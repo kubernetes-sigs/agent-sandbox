@@ -29,14 +29,8 @@ type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// State: RUNNING(default)|SUSPENDED
-	// +kubebuilder:default="RUNNING"
-	// +kubebuilder:validation:Enum=RUNNING;SUSPENDED
-	// +kubebuilder:validation:Required
-	State string `json:"state" protobuf:"bytes,1,opt,name=state"`
-
 	// template is the object that describes the pod spec that will be used to create
-	// an agent sandbox. Each pod will be named with the format sandbox.metadata.name
+	// an agent sandbox.
 	// +kubebuilder:validation:Required
 	Template corev1.PodTemplateSpec `json:"template" protobuf:"bytes,3,opt,name=template"`
 }

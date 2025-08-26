@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"context"
-	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -26,15 +25,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-)
-
-const (
-	sandboxFinalizer = "agents.x-k8s.io/finalizer"
 )
 
 // SandboxReconciler reconciles a Sandbox object
@@ -45,7 +41,7 @@ type SandboxReconciler struct {
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/finalizers,verbs=update
+
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -66,80 +62,65 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			log.Info("sandbox resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to get sandbox")
 		return ctrl.Result{}, err
 	}
 
-	// Check if the sandbox is being deleted
 	if !sandbox.ObjectMeta.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(sandbox, sandboxFinalizer) {
-			if err := r.finalizeSandbox(ctx, sandbox); err != nil {
-				return ctrl.Result{}, err
-			}
-
-			controllerutil.RemoveFinalizer(sandbox, sandboxFinalizer)
-			if err := r.Update(ctx, sandbox); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
+		log.Info("Sandbox is being deleted")
 		return ctrl.Result{}, nil
 	}
 
-	// Add finalizer for this CR
-	if !controllerutil.ContainsFinalizer(sandbox, sandboxFinalizer) {
-		controllerutil.AddFinalizer(sandbox, sandboxFinalizer)
-		if err := r.Update(ctx, sandbox); err != nil {
+	// Check if the pod already exists, if not create a new one
+	podInCluster := &corev1.Pod{}
+	found := true
+	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, podInCluster)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			log.Error(err, "Failed to get Pod")
 			return ctrl.Result{}, err
 		}
+		found = false
 	}
 
-	// Check if the pod already exists, if not create a new one
-	found := &corev1.Pod{}
-	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, found)
-	if err != nil && errors.IsNotFound(err) {
-		// Define a new pod
-		pod, err := r.podForSandbox(sandbox)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		log.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		if err = r.Create(ctx, pod); err != nil {
-			log.Error(err, "Failed to create new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	} else if err != nil {
-		log.Error(err, "Failed to get Pod")
+	// Create a pod object from the sandbox
+	pod, err := r.podForSandbox(sandbox)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-
+	if !found {
+		log.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		if err = r.Create(ctx, pod, client.FieldOwner("sandbox-controller")); err != nil {
+			log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			return ctrl.Result{}, err
+		}
+	} else {
+		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		// TODO - Do we enfore (change) spec if a pod exists ?
+		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
+	}
 	return ctrl.Result{}, nil
 }
 
-func (r *SandboxReconciler) finalizeSandbox(ctx context.Context, s *sandboxv1alpha1.Sandbox) error {
-	pod := &corev1.Pod{}
-	err := r.Get(ctx, types.NamespacedName{Name: s.Name, Namespace: s.Namespace}, pod)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to get pod during finalization: %w", err)
-	}
-
-	if err := r.Delete(ctx, pod); err != nil {
-		return fmt.Errorf("failed to delete pod during finalization: %w", err)
-	}
-	return nil
-}
-
 func (r *SandboxReconciler) podForSandbox(s *sandboxv1alpha1.Sandbox) (*corev1.Pod, error) {
+	// TODO we need to handle this better.
+	// We are enforcing the length limitation of label values
+	// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
+	// https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+	labelValue := s.Name
+	if len(labelValue) > 63 {
+		labelValue = labelValue[:63]
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      s.Name,
 			Namespace: s.Namespace,
+			Labels: map[string]string{
+				"agents.x-k8s.io/sandbox-name": labelValue,
+			},
 		},
 		Spec: s.Spec.Template.Spec,
 	}
+	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 	if err := ctrl.SetControllerReference(s, pod, r.Scheme); err != nil {
 		return nil, err
 	}
@@ -148,8 +129,17 @@ func (r *SandboxReconciler) podForSandbox(s *sandboxv1alpha1.Sandbox) (*corev1.P
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	labelSelectorPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
+		// Filter for pods with the agent label
+		if pod, ok := object.(*corev1.Pod); ok {
+			if _, exists := pod.Labels["agents.x-k8s.io/sandbox-name"]; exists {
+				return true
+			}
+		}
+		return false
+	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.Sandbox{}).
-		Owns(&corev1.Pod{}).
+		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
 		Complete(r)
 }

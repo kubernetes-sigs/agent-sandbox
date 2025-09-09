@@ -14,7 +14,7 @@ spec:
     shortNames:
     - sandboxtemplate
     singular: sandboxtemplate
-  scope: Namespaced
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:
@@ -28,7 +28,7 @@ spec:
             type: object
           spec:
             properties:
-              template:
+              podTemplate:
                 properties:
                   metadata:
                     type: object
@@ -3666,7 +3666,7 @@ spec:
                 format: int32
                 type: integer
             required:
-            - template
+            - podTemplate
             type: object
           status:
             type: object

@@ -33,6 +33,10 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
+const (
+	sandboxLabel = "agents.x-k8s.io/sandbox-name"
+)
+
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
@@ -43,6 +47,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
 
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -70,58 +75,119 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Check if the pod already exists, if not create a new one
-	podInCluster := &corev1.Pod{}
-	found := true
-	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, podInCluster)
+	_, err := r.reconcilePod(ctx, sandbox)
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	_, err = r.reconcileService(ctx, sandbox)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Update the sandbox status
+	// TODO: Update the sandbox status
+
+	return ctrl.Result{}, nil
+}
+
+func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (*corev1.Service, error) {
+	log := log.FromContext(ctx)
+	service := &corev1.Service{}
+	found := true
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
 		if !errors.IsNotFound(err) {
-			log.Error(err, "Failed to get Pod")
-			return ctrl.Result{}, err
+			log.Error(err, "Failed to get Service")
+			return nil, err
 		}
 		found = false
 	}
 
-	// Create a pod object from the sandbox
-	pod, err := r.podForSandbox(sandbox)
-	if err != nil {
-		return ctrl.Result{}, err
+	if found {
+		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		return service, nil
 	}
-	if !found {
-		log.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		if err = r.Create(ctx, pod, client.FieldOwner("sandbox-controller")); err != nil {
-			log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-			return ctrl.Result{}, err
+
+	log.Info("Creating a new Headless Service")
+	labelValue := sandbox.Name
+	if len(labelValue) > 63 {
+		labelValue = labelValue[:63]
+	}
+	service = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+			Labels: map[string]string{
+				sandboxLabel: labelValue,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Selector: map[string]string{
+				sandboxLabel: labelValue,
+			},
+		},
+	}
+	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
+	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	log.Info("Creating a new Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+	if err := r.Create(ctx, service, client.FieldOwner("sandbox-controller")); err != nil {
+		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		return nil, err
+	}
+	return service, nil
+}
+
+func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (*corev1.Pod, error) {
+	log := log.FromContext(ctx)
+	found := true
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod); err != nil {
+		// If the pod is not found, we should create it.
+		if !errors.IsNotFound(err) {
+			return nil, err
 		}
-	} else {
+		found = false
+		// All other errors are actual errors.
+	}
+
+	if found {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
+		return pod, nil
 	}
-	return ctrl.Result{}, nil
-}
 
-func (r *SandboxReconciler) podForSandbox(s *sandboxv1alpha1.Sandbox) (*corev1.Pod, error) {
+	// Create a pod object from the sandbox
+	log.Info("Creating a new Pod")
 	// TODO we need to handle this better.
 	// We are enforcing the length limitation of label values
 	// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
 	// https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
-	labelValue := s.Name
+	labelValue := sandbox.Name
 	if len(labelValue) > 63 {
 		labelValue = labelValue[:63]
 	}
-	pod := &corev1.Pod{
+	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      s.Name,
-			Namespace: s.Namespace,
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
 			Labels: map[string]string{
 				"agents.x-k8s.io/sandbox-name": labelValue,
 			},
 		},
-		Spec: s.Spec.Template.Spec,
+		Spec: sandbox.Spec.Template.Spec,
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
-	if err := ctrl.SetControllerReference(s, pod, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
+		return nil, err
+	}
+	log.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+	if err := r.Create(ctx, pod, client.FieldOwner("sandbox-controller")); err != nil {
+		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
 	return pod, nil
@@ -132,7 +198,13 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	labelSelectorPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		// Filter for pods with the agent label
 		if pod, ok := object.(*corev1.Pod); ok {
-			if _, exists := pod.Labels["agents.x-k8s.io/sandbox-name"]; exists {
+			if _, exists := pod.Labels[sandboxLabel]; exists {
+				return true
+			}
+		}
+		// Filter for services with the agent label
+		if svc, ok := object.(*corev1.Service); ok {
+			if _, exists := svc.Labels[sandboxLabel]; exists {
 				return true
 			}
 		}
@@ -141,5 +213,6 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.Sandbox{}).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
+		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		Complete(r)
 }

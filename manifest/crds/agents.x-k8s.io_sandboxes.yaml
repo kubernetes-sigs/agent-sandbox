@@ -28,7 +28,7 @@ spec:
             type: object
           spec:
             properties:
-              template:
+              podTemplate:
                 properties:
                   metadata:
                     type: object
@@ -3663,7 +3663,7 @@ spec:
                     type: object
                 type: object
             required:
-            - template
+            - podTemplate
             type: object
           status:
             type: object

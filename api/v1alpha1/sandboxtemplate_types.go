@@ -33,7 +33,7 @@ type SandboxTemplateSpec struct {
 	// template is the object that describes the pod spec that will be used to create
 	// an agent sandbox.
 	// +kubebuilder:validation:Required
-	Template corev1.PodTemplateSpec `json:"podTemplate" protobuf:"bytes,3,opt,name=template"`
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

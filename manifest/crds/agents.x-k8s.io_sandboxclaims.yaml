@@ -30,8 +30,6 @@ spec:
             properties:
               templateName:
                 type: string
-              templateNamespace:
-                type: string
               ttlSeconds:
                 format: int32
                 type: integer

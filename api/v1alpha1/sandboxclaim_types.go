@@ -33,10 +33,6 @@ type SandboxClaimSpec struct {
 	// Template refers to the SandboxTemplate to be used for creating a Sandbox
 	// +kubebuilder:validation:Required
 	TemplateName string `json:"templateName,omitempty" protobuf:"bytes,3,name=templateName"`
-
-	// TemplateNamespace refers to the SandboxTemplate namespace
-	// +kubebuilder:validation:Optional
-	TemplateNamespace string `json:"templateNamespace,omitempty" protobuf:"bytes,4,opt,name=templateNamespace"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

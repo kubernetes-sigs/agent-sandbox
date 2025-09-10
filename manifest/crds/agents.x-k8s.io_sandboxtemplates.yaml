@@ -4,17 +4,17 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: sandboxes.agents.x-k8s.io
+  name: sandboxtemplates.agents.x-k8s.io
 spec:
   group: agents.x-k8s.io
   names:
-    kind: Sandbox
-    listKind: SandboxList
-    plural: sandboxes
+    kind: SandboxTemplate
+    listKind: SandboxTemplateList
+    plural: sandboxtemplates
     shortNames:
-    - sandbox
-    singular: sandbox
-  scope: Namespaced
+    - sandboxtemplate
+    singular: sandboxtemplate
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:
@@ -3662,6 +3662,9 @@ spec:
                     - containers
                     type: object
                 type: object
+              ttlSeconds:
+                format: int32
+                type: integer
             required:
             - podTemplate
             type: object

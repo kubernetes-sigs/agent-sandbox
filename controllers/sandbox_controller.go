@@ -116,7 +116,7 @@ func (r *SandboxReconciler) podForSandbox(s *sandboxv1alpha1.Sandbox) (*corev1.P
 				"agents.x-k8s.io/sandbox-name": labelValue,
 			},
 		},
-		Spec: s.Spec.Template.Spec,
+		Spec: s.Spec.PodTemplate.Spec,
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 	if err := ctrl.SetControllerReference(s, pod, r.Scheme); err != nil {

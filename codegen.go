@@ -16,6 +16,5 @@
 
 package agentsandbox
 
-//go:generate controller-gen crd:maxDescLen=0 paths="./..." output:crd:dir=manifest/crds
-//go:generate controller-gen object paths="./..."
-//go:generate nwa config -c add
+//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen object crd:maxDescLen=0 paths="./..." output:crd:dir=k8s/crds
+//go:generate go tool -modfile=tools.mod nwa config -c add

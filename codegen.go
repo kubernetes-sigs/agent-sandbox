@@ -18,4 +18,3 @@ package agentsandbox
 
 //go:generate controller-gen crd:maxDescLen=0 paths="./..." output:crd:dir=manifest/crds
 //go:generate controller-gen object paths="./..."
-//go:generate nwa config -c add

@@ -18,9 +18,12 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -75,26 +78,62 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
+	status := sandbox.Status.DeepCopy()
+
 	_, err := r.reconcilePod(ctx, sandbox)
 	if err != nil {
-		return ctrl.Result{}, err
+		return r.updateStatus(ctx, err, status, sandbox)
 	}
 
 	_, err = r.reconcileService(ctx, sandbox)
 	if err != nil {
+		return r.updateStatus(ctx, err, status, sandbox)
+	}
+
+	// If the status has changed, update the status subresource
+	// TODO: Implement status update logic
+
+	return r.updateStatus(ctx, nil, status, sandbox)
+}
+
+func (r *SandboxReconciler) updateStatus(ctx context.Context, err error, oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) (ctrl.Result, error) {
+	if err == nil {
+		sandbox.Status.ReconciledGeneration = sandbox.Generation
+	}
+	// If PodReady and ServiceReady conditions are ready set Ready
+	readyCondition := metav1.Condition{
+		Type:    string(sandboxv1alpha1.SandboxConditionReady),
+		Status:  metav1.ConditionTrue,
+		Reason:  "DependenciesReady",
+		Message: "Pod and Service ready",
+	}
+	if meta.IsStatusConditionFalse(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionPodReady)) ||
+		meta.IsStatusConditionFalse(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionServiceReady)) {
+		readyCondition.Status = metav1.ConditionFalse
+		readyCondition.Reason = "DependenciesNotReady"
+		readyCondition.Message = "Pod or Service not ready"
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+
+	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
 		return ctrl.Result{}, err
 	}
 
-	// Update the sandbox status
-	// TODO: Update the sandbox status
+	log := log.FromContext(ctx)
+	if err := r.Status().Update(ctx, sandbox); err != nil {
+		log.Error(err, "Failed to update sandbox status")
+		return ctrl.Result{}, err
+	}
 
-	return ctrl.Result{}, nil
+	// Surface error
+	return ctrl.Result{}, err
 }
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	service := &corev1.Service{}
 	found := true
+
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
 		if !errors.IsNotFound(err) {
 			log.Error(err, "Failed to get Service")
@@ -105,6 +144,13 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 	if found {
 		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		readyCondition := metav1.Condition{
+			Type:    string(sandboxv1alpha1.SandboxConditionServiceReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  "ServiceCreated",
+			Message: "Service Exists",
+		}
+		meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
 		return service, nil
 	}
 
@@ -134,11 +180,21 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	}
 
 	log.Info("Creating a new Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
-	if err := r.Create(ctx, service, client.FieldOwner("sandbox-controller")); err != nil {
-		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
-		return nil, err
+	readyCondition := metav1.Condition{
+		Type:    string(sandboxv1alpha1.SandboxConditionServiceReady),
+		Status:  metav1.ConditionFalse,
+		Reason:  "ServiceCreating",
+		Message: "Service is being created",
 	}
-	return service, nil
+	err := r.Create(ctx, service, client.FieldOwner("sandbox-controller"))
+	if err != nil {
+		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		readyCondition.Message = fmt.Sprintf("Service Create Failed: %s", err.Error())
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+	sandbox.Status.InClusterFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
+	sandbox.Status.DnsName = service.Name
+	return service, err
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (*corev1.Pod, error) {
@@ -146,18 +202,35 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	found := true
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod); err != nil {
-		// If the pod is not found, we should create it.
+		// All other errors are actual errors.
 		if !errors.IsNotFound(err) {
+			log.Error(err, "Failed to get Pod")
 			return nil, err
 		}
 		found = false
-		// All other errors are actual errors.
 	}
 
 	if found {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
+		readyCondition := metav1.Condition{
+			Type:    string(sandboxv1alpha1.SandboxConditionPodReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  "PodCreated",
+			Message: "Pod exists with phase: " + string(pod.Status.Phase),
+		}
+
+		// Check if pod Ready condition is true
+		if pod.Status.Phase == corev1.PodRunning {
+			readyCondition.Message = "Pod is Running but not Ready"
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+					readyCondition.Message = "Pod is Ready"
+				}
+			}
+		}
+		meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
 		return pod, nil
 	}
 
@@ -186,11 +259,19 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 	log.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-	if err := r.Create(ctx, pod, client.FieldOwner("sandbox-controller")); err != nil {
-		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		return nil, err
+	readyCondition := metav1.Condition{
+		Type:    string(sandboxv1alpha1.SandboxConditionPodReady),
+		Status:  metav1.ConditionFalse,
+		Reason:  "PodCreating",
+		Message: "Pod is being created",
 	}
-	return pod, nil
+	err := r.Create(ctx, pod, client.FieldOwner("sandbox-controller"))
+	if err != nil {
+		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		readyCondition.Message = fmt.Sprintf("Pod Create Failed: %s", err.Error())
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+	return pod, err
 }
 
 // SetupWithManager sets up the controller with the Manager.

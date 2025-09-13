@@ -35,6 +35,18 @@ type SandboxSpec struct {
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
+	// ReconciledGeneratio - record generation of last successful run
+	ReconciledGeneration int64 `json:"reconciledGeneration,omitempty"`
+
+	// sandbox dns name
+	DnsName string `json:"dnsName,omitempty"`
+
+	// FQDN within cluster
+	// e.g. sndbox-example.default.svc.cluster.local
+	InClusterFQDN string `json:"inClusterFQDN,omitempty"`
+
+	// status conditions array
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

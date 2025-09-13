@@ -16,9 +16,12 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,6 +34,10 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
+const (
+	sandboxLabel = "agents.x-k8s.io/sandbox-name"
+)
+
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
@@ -41,6 +48,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
 
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -68,61 +76,200 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Check if the pod already exists, if not create a new one
-	podInCluster := &corev1.Pod{}
-	found := true
-	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, podInCluster)
+	status := sandbox.Status.DeepCopy()
+
+	_, err := r.reconcilePod(ctx, sandbox)
 	if err != nil {
+		return r.updateStatus(ctx, err, status, sandbox)
+	}
+
+	_, err = r.reconcileService(ctx, sandbox)
+	if err != nil {
+		return r.updateStatus(ctx, err, status, sandbox)
+	}
+
+	// If the status has changed, update the status subresource
+	// TODO: Implement status update logic
+
+	return r.updateStatus(ctx, nil, status, sandbox)
+}
+
+func (r *SandboxReconciler) updateStatus(ctx context.Context, err error, oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) (ctrl.Result, error) {
+	if err == nil {
+		sandbox.Status.ReconciledGeneration = sandbox.Generation
+	}
+	// If PodReady and ServiceReady conditions are ready set Ready
+	readyCondition := metav1.Condition{
+		Type:    string(sandboxv1alpha1.SandboxConditionReady),
+		Status:  metav1.ConditionTrue,
+		Reason:  "DependenciesReady",
+		Message: "Pod and Service ready",
+	}
+	if meta.IsStatusConditionFalse(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionPodReady)) ||
+		meta.IsStatusConditionFalse(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionServiceReady)) {
+		readyCondition.Status = metav1.ConditionFalse
+		readyCondition.Reason = "DependenciesNotReady"
+		readyCondition.Message = "Pod or Service not ready"
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+
+	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
+		return ctrl.Result{}, err
+	}
+
+	log := log.FromContext(ctx)
+	if err := r.Status().Update(ctx, sandbox); err != nil {
+		log.Error(err, "Failed to update sandbox status")
+		return ctrl.Result{}, err
+	}
+
+	// Surface error
+	return ctrl.Result{}, err
+}
+
+func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (*corev1.Service, error) {
+	log := log.FromContext(ctx)
+	service := &corev1.Service{}
+	found := true
+
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
 		if !errors.IsNotFound(err) {
-			log.Error(err, "Failed to get Pod")
-			return ctrl.Result{}, err
+			log.Error(err, "Failed to get Service")
+			return nil, err
 		}
 		found = false
 	}
 
-	// Create a pod object from the sandbox
-	pod, err := r.podForSandbox(sandbox)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !found {
-		log.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		if err = r.Create(ctx, pod, client.FieldOwner("sandbox-controller")); err != nil {
-			log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-			return ctrl.Result{}, err
+	if found {
+		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		readyCondition := metav1.Condition{
+			Type:    string(sandboxv1alpha1.SandboxConditionServiceReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  "ServiceCreated",
+			Message: "Service Exists",
 		}
-	} else {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+		return service, nil
+	}
+
+	log.Info("Creating a new Headless Service")
+	labelValue := sandbox.Name
+	if len(labelValue) > 63 {
+		labelValue = labelValue[:63]
+	}
+	service = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+			Labels: map[string]string{
+				sandboxLabel: labelValue,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Selector: map[string]string{
+				sandboxLabel: labelValue,
+			},
+		},
+	}
+	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
+	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	log.Info("Creating a new Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+	readyCondition := metav1.Condition{
+		Type:    string(sandboxv1alpha1.SandboxConditionServiceReady),
+		Status:  metav1.ConditionFalse,
+		Reason:  "ServiceCreating",
+		Message: "Service is being created",
+	}
+	err := r.Create(ctx, service, client.FieldOwner("sandbox-controller"))
+	if err != nil {
+		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		readyCondition.Message = fmt.Sprintf("Service Create Failed: %s", err.Error())
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+	sandbox.Status.InClusterFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
+	sandbox.Status.DnsName = service.Name
+	return service, err
+}
+
+func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (*corev1.Pod, error) {
+	log := log.FromContext(ctx)
+	found := true
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod); err != nil {
+		// All other errors are actual errors.
+		if !errors.IsNotFound(err) {
+			log.Error(err, "Failed to get Pod")
+			return nil, err
+		}
+		found = false
+	}
+
+	if found {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
-	}
-	return ctrl.Result{}, nil
-}
+		readyCondition := metav1.Condition{
+			Type:    string(sandboxv1alpha1.SandboxConditionPodReady),
+			Status:  metav1.ConditionFalse,
+			Reason:  "PodCreated",
+			Message: "Pod exists with phase: " + string(pod.Status.Phase),
+		}
 
-func (r *SandboxReconciler) podForSandbox(s *sandboxv1alpha1.Sandbox) (*corev1.Pod, error) {
+		// Check if pod Ready condition is true
+		if pod.Status.Phase == corev1.PodRunning {
+			readyCondition.Message = "Pod is Running but not Ready"
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+					readyCondition.Message = "Pod is Ready"
+				}
+			}
+		}
+		meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+		return pod, nil
+	}
+
+	// Create a pod object from the sandbox
+	log.Info("Creating a new Pod")
 	// TODO we need to handle this better.
 	// We are enforcing the length limitation of label values
 	// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
 	// https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
-	labelValue := s.Name
+	labelValue := sandbox.Name
 	if len(labelValue) > 63 {
 		labelValue = labelValue[:63]
 	}
-	pod := &corev1.Pod{
+	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      s.Name,
-			Namespace: s.Namespace,
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
 			Labels: map[string]string{
 				"agents.x-k8s.io/sandbox-name": labelValue,
 			},
 		},
-		Spec: s.Spec.Template.Spec,
+		Spec: sandbox.Spec.Template.Spec,
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
-	if err := ctrl.SetControllerReference(s, pod, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 		return nil, err
 	}
-	return pod, nil
+	log.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+	readyCondition := metav1.Condition{
+		Type:    string(sandboxv1alpha1.SandboxConditionPodReady),
+		Status:  metav1.ConditionFalse,
+		Reason:  "PodCreating",
+		Message: "Pod is being created",
+	}
+	err := r.Create(ctx, pod, client.FieldOwner("sandbox-controller"))
+	if err != nil {
+		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		readyCondition.Message = fmt.Sprintf("Pod Create Failed: %s", err.Error())
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+	return pod, err
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -130,7 +277,13 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	labelSelectorPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		// Filter for pods with the agent label
 		if pod, ok := object.(*corev1.Pod); ok {
-			if _, exists := pod.Labels["agents.x-k8s.io/sandbox-name"]; exists {
+			if _, exists := pod.Labels[sandboxLabel]; exists {
+				return true
+			}
+		}
+		// Filter for services with the agent label
+		if svc, ok := object.(*corev1.Service); ok {
+			if _, exists := svc.Labels[sandboxLabel]; exists {
 				return true
 			}
 		}
@@ -139,5 +292,6 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.Sandbox{}).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
+		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		Complete(r)
 }

@@ -28,6 +28,55 @@ spec:
             type: object
           spec:
             properties:
+              networking:
+                properties:
+                  routeRefs:
+                    items:
+                      properties:
+                        kind:
+                          type: string
+                        name:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    type: array
+                  service:
+                    properties:
+                      ports:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            port:
+                              format: int32
+                              type: integer
+                            protocol:
+                              enum:
+                              - TCP
+                              - UDP
+                              - SCTP
+                              type: string
+                            targetPort:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                          required:
+                          - port
+                          type: object
+                        type: array
+                      type:
+                        enum:
+                        - ClusterIP
+                        - NodePort
+                        - LoadBalancer
+                        type: string
+                    type: object
+                type: object
+              pause:
+                type: boolean
               podTemplate:
                 properties:
                   metadata:
@@ -3803,10 +3852,71 @@ spec:
                     - containers
                     type: object
                 type: object
+              schedule:
+                properties:
+                  shutdownTime:
+                    format: date-time
+                    type: string
+                type: object
             required:
             - podTemplate
             type: object
           status:
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              networking:
+                items:
+                  properties:
+                    ip:
+                      type: string
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    port:
+                      format: int32
+                      type: integer
+                    ready:
+                      type: boolean
+                    url:
+                      type: string
+                  type: object
+                type: array
             type: object
         required:
         - spec

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"reflect"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
@@ -95,21 +97,24 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	allErrors = errors.Join(allErrors, err)
 
 	// compute and set overall Ready condition
-	readyCondition := r.computeReadyCondition(sandbox.Generation, allErrors, svc, pod)
+	readyCondition := r.computeReadyCondition(sandbox, allErrors, svc, pod)
 	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+
+	result, err := r.ReconcileSandboxTTL(ctx, sandbox)
+	allErrors = errors.Join(allErrors, err)
 
 	// Update status
 	err = r.updateStatus(ctx, oldStatus, sandbox)
 	allErrors = errors.Join(allErrors, err)
 
 	// return errors seen
-	return ctrl.Result{}, allErrors
+	return result, allErrors
 }
 
-func (r *SandboxReconciler) computeReadyCondition(generation int64, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
+func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
 	readyCondition := metav1.Condition{
 		Type:               string(sandboxv1alpha1.SandboxConditionReady),
-		ObservedGeneration: generation,
+		ObservedGeneration: sandbox.Generation,
 		Message:            "",
 		Status:             metav1.ConditionFalse,
 		Reason:             "DependenciesNotReady",
@@ -150,7 +155,10 @@ func (r *SandboxReconciler) computeReadyCondition(generation int64, err error, s
 	if podReady && svcReady {
 		readyCondition.Status = metav1.ConditionTrue
 		readyCondition.Reason = "DependenciesReady"
-		return readyCondition
+		if sandbox.Status.FirstReadyTime == nil {
+			now := metav1.Now()
+			sandbox.Status.FirstReadyTime = &now
+		}
 	}
 
 	return readyCondition
@@ -268,6 +276,71 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 	return pod, nil
+}
+
+// ReconcileSandboxTTL will check if a sandbox has expired, and if so, delete it.
+// If the sandbox has not expired, it will requeue the request for the remaining time.
+
+func (r *SandboxReconciler) ReconcileSandboxTTL(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	sandbox.Status.ShutdownAt = nil
+	if sandbox.Spec.TTL == nil || (sandbox.Spec.TTL.Seconds == 0 && sandbox.Spec.TTL.ShutdownAt == "") {
+		log.Info("Sandbox TTL is not set, skipping TTL check.")
+		return reconcile.Result{}, nil
+	}
+
+	var expiryTime time.Time
+	if sandbox.Spec.TTL.ShutdownAt != "" {
+		// Try parsing the endtime as a RFC 3339 string
+		fromTime, err := time.Parse(time.RFC3339, sandbox.Spec.TTL.ShutdownAt)
+		if err != nil {
+			log.Error(err, "Failed to parse TTLFromTime as RFC3339 string", "ShutdownAt", sandbox.Spec.TTL.ShutdownAt)
+			return reconcile.Result{}, err
+		}
+		expiryTime = fromTime.Add(time.Duration(sandbox.Spec.TTL.Seconds) * time.Second)
+	} else {
+		switch sandbox.Spec.TTL.StartPolicy {
+		case sandboxv1alpha1.TTLPolicyOnCreate:
+			// Look at the sandbox create time and calculate the endtime
+			expiryTime = sandbox.CreationTimestamp.Add(time.Duration(sandbox.Spec.TTL.Seconds) * time.Second)
+		case sandboxv1alpha1.TTLPolicyOnReady:
+			if sandbox.Status.FirstReadyTime != nil {
+				expiryTime = sandbox.Status.FirstReadyTime.Add(time.Duration(sandbox.Spec.TTL.Seconds) * time.Second)
+			} else {
+				log.Info("Sandbox not yet ready, cannot calculate TTLFromReady")
+				return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+		case sandboxv1alpha1.TTLPolicyNever:
+			log.Info("TTL is disabled for this sandbox")
+			return reconcile.Result{}, nil
+		case sandboxv1alpha1.TTLPolicyOnEnable:
+			if sandbox.Status.ShutdownAt == nil {
+				expiryTime = time.Now().Add(time.Duration(sandbox.Spec.TTL.Seconds) * time.Second)
+			}
+		default:
+			// should not happen
+			log.Info("TTL policy unknown: %s", sandbox.Spec.TTL.StartPolicy)
+			return reconcile.Result{}, nil
+		}
+	}
+
+	// Set the .status.ttlExpiryTime
+	sandbox.Status.ShutdownAt = &metav1.Time{Time: expiryTime}
+
+	// Calculate remaining time
+	remainingTime := time.Until(expiryTime)
+	if remainingTime <= 0 {
+		log.Info("Sandbox has expired, deleting")
+		if err := r.Delete(ctx, sandbox); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to delete sandbox: %w", err)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	requeueAfter := max(remainingTime/2, 2*time.Second) // Requeue at most every 2 seconds
+	log.Info("Requeuing sandbox for TTL", "remaining time", remainingTime, "requeue after", requeueAfter,
+		"expiry time", expiryTime)
+	return reconcile.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

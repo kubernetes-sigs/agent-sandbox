@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+import os
+import subprocess
+import sys
+
+# Add shared directory to Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), "shared"))
+import utils
+
+
+def build_and_push_image_with_docker_buildx(image_name, srcdir, dockerfile_path):
+    platforms = "linux/amd64,linux/arm64"
+    build_cmd = ["docker", "buildx", "build", "--output=type=registry", "--platform=" + platforms, "-t", image_name, "-f", dockerfile_path, "."]
+    subprocess.run(build_cmd, cwd=srcdir, check=True)
+    print(f"pushed image {image_name}")
+
+def build_and_push_image(image_name, srcdir, dockerfile_path):
+    build_and_push_image_with_docker_buildx(image_name, srcdir, dockerfile_path)
+
+def main():
+    """Builds and pushes docker images."""
+    srcdir = utils.find_srcdir()
+    images_dir = os.path.join(srcdir, "images")
+
+    if not os.path.isdir(images_dir):
+        print("images directory not found")
+        return
+
+    for root, dirs, files in os.walk(images_dir):
+        for filename in files:
+            if filename != "Dockerfile":
+                continue
+
+            dockerfile_path = os.path.join(root, filename)
+            service_name = os.path.basename(root)
+
+            image_name = utils.get_full_image_name(service_name)
+
+            print(f"building image for {service_name} with tag {image_name}")
+            build_and_push_image(image_name, srcdir, dockerfile_path)
+
+if __name__ == "__main__":
+    main()

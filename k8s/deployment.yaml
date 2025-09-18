@@ -1,0 +1,45 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: agent-sandbox-controller
+  labels:
+    app: agent-sandbox-controller
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: agent-sandbox-controller
+  labels:
+    app: agent-sandbox-controller
+spec:
+  selector:
+    app: agent-sandbox-controller
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+
+---
+
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: agent-sandbox-controller
+  labels:
+    app: agent-sandbox-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox-controller
+    spec:
+      serviceAccountName: agent-sandbox-controller
+      containers:
+      - name: agent-sandbox-controller
+        image: ko://sigs.k8s.io/agent-sandbox/cmd # placeholder value, replaced by deployment scripts

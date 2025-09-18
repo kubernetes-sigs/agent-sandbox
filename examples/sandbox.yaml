@@ -3,6 +3,9 @@ kind: Sandbox
 metadata:
   name: sandbox-example
 spec:
+  ttl:
+   seconds: 200
+   startPolicy: onCreate
   podTemplate:
     spec:
       containers:

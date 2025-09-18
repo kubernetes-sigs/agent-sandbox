@@ -3803,6 +3803,21 @@ spec:
                     - containers
                     type: object
                 type: object
+              ttl:
+                properties:
+                  seconds:
+                    format: int32
+                    type: integer
+                  shutdownAt:
+                    type: string
+                  startPolicy:
+                    enum:
+                    - onCreate
+                    - onReady
+                    - onEnable
+                    - disable
+                    type: string
+                type: object
             required:
             - podTemplate
             type: object
@@ -3844,9 +3859,15 @@ spec:
                   - type
                   type: object
                 type: array
+              firstReadyTime:
+                format: date-time
+                type: string
               service:
                 type: string
               serviceFQDN:
+                type: string
+              ttlShutdownAt:
+                format: date-time
                 type: string
             type: object
         required:

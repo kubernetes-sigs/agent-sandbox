@@ -24,10 +24,12 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -297,7 +299,7 @@ func TestReconcile(t *testing.T) {
 							},
 						},
 					},
-					ObjectMeta: sandboxv1alpha1.PodMetadata{
+					ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
 						Labels: map[string]string{
 							"custom-label": "label-val",
 						},
@@ -566,7 +568,7 @@ func TestReconcilePod(t *testing.T) {
 						},
 					},
 				},
-				ObjectMeta: sandboxv1alpha1.PodMetadata{
+				ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
 					Labels: map[string]string{
 						"custom-label": "label-val",
 					},
@@ -955,6 +957,422 @@ func TestSandboxExpiry(t *testing.T) {
 				require.Greater(t, requeueAfter, time.Duration(0))
 			} else {
 				require.Equal(t, time.Duration(0), requeueAfter)
+			}
+		})
+	}
+}
+
+func TestReconcileService(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := NameHash(sandboxName)
+	newSandbox := func() *sandboxv1alpha1.Sandbox {
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       sandboxName,
+				Namespace:  sandboxNs,
+				Generation: 1,
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{
+				Replicas: ptr.To(int32(1)),
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name          string
+		initialObjs   []runtime.Object
+		sandbox       *sandboxv1alpha1.Sandbox
+		verifyService func(t *testing.T, svc *corev1.Service)
+		verifySandbox func(t *testing.T, sb *sandboxv1alpha1.Sandbox)
+	}{
+		{
+			name: "creates custom Service with user spec",
+			sandbox: func() *sandboxv1alpha1.Sandbox {
+				sb := newSandbox()
+				sb.Spec.Service = &sandboxv1alpha1.ServiceTemplate{
+					ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
+						Labels: map[string]string{"svc-label": "val"},
+						Annotations: map[string]string{
+							"svc-annotation": "anno",
+						},
+					},
+					Spec: &corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "http",
+								Port:       80,
+								TargetPort: intstr.FromInt32(8080),
+							},
+						},
+					},
+				}
+				return sb
+			}(),
+			verifyService: func(t *testing.T, svc *corev1.Service) {
+				require.Equal(t, corev1.ServiceTypeNodePort, svc.Spec.Type)
+				require.Equal(t, map[string]string{
+					sandboxLabel: nameHash,
+					"svc-label":  "val",
+				}, svc.Labels)
+				require.Equal(t, map[string]string{"svc-annotation": "anno"}, svc.Annotations)
+				require.Equal(t, map[string]string{sandboxLabel: nameHash}, svc.Spec.Selector)
+				require.Len(t, svc.Spec.Ports, 1)
+				require.Equal(t, corev1.ServicePort{
+					Name:       "http",
+					Port:       80,
+					TargetPort: intstr.FromInt32(8080),
+				}, svc.Spec.Ports[0])
+			},
+		},
+		{
+			name: "creates default headless Service with metadata only",
+			sandbox: func() *sandboxv1alpha1.Sandbox {
+				sb := newSandbox()
+				sb.Spec.Service = &sandboxv1alpha1.ServiceTemplate{
+					ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
+						Labels: map[string]string{"svc-label": "val"},
+						Annotations: map[string]string{
+							"svc-annotation": "anno",
+						},
+					},
+				}
+				return sb
+			}(),
+			verifyService: func(t *testing.T, svc *corev1.Service) {
+				require.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
+				require.Equal(t, map[string]string{
+					sandboxLabel: nameHash,
+					"svc-label":  "val",
+				}, svc.Labels)
+				require.Equal(t, map[string]string{"svc-annotation": "anno"}, svc.Annotations)
+				require.Equal(t, map[string]string{sandboxLabel: nameHash}, svc.Spec.Selector)
+			},
+		},
+		{
+			name: "updates existing Service with new metadata and ports",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+							"old-label":  "stale",
+						},
+						Annotations: map[string]string{
+							"old-annotation": "stale",
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "10.0.0.1",
+						Selector: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						Type: corev1.ServiceTypeClusterIP,
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "http",
+								Port:       80,
+								TargetPort: intstr.FromInt32(8080),
+							},
+						},
+					},
+				},
+			},
+			sandbox: func() *sandboxv1alpha1.Sandbox {
+				sb := newSandbox()
+				sb.Spec.Service = &sandboxv1alpha1.ServiceTemplate{
+					ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
+						Labels: map[string]string{"svc-label": "val"},
+						Annotations: map[string]string{
+							"svc-annotation": "anno",
+						},
+					},
+					Spec: &corev1.ServiceSpec{
+						ClusterIP: "10.0.0.1",
+						Type:      corev1.ServiceTypeClusterIP,
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "https",
+								Port:       443,
+								TargetPort: intstr.FromInt32(8443),
+							},
+						},
+					},
+				}
+				return sb
+			}(),
+			verifyService: func(t *testing.T, svc *corev1.Service) {
+				require.Equal(t, "10.0.0.1", svc.Spec.ClusterIP)
+				require.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
+				require.Equal(t, map[string]string{
+					sandboxLabel: nameHash,
+					"svc-label":  "val",
+				}, svc.Labels)
+				require.Equal(t, map[string]string{"svc-annotation": "anno"}, svc.Annotations)
+				require.Equal(t, map[string]string{sandboxLabel: nameHash}, svc.Spec.Selector)
+				require.Len(t, svc.Spec.Ports, 1)
+				require.Equal(t, int32(443), svc.Spec.Ports[0].Port)
+				require.Equal(t, intstr.FromInt32(8443), svc.Spec.Ports[0].TargetPort)
+			},
+		},
+		{
+			name: "records error when changing immutable Service fields",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: corev1.ClusterIPNone,
+						Type:      corev1.ServiceTypeClusterIP,
+						Selector: map[string]string{
+							sandboxLabel: nameHash,
+						},
+					},
+				},
+			},
+			sandbox: func() *sandboxv1alpha1.Sandbox {
+				sb := newSandbox()
+				sb.Spec.Service = &sandboxv1alpha1.ServiceTemplate{
+					Spec: &corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "http",
+								Port:       80,
+								TargetPort: intstr.FromInt32(8080),
+							},
+						},
+					},
+				}
+				return sb
+			}(),
+			verifyService: func(t *testing.T, svc *corev1.Service) {
+				require.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
+				require.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
+			},
+			verifySandbox: func(t *testing.T, sb *sandboxv1alpha1.Sandbox) {
+				cond := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+				require.NotNil(t, cond)
+				require.Equal(t, metav1.ConditionFalse, cond.Status)
+				require.Equal(t, "ReconcilerError", cond.Reason)
+				require.Equal(t, int64(1), cond.ObservedGeneration)
+				require.Contains(t, cond.Message, "cannot change Service from headless to non-headless")
+				require.Contains(t, cond.Message, "cannot change Service from headless (ClusterIPs=[None]) to normal ClusterIP")
+			},
+		},
+		{
+			name: "preserves system-managed Service fields when desired leaves them empty",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						Type:                corev1.ServiceTypeNodePort,
+						ClusterIP:           "10.0.0.20",
+						ClusterIPs:          []string{"10.0.0.20"},
+						IPFamilies:          []corev1.IPFamily{corev1.IPv4Protocol},
+						IPFamilyPolicy:      ptr.To(corev1.IPFamilyPolicySingleStack),
+						Selector:            map[string]string{sandboxLabel: nameHash},
+						HealthCheckNodePort: 30202,
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "http",
+								Port:       80,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(8080),
+								NodePort:   30080,
+							},
+							{
+								Port:       81,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(8081),
+								NodePort:   30081,
+							},
+						},
+					},
+				},
+			},
+			sandbox: func() *sandboxv1alpha1.Sandbox {
+				sb := newSandbox()
+				sb.Spec.Service = &sandboxv1alpha1.ServiceTemplate{
+					Spec: &corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "http",
+								Port:       80,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(8080),
+							},
+							{
+								Port:       81,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(8081),
+							},
+						},
+					},
+				}
+				return sb
+			}(),
+			verifyService: func(t *testing.T, svc *corev1.Service) {
+				require.Equal(t, "10.0.0.20", svc.Spec.ClusterIP)
+				require.Equal(t, []string{"10.0.0.20"}, svc.Spec.ClusterIPs)
+				require.Equal(t, []corev1.IPFamily{corev1.IPv4Protocol}, svc.Spec.IPFamilies)
+				require.Equal(t, ptr.To(corev1.IPFamilyPolicySingleStack), svc.Spec.IPFamilyPolicy)
+				require.Equal(t, int32(30202), svc.Spec.HealthCheckNodePort)
+				require.Len(t, svc.Spec.Ports, 2)
+				require.Equal(t, int32(30080), svc.Spec.Ports[0].NodePort)
+				require.Equal(t, int32(30081), svc.Spec.Ports[1].NodePort)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := SandboxReconciler{
+				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
+				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
+			}
+			_, err := r.Reconcile(t.Context(), ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+				},
+			})
+			require.NoError(t, err)
+
+			svc := &corev1.Service{}
+			require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, svc))
+			tc.verifyService(t, svc)
+
+			if tc.verifySandbox != nil {
+				sb := &sandboxv1alpha1.Sandbox{}
+				require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, sb))
+				tc.verifySandbox(t, sb)
+			}
+		})
+	}
+}
+
+func TestMergeSystemManagedServiceFields(t *testing.T) {
+	current := corev1.ServiceSpec{
+		ClusterIP:           "10.0.0.1",
+		ClusterIPs:          []string{"10.0.0.1"},
+		IPFamilies:          []corev1.IPFamily{corev1.IPv4Protocol},
+		IPFamilyPolicy:      ptr.To(corev1.IPFamilyPolicySingleStack),
+		HealthCheckNodePort: 30200,
+		Ports: []corev1.ServicePort{
+			{
+				Name:       "http",
+				Port:       80,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt32(8080),
+				NodePort:   30000,
+			},
+			{
+				Port:       81,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt32(8081),
+				NodePort:   30001,
+			},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		desired        corev1.ServiceSpec
+		wantNodePorts  []int32
+		wantClusterIP  string
+		wantClusterIPs []string
+	}{
+		{
+			name: "fills empty system-managed fields",
+			desired: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{
+					{
+						Name:       "http",
+						Port:       80,
+						Protocol:   corev1.ProtocolTCP,
+						TargetPort: intstr.FromInt32(8080),
+					},
+					{
+						Port:       81,
+						Protocol:   corev1.ProtocolTCP,
+						TargetPort: intstr.FromInt32(8081),
+					},
+				},
+			},
+			wantNodePorts:  []int32{30000, 30001},
+			wantClusterIP:  "10.0.0.1",
+			wantClusterIPs: []string{"10.0.0.1"},
+		},
+		{
+			name: "preserves provided nodePort by name and fills unnamed by signature",
+			desired: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{
+					{
+						Name:       "http",
+						Port:       80,
+						Protocol:   corev1.ProtocolTCP,
+						TargetPort: intstr.FromInt32(8080),
+						NodePort:   31000,
+					},
+					{
+						Port:       81,
+						Protocol:   corev1.ProtocolTCP,
+						TargetPort: intstr.FromInt32(8081),
+					},
+				},
+			},
+			wantNodePorts:  []int32{31000, 30001},
+			wantClusterIP:  "10.0.0.1",
+			wantClusterIPs: []string{"10.0.0.1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			desired := tt.desired.DeepCopy()
+			mergeSystemManagedServiceFields(&current, desired)
+
+			require.Equal(t, tt.wantClusterIP, desired.ClusterIP)
+			require.Equal(t, tt.wantClusterIPs, desired.ClusterIPs)
+			require.Equal(t, current.IPFamilies, desired.IPFamilies)
+			require.Equal(t, current.IPFamilyPolicy, desired.IPFamilyPolicy)
+			require.Equal(t, current.HealthCheckNodePort, desired.HealthCheckNodePort)
+			require.Equal(t, current.Type, desired.Type)
+			require.Equal(t, current.InternalTrafficPolicy, desired.InternalTrafficPolicy)
+			require.Equal(t, current.SessionAffinity, desired.SessionAffinity)
+
+			require.Len(t, desired.Ports, len(tt.wantNodePorts))
+			for i, np := range tt.wantNodePorts {
+				require.Equal(t, np, desired.Ports[i].NodePort)
 			}
 		})
 	}

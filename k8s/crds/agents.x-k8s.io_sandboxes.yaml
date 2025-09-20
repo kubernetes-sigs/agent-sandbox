@@ -3803,6 +3803,7 @@ spec:
                     - containers
                     type: object
                 type: object
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - podTemplate
             type: object

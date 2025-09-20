@@ -109,6 +109,12 @@ type SandboxSpec struct {
 	// If a time in the past is provided, the sandbox will be deleted immediately.
 	// +kubebuilder:validation:Format="date-time"
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+
+	// Networking describes optional external exposure and/or references to
+	// externally managed routes for this sandbox. If omitted, only the default
+	// headless Service (for internal discovery) is used.
+	// +optional
+	Networking NetworkingSpec `json:"networking,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.
@@ -123,6 +129,16 @@ type SandboxStatus struct {
 
 	// status conditions array
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// NetworkingSpec describes optional exposure configuration and external route refs.
+type NetworkingSpec struct {
+	// Service describes an optional Service to create for exposure.
+	// If omitted, only the internal headless Service is maintained for discovery.
+	// Service.selector must not be set. The operator will automatically manage the selector.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == null || !has(self.selector) || size(self.selector) == 0",message="service.selector must not be set, it automatically managed by operator"
+	Service *corev1.ServiceSpec `json:"service,omitempty"`
 }
 
 // +kubebuilder:object:root=true

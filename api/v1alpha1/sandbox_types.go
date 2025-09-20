@@ -32,7 +32,12 @@ const (
 	SandboxReasonExpired = "SandboxExpired"
 )
 
-type PodMetadata struct {
+// TemplateObjectMetadata is a minimal metadata for templates that
+// only exposes labels and annotations. It omits fields like name,
+// namespace, ownerReferences, etc., which are controller-managed.
+// This struct is introduced as a workaround for the issue:
+// https://github.com/kubernetes-sigs/agent-sandbox/issues/38
+type TemplateObjectMetadata struct {
 	// Map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers
 	// and services.
@@ -80,7 +85,7 @@ type PodTemplate struct {
 
 	// Metadata is the Pod's metadata. Only labels and annotations are used.
 	// +kubebuilder:validation:Optional
-	ObjectMeta PodMetadata `json:"metadata" protobuf:"bytes,3,opt,name=metadata"`
+	ObjectMeta TemplateObjectMetadata `json:"metadata" protobuf:"bytes,3,opt,name=metadata"`
 }
 
 type PersistentVolumeClaimTemplate struct {
@@ -91,6 +96,21 @@ type PersistentVolumeClaimTemplate struct {
 	// Spec is the PVC's spec
 	// +kubebuilder:validation:Required
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
+}
+
+// ServiceTemplate exposes a subset of Service fields via metadata (labels/annotations)
+// and a user-provided ServiceSpec. The controller controls the Service name and selector.
+type ServiceTemplate struct {
+	// Metadata is the Service's metadata. Only labels and annotations are used.
+	// When Spec is not provided, these labels/annotations are applied to the default Service.
+	// +kubebuilder:validation:Optional
+	ObjectMeta TemplateObjectMetadata `json:"metadata,omitempty" protobuf:"bytes,3,opt,name=metadata"`
+
+	// Spec is the user-provided ServiceSpec; selector is managed by the controller.
+	// If omitted, the controller creates a default Service and applies the Metadata above if provided.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:XValidation:rule="self == null || !has(self.selector) || size(self.selector) == 0",message="service.selector must not be set, it automatically managed by operator"
+	Spec *corev1.ServiceSpec `json:"spec,omitempty" protobuf:"bytes,3,opt,name=spec"`
 }
 
 // SandboxSpec defines the desired state of Sandbox
@@ -119,6 +139,14 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Maximum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Service describes an optional Service to create for exposure. If omitted,
+	// a default headless Service is created for internal discovery.
+	// Note: Once a Sandbox is created, the Service type (headless vs non-headless)
+	// cannot be changed directly. To switch, you must first delete the existing
+	// Service object.
+	// +optional
+	Service *ServiceTemplate `json:"service,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

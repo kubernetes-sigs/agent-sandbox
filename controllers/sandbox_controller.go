@@ -248,13 +248,23 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Create a pod object from the sandbox
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
+	labels := map[string]string{
+		sandboxLabel: nameHash,
+	}
+	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		labels[k] = v
+	}
+	annotations := map[string]string{}
+	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+		annotations[k] = v
+	}
+
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-			Labels: map[string]string{
-				sandboxLabel: nameHash,
-			},
+			Name:        sandbox.Name,
+			Namespace:   sandbox.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: sandbox.Spec.PodTemplate.Spec,
 	}

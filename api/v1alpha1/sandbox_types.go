@@ -39,6 +39,7 @@ type SandboxSpec struct {
 
 	// PodTemplate describes the pod spec that will be used to create an agent sandbox.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:pruning:PreserveUnknownFields
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 }
 

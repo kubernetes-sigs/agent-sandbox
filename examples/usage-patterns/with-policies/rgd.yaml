@@ -1,0 +1,96 @@
+
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: agentic-sandbox
+spec:
+  schema:
+    apiVersion: v1alpha1
+    group: custom.agents.x-k8s.io
+    kind: AgenticSandbox
+    spec:
+      # Spec fields that users can provide.
+      image: string | default="nginx"
+      service:
+        port: integer | default=80
+      networkPolicy:
+        enabled: boolean | default=false
+        ingress:
+          podLabels: "map[string]string"
+          namespaceLabels: "map[string]string"
+        egress: object
+      ingress:
+        enabled: boolean | default=false
+
+    status:
+      # Fields the controller will inject into instances status.
+      fqdn: ${service.metadata.name}.${service.metadata.namespace}.svc.cluster.local
+      sandboxConditions: ${sandbox.status.conditions}
+  resources:
+    - id: sandbox
+      template:
+        apiVersion: agents.x-k8s.io/v1alpha1
+        kind: Sandbox
+        metadata:
+          name: ${schema.metadata.name} # Use the name provided by user
+        spec:
+          podTemplate:
+            #metadata:
+            #  labels:
+            #    sandbox: ${schema.metadata.name}
+            spec:
+              containers:
+                - name: sandbox
+                  image: ${schema.spec.image}
+                  ports:
+                    - containerPort: ${schema.spec.service.port}
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${schema.metadata.name}-lb
+        spec:
+          selector:
+            sandbox: ${schema.metadata.name}
+          ports:
+            - protocol: TCP
+              port: ${schema.spec.service.port}
+              targetPort: ${schema.spec.service.port}
+    - id: nwpolicy
+      includeWhen:
+        - ${schema.spec.networkPolicy.enabled}
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: allow-frontend-to-backend
+          namespace: default
+        spec:
+          podSelector:
+            matchLabels:
+              sandbox: ${schema.metadata.name}
+          policyTypes:
+            - Ingress
+            - Egress
+          ingress:
+          - from:
+            - podSelector:
+                matchLabels: ${schema.spec.networkPolicy.ingress.podLabels}
+            - namespaceSelector:
+                matchLabels: ${schema.spec.networkPolicy.ingress.namespaceLabels}
+          egress: ${schema.spec.networkPolicy.egress}
+    - id: ingress
+      includeWhen:
+        - ${schema.spec.ingress.enabled} # Only include if the user wants to create an Ingress
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: ${schema.metadata.name}
+        spec:
+          defaultBackend:
+            service:
+              name: ${service.metadata.name}
+              port:
+                number: ${schema.spec.service.port}

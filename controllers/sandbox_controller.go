@@ -90,8 +90,23 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
 	allErrors = errors.Join(err)
 
-	// Reconcile Service
-	svc, err := r.reconcileService(ctx, sandbox, nameHash)
+	// Create either the default headless Service (for internal discovery)
+	// or the user-specified networking Service.
+	var svc *corev1.Service
+	if sandbox.Spec.Networking == nil || sandbox.Spec.Networking.Service == nil {
+		// Ensure headless Service exists
+		svc, err = r.reconcileHeadlessService(ctx, sandbox, nameHash)
+		allErrors = errors.Join(allErrors, err)
+		// Ensure any previously created networking Service is deleted
+		err = r.deleteNetworkingService(ctx, sandbox)
+	} else {
+		// Ensure headless Service is deleted if it exists
+		err = r.deleteHeadlessService(ctx, sandbox)
+		allErrors = errors.Join(allErrors, err)
+		// Ensure user-specified networking Service exists
+		_, err = r.reconcileNetworkingService(ctx, sandbox, nameHash)
+	}
+
 	allErrors = errors.Join(allErrors, err)
 
 	// compute and set overall Ready condition
@@ -184,7 +199,7 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", hashValue)
 }
 
-func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
+func (r *SandboxReconciler) reconcileHeadlessService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	service := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
@@ -229,6 +244,24 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
 	sandbox.Status.Service = service.Name
 	return service, nil
+}
+
+// deleteHeadlessService deletes the default headless Service if present.
+func (r *SandboxReconciler) deleteHeadlessService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+	log := log.FromContext(ctx)
+	service := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	log.Info("Deleting Headless Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+	if err := r.Delete(ctx, service); err != nil {
+		log.Error(err, "Failed to delete Headless Service")
+		return err
+	}
+	return nil
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {

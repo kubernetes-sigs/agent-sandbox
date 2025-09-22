@@ -142,7 +142,10 @@ func TestComputeReadyCondition(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			condition := r.computeReadyCondition(tc.generation, tc.err, tc.svc, tc.pod)
+			sandbox := &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Generation: tc.generation},
+			}
+			condition := r.computeReadyCondition(sandbox, tc.err, tc.svc, tc.pod)
 			g.Expect(condition.Type).To(Equal(string(sandboxv1alpha1.SandboxConditionReady)))
 			g.Expect(condition.ObservedGeneration).To(Equal(tc.generation))
 			g.Expect(condition.Status).To(Equal(tc.expectedStatus))

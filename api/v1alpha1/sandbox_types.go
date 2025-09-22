@@ -24,13 +24,40 @@ type ConditionType string
 
 func (c ConditionType) String() string { return string(c) }
 
+type TTLPolicyType string
+
+func (c TTLPolicyType) String() string { return string(c) }
+
 const (
 	// SandboxConditionReady indicates readiness for Sandbox
 	SandboxConditionReady ConditionType = "Ready"
+
+	// TTL policy
+	TTLPolicyOnCreate TTLPolicyType = "onCreate"
+	TTLPolicyOnReady  TTLPolicyType = "onReady"
+	TTLPolicyOnEnable TTLPolicyType = "onEnable"
+	TTLPolicyNever    TTLPolicyType = "never"
 )
 
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 // Important: Run "make" to regenerate code after modifying this file
+
+type TTLConfig struct {
+	// Seconds sets after how many seconds should the sandbox be deleted
+	Seconds int32 `json:"seconds,omitempty"`
+
+	// StartPolicy indicated when the count down for shutdown should start
+	// onCreate - TTL starts from sandbox creation
+	// onReady - TTL starts from sandbox ready
+	// onEnable - When this is set and .status.shutdownAt is nil
+	// never - TTL is disabled
+	// +kubebuilder:validation:Enum=onCreate;onReady;onEnable;disable
+	StartPolicy TTLPolicyType `json:"startPolicy,omitempty"`
+
+	//ShutdownAt - Absolute time when the sandbox is deleted.
+	// setting this would override StartPolicy and Seconds
+	ShutdownAt string `json:"shutdownAt,omitempty"`
+}
 
 // SandboxSpec defines the desired state of Sandbox
 type SandboxSpec struct {
@@ -40,6 +67,9 @@ type SandboxSpec struct {
 	// PodTemplate describes the pod spec that will be used to create an agent sandbox.
 	// +kubebuilder:validation:Required
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+
+	// +optional
+	TTL *TTLConfig `json:"ttl,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.
@@ -54,6 +84,12 @@ type SandboxStatus struct {
 
 	// status conditions array
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// FirstReadyTime - when did the sandbox become ready first
+	FirstReadyTime *metav1.Time `json:"firstReadyTime,omitempty"`
+
+	// ShutdownAt - when will the sandbox be deleted
+	ShutdownAt *metav1.Time `json:"ttlShutdownAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -17,33 +17,6 @@
 set -e
 set -x
 
-# iglx avoids "Failed to initialize DRI3 extension" errors
-Xtigervnc :1 -geometry 1280x1024 | tee -a /tmp/tigervnc.log 2>&1 &
-echo "Started TigerVNC"
-
-# Wait for display to become available
-for i in {1..100}; do
-  if xdpyinfo -display :1 >/dev/null 2>&1; then
-    echo "VNC server is ready on display :1."
-    break
-  fi
-  echo "Waiting for VNC (display :1) to be ready... ($i)"
-  sleep 0.1
-done
-
-export DISPLAY=:1
-
-# Capture screenshots for 10 seconds
-for i in $(seq 1 100); do
-  xwd -display :1 -root -out "/screenshots/screenshot_$(printf "%04d" $i).xwd"
-  sleep 0.1
-done &
-echo "Started screenshot capture"
-
-# Kill chrome after about 10 seconds (if we haven't already been killed)
-(sleep 10; echo "Killing chrome after 10 seconds"; pkill -f google-chrome) &
-
-
 # There are a lot of interesting flags we could use here: https://github.com/microsoft/playwright/blob/20023ab33a1dc04db2d5a3f753760eef33339e73/packages/playwright-core/src/server/chromium/chromiumSwitches.ts#L47
 flags=()
 
@@ -58,6 +31,10 @@ flags+=(--no-first-run) # Avoids hanging with a "set chrome as default browser" 
 flags+=(--start-maximized) # We're the only thing running, use the whole screen
 
 flags+=(--disable-field-trial-config) # Keeps things consistent and a little faster (?)
+
+flags+=(--remote-debugging-port=9222) # Enable remote debugging
+flags+=(--user-data-dir=/tmp/chrome-data) # DevTools remote debugging requires a non-default data directory. Specify this using --user-data-dir.
+
 
 # Launch Chrome
 google-chrome "${flags[@]}" "https://www.google.com"

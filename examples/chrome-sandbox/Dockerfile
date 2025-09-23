@@ -1,3 +1,14 @@
+# Compile our golang binaries in a separate stage to keep the final image small.
+FROM golang:1.25.1 AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+COPY cmd ./cmd
+
+RUN CGO_ENABLED=0 go build -o /chrome-sandbox-entrypoint ./cmd/chrome-sandbox-entrypoint
+
+#----------------------
 # Use a base image with a minimal set of packages.
 FROM debian:13-slim
 
@@ -57,19 +68,14 @@ RUN apt-get update  \
     && apt-get install --yes x11-utils --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# If we want to create vnc screenshots, we need xwd
-RUN apt-get update  \
-    && apt-get install --yes x11-apps --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
 # Precreate X11 stuff
 RUN mkdir -p /tmp/.X11-unix
 RUN chmod 1777 /tmp/.X11-unix
 
 #----------------------
 # Add our entrypoint script
-COPY --chmod=a+rx chrome-sandbox-entrypoint /chrome-sandbox-entrypoint
-RUN chmod a+rx /chrome-sandbox-entrypoint
+COPY --chmod=a+rx scripts/start-chrome /start-chrome
+COPY --from=builder --chmod=a+rx /chrome-sandbox-entrypoint /chrome-sandbox-entrypoint
 
 #----------------------
 # Configure entrypoint, user, etc
@@ -78,5 +84,5 @@ WORKDIR /home/chrome
 
 USER chrome
 
-# Set the entrypoint to run our script.
+# Set the entrypoint to run our binary.
 ENTRYPOINT [ "/chrome-sandbox-entrypoint" ]

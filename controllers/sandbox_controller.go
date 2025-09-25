@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"reflect"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
@@ -98,12 +100,15 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	readyCondition := r.computeReadyCondition(sandbox.Generation, allErrors, svc, pod)
 	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
 
+	result, err := r.reconcileSandboxExpiry(ctx, sandbox)
+	allErrors = errors.Join(allErrors, err)
+
 	// Update status
 	err = r.updateStatus(ctx, oldStatus, sandbox)
 	allErrors = errors.Join(allErrors, err)
 
 	// return errors seen
-	return ctrl.Result{}, allErrors
+	return result, allErrors
 }
 
 func (r *SandboxReconciler) computeReadyCondition(generation int64, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
@@ -278,6 +283,42 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 	return pod, nil
+}
+
+// reconcileSandboxExpiry will check if a sandbox has expired, and if so, delete it.
+// If the sandbox has not expired, it will requeue the request for the remaining time.
+
+func (r *SandboxReconciler) reconcileSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	var expiryTime time.Time
+	if sandbox.Spec.ShutdownAt != "" {
+		var err error
+		// Try parsing the endtime as a RFC 3339 string
+		expiryTime, err = time.Parse(time.RFC3339, sandbox.Spec.ShutdownAt)
+		if err != nil {
+			log.Error(err, "Failed to parse ShutdownAt as RFC3339 string", "ShutdownAt", sandbox.Spec.ShutdownAt)
+			return reconcile.Result{}, err
+		}
+	} else {
+		log.Info("Sandbox ShutdownAt is not set, skipping.")
+		return reconcile.Result{}, nil
+	}
+
+	// Calculate remaining time
+	remainingTime := time.Until(expiryTime)
+	if remainingTime <= 0 {
+		log.Info("Sandbox has expired, deleting")
+		if err := r.Delete(ctx, sandbox); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to delete sandbox: %w", err)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	requeueAfter := max(remainingTime/2, 2*time.Second) // Requeue at most every 2 seconds
+	log.Info("Requeuing sandbox for shutdown", "remaining time", remainingTime, "requeue after", requeueAfter,
+		"expiry time", expiryTime)
+	return reconcile.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

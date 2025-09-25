@@ -3814,6 +3814,8 @@ spec:
                 required:
                 - spec
                 type: object
+              shutdownAt:
+                type: string
             required:
             - podTemplate
             type: object

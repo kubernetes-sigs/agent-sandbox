@@ -66,6 +66,12 @@ type SandboxSpec struct {
 	// PodTemplate describes the pod spec that will be used to create an agent sandbox.
 	// +kubebuilder:validation:Required
 	PodTemplate PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+
+	// Networking describes optional external exposure and/or references to
+	// externally managed routes for this sandbox. If omitted, only the default
+	// headless Service (for internal discovery) is used.
+	// +optional
+	Networking NetworkingSpec `json:"networking,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.
@@ -80,6 +86,14 @@ type SandboxStatus struct {
 
 	// status conditions array
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// NetworkingSpec describes optional exposure configuration and external route refs.
+type NetworkingSpec struct {
+	// Service describes an optional Service to create for exposure.
+	// If omitted, only the internal headless Service is maintained for discovery.
+	// +optional
+	Service *corev1.ServiceSpec `json:"service,omitempty"`
 }
 
 // +kubebuilder:object:root=true

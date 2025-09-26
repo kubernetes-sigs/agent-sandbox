@@ -66,6 +66,9 @@ type SandboxSpec struct {
 	// PodTemplate describes the pod spec that will be used to create an agent sandbox.
 	// +kubebuilder:validation:Required
 	PodTemplate PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+
+	// ShutdownAt - Absolute time (RFC 3339) when the sandbox is deleted.
+	ShutdownAt string `json:"shutdownAt,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.

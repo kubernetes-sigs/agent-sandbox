@@ -1,0 +1,8 @@
+apiVersion: custom.agents.x-k8s.io/v1alpha1
+kind: AgenticSandbox
+metadata:
+  name: demo
+spec:
+  image: nginx
+  service:
+    port: 80

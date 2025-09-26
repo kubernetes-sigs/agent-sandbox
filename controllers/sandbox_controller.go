@@ -52,6 +52,7 @@ type SandboxReconciler struct {
 
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -86,9 +87,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	var allErrors error
 
+	// Reconcile PVCs
+	err := r.reconcilePVCs(ctx, sandbox)
+	allErrors = errors.Join(allErrors, err)
+
 	// Reconcile Pod
 	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
-	allErrors = errors.Join(err)
+	allErrors = errors.Join(allErrors, err)
 
 	// Reconcile Service
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
@@ -259,6 +264,19 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		annotations[k] = v
 	}
 
+	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
+
+	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
+		pvcName := pvcTemplate.ObjectMeta.Name + "-" + sandbox.Name
+		mutatedSpec.Volumes = append(mutatedSpec.Volumes, corev1.Volume{
+			Name: pvcTemplate.ObjectMeta.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				},
+			},
+		})
+	}
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sandbox.Name,
@@ -266,7 +284,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: sandbox.Spec.PodTemplate.Spec,
+		Spec: *mutatedSpec,
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
@@ -278,6 +296,38 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 	return pod, nil
+}
+
+func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+	log := log.FromContext(ctx)
+	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcName := pvcTemplate.ObjectMeta.Name + "-" + sandbox.Name
+		err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				log.Info("Creating a new PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
+				pvc = &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandbox.Namespace,
+					},
+					Spec: pvcTemplate.Spec,
+				}
+				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+				}
+				if err := r.Create(ctx, pvc, client.FieldOwner("sandbox-controller")); err != nil {
+					log.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
+					return err
+				}
+			} else {
+				log.Error(err, "Failed to get PVC")
+				return fmt.Errorf("PVC Get Failed: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

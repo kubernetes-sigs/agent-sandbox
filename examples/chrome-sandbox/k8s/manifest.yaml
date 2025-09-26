@@ -1,0 +1,11 @@
+kind: Sandbox
+apiVersion: agents.x-k8s.io/v1alpha1
+metadata:
+  name: chrome-sandbox
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: chrome-sandbox
+        image: kind.local/chrome-sandbox:latest
+        imagePullPolicy: IfNotPresent

@@ -14,3 +14,14 @@ spec:
       - name: my-container
         image: busybox
         command: ["/bin/sh", "-c", "sleep 3600"]
+        volumeMounts:
+        - name: my-pvc
+          mountPath: /my-data
+  volumeClaimTemplates:
+  - metadata:
+      name: my-pvc
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

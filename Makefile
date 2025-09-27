@@ -20,3 +20,7 @@ deploy-kind:
 .PHONY: delete-kind
 delete-kind:
 	kind delete cluster --name ${KIND_CLUSTER}
+
+.PHONY: test-unit
+test-unit:
+	./dev/ci/presubmits/test-unit

@@ -23,9 +23,6 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
-    - jsonPath: .status.availableReplicas
-      name: Available
-      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

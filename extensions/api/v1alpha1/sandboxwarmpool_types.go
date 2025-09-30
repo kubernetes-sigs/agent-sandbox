@@ -40,23 +40,12 @@ type SandboxWarmPoolStatus struct {
 	// Replicas is the total number of sandboxes in the pool.
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
-
-	// ReadyReplicas is the number of sandboxes that are ready.
-	// +optional
-	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
-
-	// Conditions represent the latest available observations of the warm pool's state.
-	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.readyReplicas
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
-// +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.spec.replicas`
-// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
-// +kubebuilder:printcolumn:name="Available",type=integer,JSONPath=`.status.availableReplicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // SandboxWarmPool is the Schema for the sandboxwarmpools API
 type SandboxWarmPool struct {

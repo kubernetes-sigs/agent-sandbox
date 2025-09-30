@@ -16,45 +16,11 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
 // Important: Run "make" to regenerate code after modifying this file
-
-// StrategyType defines the type of upgrade strategy
-type StrategyType string
-
-const (
-	// RollingUpdateStrategyType means the warm pool is updated in a rolling fashion
-	RollingUpdateStrategyType StrategyType = "RollingUpdate"
-)
-
-// RollingUpdateStrategy defines the parameters for a rolling update strategy
-type RollingUpdateStrategy struct {
-	// The maximum number of sandboxes that can be scheduled above the desired number of replicas.
-	// Value can be an absolute number (ex: 5) or a percentage of desired replicas (ex: 10%).
-	// Defaults to 1.
-	// +optional
-	MaxSurge *int32 `json:"maxSurge,omitempty"`
-
-	// The maximum number of sandboxes that can be unavailable during the update.
-	// Value can be an absolute number (ex: 5) or a percentage of desired replicas (ex: 10%).
-	// Defaults to 0.
-	// +optional
-	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
-}
-
-// SandboxWarmPoolStrategy defines the upgrade strategy for the warm pool
-type SandboxWarmPoolStrategy struct {
-	// Type of upgrade strategy. Currently only supports RollingUpdate.
-	// +optional
-	// +kubebuilder:default=RollingUpdate
-	Type StrategyType `json:"type,omitempty"`
-
-	// Rolling update config params. Present only if Type = RollingUpdate.
-	// +optional
-	RollingUpdate *RollingUpdateStrategy `json:"rollingUpdate,omitempty"`
-}
 
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool
 type SandboxWarmPoolSpec struct {
@@ -66,11 +32,7 @@ type SandboxWarmPoolSpec struct {
 
 	// PodTemplate describes the pod spec that will be used to create sandboxes in the warm pool.
 	// +kubebuilder:validation:Required
-	PodTemplate PodTemplate `json:"podTemplate"`
-
-	// Strategy defines the upgrade strategy for the warm pool.
-	// +optional
-	Strategy SandboxWarmPoolStrategy `json:"strategy,omitempty"`
+	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate"`
 }
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool
@@ -82,10 +44,6 @@ type SandboxWarmPoolStatus struct {
 	// ReadyReplicas is the number of sandboxes that are ready.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
-
-	// AvailableReplicas is the number of sandboxes that are available (ready and not allocated).
-	// +optional
-	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
 	// Conditions represent the latest available observations of the warm pool's state.
 	// +optional

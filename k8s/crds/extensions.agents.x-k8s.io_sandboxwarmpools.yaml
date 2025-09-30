@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: sandboxwarmpools.agents.x-k8s.io
+  name: sandboxwarmpools.extensions.agents.x-k8s.io
 spec:
-  group: agents.x-k8s.io
+  group: extensions.agents.x-k8s.io
   names:
     kind: SandboxWarmPool
     listKind: SandboxWarmPoolList
@@ -3831,30 +3831,12 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
-              strategy:
-                properties:
-                  rollingUpdate:
-                    properties:
-                      maxSurge:
-                        format: int32
-                        type: integer
-                      maxUnavailable:
-                        format: int32
-                        type: integer
-                    type: object
-                  type:
-                    default: RollingUpdate
-                    type: string
-                type: object
             required:
             - podTemplate
             - replicas
             type: object
           status:
             properties:
-              availableReplicas:
-                format: int32
-                type: integer
               conditions:
                 items:
                   properties:

@@ -15,7 +15,9 @@
 package v1alpha1
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
@@ -44,18 +46,6 @@ type RollingUpdateStrategy struct {
 	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
 }
 
-// SandboxWarmPoolStrategy defines the upgrade strategy for the warm pool
-type SandboxWarmPoolStrategy struct {
-	// Type of upgrade strategy. Currently only supports RollingUpdate.
-	// +optional
-	// +kubebuilder:default=RollingUpdate
-	Type StrategyType `json:"type,omitempty"`
-
-	// Rolling update config params. Present only if Type = RollingUpdate.
-	// +optional
-	RollingUpdate *RollingUpdateStrategy `json:"rollingUpdate,omitempty"`
-}
-
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool
 type SandboxWarmPoolSpec struct {
 	// Replicas is the desired number of sandboxes in the pool.
@@ -66,11 +56,12 @@ type SandboxWarmPoolSpec struct {
 
 	// PodTemplate describes the pod spec that will be used to create sandboxes in the warm pool.
 	// +kubebuilder:validation:Required
-	PodTemplate PodTemplate `json:"podTemplate"`
+	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate"`
 
 	// Strategy defines the upgrade strategy for the warm pool.
+	// This field can be controlled by a HPA.
 	// +optional
-	Strategy SandboxWarmPoolStrategy `json:"strategy,omitempty"`
+	Strategy appsv1.DeploymentStrategy `json:"strategy"`
 }
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool
@@ -82,10 +73,6 @@ type SandboxWarmPoolStatus struct {
 	// ReadyReplicas is the number of sandboxes that are ready.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
-
-	// AvailableReplicas is the number of sandboxes that are available (ready and not allocated).
-	// +optional
-	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
 	// Conditions represent the latest available observations of the warm pool's state.
 	// +optional

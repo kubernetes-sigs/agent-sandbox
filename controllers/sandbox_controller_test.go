@@ -18,14 +18,17 @@ import (
 	"errors"
 	"testing"
 
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestComputeReadyCondition(t *testing.T) {
-	g := NewGomegaWithT(t)
 	r := &SandboxReconciler{}
 
 	testCases := []struct {
@@ -143,10 +146,134 @@ func TestComputeReadyCondition(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			condition := r.computeReadyCondition(tc.generation, tc.err, tc.svc, tc.pod)
-			g.Expect(condition.Type).To(Equal(string(sandboxv1alpha1.SandboxConditionReady)))
-			g.Expect(condition.ObservedGeneration).To(Equal(tc.generation))
-			g.Expect(condition.Status).To(Equal(tc.expectedStatus))
-			g.Expect(condition.Reason).To(Equal(tc.expectedReason))
+			require.Equal(t, sandboxv1alpha1.SandboxConditionReady.String(), condition.Type)
+			require.Equal(t, tc.generation, condition.ObservedGeneration)
+			require.Equal(t, tc.expectedStatus, condition.Status)
+			require.Equal(t, tc.expectedReason, condition.Reason)
+		})
+	}
+}
+
+func TestReconcilePod(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := "name-hash"
+	sandboxObj := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+						},
+					},
+				},
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						"custom-label": "label-val",
+					},
+					Annotations: map[string]string{
+						"custom-annotation": "anno-val",
+					},
+				},
+			},
+		},
+	}
+	testCases := []struct {
+		name        string
+		initialObjs []runtime.Object
+		sandbox     *sandboxv1alpha1.Sandbox
+		wantPod     *corev1.Pod
+	}{
+		{
+			name: "no-op if Pod already exists",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "foo",
+							},
+						},
+					},
+				},
+			},
+			sandbox: sandboxObj,
+			wantPod: &corev1.Pod{ // Pod is not updated
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "foo",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:    "reconcilePod creates a new Pod",
+			sandbox: sandboxObj,
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+					},
+					Annotations: map[string]string{
+						"custom-annotation": "anno-val",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion:         "agents.x-k8s.io/v1alpha1",
+							Kind:               "Sandbox",
+							Name:               sandboxName,
+							Controller:         ptr.To(true),
+							BlockOwnerDeletion: ptr.To(true),
+						},
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := SandboxReconciler{
+				Client: fake.NewFakeClient(tc.initialObjs...),
+				Scheme: Scheme,
+			}
+
+			pod, err := r.reconcilePod(t.Context(), tc.sandbox, nameHash)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantPod, pod)
+			// Validate the Pod from the "cluster" (fake client)
+			livePod := &corev1.Pod{}
+			err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantPod, livePod)
 		})
 	}
 }

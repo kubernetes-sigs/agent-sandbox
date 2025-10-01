@@ -27,6 +27,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,6 +42,16 @@ import (
 const (
 	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
+
+var (
+	// Scheme for use by sandbox controllers. Registers required types for client.
+	Scheme = runtime.NewScheme()
+)
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
+	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
+}
 
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {

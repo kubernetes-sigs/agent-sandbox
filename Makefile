@@ -23,4 +23,4 @@ delete-kind:
 
 .PHONY: test-unit
 test-unit:
-	./dev/ci/presubmits/test-unit
+	./dev/tools/test-unit

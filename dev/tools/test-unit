@@ -14,28 +14,22 @@
 # limitations under the License.
 
 import os
-import shutil
 import subprocess
 import sys
 
 
 def get_repo_root():
     """ returns the absolute path to the repo root directory """
-    presubmit_dir = os.path.dirname(os.path.realpath(__file__))
-    return os.path.dirname(os.path.dirname(os.path.dirname(presubmit_dir)))
+    tools_dir = os.path.dirname(os.path.realpath(__file__))
+    return os.path.dirname(os.path.dirname(tools_dir))
 
 
 def main():
-    """ invokes unit tests and outputs a junit report in the ARTIFACTS dir
-
-    The ARTIFACTS environment variable is set by prow.
-    """
+    """ invokes unit tests and outputs a junit results file """
     repo_root = get_repo_root()
-    result = subprocess.run([f"{repo_root}/dev/tools/test-unit"])
-
-    artifact_dir = os.getenv("ARTIFACTS")
-    if artifact_dir:
-        shutil.copy(f"{repo_root}/bin/junit.xml", f"{artifact_dir}/junit.xml")
+    result = subprocess.run([
+        "go", "tool", "gotestsum", f"--junitfile={repo_root}/bin/junit.xml"
+    ], cwd=repo_root)
 
     return result.returncode
 

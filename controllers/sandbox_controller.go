@@ -107,7 +107,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Update status
-	err = errors.Join(err, r.updateStatus(ctx, oldStatus, sandbox))
+	if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+		// Surface update error
+		err = errors.Join(err, statusUpdateErr)
+	}
 
 	// return errors seen
 	return ctrl.Result{RequeueAfter: requeueAfter}, err
@@ -132,16 +135,16 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 
 	// compute and set overall Ready condition
-	readyCondition := r.computeReadyCondition(sandbox.Generation, allErrors, svc, pod)
+	readyCondition := r.computeReadyCondition(sandbox, allErrors, svc, pod)
 	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
 
 	return allErrors
 }
 
-func (r *SandboxReconciler) computeReadyCondition(generation int64, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
+func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
 	readyCondition := metav1.Condition{
 		Type:               string(sandboxv1alpha1.SandboxConditionReady),
-		ObservedGeneration: generation,
+		ObservedGeneration: sandbox.Generation,
 		Message:            "",
 		Status:             metav1.ConditionFalse,
 		Reason:             "DependenciesNotReady",
@@ -153,7 +156,7 @@ func (r *SandboxReconciler) computeReadyCondition(generation int64, err error, s
 		return readyCondition
 	}
 
-	message := "Pod or Service not ready"
+	message := ""
 	podReady := false
 	if pod != nil {
 		message = "Pod exists with phase: " + string(pod.Status.Phase)
@@ -170,12 +173,22 @@ func (r *SandboxReconciler) computeReadyCondition(generation int64, err error, s
 				}
 			}
 		}
+	} else {
+		if sandbox.Spec.RunMode == sandboxv1alpha1.RunModeSuspended {
+			message = "Pod does not exist because sandbox is suspended."
+			// This is intended behaviour. So marking it ready.
+			podReady = true
+		} else {
+			message = "Pod does not exist"
+		}
 	}
 
 	svcReady := false
 	if svc != nil {
 		message += "; Service Exists"
 		svcReady = true
+	} else {
+		message += "; Service does not exist"
 	}
 
 	readyCondition.Message = message
@@ -266,13 +279,36 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod); err != nil {
+	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod)
+	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			log.Error(err, "Failed to get Pod")
 			return nil, fmt.Errorf("Pod Get Failed: %w", err)
 		}
-	} else {
+		pod = nil
+	}
+
+	if sandbox.Spec.RunMode == sandboxv1alpha1.RunModeSuspended {
+		if pod != nil {
+			if pod.ObjectMeta.DeletionTimestamp.IsZero() {
+				log.Info("Deleting Pod because RunMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+				if err := r.Delete(ctx, pod); err != nil {
+					log.Error(err, "Failed to delete Pod")
+					return nil, fmt.Errorf("Pod Delete Failed: %w", err)
+				}
+			} else {
+				log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			}
+		}
+		return nil, nil
+	}
+
+	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+			// Sometimes when we delete and recreate a sandbox quickly, the old pod might still be terminating
+			log.Info("Pod is being deleted, will wait for it to be gone before recreating", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		}
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
@@ -317,7 +353,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
-	err := r.Create(ctx, pod, client.FieldOwner("sandbox-controller"))
+	err = r.Create(ctx, pod, client.FieldOwner("sandbox-controller"))
 	if err != nil {
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err

@@ -20,6 +20,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -33,7 +34,7 @@ func TestComputeReadyCondition(t *testing.T) {
 
 	testCases := []struct {
 		name           string
-		generation     int64
+		sandbox        *sandboxv1alpha1.Sandbox
 		err            error
 		svc            *corev1.Service
 		pod            *corev1.Pod
@@ -41,10 +42,14 @@ func TestComputeReadyCondition(t *testing.T) {
 		expectedReason string
 	}{
 		{
-			name:       "all ready",
-			generation: 1,
-			err:        nil,
-			svc:        &corev1.Service{},
+			name: "all ready",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
+			err: nil,
+			svc: &corev1.Service{},
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
@@ -60,8 +65,12 @@ func TestComputeReadyCondition(t *testing.T) {
 			expectedReason: "DependenciesReady",
 		},
 		{
-			name:           "error",
-			generation:     1,
+			name: "error",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
 			err:            errors.New("test error"),
 			svc:            &corev1.Service{},
 			pod:            &corev1.Pod{},
@@ -69,10 +78,14 @@ func TestComputeReadyCondition(t *testing.T) {
 			expectedReason: "ReconcilerError",
 		},
 		{
-			name:       "pod not ready",
-			generation: 1,
-			err:        nil,
-			svc:        &corev1.Service{},
+			name: "pod not ready",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
+			err: nil,
+			svc: &corev1.Service{},
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
@@ -88,10 +101,14 @@ func TestComputeReadyCondition(t *testing.T) {
 			expectedReason: "DependenciesNotReady",
 		},
 		{
-			name:       "pod running but not ready",
-			generation: 1,
-			err:        nil,
-			svc:        &corev1.Service{},
+			name: "pod running but not ready",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
+			err: nil,
+			svc: &corev1.Service{},
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
@@ -101,10 +118,14 @@ func TestComputeReadyCondition(t *testing.T) {
 			expectedReason: "DependenciesNotReady",
 		},
 		{
-			name:       "pod pending",
-			generation: 1,
-			err:        nil,
-			svc:        &corev1.Service{},
+			name: "pod pending",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
+			err: nil,
+			svc: &corev1.Service{},
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodPending,
@@ -114,27 +135,29 @@ func TestComputeReadyCondition(t *testing.T) {
 			expectedReason: "DependenciesNotReady",
 		},
 		{
-			name:       "service not ready",
-			generation: 1,
-			err:        nil,
-			svc:        nil,
+			name: "service not ready",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
+			err: nil,
+			svc: nil,
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
-					Conditions: []corev1.PodCondition{
-						{
-							Type:   corev1.PodReady,
-							Status: corev1.ConditionTrue,
-						},
-					},
 				},
 			},
 			expectedStatus: metav1.ConditionFalse,
 			expectedReason: "DependenciesNotReady",
 		},
 		{
-			name:           "all not ready",
-			generation:     1,
+			name: "all not ready",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
 			err:            nil,
 			svc:            nil,
 			pod:            nil,
@@ -145,9 +168,9 @@ func TestComputeReadyCondition(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			condition := r.computeReadyCondition(tc.generation, tc.err, tc.svc, tc.pod)
+			condition := r.computeReadyCondition(tc.sandbox, tc.err, tc.svc, tc.pod)
 			require.Equal(t, sandboxv1alpha1.SandboxConditionReady.String(), condition.Type)
-			require.Equal(t, tc.generation, condition.ObservedGeneration)
+			require.Equal(t, tc.sandbox.Generation, condition.ObservedGeneration)
 			require.Equal(t, tc.expectedStatus, condition.Status)
 			require.Equal(t, tc.expectedReason, condition.Reason)
 		})
@@ -188,6 +211,7 @@ func TestReconcilePod(t *testing.T) {
 		initialObjs []runtime.Object
 		sandbox     *sandboxv1alpha1.Sandbox
 		wantPod     *corev1.Pod
+		expectErr   bool
 	}{
 		{
 			name: "no-op if Pod already exists",
@@ -257,23 +281,67 @@ func TestReconcilePod(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "delete pod if RunMode is Suspended",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					RunMode: sandboxv1alpha1.RunModeSuspended,
+				},
+			},
+			wantPod: nil,
+		},
+		{
+			name: "no-op if RunMode is Suspended and pod does not exist",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					RunMode: sandboxv1alpha1.RunModeSuspended,
+				},
+			},
+			wantPod: nil,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := SandboxReconciler{
-				Client: fake.NewFakeClient(tc.initialObjs...),
+				Client: fake.NewClientBuilder().WithScheme(Scheme).WithRuntimeObjects(tc.initialObjs...).Build(),
 				Scheme: Scheme,
 			}
 
 			pod, err := r.reconcilePod(t.Context(), tc.sandbox, nameHash)
-			require.NoError(t, err)
+			if tc.expectErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
 			require.Equal(t, tc.wantPod, pod)
 			// Validate the Pod from the "cluster" (fake client)
-			livePod := &corev1.Pod{}
-			err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
-			require.NoError(t, err)
-			require.Equal(t, tc.wantPod, livePod)
+			if tc.wantPod != nil {
+				livePod := &corev1.Pod{}
+				err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantPod, livePod)
+			} else {
+				livePod := &corev1.Pod{}
+				err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod)
+				require.True(t, k8serrors.IsNotFound(err))
+			}
 		})
 	}
 }

@@ -88,7 +88,30 @@ type SandboxSpec struct {
 	// If a time in the past is provided, the sandbox will be deleted immediately.
 	// +kubebuilder:validation:Format="date-time"
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+
+	// RunMode indicates the desired state of the sandbox.
+	// The valid values are "Active", "Suspended".
+	// If not specified, the default is "Active".
+	// When the RunMode is set to "Suspended", the sandbox's pod will be deleted.
+	// When the RunMode is set to "Active", a pod will be created if one does not already exist.
+	// The volume claims will not be deleted when the RunMode is set to "Suspended".
+	// +optional
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=Active
+	// +kubebuilder:validation:Enum=Active;Suspended
+	RunMode RunModeType `json:"runMode,omitempty" protobuf:"bytes,5,opt,name=runMode"`
 }
+
+// RunModeType defines the strategy for running a sandbox.
+// +kubebuilder:validation:Enum=Active;Suspended
+type RunModeType string
+
+const (
+	// RunModeActive indicates that the sandbox should be running.
+	RunModeActive RunModeType = "Active"
+	// RunModeSuspended indicates that the sandbox should be paused.
+	RunModeSuspended RunModeType = "Suspended"
+)
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {

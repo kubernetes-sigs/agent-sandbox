@@ -3814,6 +3814,16 @@ spec:
                 required:
                 - spec
                 type: object
+              runMode:
+                allOf:
+                - enum:
+                  - Active
+                  - Suspended
+                - enum:
+                  - Active
+                  - Suspended
+                default: Active
+                type: string
               shutdownTime:
                 format: date-time
                 type: string

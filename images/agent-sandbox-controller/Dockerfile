@@ -7,6 +7,7 @@ COPY go.mod go.sum /workspace/
 COPY api/ /workspace/api/
 COPY cmd/ /workspace/cmd/
 COPY controllers/ /workspace/controllers/
+COPY extensions/ /workspace/extensions/
 
 WORKDIR /workspace
 

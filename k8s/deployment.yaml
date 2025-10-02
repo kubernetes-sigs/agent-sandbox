@@ -30,6 +30,21 @@ roleRef:
 
 ---
 
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-sandbox-controller-extensions
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+roleRef:
+  kind: ClusterRole
+  name: agent-sandbox-controller-extensions
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
 kind: Service
 apiVersion: v1
 metadata:
@@ -69,3 +84,5 @@ spec:
       containers:
       - name: agent-sandbox-controller
         image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # placeholder value, replaced by deployment scripts
+        args:
+          - "--extensions"

@@ -18,14 +18,9 @@ set -e
 
 docker buildx build --load --tag chrome-sandbox .
 
-SCREENSHOTS=$(pwd)/screenshots/$(date +%Y%m%d-%H%M%S)
-mkdir -p ${SCREENSHOTS}
-chmod -R 777 ${SCREENSHOTS}
 
 # Exit after about 5 seconds
 (sleep 5; echo "Killing docker container"; docker rm --force chrome-sandbox) &
 
-time docker run -i --rm --name chrome-sandbox --volume "${SCREENSHOTS}:/screenshots:rw" chrome-sandbox || true
-
-echo "Building animated GIF"
-convert -delay 10 -loop 0 ${SCREENSHOTS}/screenshot_*.xwd chrome_launch.gif
+echo "Starting docker container at $(date -u +%Y%m%dT%H%M%S.%N)"
+docker run -i --rm --name chrome-sandbox chrome-sandbox || true

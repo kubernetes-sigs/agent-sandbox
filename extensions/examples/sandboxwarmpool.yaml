@@ -1,0 +1,29 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: sandboxwarmpool-example
+spec:
+  replicas: 3
+  podTemplate:
+    metadata:
+      labels:
+        pool: my-sandbox-pool
+      annotations:
+        description: "Pre-warmed sandbox from pool"
+    spec:
+      containers:
+      - name: my-container
+        image: busybox
+        command: ["/bin/sh", "-c", "sleep 3600"]
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "250m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0

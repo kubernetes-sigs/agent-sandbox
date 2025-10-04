@@ -127,7 +127,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
-	// Reconcile Service
+	// Reconcile Service, Create default headless Service or user-specified Service.
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
@@ -218,49 +218,102 @@ func NameHash(objectName string) string {
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
-	service := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
-		if !k8serrors.IsNotFound(err) {
-			log.Error(err, "Failed to get Service")
-			return nil, fmt.Errorf("Service Get Failed: %w", err)
-		}
-	} else {
-		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
-		return service, nil
+	serviceName := sandbox.Name
+	key := types.NamespacedName{Name: serviceName, Namespace: sandbox.Namespace}
+
+	// Check if Service exists
+	currentService := &corev1.Service{}
+	err := r.Get(ctx, key, currentService)
+	if err != nil && !k8serrors.IsNotFound(err) {
+		log.Error(err, "Failed to get Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
+		return nil, err
 	}
 
-	log.Info("Creating a new Headless Service", "Service.Namespace", sandbox.Namespace, "Service.Name", sandbox.Name)
-	service = &corev1.Service{
+	// Get the desired Service specification
+	desiredSpec := r.getDesiredServiceSpec(sandbox, nameHash)
+
+	// Handle Service exists
+	if err == nil {
+		return r.handleServiceExists(ctx, currentService, desiredSpec)
+	}
+
+	// Service doesn't exist, create it
+	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
+			Name:      serviceName,
 			Namespace: sandbox.Namespace,
 			Labels: map[string]string{
 				sandboxLabel: nameHash,
 			},
 		},
-		Spec: corev1.ServiceSpec{
-			ClusterIP: "None",
-			Selector: map[string]string{
-				sandboxLabel: nameHash,
-			},
-		},
+		Spec: *desiredSpec,
 	}
+
 	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
-		log.Error(err, "Failed to set controller reference")
 		return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 	}
-
-	err := r.Create(ctx, service, client.FieldOwner("sandbox-controller"))
-	if err != nil {
-		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+	if err := r.Create(ctx, service, client.FieldOwner("sandbox-controller")); err != nil {
+		log.Error(err, "Failed to create Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
 		return nil, err
 	}
-
+	log.Info("Created Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
 	// TODO(barney-s) : hardcoded to svc.cluster.local which is the default. Need a way to change it.
 	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
 	sandbox.Status.Service = service.Name
+
 	return service, nil
+}
+
+func (r *SandboxReconciler) getDesiredServiceSpec(sandbox *sandboxv1alpha1.Sandbox, nameHash string) *corev1.ServiceSpec {
+	// Use user-specified Service configuration if provided
+	if sandbox.Spec.Networking.Service != nil {
+		spec := sandbox.Spec.Networking.Service.DeepCopy()
+		// Ensure selector is correctly set
+		if spec.Selector == nil {
+			spec.Selector = make(map[string]string)
+		}
+		spec.Selector[sandboxLabel] = nameHash
+
+		return spec
+	}
+
+	// Default configuration: headless Service
+	return &corev1.ServiceSpec{
+		ClusterIP: corev1.ClusterIPNone,
+		Selector: map[string]string{
+			sandboxLabel: nameHash,
+		},
+	}
+}
+
+func (r *SandboxReconciler) handleServiceExists(ctx context.Context, currentService *corev1.Service, desiredSpec *corev1.ServiceSpec) (*corev1.Service, error) {
+	log := log.FromContext(ctx)
+	// Detect invalid Service type transitions
+	currentIsHeadless := currentService.Spec.ClusterIP == corev1.ClusterIPNone
+	desiredIsHeadless := desiredSpec.ClusterIP == corev1.ClusterIPNone
+
+	// Case 1: Headless to non-headless
+	if currentIsHeadless && !desiredIsHeadless {
+		return nil, fmt.Errorf("cannot change Service from headless to non-headless: ClusterIP is immutable. " +
+			"Please delete the existing Service and let the controller recreate it")
+	}
+
+	// Case 2: Non-headless to headless
+	if !currentIsHeadless && desiredIsHeadless {
+		return nil, fmt.Errorf(
+			"cannot change Service from non-headless to headless: ClusterIP is immutable. " +
+				"Please delete the existing Service and let the controller recreate it")
+	}
+	updatedService := currentService.DeepCopy()
+	updatedService.Spec = *desiredSpec
+
+	if err := r.Update(ctx, updatedService, client.FieldOwner("sandbox-controller")); err != nil {
+		log.Error(err, "Failed to apply Service", "Service.Namespace", updatedService.Namespace, "Service.Name", updatedService.Name)
+		return nil, err
+	}
+	log.Info("Updated Service", "Service.Namespace", updatedService.Namespace, "Service.Name", updatedService.Name)
+	return updatedService, nil
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
@@ -277,7 +330,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
 	}
-
 	// Create a pod object from the sandbox
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{

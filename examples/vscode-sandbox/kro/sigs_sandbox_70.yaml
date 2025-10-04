@@ -1,0 +1,16 @@
+apiVersion: custom.agents.x-k8s.io/v1alpha1
+kind: GeminiVSCodeSandbox
+metadata:
+  name: sigs-sandbox-70
+spec:
+  prompt: |
+    You are an expert kubernetes developer who is helping address code reviews.
+    Please looks at this PR's opens review comments and the most recent commit, and make code changes to address the comments.
+    https://github.com/kubernetes-sigs/agent-sandbox/pull/70
+    Please make sure the code compiles and passes tests.
+    After making the changes please do a git commit.
+    Please dont push the changes to the branch.
+  source:
+    giturl: https://github.com/barney-s/agent-sandbox.git#refs/heads/pause_feature
+  devcontainerDir: examples/vscode-sandbox
+  entrypoint: examples/vscode-sandbox/kro/entrypoint.sh

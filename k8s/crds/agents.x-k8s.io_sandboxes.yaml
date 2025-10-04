@@ -3814,6 +3814,16 @@ spec:
                 required:
                 - spec
                 type: object
+              runStrategy:
+                allOf:
+                - enum:
+                  - Running
+                  - Paused
+                - enum:
+                  - Running
+                  - Paused
+                default: Running
+                type: string
               shutdownTime:
                 format: date-time
                 type: string

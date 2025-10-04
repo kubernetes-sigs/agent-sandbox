@@ -109,7 +109,27 @@ type SandboxSpec struct {
 	// If a time in the past is provided, the sandbox will be deleted immediately.
 	// +kubebuilder:validation:Format="date-time"
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+
+	// RunStrategy indicates the desired state of the sandbox.
+	// The valid values are "Running", "Paused".
+	// If not specified, the default is "Running".
+	// +optional
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=Running
+	// +kubebuilder:validation:Enum=Running;Paused
+	RunStrategy RunStrategyType `json:"runStrategy,omitempty" protobuf:"bytes,5,opt,name=runStrategy"`
 }
+
+// RunStrategyType defines the strategy for running a sandbox.
+// +kubebuilder:validation:Enum=Running;Paused
+type RunStrategyType string
+
+const (
+	// RunStrategyRunning indicates that the sandbox should be running.
+	RunStrategyRunning RunStrategyType = "Running"
+	// RunStrategyPaused indicates that the sandbox should be paused.
+	RunStrategyPaused RunStrategyType = "Paused"
+)
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {

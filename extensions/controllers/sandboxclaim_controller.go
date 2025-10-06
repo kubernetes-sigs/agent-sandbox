@@ -27,15 +27,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	policyv1 "k8s.io/api/policy/v1"
 	"sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+)
+
+const (
+	// These are for our PDB management
+	pdbFinalizerName = "sandboxclaim.agents.x-k8s.io/pdb-cleanup"
+	pdbName          = "sandbox-highly-available"
+	pdbLabelKey      = "extensions.agents.x-k8s.io/sandbox-disruption-policy"
+	pdbLabelValue    = "true"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -52,6 +63,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -59,27 +71,24 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
+			// Object not found, probably deleted. Nothing to do.
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
 	}
 
+	// Check if the object is being deleted
 	if !claim.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.reconcileDelete(ctx, claim)
 	}
 
-	// cache the original status from sandboxclaim
+	// Object is not being deleted.
 	originalClaimStatus := claim.Status.DeepCopy()
-	var err error
-	var sandbox *v1alpha1.Sandbox
-	var template *extensionsv1alpha1.SandboxTemplate
 
-	// Try getting template
-	if template, err = r.getTemplate(ctx, claim); err == nil || k8errors.IsNotFound(err) {
-		// Try getting sandbox even if template is not found
-		// It is possible that the template was deleted after the sandbox was created
-		sandbox, err = r.getOrCreateSandbox(ctx, claim, template)
-	}
+	// We create a custom error type to request a requeue from reconcileCreateOrUpdate
+	var requeueErr *requeueError
+
+	sandbox, err := r.reconcileCreateOrUpdate(ctx, claim)
 
 	// Update claim status
 	r.computeAndSetStatus(claim, sandbox, err)
@@ -87,7 +96,94 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		err = errors.Join(err, updateErr)
 	}
 
+	// Check if reconcileCreateOrUpdate requested an explicit requeue
+	if errors.As(err, &requeueErr) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	return ctrl.Result{}, err
+}
+
+// requeueError is a simple error type to signal that we need to requeue.
+type requeueError struct {
+	message string
+}
+
+func (e *requeueError) Error() string {
+	return e.message
+}
+
+// reconcileDelete handles the cleanup when a SandboxClaim is deleted.
+func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// We only care if our finalizer is present.
+	if controllerutil.ContainsFinalizer(claim, pdbFinalizerName) {
+		logger.Info("Reconciling PDB deletion for deleted claim")
+
+		// Run the PDB cleanup logic
+		if err := r.reconcilePDBDeletion(ctx, claim); err != nil {
+			// If cleanup fails, return error to retry.
+			return ctrl.Result{}, err
+		}
+
+		// Cleanup successful, remove the finalizer
+		logger.Info("PDB cleanup successful, removing finalizer")
+		controllerutil.RemoveFinalizer(claim, pdbFinalizerName)
+		if err := r.Update(ctx, claim); err != nil {
+			logger.Error(err, "Failed to remove finalizer")
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Object is cleaned up or has no finalizer. Stop reconciliation.
+	return ctrl.Result{}, nil
+}
+
+// reconcileCreateOrUpdate handles the "normal" reconciliation loop for a SandboxClaim.
+// This is called when the object is not being deleted.
+func (r *SandboxClaimReconciler) reconcileCreateOrUpdate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
+	logger := log.FromContext(ctx)
+
+	// Template Logic
+	template, err := r.getTemplate(ctx, claim)
+	if err != nil {
+		if k8errors.IsNotFound(err) {
+			logger.Info("SandboxTemplate not found", "template", claim.Spec.TemplateRef.Name)
+			return nil, ErrTemplateNotFound
+		}
+		logger.Error(err, "Failed to get SandboxTemplate", "template", claim.Spec.TemplateRef.Name)
+		return nil, err
+	}
+
+	// PDB Finalizer Logic
+	managePDB := template != nil && template.Spec.EnableDisruptionControl
+	if managePDB && !controllerutil.ContainsFinalizer(claim, pdbFinalizerName) {
+		logger.Info("Adding PDB finalizer to claim")
+		controllerutil.AddFinalizer(claim, pdbFinalizerName)
+		if err := r.Update(ctx, claim); err != nil {
+			logger.Error(err, "Failed to add finalizer")
+			return nil, err
+		}
+		// Signal to the main Reconcile loop that we need to requeue
+		return nil, &requeueError{"finalizer added"}
+	}
+
+	// Sandbox Logic Retrieval/Creation
+	sandbox, err := r.getOrCreateSandbox(ctx, claim, template)
+	if err != nil {
+		// Error already logged by getOrCreateSandbox
+		return nil, err
+	}
+
+	// PDB Creation Logic
+	if managePDB {
+		if pdbErr := r.reconcilePDB(ctx, claim); pdbErr != nil {
+			err = errors.Join(err, pdbErr)
+		}
+	}
+
+	return sandbox, err
 }
 
 func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1alpha1.SandboxClaimStatus, claim *extensionsv1alpha1.SandboxClaim) error {
@@ -255,6 +351,24 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 	sandbox.Spec.PodTemplate = template.Spec.PodTemplate
+
+	replicas := int32(1)
+	sandbox.Spec.Replicas = &replicas
+
+	if template.Spec.EnableDisruptionControl {
+		// 1. Inject the PDB label for the shared PDB to select
+		if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
+			sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+		}
+		sandbox.Spec.PodTemplate.ObjectMeta.Labels[pdbLabelKey] = pdbLabelValue
+
+		// 2. Inject the safe-to-evict annotation
+		if sandbox.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+			sandbox.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+		}
+		sandbox.Spec.PodTemplate.ObjectMeta.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] = "false"
+	}
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)
@@ -330,6 +444,99 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 	}
 
 	return template, nil
+}
+
+// reconcilePDB ensures the shared PDB exists in the namespace.
+func (r *SandboxClaimReconciler) reconcilePDB(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
+	logger := log.FromContext(ctx)
+	pdb := &policyv1.PodDisruptionBudget{}
+	pdbKey := types.NamespacedName{Name: pdbName, Namespace: claim.Namespace}
+
+	err := r.Client.Get(ctx, pdbKey, pdb)
+	if err != nil {
+		if k8errors.IsNotFound(err) {
+			// PDB does not exist, let's create it.
+			logger.Info("Creating shared PodDisruptionBudget", "PDB.Name", pdbName, "PDB.Namespace", claim.Namespace)
+
+			// This PDB will select ALL pods created by the core sandbox-controller
+			// that have the disruption policy enabled.
+			pdbToCreate := &policyv1.PodDisruptionBudget{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pdbName,
+					Namespace: claim.Namespace,
+				},
+				Spec: policyv1.PodDisruptionBudgetSpec{
+					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							pdbLabelKey: pdbLabelValue,
+						},
+					},
+				},
+			}
+
+			// We DO NOT set an owner ref, as this PDB is shared and its
+			// lifecycle is managed by our finalizer.
+			if err := r.Client.Create(ctx, pdbToCreate); err != nil {
+				logger.Error(err, "Failed to create PDB")
+				return err
+			}
+			return nil
+		}
+		// Some other error occurred when trying to Get the PDB
+		return err
+	}
+	// PDB already exists, do nothing.
+	return nil
+}
+
+// reconcilePDBDeletion handles cleanup of the shared PDB.
+func (r *SandboxClaimReconciler) reconcilePDBDeletion(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
+	logger := log.FromContext(ctx)
+
+	// List all other SandboxClaims in the same namespace
+	claimList := &extensionsv1alpha1.SandboxClaimList{}
+	if err := r.Client.List(ctx, claimList, client.InNamespace(claim.Namespace)); err != nil {
+		logger.Error(err, "Failed to list SandboxClaims for PDB cleanup")
+		return err
+	}
+
+	// Check if any *other* claims that require PDBs still exist.
+	otherClaimsNeedPDB := false
+	for _, otherClaim := range claimList.Items {
+		if otherClaim.UID == claim.UID || !otherClaim.DeletionTimestamp.IsZero() {
+			continue // Skip self or claims already being deleted
+		}
+
+		// We must check if the other claim also has PDB enabled
+		if controllerutil.ContainsFinalizer(&otherClaim, pdbFinalizerName) {
+			otherClaimsNeedPDB = true
+			break
+		}
+	}
+
+	if !otherClaimsNeedPDB {
+		// This is the last claim that needs a PDB. Delete the PDB.
+		logger.Info("Last SandboxClaim with disruption control deleted. Deleting PDB.", "PDB.Name", pdbName, "PDB.Namespace", claim.Namespace)
+		pdbToDelete := &policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pdbName,
+				Namespace: claim.Namespace,
+			},
+		}
+
+		if err := r.Client.Delete(ctx, pdbToDelete); err != nil {
+			// Ignore "not found" errors, as it might already be gone.
+			if !k8errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete PDB")
+				return err
+			}
+		}
+	} else {
+		logger.Info("Other SandboxClaims still require the PDB, not deleting.")
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

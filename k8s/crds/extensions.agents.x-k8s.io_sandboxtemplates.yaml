@@ -28,6 +28,8 @@ spec:
             type: object
           spec:
             properties:
+              enableDisruptionControl:
+                type: boolean
               podTemplate:
                 properties:
                   metadata:

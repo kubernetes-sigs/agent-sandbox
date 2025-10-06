@@ -25,14 +25,25 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	policyv1 "k8s.io/api/policy/v1"
 	"sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+)
+
+const (
+	// These are for our PDB management
+	pdbFinalizerName = "sandboxclaim.agents.x-k8s.io/pdb-cleanup"
+	pdbName          = "sandbox-highly-available"
+	pdbLabelKey      = "sandbox-disruption-policy"
+	pdbLabelValue    = "HighlyAvailable"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -48,10 +59,12 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
+//+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
@@ -59,22 +72,75 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
 	}
+	originalClaimStatus := claim.Status.DeepCopy()
+
+	template, err := r.getTemplate(ctx, claim)
+	if err != nil && !k8errors.IsNotFound(err) {
+		// This is a real error, update status and requeue
+		r.computeAndSetStatus(claim, nil, err)
+		// We can't update status if the claim is not found, but we also don't need to.
+		if !k8errors.IsNotFound(err) {
+			if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+				err = errors.Join(err, updateErr)
+			}
+		}
+		return ctrl.Result{}, err
+	}
+	if k8errors.IsNotFound(err) {
+		// Template not found, set status and stop.
+		r.computeAndSetStatus(claim, nil, ErrTemplateNotFound)
+		if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+			err = errors.Join(err, updateErr)
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Determine if we should manage PDBs for this claim
+	managePDB := template != nil && template.Spec.EnableDisruptionControl
 
 	if !claim.DeletionTimestamp.IsZero() {
+		// This logic only runs if the claim is being deleted
+		if managePDB && controllerutil.ContainsFinalizer(claim, pdbFinalizerName) {
+			logger.Info("Reconciling PDB deletion for deleted claim")
+			if err := r.reconcilePDBDeletion(ctx, claim); err != nil {
+				return ctrl.Result{}, err
+			}
+
+			// Cleanup successful, remove the finalizer
+			controllerutil.RemoveFinalizer(claim, pdbFinalizerName)
+			if err := r.Update(ctx, claim); err != nil {
+				logger.Error(err, "Failed to remove finalizer")
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
-	// cache the original status from sandboxclaim
-	originalClaimStatus := claim.Status.DeepCopy()
-	var err error
-	var sandbox *v1alpha1.Sandbox
-	var template *extensionsv1alpha1.SandboxTemplate
+	// If not deleting, add the finalizer if it's needed and missing
+	if managePDB && !controllerutil.ContainsFinalizer(claim, pdbFinalizerName) {
+		logger.Info("Adding PDB finalizer to claim")
+		controllerutil.AddFinalizer(claim, pdbFinalizerName)
+		if err := r.Update(ctx, claim); err != nil {
+			logger.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil // Requeue to process again with the finalizer
+	}
 
-	// Try getting template
-	if template, err = r.getTemplate(ctx, claim); err == nil || k8errors.IsNotFound(err) {
-		// Try getting sandbox even if template is not found
-		// It is possible that the template was deleted after the sandbox was created
-		sandbox, err = r.getOrCreateSandbox(ctx, claim, template)
+	// cache the original status from sandboxclaim
+	var sandbox *v1alpha1.Sandbox
+
+	// Try getting or creating the sandbox
+	// We already fetched the template, so we pass it in.
+	sandbox, err = r.getOrCreateSandbox(ctx, claim, template)
+
+	if err == nil { // Only reconcile children if sandbox was found or created
+		// Reconcile PDB
+		if managePDB {
+			if pdbErr := r.reconcilePDB(ctx, claim); pdbErr != nil {
+				err = errors.Join(err, pdbErr)
+			}
+		}
 	}
 
 	// Update claim status
@@ -179,9 +245,27 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Name:      claim.Name,
 		},
 	}
+	replicas := int32(1)
+	sandbox.Spec.Replicas = &replicas
+
 	sandbox.Spec.PodTemplate.Spec = template.Spec.PodTemplate.Spec
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = template.Spec.PodTemplate.Labels
 	sandbox.Spec.PodTemplate.ObjectMeta.Annotations = template.Spec.PodTemplate.Annotations
+
+	if template.Spec.EnableDisruptionControl {
+		// 1. Inject the PDB label for the shared PDB to select
+		if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
+			sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+		}
+		sandbox.Spec.PodTemplate.ObjectMeta.Labels[pdbLabelKey] = pdbLabelValue
+
+		// 2. Inject the safe-to-evict annotation
+		if sandbox.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+			sandbox.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+		}
+		sandbox.Spec.PodTemplate.ObjectMeta.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] = "false"
+	}
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)
@@ -241,6 +325,106 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 	}
 
 	return template, nil
+}
+
+// reconcilePDB ensures the shared PDB exists in the namespace.
+func (r *SandboxClaimReconciler) reconcilePDB(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
+	logger := log.FromContext(ctx)
+	pdb := &policyv1.PodDisruptionBudget{}
+	pdbKey := types.NamespacedName{Name: pdbName, Namespace: claim.Namespace}
+
+	err := r.Client.Get(ctx, pdbKey, pdb)
+	if err != nil {
+		if k8errors.IsNotFound(err) {
+			// PDB does not exist, let's create it.
+			logger.Info("Creating shared PodDisruptionBudget", "PDB.Name", pdbName, "PDB.Namespace", claim.Namespace)
+
+			// This PDB will select ALL pods created by the core sandbox-controller
+			// that have the disruption policy enabled.
+			pdbToCreate := &policyv1.PodDisruptionBudget{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pdbName,
+					Namespace: claim.Namespace,
+				},
+				Spec: policyv1.PodDisruptionBudgetSpec{
+					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							// This label is injected into the PodTemplate by createSandbox
+							// and then propagated to the Pod by the sandbox-controller.
+						},
+					},
+				},
+			}
+
+			// The PDB selector will target this common label.
+			pdbToCreate.Spec.Selector.MatchLabels = map[string]string{
+				pdbLabelKey: pdbLabelValue,
+			}
+
+			// We DO NOT set an owner ref, as this PDB is shared and its
+			// lifecycle is managed by our finalizer.
+			if err := r.Client.Create(ctx, pdbToCreate); err != nil {
+				logger.Error(err, "Failed to create PDB")
+				return err
+			}
+			return nil
+		}
+		// Some other error occurred when trying to Get the PDB
+		return err
+	}
+	// PDB already exists, do nothing.
+	return nil
+}
+
+// reconcilePDBDeletion handles cleanup of the shared PDB.
+func (r *SandboxClaimReconciler) reconcilePDBDeletion(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
+	logger := log.FromContext(ctx)
+
+	// List all other SandboxClaims in the same namespace
+	claimList := &extensionsv1alpha1.SandboxClaimList{}
+	if err := r.Client.List(ctx, claimList, client.InNamespace(claim.Namespace)); err != nil {
+		logger.Error(err, "Failed to list SandboxClaims for PDB cleanup")
+		return err
+	}
+
+	// Check if any *other* claims that require PDBs still exist.
+	otherClaimsNeedPDB := false
+	for _, otherClaim := range claimList.Items {
+		if otherClaim.UID == claim.UID || !otherClaim.DeletionTimestamp.IsZero() {
+			continue // Skip self or claims already being deleted
+		}
+
+		// We must check if the other claim also has PDB enabled
+		template, err := r.getTemplate(ctx, &otherClaim)
+		if err == nil && template != nil && template.Spec.EnableDisruptionControl {
+			otherClaimsNeedPDB = true
+			break
+		}
+	}
+
+	if !otherClaimsNeedPDB {
+		// This is the last claim that needs a PDB. Delete the PDB.
+		logger.Info("Last SandboxClaim with disruption control deleted. Deleting PDB.", "PDB.Name", pdbName, "PDB.Namespace", claim.Namespace)
+		pdbToDelete := &policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pdbName,
+				Namespace: claim.Namespace,
+			},
+		}
+
+		if err := r.Client.Delete(ctx, pdbToDelete); err != nil {
+			// Ignore "not found" errors, as it might already be gone.
+			if !k8errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete PDB")
+				return err
+			}
+		}
+	} else {
+		logger.Info("Other SandboxClaims still require the PDB, not deleting.")
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -44,6 +44,12 @@ type SandboxTemplateSpec struct {
 	// an agent sandbox.
 	// +kubebuilder:validation:Required
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+
+	// EnableDisruptionControl, if true, will protect sandboxes created
+	// from this template with a PodDisruptionBudget and a "safe-to-evict"
+	// annotation, making them resilient to voluntary disruptions.
+	// +optional
+	EnableDisruptionControl bool `json:"enableDisruptionControl,omitempty"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

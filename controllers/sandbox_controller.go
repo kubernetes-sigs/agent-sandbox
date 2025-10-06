@@ -41,7 +41,8 @@ import (
 )
 
 const (
-	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel      = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxUsageLabel = "agents.x-k8s.io/agent-sandbox"
 )
 
 var (
@@ -235,7 +236,8 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			Name:      sandbox.Name,
 			Namespace: sandbox.Namespace,
 			Labels: map[string]string{
-				sandboxLabel: nameHash,
+				sandboxLabel:      nameHash,
+				sandboxUsageLabel: "true",
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -281,7 +283,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// Create a pod object from the sandbox
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
-		sandboxLabel: nameHash,
+		sandboxLabel:      nameHash,
+		sandboxUsageLabel: "true",
 	}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		labels[k] = v
@@ -338,6 +341,9 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      pvcName,
 						Namespace: sandbox.Namespace,
+						Labels: map[string]string{
+							sandboxUsageLabel: "true",
+						},
 					},
 					Spec: pvcTemplate.Spec,
 				}

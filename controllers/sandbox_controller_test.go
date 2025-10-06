@@ -234,6 +234,7 @@ func TestReconcilePod(t *testing.T) {
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"custom-label":                      "label-val",
+						"agents.x-k8s.io/agent-sandbox":     "true",
 					},
 					Annotations: map[string]string{
 						"custom-annotation": "anno-val",

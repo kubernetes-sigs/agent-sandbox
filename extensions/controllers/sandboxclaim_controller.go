@@ -255,6 +255,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 	sandbox.Spec.PodTemplate = template.Spec.PodTemplate
+	// TODO: this is a workaround, remove replica assignment related issue #202
+	replicas := int32(1)
+	sandbox.Spec.Replicas = &replicas
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)

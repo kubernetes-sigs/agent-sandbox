@@ -16,6 +16,8 @@
 
 package agentsandbox
 
-// Generate CRDs and RBAC rules
-//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen object crd:maxDescLen=0 paths="./api/..." output:crd:dir=k8s/crds output:rbac:dir=k8s rbac:roleName=agent-sandbox-controller,fileName=rbac.generated.yaml
-//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen object crd:maxDescLen=0 paths="./extensions/..." output:crd:dir=k8s/crds output:rbac:dir=k8s rbac:roleName=agent-sandbox-controller,fileName=rbac-extensions.generated.yaml
+// Generate CRDs and RBAC rules for core API
+//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen object crd:maxDescLen=0 paths=./api/... output:crd:dir=k8s/crds output:rbac:dir=k8s rbac:roleName=agent-sandbox-controller,fileName=rbac.generated.yaml
+
+// Generate CRDs and RBAC rules for extensions API
+//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen object crd:maxDescLen=0 paths=./extensions/... output:crd:dir=k8s/crds output:rbac:dir=k8s rbac:roleName=agent-sandboxwarmpool-controller,fileName=rbac-extensions.generated.yaml

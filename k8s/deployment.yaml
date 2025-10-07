@@ -30,6 +30,21 @@ roleRef:
 
 ---
 
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-sandboxwarmpool-controller
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+roleRef:
+  kind: ClusterRole
+  name: agent-sandboxwarmpool-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
 kind: Service
 apiVersion: v1
 metadata:

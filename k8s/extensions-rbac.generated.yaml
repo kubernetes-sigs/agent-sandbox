@@ -5,6 +5,18 @@ metadata:
   name: agent-sandbox-controller-extensions
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes
@@ -20,6 +32,7 @@ rules:
   - extensions.agents.x-k8s.io
   resources:
   - sandboxclaims
+  - sandboxwarmpools
   verbs:
   - create
   - delete
@@ -32,6 +45,7 @@ rules:
   - extensions.agents.x-k8s.io
   resources:
   - sandboxclaims/status
+  - sandboxwarmpools/status
   verbs:
   - get
   - patch

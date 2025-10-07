@@ -5,6 +5,7 @@ ARG TARGETARCH
 
 COPY go.mod go.sum /workspace/
 COPY api/ /workspace/api/
+COPY extensions/ /workspace/extensions/
 COPY cmd/ /workspace/cmd/
 COPY controllers/ /workspace/controllers/
 COPY extensions/ /workspace/extensions/

@@ -62,6 +62,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	setupLog.Info("Setting up Sandbox controller")
 	if err = (&controllers.SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -69,6 +70,17 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
 	}
+	setupLog.Info("Sandbox controller setup complete")
+
+	setupLog.Info("Setting up SandboxWarmPool controller")
+	if err = (&controllers.SandboxWarmPoolReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
+		os.Exit(1)
+	}
+	setupLog.Info("SandboxWarmPool controller setup complete")
+
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

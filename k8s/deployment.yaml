@@ -69,3 +69,4 @@ spec:
       containers:
       - name: agent-sandbox-controller
         image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # placeholder value, replaced by deployment scripts
+        imagePullPolicy: Always

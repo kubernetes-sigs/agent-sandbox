@@ -1,0 +1,68 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8spreventactiveserviceaccountbinding
+  annotations:
+    description: >-
+      Prevents RoleBindings and ClusterRoleBindings from being applied to
+      ServiceAccounts that are actively in use by Pods CONTROLLED BY A SANDBOX CR.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sPreventActiveServiceAccountBinding
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            # No parameters needed for this policy
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package kubernetes.preventactivebinding
+
+        violation[{"msg": msg}] {
+          # Trigger for RoleBindings
+          input.review.kind.kind == "RoleBinding"
+          binding := input.review.object
+          subject := binding.subjects[_]
+          subject.kind == "ServiceAccount"
+
+          sa_name := subject.name
+          sa_namespace := subject.namespace
+          sa_namespace != ""
+
+          # Find a pod using this ServiceAccount in the same namespace
+          pod := data.inventory.namespace[sa_namespace]["v1"]["Pod"][_]
+          pod.spec.serviceAccountName == sa_name
+
+          # Check if this pod is controlled by a Sandbox CR
+          owner := pod.metadata.ownerReferences[_]
+          owner.kind == "Sandbox"
+          startswith(owner.apiVersion, "agents.x-k8s.io/") # Match agents.x-k8s.io/v1alpha1 or other versions
+
+          msg := sprintf("RoleBinding cannot be created/updated: ServiceAccount '%s/%s' is in use by Pod '%s/%s', which is controlled by Sandbox CR '%s'", [sa_namespace, sa_name, sa_namespace, pod.metadata.name, owner.name])
+        }
+
+        violation[{"msg": msg}] {
+          # Trigger for ClusterRoleBindings
+          input.review.kind.kind == "ClusterRoleBinding"
+          binding := input.review.object
+          subject := binding.subjects[_]
+          subject.kind == "ServiceAccount"
+
+          sa_name := subject.name
+          sa_namespace := subject.namespace
+          sa_namespace != ""
+
+          # Find a pod using this ServiceAccount in the same namespace
+          pod := data.inventory.namespace[sa_namespace]["v1"]["Pod"][_]
+          pod.spec.serviceAccountName == sa_name
+
+          # Check if this pod is controlled by a Sandbox CR
+          owner := pod.metadata.ownerReferences[_]
+          owner.kind == "Sandbox"
+          startswith(owner.apiVersion, "agents.x-k8s.io/") # Match agents.x-k8s.io/v1alpha1 or other versions
+
+          msg := sprintf("ClusterRoleBinding cannot be created/updated: ServiceAccount '%s/%s' is in use by Pod '%s/%s', which is controlled by Sandbox CR '%s'", [sa_namespace, sa_name, sa_namespace, pod.metadata.name, owner.name])
+        }

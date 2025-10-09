@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 const (
@@ -52,6 +53,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
 	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
+	utilruntime.Must(extensionsv1alpha1.AddToScheme(Scheme))
 }
 
 // SandboxReconciler reconciles a Sandbox object

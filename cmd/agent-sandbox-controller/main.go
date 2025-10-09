@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"sigs.k8s.io/agent-sandbox/controllers"
+	extensioncontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -62,6 +63,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	setupLog.Info("Setting up Sandbox controller")
+	setupLog.Info("Setting up Sandbox controller")
 	if err = (&controllers.SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -69,6 +72,17 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
 	}
+	setupLog.Info("Sandbox controller setup complete")
+
+	setupLog.Info("Setting up SandboxWarmPool controller")
+	if err = (&extensioncontrollers.SandboxWarmPoolReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
+		os.Exit(1)
+	}
+	setupLog.Info("SandboxWarmPool controller setup complete")
+
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

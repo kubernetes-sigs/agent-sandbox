@@ -1,0 +1,9 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPreventActiveServiceAccountBinding
+metadata:
+  name: prevent-active-sa-binding
+spec:
+  match:
+    kinds:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        kinds: ["RoleBinding", "ClusterRoleBinding"]

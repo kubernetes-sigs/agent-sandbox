@@ -1,17 +1,3 @@
-Metadata-Version: 2.4
-Name: agentic_sandbox
-Version: 0.1.0
-Summary: A client library to interact with the Agentic Sandbox on Kubernetes.
-Project-URL: Homepage, https://github.com/kubernetes-sigs/agent-sandbox
-Project-URL: Bug Tracker, https://github.com/kubernetes-sigs/agent-sandbox/issues
-Classifier: Programming Language :: Python :: 3
-Classifier: License :: OSI Approved :: MIT License
-Classifier: Operating System :: OS Independent
-Requires-Python: >=3.7
-Description-Content-Type: text/markdown
-Requires-Dist: kubernetes
-Requires-Dist: requests
-
 # Agentic Sandbox Python Client
 
 This Python client provides a simple, high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller. It's designed to be used as a context manager, ensuring that sandbox resources are properly created and cleaned up.

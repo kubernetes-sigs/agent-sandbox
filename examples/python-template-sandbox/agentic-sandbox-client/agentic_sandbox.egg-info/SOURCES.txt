@@ -1,4 +1,5 @@
-setup.py
+README.md
+pyproject.toml
 agentic_sandbox/__init__.py
 agentic_sandbox/sandbox.py
 agentic_sandbox.egg-info/PKG-INFO

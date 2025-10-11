@@ -51,7 +51,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Waiting for sandbox pod to be ready..."
-sleep 40
+sleep 20
 kubectl wait --for=condition=ready pod --selector=app=python-sandbox --timeout=60s
 
 echo "Port-forwarding service..."
@@ -65,8 +65,11 @@ trap "kill $PF_PID; cleanup" EXIT
 # Give port-forward a moment to establish
 sleep 3
 
-echo "Running the Python tester..."
-python3 tester.py 127.0.0.1 8888
+echo "Installing the Python client..."
+pip install -e ./agentic-sandbox-client
+
+echo "Running the Python client tester..."
+python ./agentic-sandbox-client/test_client.py
 
 echo "Test finished."
 # The 'trap' command will now execute the cleanup function.

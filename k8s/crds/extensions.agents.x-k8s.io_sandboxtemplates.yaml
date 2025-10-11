@@ -32,6 +32,15 @@ spec:
                 properties:
                   metadata:
                     type: object
+                    properties:
+                      labels:
+                        type: object
+                        additionalProperties:
+                          type: string
+                      annotations:
+                        type: object
+                        additionalProperties:
+                          type: string
                   spec:
                     properties:
                       activeDeadlineSeconds:

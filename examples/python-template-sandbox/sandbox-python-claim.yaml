@@ -1,0 +1,7 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: python-sandbox-claim
+spec:
+  templateRef:
+    name: python-sandbox-template

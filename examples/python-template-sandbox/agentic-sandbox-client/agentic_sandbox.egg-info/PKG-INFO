@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: agentic_sandbox
+Version: 0.1.0
+Summary: A client library to interact with the Agentic Sandbox on Kubernetes.
+Requires-Dist: kubernetes
+Requires-Dist: requests
+Dynamic: requires-dist
+Dynamic: summary

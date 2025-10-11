@@ -25,7 +25,7 @@ def main():
             
             assert result.exit_code == 0
             assert result.stdout.strip() == "Hello from the sandbox!"
-            
+                        
             print("\n--- Command Execution Test Passed! ---")
 
             # Test file operations

@@ -53,6 +53,17 @@ type SandboxClaimSpec struct {
 
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatus struct {
+	// Conditions represent the latest available observations of a Sandbox's current state.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty" protobuf:"bytes,1,rep,name=conditions"`
+
+	SandboxStatus SandboxStatus `json:"sandbox,omitempty" protobuf:"bytes,2,opt,name=sandboxStatus"`
+}
+
+type SandboxStatus struct {
+	// SandboxName is the name of the Sandbox created from this claim
+	// +optional
+	Name string `json:"Name,omitempty"`
 }
 
 // +kubebuilder:object:root=true

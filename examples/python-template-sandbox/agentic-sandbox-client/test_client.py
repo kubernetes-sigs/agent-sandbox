@@ -43,6 +43,19 @@ def main():
             assert read_content == file_content
             print("--- File Operations Test Passed! ---")
 
+            # Test introspection commands
+            print("\n--- Testing Pod Introspection ---")
+            
+            print("\n--- Listing files in /app ---")
+            list_files_result = sandbox.run("ls -la /app")
+            print(list_files_result.stdout)
+
+            print("\n--- Printing environment variables ---")
+            env_result = sandbox.run("env")
+            print(env_result.stdout)
+
+            print("--- Introspection Tests Finished ---")
+
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")
         # The __exit__ method of the Sandbox class will handle cleanup.

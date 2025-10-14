@@ -32,9 +32,9 @@ echo "Loading sandbox-runtime image into kind cluster..."
 kind load docker-image sandbox-runtime:latest --name "${KIND_CLUSTER_NAME}"
 
 
-echo "Applying CRD and deployment..."
+echo "Applying CRD for template - Sandbox claim will be applied by the sandbox client in python code"
 kubectl apply -f sandbox-python-template.yaml
-kubectl apply -f sandbox-python-claim.yaml
+#kubectl apply -f sandbox-python-claim.yaml
 
 # Cleanup function
 cleanup() {
@@ -50,26 +50,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Waiting for sandbox pod to be ready..."
-sleep 20
-kubectl wait --for=condition=ready pod --selector=app=python-sandbox --timeout=60s
-
-echo "Port-forwarding service..."
-POD_NAME=$(kubectl get pods -l app=python-sandbox -o jsonpath='{.items[0].metadata.name}')
-kubectl port-forward "pod/${POD_NAME}" 8888:8888 &
-PF_PID=$!
-
-# Additional cleanup for port-forward
-trap "kill $PF_PID; cleanup" EXIT
-
-# Give port-forward a moment to establish
-sleep 3
-
 echo "Installing the Python client..."
 pip install -e ./agentic-sandbox-client
 
-echo "Running the Python client tester..."
+echo "========= $0 - Running the Python client tester... ========="
 python ./agentic-sandbox-client/test_client.py
+echo "========= $0 - Finished running the Python client tester. ========="
+
+
+trap cleanup EXIT
 
 echo "Test finished."
 # The 'trap' command will now execute the cleanup function.

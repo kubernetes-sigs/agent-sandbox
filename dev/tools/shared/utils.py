@@ -41,6 +41,33 @@ def get_full_image_name(args, image_id):
     return f"{image_prefix}{image_id}:{tag}"
 
 
+def run_go_command(*args, **kwargs):
+  """ Runs a Go command with GOWORK=off """
+  env = os.environ.copy()
+  env["GOWORK"] = "off"
+  if "env" in kwargs:
+    env.update(kwargs["env"])
+  kwargs["env"] = env
+  return subprocess.run(*args, **kwargs)
+
+def check_output_go_command(*args, **kwargs):
+  """ Runs a Go command with GOWORK=off """
+  env = os.environ.copy()
+  env["GOWORK"] = "off"
+  if "env" in kwargs:
+    env.update(kwargs["env"])
+  kwargs["env"] = env
+  return subprocess.check_output(*args, **kwargs)
+
+def check_go_command(*args, **kwargs):
+  """ Runs a Go command with GOWORK=off """
+  env = os.environ.copy()
+  env["GOWORK"] = "off"
+  if "env" in kwargs:
+    env.update(kwargs["env"])
+  kwargs["env"] = env
+  subprocess.check_call(*args, **kwargs)
+
 def get_repo_root():
     """ Gets the absolute path to the repo root directory """
     tools_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))

@@ -15,13 +15,24 @@
 
 import subprocess
 import sys
+import argparse
 
 from shared import utils
 
-
 def main():
     """ invokes unit tests and outputs a junit results file """
-    repo_root = utils.get_repo_root()
+    # parse arguments and call
+    parser = argparse.ArgumentParser(description="Invoke go unit tests and output junit results files")
+    parser.add_argument("--working-dir",
+                        dest="working_dir",
+                        help="use working dir instead of repo root",
+                        type=str,
+                        default=None)
+    args = parser.parse_args()
+
+    working_dir = args.working_dir or utils.get_repo_root()
+    print(f"using working dir: {working_dir}")
+
     # get the list of packages using go list ./...
     go_list_cmd = ["go", "list", "./..."]
     go_list_output = utils.check_output_go_command(go_list_cmd, cwd=working_dir, text=True)

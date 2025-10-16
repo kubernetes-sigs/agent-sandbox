@@ -17,11 +17,12 @@
 import os
 import subprocess
 import sys
+import argparse
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(script_dir)
 
-from shared import headers
+from shared import utils
 
 def main():
     # Find the repo root from the script's location

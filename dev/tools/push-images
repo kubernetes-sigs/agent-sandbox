@@ -80,8 +80,12 @@ def build_and_push_image(args, image_name, srcdir, dockerfile_path):
 
 def main(args):
     """Builds and pushes docker images."""
+
     repo_root = utils.get_repo_root()
-    images_dir = os.path.join(repo_root, "images")
+    working_dir = args.working_dir or repo_root
+    print(f"using working dir: {working_dir}")
+
+    images_dir = os.path.join(working_dir, "images")
 
     if not os.path.isdir(images_dir):
         print("images directory not found")
@@ -100,7 +104,7 @@ def main(args):
             print(f"create Docker buildx builder for {service_name}")
             create_buildx_builder_if_not_exists()
             print(f"building image for {service_name} with tag {image_name}")
-            build_and_push_image(args, image_name, repo_root, dockerfile_path)
+            build_and_push_image(args, image_name, working_dir, dockerfile_path)
 
 
 if __name__ == "__main__":
@@ -116,8 +120,18 @@ if __name__ == "__main__":
                         help="Name of the kind cluster. If set, images will be loaded into the cluster",
                         type=str,
                         default=os.getenv("KIND_CLUSTER_NAME"))
+    parser.add_argument("--working-dir",
+                        dest="working_dir",
+                        help="use working dir instead of repo root",
+                        type=str,
+                        default=None)
     args = parser.parse_args()
 
+    if args.working_dir:
+        if not os.path.isdir(args.working_dir):
+            print(f"working dir {args.working_dir} not found")
+            exit(1)
+        args.working_dir = os.path.abspath(args.working_dir)
     if args.kind_cluster_name:
         args.docker_build_output_type = "docker"
     else:

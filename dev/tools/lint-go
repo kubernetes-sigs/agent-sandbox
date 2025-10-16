@@ -15,12 +15,22 @@
 
 import subprocess
 import sys
+import argparse
 
 from shared import utils
 
 
 def main():
     """ invokes go linter """
+    # parse arguments and call
+    parser = argparse.ArgumentParser(description="Invoke go linter")
+    parser.add_argument("--working-dir",
+                        dest="working_dir",
+                        help="use working dir instead of repo root",
+                        type=str,
+                        default=None)
+    args = parser.parse_args()
+
     repo_root = utils.get_repo_root()
     working_dir = args.working_dir or repo_root
     print(f"using working dir: {working_dir}")

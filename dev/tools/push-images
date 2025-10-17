@@ -18,6 +18,7 @@ import os
 import subprocess
 
 from shared import utils
+from shared import golang
 
 
 def create_buildx_builder_if_not_exists():
@@ -78,13 +79,11 @@ def build_and_push_image(args, image_name, srcdir, dockerfile_path):
         load_kind_image(args.kind_cluster_name, image_name, srcdir)
 
 
-def main(args):
+def push_image_for_go_mod(args, mod_dir):
     """Builds and pushes docker images."""
-    repo_root = utils.get_repo_root()
-    images_dir = os.path.join(repo_root, "images")
+    images_dir = os.path.join(mod_dir, "images")
 
     if not os.path.isdir(images_dir):
-        print("images directory not found")
         return
 
     for root, dirs, files in os.walk(images_dir):
@@ -100,8 +99,12 @@ def main(args):
             print(f"create Docker buildx builder for {service_name}")
             create_buildx_builder_if_not_exists()
             print(f"building image for {service_name} with tag {image_name}")
-            build_and_push_image(args, image_name, repo_root, dockerfile_path)
+            build_and_push_image(args, image_name, mod_dir, dockerfile_path)
 
+
+def main(args):
+    """Builds and pushes docker images."""
+    golang.for_each_module(lambda mod_dir: push_image_for_go_mod(args, mod_dir))
 
 if __name__ == "__main__":
     # parse arguments and call
@@ -121,6 +124,6 @@ if __name__ == "__main__":
     if args.kind_cluster_name:
         args.docker_build_output_type = "docker"
     else:
-        args.docker_build_output_type = "registry"    
+        args.docker_build_output_type = "registry"
 
     main(args)

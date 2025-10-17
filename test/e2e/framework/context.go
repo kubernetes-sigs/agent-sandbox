@@ -70,6 +70,7 @@ func NewTestContext(t *testing.T) *TestContext {
 		client: cl,
 	}
 	t.Cleanup(func() {
+		t.Helper()
 		if err := th.afterEach(); err != nil {
 			t.Error(err)
 		}
@@ -82,10 +83,14 @@ func NewTestContext(t *testing.T) *TestContext {
 
 // beforeEach runs before each test case is executed.
 func (th *TestContext) beforeEach() error {
+	th.Helper()
 	return th.validateAgentSandboxInstallation(context.Background())
 }
 
 // afterEach runs after each test case is executed.
+//
+//nolint:unparam // remove nolint once this is implemented
 func (th *TestContext) afterEach() error {
+	th.Helper()
 	return nil // currently no-op, add functionality as needed
 }

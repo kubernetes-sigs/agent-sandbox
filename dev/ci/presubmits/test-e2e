@@ -38,14 +38,13 @@ def main():
     if result.returncode != 0:
         return result.returncode
     result = subprocess.run([f"{repo_root}/dev/tools/test-e2e"])
-    if result.returncode != 0:
-        return result.returncode
-    
+
+    # Always create junit file whether tests pass or fail
     artifact_dir = os.getenv("ARTIFACTS")
     if artifact_dir:
         shutil.copy(f"{repo_root}/bin/e2e-junit.xml", f"{artifact_dir}/junit.xml")
 
-    return 0
+    return result.returncode
 
 
 if __name__ == "__main__":

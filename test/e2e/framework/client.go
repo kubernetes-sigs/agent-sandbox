@@ -35,6 +35,17 @@ type ClusterClient struct {
 	client client.Client
 }
 
+// Update an object that already exists on the cluster.
+func (cl *ClusterClient) Update(ctx context.Context, obj client.Object) error {
+	cl.Helper()
+	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	cl.Logf("Updating object %T (%s)", obj, nn.String())
+	if err := cl.client.Update(ctx, obj); err != nil {
+		return fmt.Errorf("update %T (%s): %w", obj, nn.String(), err)
+	}
+	return nil
+}
+
 // CreateWithCleanup creates the specified object and cleans up the object after
 // the test completes.
 func (cl *ClusterClient) CreateWithCleanup(ctx context.Context, obj client.Object) error {
@@ -49,6 +60,9 @@ func (cl *ClusterClient) CreateWithCleanup(ctx context.Context, obj client.Objec
 		cl.Logf("Deleting object %T (%s)", obj, nn.String())
 		// Use context.Background because test context is done during cleanup
 		if err := cl.client.Delete(context.Background(), obj); err != nil && !k8serrors.IsNotFound(err) {
+			cl.Errorf("CreateWithCleanup %T (%s): %s", obj, nn.String(), err)
+		}
+		if err := cl.WaitForObjectNotFound(context.Background(), obj); err != nil {
 			cl.Errorf("CreateWithCleanup %T (%s): %s", obj, nn.String(), err)
 		}
 	})
@@ -72,6 +86,22 @@ func (cl *ClusterClient) ValidateObject(ctx context.Context, obj client.Object, 
 	return nil
 }
 
+// ValidateObjectNotFound verifies the specified object does not exist.
+func (cl *ClusterClient) ValidateObjectNotFound(ctx context.Context, obj client.Object) error {
+	cl.Helper()
+	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	cl.Logf("ValidateObjectNotFound %T (%s)", obj, nn.String())
+	err := cl.client.Get(ctx, nn, obj)
+	if err == nil { // object still exists - error
+		return fmt.Errorf("ValidateObjectNotFound %T (%s): object still exists",
+			obj, nn.String())
+	} else if !k8serrors.IsNotFound(err) { // unexpected error
+		return fmt.Errorf("ValidateObjectNotFound %T (%s): %w",
+			obj, nn.String(), err)
+	}
+	return nil // happy path - object not found
+}
+
 // WaitForObject waits for the specified object to exist and satisfy the provided
 // predicates.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
@@ -79,6 +109,12 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 	// Static 30 second timeout, this can be adjusted if needed
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	start := time.Now()
+	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	defer func() {
+		cl.Helper()
+		cl.Logf("WaitForObject %T (%s) took %s", obj, nn, time.Since(start))
+	}()
 	var validationErr error
 	for {
 		select {
@@ -86,6 +122,33 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 			return fmt.Errorf("timed out waiting for object: %w", validationErr)
 		default:
 			if validationErr = cl.ValidateObject(timeoutCtx, obj, p...); validationErr == nil {
+				return nil
+			}
+			// Simple sleep for fixed duration (basic MVP)
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+// WaitForObjectNotFound waits for the specified object to not exist.
+func (cl *ClusterClient) WaitForObjectNotFound(ctx context.Context, obj client.Object) error {
+	cl.Helper()
+	// Static 30 second timeout, this can be adjusted if needed
+	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	defer func() {
+		cl.Helper()
+		cl.Logf("WaitForObjectNotFound %T (%s) took %s", obj, nn, time.Since(start))
+	}()
+	var validationErr error
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			return fmt.Errorf("timed out waiting for object: %w", validationErr)
+		default:
+			if validationErr = cl.ValidateObjectNotFound(timeoutCtx, obj); validationErr == nil {
 				return nil
 			}
 			// Simple sleep for fixed duration (basic MVP)

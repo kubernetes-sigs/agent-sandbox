@@ -12,6 +12,8 @@ spec:
     group: custom.agents.x-k8s.io
     kind: AgenticSandbox
     # Spec fields that users can provide.
+    types:
+      egressRule: object
     spec:
       image: string | default="nginx"
       service:
@@ -21,7 +23,7 @@ spec:
         ingress:
           podLabels: "map[string]string"
           namespaceLabels: "map[string]string"
-        egress: object
+        egress: "[]egressRule"
       ingress:
         enabled: boolean | default=false
     status:

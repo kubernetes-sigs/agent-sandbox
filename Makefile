@@ -1,5 +1,5 @@
 .PHONY: all
-all: fix-go-generate build lint-go test-unit
+all: fix-go-generate build lint-go test-unit toc-verify
 
 .PHONY: fix-go-generate
 fix-go-generate:
@@ -39,3 +39,11 @@ release:
 	go mod tidy
 	go generate ./...
 	./dev/tools/release --tag=${TAG}
+
+.PHONY: toc-update
+toc-update:
+	./dev/tools/update-toc
+
+.PHONY: toc-verify
+toc-verify:
+	./dev/tools/verify-toc

@@ -60,8 +60,10 @@ def walk_object(obj, fn, field_path=""):
 
 def main(args):
     repo_root = utils.get_repo_root()
+    working_dir = args.working_dir or repo_root
+    print(f"using working dir: {working_dir}")
 
-    manifests_path = os.path.join(repo_root, "k8s")
+    manifests_path = os.path.join(working_dir, "k8s")
 
     if not os.path.isdir(manifests_path):
         print("k8s directory not found")
@@ -94,11 +96,11 @@ def main(args):
             yaml.dump_all(docs, string_stream)
             modified_content = string_stream.getvalue()
 
-            rel_path = os.path.relpath(path, repo_root)
+            rel_path = os.path.relpath(path, working_dir)
             print(f"applying manifest {rel_path}")
 
             cmd = ["kubectl", "apply", "-f", "-"]
-            subprocess.run(cmd, cwd=repo_root, check=True, input=modified_content, text=True)
+            subprocess.run(cmd, cwd=working_dir, check=True, input=modified_content, text=True)
 
 
 if __name__ == "__main__":
@@ -108,5 +110,15 @@ if __name__ == "__main__":
                         help="prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
+    parser.add_argument("--working-dir",
+                        dest="working_dir",
+                        help="use working dir instead of repo root",
+                        type=str,
+                        default=None)
     args = parser.parse_args()
+    if args.working_dir:
+        if not os.path.isdir(args.working_dir):
+            print(f"working dir {args.working_dir} not found")
+            exit(1)
+        args.working_dir = os.path.abspath(args.working_dir)
     main(args)

@@ -15,25 +15,36 @@
 
 import subprocess
 import sys
+import argparse
 
 from shared import utils
 
-
 def main():
     """ invokes unit tests and outputs a junit results file """
-    repo_root = utils.get_repo_root()
+    # parse arguments and call
+    parser = argparse.ArgumentParser(description="Invoke go unit tests and output junit results files")
+    parser.add_argument("--working-dir",
+                        dest="working_dir",
+                        help="use working dir instead of repo root",
+                        type=str,
+                        default=None)
+    args = parser.parse_args()
+
+    working_dir = args.working_dir or utils.get_repo_root()
+    print(f"using working dir: {working_dir}")
+
     # get the list of packages using go list ./...
     go_list_cmd = ["go", "list", "./..."]
-    go_list_output = subprocess.check_output(go_list_cmd, cwd=repo_root, text=True)
+    go_list_output = utils.check_output_go_command(go_list_cmd, cwd=working_dir, text=True)
     packages = go_list_output.strip().split('\n')
 
     # Filter out the e2e packages
     filtered_packages = [pkg for pkg in packages if not "test/e2e" in pkg]
 
-    result = subprocess.run(utils.go_tool_args(
-        "gotestsum", f"--junitfile={repo_root}/bin/unit-junit.xml",
+    result = utils.run_go_command(utils.go_tool_args(
+        "gotestsum", f"--junitfile={working_dir}/bin/unit-junit.xml",
         "--", *filtered_packages
-    ), cwd=repo_root)
+    ), cwd=working_dir)
 
     return result.returncode
 

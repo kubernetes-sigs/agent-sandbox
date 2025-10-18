@@ -15,17 +15,30 @@
 
 import subprocess
 import sys
+import argparse
 
 from shared import utils
 
 
 def main():
     """ invokes go linter """
+    # parse arguments and call
+    parser = argparse.ArgumentParser(description="Invoke go linter")
+    parser.add_argument("--working-dir",
+                        dest="working_dir",
+                        help="use working dir instead of repo root",
+                        type=str,
+                        default=None)
+    args = parser.parse_args()
+
     repo_root = utils.get_repo_root()
-    result = subprocess.run(utils.go_tool_args(
+    working_dir = args.working_dir or repo_root
+    print(f"using working dir: {working_dir}")
+
+    result = utils.run_go_command(utils.go_tool_args(
         "golangci-lint", "run",
         f"--config={repo_root}/dev/tools/.golangci.yaml",
-    ), cwd=repo_root)
+    ), cwd=working_dir)
 
     return result.returncode
 

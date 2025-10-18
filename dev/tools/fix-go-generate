@@ -17,18 +17,27 @@
 import os
 import subprocess
 import sys
+import argparse
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(script_dir)
 
-from shared import headers
+from shared import utils
 
 def main():
     # Find the repo root from the script's location
-    repo_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
+    # parse arguments and call
+    parser = argparse.ArgumentParser(description="run go generate")
+    parser.add_argument("--working-dir",
+                        dest="working_dir",
+                        help="use working dir instead of repo root",
+                        type=str,
+                        default=None)
+    args = parser.parse_args()
 
-    print(f"Running go generate ./... in {repo_root}")
-    subprocess.check_call(["go", "generate", "-v", "./..."], cwd=repo_root)
+    working_dir = args.working_dir or utils.get_repo_root()
+    print(f"using working dir: {working_dir}")
+    utils.check_go_command(["go", "generate", "-v", "./..."], cwd=working_dir)
 
 if __name__ == "__main__":
     main()

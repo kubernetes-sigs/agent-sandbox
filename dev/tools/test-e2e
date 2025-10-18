@@ -23,7 +23,7 @@ def main():
     """ invokes unit tests and outputs a junit results file """
     repo_root = utils.get_repo_root()
 
-    result = subprocess.run(utils.go_tool_args(
+    result = utils.run_go_command(utils.go_tool_args(
         "gotestsum", f"--junitfile={repo_root}/bin/e2e-junit.xml",
         "--", "./test/e2e/...", "--parallel=1"
     ), cwd=repo_root)

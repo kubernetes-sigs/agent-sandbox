@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import subprocess
 import sys
 
@@ -23,10 +24,13 @@ def main():
     """ invokes unit tests and outputs a junit results file """
     repo_root = utils.get_repo_root()
 
+    env = os.environ.copy()
+    env["IMAGE_TAG"] = utils.get_image_tag()
+
     result = subprocess.run(utils.go_tool_args(
         "gotestsum", f"--junitfile={repo_root}/bin/e2e-junit.xml",
         "--", "./test/e2e/...", "--parallel=1"
-    ), cwd=repo_root)
+    ), env=env, cwd=repo_root)
     return result.returncode
 
 

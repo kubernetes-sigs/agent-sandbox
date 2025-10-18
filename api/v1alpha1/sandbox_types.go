@@ -27,6 +27,10 @@ func (c ConditionType) String() string { return string(c) }
 const (
 	// SandboxConditionReady indicates readiness for Sandbox
 	SandboxConditionReady ConditionType = "Ready"
+
+	// PDBRequiredAnnotation is the annotation that the sandbox-policy-controller
+	// looks for to create a PodDisruptionBudget for a Sandbox.
+	PDBRequiredAnnotation = "policy.agents.x-k8s.io/pdb"
 )
 
 type PodMetadata struct {

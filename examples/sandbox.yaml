@@ -3,6 +3,9 @@ kind: Sandbox
 metadata:
   name: sandbox-example
   namespace: sandbox-ns
+  # To request a PDB
+  annotations:
+    policy.agents.x-k8s.io/pdb: "true"
 spec:
   podTemplate:
     metadata:

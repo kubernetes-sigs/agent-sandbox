@@ -1,0 +1,64 @@
+# Restrict Pod-to-Pod Communication: The presence of the 'networkPolicy' block causes the controller 
+# to create a unique NetworkPolicy for each sandbox. This individual policy is what guarantees 
+# that sandbox-1 cannot talk to sandbox-2.
+
+# Only Allow Pod Ingress from MST L7XLB: The 'ingress' list explicitly defines the L7XLB's labels 
+# as the only allowed ingress source.
+
+# Only Allow Egress if Required:
+# We explicitly create a rule to allow TCP and UDP traffic on port 53.
+# This ensures DNS resolution works regardless of the cluster's DNS provider (CoreDNS, NodeLocal DNS, Cloud DNS, etc.).
+# By providing only this rule in 'egress', we are declaring that no other traffic is required.
+
+# Don't Allow Access to API Server: This is a direct result of the "default-deny" egress policy. 
+# Since there is no rule in 'egress' that allows traffic to the API server IPs, it is blocked.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: secure-datascience-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      # This pod uses a non-root user and gVisor for runtime sandboxing.
+      runtimeClassName: gvisor
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        runAsNonRoot: true
+      containers:
+      - name: my-container
+        image: busybox
+        command: ["/bin/sh", "-c", "sleep 36000"]
+        ports:
+        - containerPort: 8888
+          protocol: TCP
+
+  # 2. Define the Network Policy to enforce the security requirements.
+  networkPolicy:
+    # WARNING: Sidecars (like Istio/Datadog) needing extra ingress ports must be
+    # explicitly allowed via the 'ingress' list below.
+
+    # REQUIREMENT #3: Only allow pod ingress from MST L7XLB.
+    # This section defines the trusted ingress source using standard K8s syntax.
+    # Traffic from any other source, including other sandbox pods, will be blocked.
+    ingress:
+      - from:
+        - namespaceSelector:
+            matchLabels:
+              istio-injection: enabled
+          podSelector:
+            matchLabels:
+              app: istio-ingressgateway
+    
+    # REQUIREMENT #2 & #4: Only allow egress if required & block API server access.
+    # We must explicitly allow DNS (Port 53), otherwise the Pod cannot resolve names.
+    # By listing ONLY DNS here, we implicitly block all other outgoing traffic,
+    # including connections to the Kubernetes API server and other pods.
+    egress:
+      - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

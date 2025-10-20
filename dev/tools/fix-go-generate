@@ -22,13 +22,14 @@ script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(script_dir)
 
 from shared import headers
+from shared import utils
 
 def main():
     # Find the repo root from the script's location
     repo_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 
     print(f"Running go generate ./... in {repo_root}")
-    subprocess.check_call(["go", "generate", "-v", "./..."], cwd=repo_root)
+    utils.check_go_command(["go", "generate", "-v", "./..."], cwd=repo_root)
 
 if __name__ == "__main__":
     main()

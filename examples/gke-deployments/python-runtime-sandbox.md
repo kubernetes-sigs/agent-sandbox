@@ -13,8 +13,6 @@ This guide walks you through deploying the Agent Sandbox Controller and [Python 
 Set up your project environment variables and enable required services:
 
 ```bash
-# Replace with your actual Project ID
-export PROJECT_ID="gke-ai-open-models"
 export AR_REPO_NAME="agent-sandbox-repo"
 export GKE_LOCATION="us-central1"
 

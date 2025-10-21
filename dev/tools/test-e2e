@@ -24,11 +24,17 @@ def main():
     """ invokes unit tests and outputs a junit results file """
     repo_root = utils.get_repo_root()
 
+    artifact_dir = os.getenv("ARTIFACTS")
+    if not artifact_dir:
+        artifact_dir = f"{repo_root}/bin"
+
     env = os.environ.copy()
     env["IMAGE_TAG"] = utils.get_image_tag()
 
     result = subprocess.run(utils.go_tool_args(
-        "gotestsum", f"--junitfile={repo_root}/bin/e2e-junit.xml",
+        "gotestsum",
+        f"--junitfile={repo_root}/bin/e2e-junit.xml",
+        f"--jsonfile={artifact_dir}/test-e2e.json",
         "--", "./test/e2e/...", "--parallel=1"
     ), env=env, cwd=repo_root)
     return result.returncode

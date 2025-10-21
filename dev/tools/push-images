@@ -45,6 +45,7 @@ def build_and_push_image_with_docker_buildx(args, image_name, srcdir, dockerfile
         "docker",
         "buildx",
         "build",
+        "--progress=plain",
         f"--output=type={args.docker_build_output_type}",
     ]
     if args.docker_build_output_type == "registry":

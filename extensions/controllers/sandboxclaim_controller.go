@@ -254,10 +254,19 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Name:      claim.Name,
 		},
 	}
-	sandbox.Spec.PodTemplate = template.Spec.PodTemplate
+
+	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas
+	// Enforce a secure-by-default policy by disabling the automatic mounting
+	// of the service account token, adhering to security best practices for
+	// sandboxed environments.
+	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
+		automount := false
+		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
+	}
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)

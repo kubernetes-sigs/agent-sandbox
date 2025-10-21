@@ -101,6 +101,45 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 	}
 
+	templateWithAutomount := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "automount-template",
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: func(b bool) *bool { return &b }(true),
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// New claim fixture pointing to the new template
+	claimForAutomount := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "automount-claim",
+			Namespace: "default",
+			UID:       "claim-uid-automount",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: "automount-template",
+			},
+		},
+	}
+
+	// The controlled sandbox fixtures should represent what the controller
+	// would have *actually* created. This includes the injected field.
+	automount := false
+	controlledSandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
+
 	readySandbox := controlledSandbox.DeepCopy()
 	readySandbox.Status.Conditions = []metav1.Condition{
 		{
@@ -109,15 +148,39 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 	}
 
+	// It checks that the PodSpec was copied correctly AND that the automount token field was injected.
+	defaultSandboxValidation := func(t *testing.T, sandbox *v1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
+		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+		automount := false
+		expectedSpec.AutomountServiceAccountToken = &automount
+		if diff := cmp.Diff(&sandbox.Spec.PodTemplate.Spec, expectedSpec); diff != "" {
+			t.Errorf("unexpected sandbox spec:\n%s", diff)
+		}
+	}
+
+	// New validation function to check for AutomountServiceAccountToken: true
+	validateSandboxAutomountTrue := func(t *testing.T, sandbox *v1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+		if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
+			t.Error("expected AutomountServiceAccountToken to be set, but it was nil")
+			return
+		}
+		if !*sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken {
+			t.Error("expected AutomountServiceAccountToken to be true, but it was false")
+		}
+	}
+
 	testCases := []struct {
 		name              string
+		claimName         string
 		existingObjects   []client.Object
 		expectSandbox     bool
 		expectError       bool
 		expectedCondition metav1.Condition
+		validateSandbox   func(t *testing.T, sandbox *v1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
 	}{
 		{
 			name:            "sandbox is created when a claim is made",
+			claimName:       "test-claim",
 			existingObjects: []client.Object{template, claim},
 			expectSandbox:   true,
 			expectedCondition: metav1.Condition{
@@ -126,9 +189,24 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Reason:  "SandboxNotReady",
 				Message: "Sandbox is not ready",
 			},
+			validateSandbox: defaultSandboxValidation,
+		},
+		{
+			name:            "sandbox is created with automount token enabled when template specifies it",
+			claimName:       "automount-claim",
+			existingObjects: []client.Object{templateWithAutomount, claimForAutomount},
+			expectSandbox:   true,
+			expectedCondition: metav1.Condition{
+				Type:    string(sandboxv1alpha1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  "SandboxNotReady",
+				Message: "Sandbox is not ready",
+			},
+			validateSandbox: validateSandboxAutomountTrue,
 		},
 		{
 			name:            "sandbox is not created when template is not found",
+			claimName:       "test-claim",
 			existingObjects: []client.Object{claim},
 			expectSandbox:   false,
 			expectError:     true,
@@ -141,6 +219,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 		{
 			name:            "sandbox exists but is not controlled by claim",
+			claimName:       "test-claim",
 			existingObjects: []client.Object{template, claim, uncontrolledSandbox},
 			expectSandbox:   true,
 			expectError:     true,
@@ -150,9 +229,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Reason:  "ReconcilerError",
 				Message: "Error seen: sandbox \"test-claim\" is not controlled by claim \"test-claim\". Please use a different claim name or delete the sandbox manually",
 			},
+			// No validation, we expect an error
 		},
 		{
 			name:            "sandbox exists and is controlled by claim",
+			claimName:       "test-claim",
 			existingObjects: []client.Object{template, claim, controlledSandbox},
 			expectSandbox:   true,
 			expectedCondition: metav1.Condition{
@@ -161,9 +242,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Reason:  "SandboxNotReady",
 				Message: "Sandbox is not ready",
 			},
+			validateSandbox: defaultSandboxValidation,
 		},
 		{
 			name:            "sandbox exists but template is not found",
+			claimName:       "test-claim",
 			existingObjects: []client.Object{claim, readySandbox},
 			expectSandbox:   true,
 			expectedCondition: metav1.Condition{
@@ -172,9 +255,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Reason:  "SandboxReady",
 				Message: "Sandbox is ready",
 			},
+			validateSandbox: defaultSandboxValidation,
 		},
 		{
 			name:            "sandbox is ready",
+			claimName:       "test-claim",
 			existingObjects: []client.Object{template, claim, readySandbox},
 			expectSandbox:   true,
 			expectedCondition: metav1.Condition{
@@ -183,6 +268,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Reason:  "SandboxReady",
 				Message: "Sandbox is ready",
 			},
+			validateSandbox: defaultSandboxValidation,
 		},
 	}
 
@@ -196,7 +282,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			}
 			req := reconcile.Request{
 				NamespacedName: types.NamespacedName{
-					Name:      "test-claim",
+					Name:      tc.claimName,
 					Namespace: "default",
 				},
 			}
@@ -217,10 +303,8 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				t.Fatalf("expected sandbox to not exist, but got err: %v", err)
 			}
 
-			if tc.expectSandbox {
-				if diff := cmp.Diff(sandbox.Spec.PodTemplate.Spec, template.Spec.PodTemplate.Spec); diff != "" {
-					t.Errorf("unexpected sandbox spec:\n%s", diff)
-				}
+			if tc.validateSandbox != nil {
+				tc.validateSandbox(t, &sandbox, template)
 			}
 
 			var updatedClaim extensionsv1alpha1.SandboxClaim

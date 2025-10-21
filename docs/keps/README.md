@@ -4,16 +4,16 @@ In agent-sandbox, we follow a process inspired by the official [Kubernetes Enhan
 
 ## Quick Start
 
-Follow the process outlined in the [template](NNNN-template/README.md) to create your proposal. Before writing the proposal, you can socialize your ideas by reaching the maintainers and other contributors on the [#sig-apps channel on Kubernetes Slack](https://kubernetes.slack.com/messages/sig-apps) or the [SIG-Apps mailing list](https://groups.google.com/a/kubernetes.io/g/sig-apps).
+Writing a KEP is optional. If you choose to write one, follow the process outlined in the [template](NNNN-template/README.md) to create your proposal. Before writing the proposal, you can socialize your ideas by reaching the maintainers and other contributors on the [#sig-apps channel on Kubernetes Slack](https://kubernetes.slack.com/messages/sig-apps) or the [SIG-Apps mailing list](https://groups.google.com/a/kubernetes.io/g/sig-apps).
 
 ## FAQs
 
 ### When should I follow the process?
 
-It's best for most non-trivial changes. Specifically:
+It's best for non-trivial changes:
 
 *   Anything that may be controversial
-*   Most new features (except for the very smallest)
+*   New features
 *   Major changes to existing features
 *   Changes that have a wide-ranging impact on the project
 
@@ -21,7 +21,7 @@ It's best for most non-trivial changes. Specifically:
 
 KEPs are prefixed with their associated tracking issue number from the `agent-sandbox` repository. This gives each KEP a unique identifier and makes it easy to find the issue where the current state of the proposal is being discussed and updated.
 
-### Why should I write an KEP?
+### What are the benefits of writing a KEP?
 
 The goal of the KEP process is to clearly communicate new efforts to the `agent-sandbox` community. By creating a well-curated set of proposals, we can:
 

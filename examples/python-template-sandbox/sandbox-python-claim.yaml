@@ -3,5 +3,5 @@ kind: SandboxClaim
 metadata:
   name: python-sandbox-claim
 spec:
-  templateRef:
+  sandboxTemplateRef:
     name: python-sandbox-template

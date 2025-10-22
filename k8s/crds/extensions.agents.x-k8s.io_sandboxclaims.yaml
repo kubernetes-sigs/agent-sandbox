@@ -28,7 +28,7 @@ spec:
             type: object
           spec:
             properties:
-              templateRef:
+              sandboxTemplateRef:
                 properties:
                   name:
                     type: string
@@ -36,7 +36,7 @@ spec:
                 - name
                 type: object
             required:
-            - templateRef
+            - sandboxTemplateRef
             type: object
           status:
             properties:

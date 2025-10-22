@@ -34,7 +34,7 @@ kind load docker-image sandbox-runtime:latest --name "${KIND_CLUSTER_NAME}"
 
 echo "Applying CRD for template - Sandbox claim will be applied by the sandbox client in python code"
 kubectl apply -f sandbox-python-template.yaml
-#kubectl apply -f sandbox-python-claim.yaml
+
 
 # Cleanup function
 cleanup() {
@@ -50,8 +50,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Installing the Python client..."
-pip install -e ./agentic-sandbox-client
 
 echo "========= $0 - Running the Python client tester... ========="
 python ./agentic-sandbox-client/test_client.py

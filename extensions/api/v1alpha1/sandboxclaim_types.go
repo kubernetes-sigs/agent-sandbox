@@ -48,7 +48,7 @@ type SandboxTemplateRef struct {
 type SandboxClaimSpec struct {
 	// SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox
 	// +kubebuilder:validation:Required
-	TemplateRef SandboxTemplateRef `json:"templateRef,omitempty" protobuf:"bytes,3,name=templateRef"`
+	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

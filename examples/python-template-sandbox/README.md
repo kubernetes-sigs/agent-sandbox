@@ -54,3 +54,42 @@ This class models the response body for the `/execute` endpoint.
 - **`stdout: str`**: The standard output from the executed command.
 - **`stderr: str`**: The standard error from the executed command.
 - **`exit_code: int`**: The exit code of the executed command.
+
+## Testing using Gemini CLI
+
+The `./tools` includes a extention for Gemini CLI to use Sandbox to run generated python code in a sandbox
+You can refer to `tools/run_in_sandbox/GEMINI.md` for more details and setup instructions.
+
+### How It Works
+
+The `run` script is a wrapper around a Python script (`tools/run_in_sandbox/main.py`) that uses the `agentic-sandbox-client` to:
+1.  Create a new sandbox on the Kubernetes cluster.
+2.  Write the provided Python code to a file inside the sandbox.
+3.  Execute the file with the Python interpreter in the sandbox.
+4.  Stream the `stdout` and `stderr` back to the console.
+5.  Clean up all sandbox resources automatically.
+
+### Prerequisites
+
+-   A running Kubernetes cluster (e.g., `kind`) - Please use the script `run-codex-cluster.sh` to create and setup a python runtime cluster waiting for sandbox claims.
+- -   A `SandboxTemplate` named `python-sandbox-template` must be created in the cluster (already installed by the script).
+-   The `agentic-sandbox-client` and its dependencies must be installed in the environment where you are running the tool.
+
+### Setup
+
+1.  **Create a virtual environment:**
+    ```bash
+    python3 -m venv .venv
+    ```
+2.  **Activate the virtual environment:**
+    ```bash
+    source .venv/bin/activate
+    ```
+3.  **Install the required dependencies:**
+    ```bash
+    pip install -e ./agentic-sandbox-client/
+4.  **Install as an extension in gemini cli:**
+    ```bash
+    gemini extensions install ./tools/run_in_sandbox/
+    ```
+    

@@ -16,7 +16,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
@@ -30,9 +29,9 @@ type SandboxWarmPoolSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
-	// PodTemplate describes the pod spec that will be used to create sandboxes in the warm pool.
+	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// +kubebuilder:validation:Required
-	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate"`
+	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
 }
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool

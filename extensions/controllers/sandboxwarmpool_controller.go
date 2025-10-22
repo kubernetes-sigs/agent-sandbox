@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -29,11 +31,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 const (
-	poolLabel = "agents.x-k8s.io/pool"
+	poolLabel              = "agents.x-k8s.io/pool"
+	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
@@ -87,13 +91,13 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) error {
 	log := log.FromContext(ctx)
 
-	// TODO: Use a hash value for the poolLabelValue
-	poolLabelValue := warmPool.Name
+	// Compute hash of the warm pool name for the pool label
+	poolNameHash := sandboxcontrollers.NameHash(warmPool.Name)
 
-	// List all pods with the pool label
+	// List all pods with the pool label matching the warm pool name hash
 	podList := &corev1.PodList{}
 	labelSelector := labels.SelectorFromSet(labels.Set{
-		poolLabel: poolLabelValue,
+		poolLabel: poolNameHash,
 	})
 
 	if err := r.List(ctx, podList, &client.ListOptions{
@@ -144,7 +148,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	log.Info("Pool status",
 		"desired", desiredReplicas,
 		"current", currentReplicas,
-		"poolLabel", poolLabelValue)
+		"poolName", warmPool.Name,
+		"poolNameHash", poolNameHash)
 
 	// Update status replicas
 	warmPool.Status.Replicas = currentReplicas
@@ -155,7 +160,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		log.Info("Creating new pods", "count", podsToCreate)
 
 		for i := int32(0); i < podsToCreate; i++ {
-			if err := r.createPoolPod(ctx, warmPool, poolLabelValue); err != nil {
+			if err := r.createPoolPod(ctx, warmPool, poolNameHash); err != nil {
 				log.Error(err, "Failed to create pod")
 				allErrors = errors.Join(allErrors, err)
 			}
@@ -167,7 +172,12 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		podsToDelete := currentReplicas - desiredReplicas
 		log.Info("Deleting excess pods", "count", podsToDelete)
 
-		// Delete the first N active pods from the list
+		// Sort active pods by creation timestamp (newest first)
+		sort.Slice(activePods, func(i, j int) bool {
+			return activePods[i].CreationTimestamp.After(activePods[j].CreationTimestamp.Time)
+		})
+
+		// Delete the first N active pods from the sorted list (newest first)
 		for i := int32(0); i < podsToDelete && i < int32(len(activePods)); i++ {
 			pod := &activePods[i]
 
@@ -190,21 +200,30 @@ func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *exte
 }
 
 // createPoolPod creates a new pod for the warm pool
-func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolLabelValue string) error {
+func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) error {
 	log := log.FromContext(ctx)
 
 	// Create labels for the pod
 	podLabels := make(map[string]string)
-	podLabels[poolLabel] = poolLabelValue
+	podLabels[poolLabel] = poolNameHash
+	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
+
+	// Try getting template
+	var template *extensionsv1alpha1.SandboxTemplate
+	var err error
+	if template, err = r.getTemplate(ctx, warmPool); err != nil {
+		log.Error(err, "Failed to get sandbox template for warm pool", "warmPoolName", warmPool.Name)
+		return err
+	}
 
 	// Copy labels from pod template
-	for k, v := range warmPool.Spec.PodTemplate.ObjectMeta.Labels {
+	for k, v := range template.ObjectMeta.Labels {
 		podLabels[k] = v
 	}
 
 	// Create annotations for the pod
 	podAnnotations := make(map[string]string)
-	for k, v := range warmPool.Spec.PodTemplate.ObjectMeta.Annotations {
+	for k, v := range template.ObjectMeta.Annotations {
 		podAnnotations[k] = v
 	}
 
@@ -216,8 +235,10 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 			Labels:       podLabels,
 			Annotations:  podAnnotations,
 		},
-		Spec: warmPool.Spec.PodTemplate.Spec,
+		Spec: template.Spec.PodTemplate.Spec,
 	}
+
+	// pod.Labels[podNameLabel] = sandboxcontrollers.NameHash(pod.Name)
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {
@@ -230,7 +251,7 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		return err
 	}
 
-	log.Info("Created new pool pod", "pod", pod.Name, "pool", poolLabelValue)
+	log.Info("Created new pool pod", "pod", pod.Name, "poolName", warmPool.Name, "poolNameHash", poolNameHash)
 	return nil
 }
 
@@ -250,6 +271,23 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 
 	log.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
 	return nil
+}
+
+func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) (*extensionsv1alpha1.SandboxTemplate, error) {
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: warmPool.Namespace,
+			Name:      warmPool.Spec.TemplateRef.Name,
+		},
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(template), template); err != nil {
+		if !k8errors.IsNotFound(err) {
+			err = fmt.Errorf("failed to get sandbox template %q: %w", warmPool.Spec.TemplateRef.Name, err)
+		}
+		return nil, err
+	}
+
+	return template, nil
 }
 
 // SetupWithManager sets up the controller with the Manager

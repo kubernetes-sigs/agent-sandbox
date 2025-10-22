@@ -649,3 +649,374 @@ func TestSandboxExpiry(t *testing.T) {
 		})
 	}
 }
+
+// TestTryAdoptPodFromPool tests the pod adoption mechanism from warm pool
+func TestTryAdoptPodFromPool(t *testing.T) {
+	sandboxName := "test-sandbox"
+	sandboxNs := "test-ns"
+	podTemplateHash := "testhash123"
+	nameHash := NameHash(sandboxName)
+
+	warmPoolOwnerRef := metav1.OwnerReference{
+		APIVersion: "agents.x-k8s.io/v1alpha1",
+		Kind:       "SandboxWarmPool",
+		Name:       "warmpool",
+		Controller: ptr.To(true),
+	}
+
+	testCases := []struct {
+		name          string
+		initialPods   []*corev1.Pod
+		wantAdopted   bool
+		wantPodName   string
+		expectErr     bool
+		validateAfter func(t *testing.T, adoptedPod *corev1.Pod)
+	}{
+		{
+			name:        "no pods in warm pool",
+			initialPods: []*corev1.Pod{},
+			wantAdopted: false,
+			expectErr:   false,
+		},
+		{
+			name: "adopt single pod from warm pool",
+			initialPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "warmpool-pod-1",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						OwnerReferences:   []metav1.OwnerReference{warmPoolOwnerRef},
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			wantAdopted: true,
+			wantPodName: "warmpool-pod-1",
+			expectErr:   false,
+			validateAfter: func(t *testing.T, adoptedPod *corev1.Pod) {
+				require.NotNil(t, adoptedPod)
+				// Verify pool labels were removed
+				_, hasPoolLabel := adoptedPod.Labels[poolLabel]
+				require.False(t, hasPoolLabel, "pool label should be removed")
+				_, hasPodTemplateHashLabel := adoptedPod.Labels[podTemplateHashLabel]
+				require.False(t, hasPodTemplateHashLabel, "podTemplateHash label should be removed")
+				// Verify sandbox label was added
+				require.Equal(t, nameHash, adoptedPod.Labels[sandboxLabel])
+				// Verify owner reference was updated
+				require.Len(t, adoptedPod.OwnerReferences, 1)
+				require.Equal(t, "Sandbox", adoptedPod.OwnerReferences[0].Kind)
+				require.Equal(t, sandboxName, adoptedPod.OwnerReferences[0].Name)
+			},
+		},
+		{
+			name: "adopt oldest pod when multiple available",
+			initialPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "warmpool-pod-newer",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						OwnerReferences:   []metav1.OwnerReference{warmPoolOwnerRef},
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "warmpool-pod-oldest",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						OwnerReferences:   []metav1.OwnerReference{warmPoolOwnerRef},
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-15 * time.Minute)),
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			wantAdopted: true,
+			wantPodName: "warmpool-pod-oldest",
+			expectErr:   false,
+		},
+		{
+			name: "skip pods being deleted",
+			initialPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "warmpool-pod-deleting",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						OwnerReferences:   []metav1.OwnerReference{warmPoolOwnerRef},
+						DeletionTimestamp: &metav1.Time{Time: time.Now()},
+						Finalizers:        []string{"test-finalizer"}, // Needed for fake client to accept deletionTimestamp
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			wantAdopted: false,
+			expectErr:   false,
+		},
+		{
+			name: "skip pods with different controller",
+			initialPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-controller-pod",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "apps/v1",
+								Kind:       "ReplicaSet",
+								Name:       "other-controller",
+								Controller: ptr.To(true),
+							},
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			wantAdopted: false,
+			expectErr:   false,
+		},
+		{
+			name: "adopt pod without owner reference",
+			initialPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "warmpool-pod-no-owner",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			wantAdopted: true,
+			wantPodName: "warmpool-pod-no-owner",
+			expectErr:   false,
+		},
+		{
+			name: "skip first pod with different controller, adopt second valid pod",
+			initialPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-controller-pod",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "apps/v1",
+								Kind:       "Deployment",
+								Name:       "other",
+								Controller: ptr.To(true),
+							},
+						},
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-20 * time.Minute)),
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "warmpool-pod-valid",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							podTemplateHashLabel: podTemplateHash,
+						},
+						OwnerReferences:   []metav1.OwnerReference{warmPoolOwnerRef},
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			wantAdopted: true,
+			wantPodName: "warmpool-pod-valid",
+			expectErr:   false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       "test-uid",
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(1)),
+				},
+			}
+
+			// Convert pods to runtime.Object
+			initialObjs := make([]runtime.Object, len(tc.initialPods))
+			for i, pod := range tc.initialPods {
+				initialObjs[i] = pod
+			}
+
+			r := &SandboxReconciler{
+				Client: newFakeClient(initialObjs...),
+				Scheme: Scheme,
+			}
+
+			adoptedPod, err := r.tryAdoptPodFromPool(t.Context(), sandbox, podTemplateHash)
+
+			if tc.expectErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			if tc.wantAdopted {
+				require.NotNil(t, adoptedPod, "expected a pod to be adopted")
+				require.Equal(t, tc.wantPodName, adoptedPod.Name)
+
+				// Verify the pod was updated in the client
+				livePod := &corev1.Pod{}
+				err = r.Get(t.Context(), types.NamespacedName{Name: adoptedPod.Name, Namespace: sandboxNs}, livePod)
+				require.NoError(t, err)
+
+				// Run additional validation if provided
+				if tc.validateAfter != nil {
+					tc.validateAfter(t, livePod)
+				}
+			} else {
+				require.Nil(t, adoptedPod, "expected no pod to be adopted")
+			}
+		})
+	}
+}
+
+// TestReconcilePodWithWarmPool tests the full reconcilePod flow with warm pool adoption
+func TestReconcilePodWithWarmPool(t *testing.T) {
+	sandboxName := "test-sandbox"
+	sandboxNs := "test-ns"
+	nameHash := NameHash(sandboxName)
+
+	// Create a sandbox with a specific pod template
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+			UID:       "test-uid",
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "nginx:latest",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Compute the expected hash for this template
+	expectedHash, err := hashPodTemplate(sandbox.Spec.PodTemplate)
+	require.NoError(t, err)
+
+	// Create a warm pool pod with the matching hash
+	warmPoolPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warmpool-pod-123",
+			Namespace: sandboxNs,
+			Labels: map[string]string{
+				podTemplateHashLabel: expectedHash,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxWarmPool",
+					Name:       "warmpool",
+					Controller: ptr.To(true),
+				},
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "test-container",
+					Image: "nginx:latest",
+				},
+			},
+		},
+	}
+
+	r := &SandboxReconciler{
+		Client: newFakeClient(warmPoolPod),
+		Scheme: Scheme,
+	}
+
+	// Reconcile the pod - should adopt from warm pool
+	adoptedPod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+	require.NoError(t, err)
+	require.NotNil(t, adoptedPod)
+	require.Equal(t, "warmpool-pod-123", adoptedPod.Name)
+
+	// Verify the pod was properly adopted
+	livePod := &corev1.Pod{}
+	err = r.Get(t.Context(), types.NamespacedName{Name: "warmpool-pod-123", Namespace: sandboxNs}, livePod)
+	require.NoError(t, err)
+
+	// Verify labels were updated
+	require.Equal(t, nameHash, livePod.Labels[sandboxLabel])
+	_, hasPoolLabel := livePod.Labels[poolLabel]
+	require.False(t, hasPoolLabel)
+	_, hasPodTemplateHashLabel := livePod.Labels[podTemplateHashLabel]
+	require.False(t, hasPodTemplateHashLabel)
+
+	// Verify owner reference was updated
+	require.Len(t, livePod.OwnerReferences, 1)
+	require.Equal(t, "Sandbox", livePod.OwnerReferences[0].Kind)
+	require.Equal(t, sandboxName, livePod.OwnerReferences[0].Name)
+}

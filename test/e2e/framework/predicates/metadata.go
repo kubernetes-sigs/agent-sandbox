@@ -68,3 +68,17 @@ func HasOwnerReferences(want []metav1.OwnerReference) ObjectPredicate {
 		return nil
 	}
 }
+
+// NotDeleted verifies the object has no deletion timestamp
+func NotDeleted() ObjectPredicate {
+	return func(obj client.Object) error {
+		if obj == nil {
+			return fmt.Errorf("object is nil")
+		}
+		deletionTimestamp := obj.GetDeletionTimestamp()
+		if deletionTimestamp != nil {
+			return fmt.Errorf("unexpected deletionTimestamp: %s", deletionTimestamp)
+		}
+		return nil
+	}
+}

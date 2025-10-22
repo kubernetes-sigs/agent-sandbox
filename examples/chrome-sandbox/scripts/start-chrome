@@ -37,4 +37,4 @@ flags+=(--user-data-dir=/tmp/chrome-data) # DevTools remote debugging requires a
 
 
 # Launch Chrome
-google-chrome "${flags[@]}" "https://www.google.com"
+chromium "${flags[@]}" "https://www.google.com"

@@ -81,11 +81,11 @@ type PodTemplate struct {
 }
 
 type PersistentVolumeClaimTemplate struct {
-	// Metadata is the Pod's metadata. Only labels and annotations are used.
+	// Metadata is the PVC's metadata.
 	// +kubebuilder:validation:Optional
 	EmbeddedObjectMetadata `json:"metadata" protobuf:"bytes,3,opt,name=metadata"`
 
-	// Spec is the Pod's spec
+	// Spec is the PVC's spec
 	// +kubebuilder:validation:Required
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 }

@@ -1,0 +1,28 @@
+timeout: 2700s
+steps:
+  # This step runs the python script to build and push the Docker image.
+  # We use the gcloud builder because it comes with python and the docker client.
+  - name: "gcr.io/k8s-staging-test-infra/gcb-docker-gcloud"
+    entrypoint: "python3"
+    args:
+      - "./dev/tools/push-images"
+      # Assuming the script accepts project and tag arguments.
+      # Using standard Cloud Build substitutions.
+      - "--image-prefix=${_IMAGE_PREFIX}/"
+
+# The `images` section lists the container images built by this pipeline.
+# Cloud Build will use this to push the image to the registry.
+# This should match the image name that is built by the push-images script.
+images:
+  - "${_IMAGE_PREFIX}/$PROJECT_ID/agent-sandbox-controller:$_GIT_TAG-$_CONFIG"
+  - "${_IMAGE_PREFIX}/$PROJECT_ID/agent-sandbox-controller:latest-$_CONFIG"
+
+options:
+  enableStructuredLogging: true
+  # Using a more powerful machine type can speed up docker builds.
+  machineType: "E2_HIGHCPU_8"
+  substitution_option: "ALLOW_LOOSE"
+substitutions:
+  _GIT_TAG: "12345"
+  _CONFIG: main
+  _IMAGE_PREFIX: "us-central1-docker.pkg.dev"

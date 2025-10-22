@@ -41,7 +41,8 @@ import (
 )
 
 const (
-	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxControllerFieldOwner = "sandbox-controller"
 )
 
 var (
@@ -100,7 +101,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	oldStatus := sandbox.Status.DeepCopy()
 	var err error
 
-	expired, requeueAfter := r.checkSandboxExpiry(sandbox)
+	expired, requeueAfter := checkSandboxExpiry(sandbox)
 
 	// Check if sandbox has expired
 	if expired {
@@ -133,10 +134,13 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// Reconcile Pod
 	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
-	if pod != nil {
+	if pod == nil {
+		sandbox.Status.Replicas = 0
+		sandbox.Status.LabelSelector = ""
+	} else {
 		sandbox.Status.Replicas = 1
+		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
 	}
-	sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
 
 	// Reconcile Service
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
@@ -272,7 +276,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 	}
 
-	err := r.Create(ctx, service, client.FieldOwner("sandbox-controller"))
+	err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner))
 	if err != nil {
 		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
 		return nil, err
@@ -357,7 +361,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
-	if err := r.Create(ctx, pod, client.FieldOwner("sandbox-controller")); err != nil {
+	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
@@ -383,7 +387,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}
-				if err := r.Create(ctx, pvc, client.FieldOwner("sandbox-controller")); err != nil {
+				if err := r.Create(ctx, pvc, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 					log.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
 					return err
 				}
@@ -436,7 +440,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 // checks if the sandbox has expired
 // returns true if expired, false otherwise
 // if not expired, also returns the duration to requeue after
-func (r *SandboxReconciler) checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
+func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
 	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0
 	}

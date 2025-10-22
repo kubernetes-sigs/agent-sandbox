@@ -13,6 +13,7 @@ spec:
           image: ghcr.io/coder/envbuilder
           env:
             # URL to the repository where the .devcontainer folder we want to load is located
+            # for a branch append "#refs/heads/branch-name"
             - name: ENVBUILDER_GIT_URL
               value: "https://github.com/kubernetes-sigs/agent-sandbox.git"
             - name: ENVBUILDER_DEVCONTAINER_DIR
@@ -20,7 +21,11 @@ spec:
             - name: ENVBUILDER_GIT_CLONE_SINGLE_BRANCH
               value: "true"
             - name: ENVBUILDER_INIT_SCRIPT
-              value: "/usr/local/bin/code-server-entrypoint"
+              value: "examples/vscode-sandbox/entrypoint.sh"
+            - name: AGENT_PROMPT
+              value: "You are an expert kubernetes developer who is helping with code reviews. Please look at the most recent commit and provide a review feedback. Dont make any code changes. Would you approve it ?"
+            - name: ENVBUILDER_IGNORE_PATHS
+              value: "/var/run,/product_uuid,/product_name,/tokens"
           volumeMounts:
             - mountPath: /workspaces
               name: workspaces-pvc

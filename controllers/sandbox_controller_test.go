@@ -17,6 +17,7 @@ package controllers
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -603,6 +604,47 @@ func TestReconcilePod(t *testing.T) {
 				livePod := &corev1.Pod{}
 				err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod)
 				require.True(t, k8serrors.IsNotFound(err))
+			}
+		})
+	}
+}
+
+func TestSandboxExpiry(t *testing.T) {
+	testCases := []struct {
+		name         string
+		shutdownTime *metav1.Time
+		wantExpired  bool
+		wantRequeue  bool
+	}{
+		{
+			name:         "nil shutdown time",
+			shutdownTime: nil,
+			wantExpired:  false,
+			wantRequeue:  false,
+		},
+		{
+			name:         "shutdown time in future",
+			shutdownTime: ptr.To(metav1.NewTime(time.Now().Add(2 * time.Hour))),
+			wantExpired:  false,
+			wantRequeue:  true,
+		},
+		{
+			name:         "shutdown time in past",
+			shutdownTime: ptr.To(metav1.NewTime(time.Now().Add(-10 * time.Second))),
+			wantExpired:  true,
+			wantRequeue:  false,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1alpha1.Sandbox{}
+			sandbox.Spec.ShutdownTime = tc.shutdownTime
+			expired, requeueAfter := checkSandboxExpiry(sandbox)
+			require.Equal(t, tc.wantExpired, expired)
+			if tc.wantRequeue {
+				require.Greater(t, requeueAfter, time.Duration(0))
+			} else {
+				require.Equal(t, time.Duration(0), requeueAfter)
 			}
 		})
 	}

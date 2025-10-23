@@ -9,13 +9,8 @@ steps:
       # Assuming the script accepts project and tag arguments.
       # Using standard Cloud Build substitutions.
       - "--image-prefix=${_IMAGE_PREFIX}/"
-
-# The `images` section lists the container images built by this pipeline.
-# Cloud Build will use this to push the image to the registry.
-# This should match the image name that is built by the push-images script.
-images:
-  - "${_IMAGE_PREFIX}/agent-sandbox-controller:$_GIT_TAG-$_CONFIG"
-  - "${_IMAGE_PREFIX}/agent-sandbox-controller:latest-$_CONFIG"
+      - "--extra-image-tag=${_GIT_TAG}-${_CONFIG}"
+      - "--extra-image-tag=latest-${_CONFIG}"
 
 options:
   enableStructuredLogging: true

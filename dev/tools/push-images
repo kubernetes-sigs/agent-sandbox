@@ -39,7 +39,7 @@ def create_buildx_builder_if_not_exists():
     subprocess.run(["docker", "buildx", "use", builder_name], check=True)
 
 
-def build_and_push_image_with_docker_buildx(args, image_name, srcdir, dockerfile_path):
+def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path):
     platforms = "linux/amd64,linux/arm64"
     build_cmd = [
         "docker",
@@ -50,9 +50,12 @@ def build_and_push_image_with_docker_buildx(args, image_name, srcdir, dockerfile
     ]
     if args.docker_build_output_type == "registry":
         build_cmd.append("--platform=" + platforms)
+    image_name = utils.get_full_image_name(args, service_name)
+    build_cmd.extend(["-t", image_name])
+    for tag in args.extra_image_tags:  # additional image tags
+        extra_tag = utils.get_full_image_name(args, service_name, tag=tag)
+        build_cmd.extend(["-t", extra_tag])
     build_cmd.extend([
-        "-t",
-        image_name,
         "-f",
         dockerfile_path,
         ".",
@@ -61,7 +64,8 @@ def build_and_push_image_with_docker_buildx(args, image_name, srcdir, dockerfile
     print(f"pushed image {image_name}")
 
 
-def load_kind_image(cluster_name, image_name, srcdir):
+def load_kind_image(cluster_name, service_name, srcdir):
+    image_name = utils.get_full_image_name(args, service_name)
     build_cmd = [
         "kind",
         "load",
@@ -74,10 +78,10 @@ def load_kind_image(cluster_name, image_name, srcdir):
     print(f"loaded image {image_name} into kind cluster {args.kind_cluster_name}")
 
 
-def build_and_push_image(args, image_name, srcdir, dockerfile_path):
-    build_and_push_image_with_docker_buildx(args, image_name, srcdir, dockerfile_path)
+def build_and_push_image(args, service_name, srcdir, dockerfile_path):
+    build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path)
     if args.kind_cluster_name:
-        load_kind_image(args.kind_cluster_name, image_name, srcdir)
+        load_kind_image(args.kind_cluster_name, service_name, srcdir)
 
 
 def push_image_for_go_mod(args, mod_dir):
@@ -95,17 +99,16 @@ def push_image_for_go_mod(args, mod_dir):
             dockerfile_path = os.path.join(root, filename)
             service_name = os.path.basename(root)
 
-            image_name = utils.get_full_image_name(args, service_name)
-
             print(f"create Docker buildx builder for {service_name}")
             create_buildx_builder_if_not_exists()
-            print(f"building image for {service_name} with tag {image_name}")
-            build_and_push_image(args, image_name, mod_dir, dockerfile_path)
+            print(f"building image for {service_name}")
+            build_and_push_image(args, service_name, mod_dir, dockerfile_path)
 
 
 def main(args):
     """Builds and pushes docker images."""
     golang.for_each_module(lambda mod_dir: push_image_for_go_mod(args, mod_dir))
+
 
 if __name__ == "__main__":
     # parse arguments and call
@@ -115,6 +118,12 @@ if __name__ == "__main__":
                         help="Prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
+    parser.add_argument("--extra-image-tag",
+                        dest="extra_image_tags",
+                        help="Additional tags to use when publishing images.",
+                        type=str,
+                        action="append",
+                        default=[])
     parser.add_argument("--kind-cluster-name",
                         dest="kind_cluster_name",
                         help="Name of the kind cluster. If set, images will be loaded into the cluster",

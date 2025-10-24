@@ -5,3 +5,6 @@ bin/
 
 # Local Netlify folder
 .netlify
+# Added by goreleaser init:
+dist/
+release_assets/

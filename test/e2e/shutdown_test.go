@@ -48,7 +48,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 			Conditions: []metav1.Condition{
 				{
 					Message:            "Pod is Ready; Service Exists",
-					ObservedGeneration: 1,
+					ObservedGeneration: 2,
 					Reason:             "DependenciesReady",
 					Status:             "True",
 					Type:               "Ready",
@@ -81,7 +81,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 			Conditions: []metav1.Condition{
 				{
 					Message:            "Sandbox has expired",
-					ObservedGeneration: 2,
+					ObservedGeneration: 3,
 					Reason:             "SandboxExpired",
 					Status:             "False",
 					Type:               "Ready",

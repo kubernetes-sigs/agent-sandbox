@@ -20,6 +20,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,12 +41,12 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func createPod(name, namespace, poolLabelValue string) *corev1.Pod {
+func createPod(name, namespace, poolNameHash string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			Labels:    map[string]string{poolLabel: poolLabelValue},
+			Labels:    map[string]string{poolLabel: poolNameHash},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -58,9 +59,9 @@ func createPod(name, namespace, poolLabelValue string) *corev1.Pod {
 	}
 }
 
-func createPoolPod(poolName, namespace, poolLabelValue, suffix string) *corev1.Pod {
+func createPoolPod(poolName, namespace, poolNameHash, suffix string) *corev1.Pod {
 	name := poolName + suffix
-	return createPod(name, namespace, poolLabelValue)
+	return createPod(name, namespace, poolNameHash)
 }
 
 func TestReconcilePool(t *testing.T) {
@@ -88,7 +89,8 @@ func TestReconcilePool(t *testing.T) {
 		},
 	}
 
-	poolLabelValue := warmPool.Name
+	// Compute the pool name hash
+	poolNameHash := NameHash(poolName)
 
 	testCases := []struct {
 		name             string
@@ -103,26 +105,26 @@ func TestReconcilePool(t *testing.T) {
 		{
 			name: "creates additional pods when under-provisioned",
 			initialObjs: []runtime.Object{
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
 			},
 			expectedReplicas: replicas,
 		},
 		{
 			name: "deletes excess pods when over-provisioned",
 			initialObjs: []runtime.Object{
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "abc123"),
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "def456"),
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "ghi789"),
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "jkl012"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "def456"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "ghi789"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "jkl012"),
 			},
 			expectedReplicas: replicas,
 		},
 		{
 			name: "maintains correct replica count",
 			initialObjs: []runtime.Object{
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "abc123"),
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "def456"),
-				createPoolPod(poolName, poolNamespace, poolLabelValue, "ghi789"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "def456"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "ghi789"),
 			},
 			expectedReplicas: replicas,
 		},
@@ -132,7 +134,7 @@ func TestReconcilePool(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := SandboxWarmPoolReconciler{
 				Client: fake.NewClientBuilder().
-					WithScheme(newTestScheme()). // Use the test scheme with extensions
+					WithScheme(newTestScheme()).
 					WithRuntimeObjects(tc.initialObjs...).
 					Build(),
 			}
@@ -154,7 +156,7 @@ func TestReconcilePool(t *testing.T) {
 			// Count pods with correct pool label
 			count := int32(0)
 			for _, pod := range list.Items {
-				if pod.Labels[poolLabel] == poolLabelValue {
+				if pod.Labels[poolLabel] == poolNameHash {
 					count++
 				}
 			}
@@ -191,10 +193,11 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 		},
 	}
 
-	poolLabelValue := warmPool.Name
+	// Compute the pool name hash
+	poolNameHash := NameHash(poolName)
 
 	createPodWithOwner := func(name string, ownerUID string) *corev1.Pod {
-		pod := createPoolPod(poolName, poolNamespace, poolLabelValue, name)
+		pod := createPoolPod(poolName, poolNamespace, poolNameHash, name)
 		if ownerUID != "" {
 			pod.OwnerReferences = []metav1.OwnerReference{
 				{
@@ -210,7 +213,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 	}
 
 	createPodWithDifferentController := func(name string) *corev1.Pod {
-		pod := createPoolPod(poolName, poolNamespace, poolLabelValue, name)
+		pod := createPoolPod(poolName, poolNamespace, poolNameHash, name)
 		pod.OwnerReferences = []metav1.OwnerReference{
 			{
 				APIVersion: "apps/v1",
@@ -315,7 +318,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 			ownedCount := int32(0)
 			adoptedCount := 0
 			for _, pod := range list.Items {
-				if pod.Labels[poolLabel] == poolLabelValue {
+				if pod.Labels[poolLabel] == poolNameHash {
 					controllerRef := metav1.GetControllerOf(&pod)
 					if controllerRef != nil && controllerRef.UID == warmPool.UID {
 						ownedCount++
@@ -340,4 +343,424 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func TestHashPodTemplate(t *testing.T) {
+	testCases := []struct {
+		name          string
+		podTemplate1  sandboxv1alpha1.PodTemplate
+		podTemplate2  sandboxv1alpha1.PodTemplate
+		shouldBeEqual bool
+	}{
+		{
+			name: "identical templates with full resource specs produce same hash even if field order differs",
+			podTemplate1: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image:v1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceMemory: resource.MustParse("128Mi"),
+									corev1.ResourceCPU:    resource.MustParse("250m"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceMemory: resource.MustParse("256Mi"),
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+								},
+							},
+							Env: []corev1.EnvVar{
+								{
+									Name:  "ENV_VAR_1",
+									Value: "value1",
+								},
+								{
+									Name:  "ENV_VAR_2",
+									Value: "value2",
+								},
+							},
+							Command: []string{"/bin/sh", "-c", "sleep 3600"},
+						},
+					},
+				},
+			},
+			podTemplate2: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("250m"),
+									corev1.ResourceMemory: resource.MustParse("128Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("256Mi"),
+								},
+							},
+							Command: []string{"/bin/sh", "-c", "sleep 3600"},
+							Env: []corev1.EnvVar{
+								{
+									Name:  "ENV_VAR_1",
+									Value: "value1",
+								},
+								{
+									Name:  "ENV_VAR_2",
+									Value: "value2",
+								},
+							},
+							Image: "test-image:v1",
+						},
+					},
+				},
+			},
+			shouldBeEqual: true,
+		},
+		{
+			name: "different images produce different hash",
+			podTemplate1: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image:v1",
+						},
+					},
+				},
+			},
+			podTemplate2: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image:v2",
+						},
+					},
+				},
+			},
+			shouldBeEqual: false,
+		},
+		{
+			name: "different container names produce different hash",
+			podTemplate1: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "container-1",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			podTemplate2: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "container-2",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			shouldBeEqual: false,
+		},
+		{
+			name: "different labels produce same hash",
+			podTemplate1: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						"app": "test1",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			podTemplate2: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						"app": "test2",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			shouldBeEqual: true,
+		},
+		{
+			name: "different annotations produce same hash",
+			podTemplate1: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Annotations: map[string]string{
+						"key": "value1",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			podTemplate2: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Annotations: map[string]string{
+						"key": "value2",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			shouldBeEqual: true,
+		},
+		{
+			name: "different resource limits produce different hash",
+			podTemplate1: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("100m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			podTemplate2: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("200m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			shouldBeEqual: false,
+		},
+		{
+			name: "different number of containers produce different hash",
+			podTemplate1: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "container-1",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			podTemplate2: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "container-1",
+							Image: "test-image",
+						},
+						{
+							Name:  "container-2",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+			shouldBeEqual: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			hash1, err := hashPodTemplate(tc.podTemplate1)
+			require.NoError(t, err)
+			require.NotEmpty(t, hash1)
+
+			hash2, err := hashPodTemplate(tc.podTemplate2)
+			require.NoError(t, err)
+			require.NotEmpty(t, hash2)
+
+			if tc.shouldBeEqual {
+				require.Equal(t, hash1, hash2, "hashes should be equal for identical templates")
+			} else {
+				require.NotEqual(t, hash1, hash2, "hashes should be different for different templates")
+			}
+		})
+	}
+}
+
+func TestHashPodTemplateProperties(t *testing.T) {
+	t.Run("hash is deterministic", func(t *testing.T) {
+		podTemplate := sandboxv1alpha1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "test-image",
+					},
+				},
+			},
+		}
+
+		// Generate hash multiple times
+		hashes := make([]string, 10)
+		for i := 0; i < 10; i++ {
+			hash, err := hashPodTemplate(podTemplate)
+			require.NoError(t, err)
+			hashes[i] = hash
+		}
+
+		// All hashes should be identical
+		for i := 1; i < len(hashes); i++ {
+			require.Equal(t, hashes[0], hashes[i], "hash should be deterministic")
+		}
+	})
+
+	t.Run("hash is base36 encoded", func(t *testing.T) {
+		podTemplate := sandboxv1alpha1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "test-image",
+					},
+				},
+			},
+		}
+
+		hash, err := hashPodTemplate(podTemplate)
+		require.NoError(t, err)
+		require.NotEmpty(t, hash)
+
+		// Verify it's valid base36 (only contains 0-9, a-z)
+		for _, char := range hash {
+			require.True(t, (char >= '0' && char <= '9') || (char >= 'a' && char <= 'z'),
+				"hash should only contain base36 characters (0-9, a-z)")
+		}
+	})
+
+	t.Run("hash is reasonable length", func(t *testing.T) {
+		podTemplate := sandboxv1alpha1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "test-image",
+					},
+				},
+			},
+		}
+
+		hash, err := hashPodTemplate(podTemplate)
+		require.NoError(t, err)
+		require.NotEmpty(t, hash)
+
+		// FNV-1a 64-bit hash in base36 should be at most 13 characters
+		// (2^64 - 1 in base36 is "3w5e11264sgsf")
+		require.LessOrEqual(t, len(hash), 13, "hash should be reasonably short")
+	})
+}
+
+func TestPoolLabelValueInIntegration(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	replicas := int32(3)
+
+	ctx := context.Background()
+
+	t.Run("all created pods have correct pool label and pod template hash label", func(t *testing.T) {
+		warmPool := &extensionsv1alpha1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: poolNamespace,
+				UID:       "warmpool-uid-123",
+			},
+			Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+				Replicas: replicas,
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					ObjectMeta: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{
+							"app":     "test-app",
+							"version": "1.0",
+						},
+						Annotations: map[string]string{
+							"description": "test pod",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "test-image:latest",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				Build(),
+		}
+
+		// Calculate expected hashes
+		expectedPoolNameHash := NameHash(poolName)
+		expectedPodTemplateHash, err := hashPodTemplate(warmPool.Spec.PodTemplate)
+		require.NoError(t, err)
+
+		// Reconcile
+		err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		// List all pods
+		list := &corev1.PodList{}
+		err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, list.Items, int(replicas))
+
+		// Verify each pod has the correct labels
+		for _, pod := range list.Items {
+			require.Equal(t, expectedPoolNameHash, pod.Labels[poolLabel],
+				"pod %s should have correct pool label (pool name hash)", pod.Name)
+			require.Equal(t, expectedPodTemplateHash, pod.Labels[podTemplateHashLabel],
+				"pod %s should have correct pod template hash label", pod.Name)
+
+			// Verify template labels are also present
+			require.Equal(t, "test-app", pod.Labels["app"])
+			require.Equal(t, "1.0", pod.Labels["version"])
+
+			// Verify annotations
+			require.Equal(t, "test pod", pod.Annotations["description"])
+		}
+	})
 }

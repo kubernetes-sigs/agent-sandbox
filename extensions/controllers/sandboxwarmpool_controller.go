@@ -16,8 +16,12 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"sort"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -29,11 +33,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 const (
-	poolLabel = "agents.x-k8s.io/pool"
+	poolLabel            = "agents.x-k8s.io/pool"
+	podTemplateHashLabel = "agents.x-k8s.io/pod-template-hash"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
@@ -83,17 +89,55 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, nil
 }
 
+// NameHash generates an FNV-1a hash from a string and returns
+// it as a fixed-length hexadecimal string.
+func NameHash(objectName string) string {
+	h := fnv.New32a()
+	h.Write([]byte(objectName))
+	hashValue := h.Sum32()
+
+	// Convert the uint32 to a hexadecimal string.
+	// This results in an 8-character string (e.g., "a5b3c2d1").
+	return fmt.Sprintf("%08x", hashValue)
+}
+
+// hashPodTemplate computes a stable hash of the PodTemplate.Spec using JSON encoding and FNV-1a
+func hashPodTemplate(podTemplate sandboxv1alpha1.PodTemplate) (string, error) {
+	// Use JSON to serialize only the Spec field (deterministic for same input)
+	jsonBytes, err := json.Marshal(podTemplate.Spec)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode PodTemplate.Spec: %w", err)
+	}
+
+	// Hash using FNV-1a 64-bit
+	hash := fnv.New64a()
+	if _, err := hash.Write(jsonBytes); err != nil {
+		return "", fmt.Errorf("failed to hash PodTemplate.Spec: %w", err)
+	}
+
+	// Encode as base36 string
+	hashValue := hash.Sum64()
+	return strconv.FormatUint(hashValue, 36), nil
+}
+
 // reconcilePool ensures the correct number of pods exist in the pool
 func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) error {
 	log := log.FromContext(ctx)
 
-	// TODO: Use a hash value for the poolLabelValue
-	poolLabelValue := warmPool.Name
+	// Compute hash value for the pod template
+	podTemplateHash, err := hashPodTemplate(warmPool.Spec.PodTemplate)
+	if err != nil {
+		log.Error(err, "Failed to compute pod template hash")
+		return err
+	}
 
-	// List all pods with the pool label
+	// Compute hash of the warm pool name for the pool label
+	poolNameHash := NameHash(warmPool.Name)
+
+	// List all pods with the pool label matching the warm pool name hash
 	podList := &corev1.PodList{}
 	labelSelector := labels.SelectorFromSet(labels.Set{
-		poolLabel: poolLabelValue,
+		poolLabel: poolNameHash,
 	})
 
 	if err := r.List(ctx, podList, &client.ListOptions{
@@ -144,7 +188,9 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	log.Info("Pool status",
 		"desired", desiredReplicas,
 		"current", currentReplicas,
-		"poolLabel", poolLabelValue)
+		"poolName", warmPool.Name,
+		"poolNameHash", poolNameHash,
+		"podTemplateHash", podTemplateHash)
 
 	// Update status replicas
 	warmPool.Status.Replicas = currentReplicas
@@ -155,7 +201,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		log.Info("Creating new pods", "count", podsToCreate)
 
 		for i := int32(0); i < podsToCreate; i++ {
-			if err := r.createPoolPod(ctx, warmPool, poolLabelValue); err != nil {
+			if err := r.createPoolPod(ctx, warmPool, poolNameHash, podTemplateHash); err != nil {
 				log.Error(err, "Failed to create pod")
 				allErrors = errors.Join(allErrors, err)
 			}
@@ -167,7 +213,12 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		podsToDelete := currentReplicas - desiredReplicas
 		log.Info("Deleting excess pods", "count", podsToDelete)
 
-		// Delete the first N active pods from the list
+		// Sort active pods by creation timestamp (newest first)
+		sort.Slice(activePods, func(i, j int) bool {
+			return activePods[i].CreationTimestamp.After(activePods[j].CreationTimestamp.Time)
+		})
+
+		// Delete the first N active pods from the sorted list (newest first)
 		for i := int32(0); i < podsToDelete && i < int32(len(activePods)); i++ {
 			pod := &activePods[i]
 
@@ -190,12 +241,13 @@ func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *exte
 }
 
 // createPoolPod creates a new pod for the warm pool
-func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolLabelValue string) error {
+func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, podTemplateHash string) error {
 	log := log.FromContext(ctx)
 
 	// Create labels for the pod
 	podLabels := make(map[string]string)
-	podLabels[poolLabel] = poolLabelValue
+	podLabels[poolLabel] = poolNameHash
+	podLabels[podTemplateHashLabel] = podTemplateHash
 
 	// Copy labels from pod template
 	for k, v := range warmPool.Spec.PodTemplate.ObjectMeta.Labels {
@@ -230,7 +282,7 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		return err
 	}
 
-	log.Info("Created new pool pod", "pod", pod.Name, "pool", poolLabelValue)
+	log.Info("Created new pool pod", "pod", pod.Name, "poolName", warmPool.Name, "poolNameHash", poolNameHash, "podTemplateHash", podTemplateHash)
 	return nil
 }
 

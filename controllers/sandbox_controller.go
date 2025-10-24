@@ -16,16 +16,20 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"reflect"
+	"sort"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -42,6 +46,9 @@ import (
 
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	poolLabel                   = "agents.x-k8s.io/pool"
+	podTemplateHashLabel        = "agents.x-k8s.io/pod-template-hash"
+	sandboxPodNameLabel         = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
 
@@ -119,6 +126,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// return errors seen
 	return ctrl.Result{RequeueAfter: requeueAfter}, err
+}
+
+// hashPodTemplate computes a stable hash of the PodTemplate.Spec using JSON encoding and FNV-1a
+func hashPodTemplate(podTemplate sandboxv1alpha1.PodTemplate) (string, error) {
+	// Use JSON to serialize only the Spec field (deterministic for same input)
+	jsonBytes, err := json.Marshal(podTemplate.Spec)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode PodTemplate.Spec: %w", err)
+	}
+
+	// Hash using FNV-1a 64-bit
+	hash := fnv.New64a()
+	if _, err := hash.Write(jsonBytes); err != nil {
+		return "", fmt.Errorf("failed to hash PodTemplate.Spec: %w", err)
+	}
+
+	// Encode as base36 string
+	hashValue := hash.Sum64()
+	return strconv.FormatUint(hashValue, 36), nil
 }
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
@@ -288,10 +314,97 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	return service, nil
 }
 
+// tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
+func (r *SandboxReconciler) tryAdoptPodFromPool(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, podTemplateHash string) (*corev1.Pod, error) {
+	log := log.FromContext(ctx)
+
+	// List all pods with the podTemplateHashLabel matching the hash
+	podList := &corev1.PodList{}
+	labelSelector := labels.SelectorFromSet(labels.Set{
+		podTemplateHashLabel: podTemplateHash,
+	})
+
+	if err := r.List(ctx, podList, &client.ListOptions{
+		LabelSelector: labelSelector,
+		Namespace:     sandbox.Namespace,
+	}); err != nil {
+		log.Error(err, "Failed to list pods from warm pool")
+		return nil, err
+	}
+
+	// Sort pods by creation timestamp (oldest first)
+	sort.Slice(podList.Items, func(i, j int) bool {
+		return podList.Items[i].CreationTimestamp.Before(&podList.Items[j].CreationTimestamp)
+	})
+
+	// Find a suitable pod to adopt
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+
+		// Skip pods that are being deleted
+		if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+			continue
+		}
+
+		// Skip pods that already have a different controller
+		controllerRef := metav1.GetControllerOf(pod)
+		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+			continue
+		}
+
+		// Found a suitable pod - adopt it
+		log.Info("Adopting pod from warm pool", "pod", pod.Name, "podTemplateHash", podTemplateHash)
+
+		// Remove the pool labels
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		delete(pod.Labels, poolLabel)
+		delete(pod.Labels, podTemplateHashLabel)
+
+		// Add sandbox label
+		nameHash := NameHash(sandbox.Name)
+		pod.Labels[sandboxLabel] = nameHash
+
+		// Update pod name to match sandbox name
+		// Since we can't rename a pod, we'll update labels and owner reference
+		// The pod will keep its generated name but will be owned by the sandbox
+
+		// Remove existing owner references (from SandboxWarmPool)
+		pod.OwnerReferences = nil
+
+		// Set controller reference to sandbox
+		if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
+			log.Error(err, "Failed to set controller reference on adopted pod")
+			return nil, fmt.Errorf("SetControllerReference for adopted Pod failed: %w", err)
+		}
+
+		// Update the pod
+		if err := r.Update(ctx, pod); err != nil {
+			log.Error(err, "Failed to update adopted pod")
+			return nil, err
+		}
+
+		log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
+		return pod, nil
+	}
+
+	// No suitable pod found in warm pool
+	return nil, nil
+}
+
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
+
+	// Determine the pod name to look up
+	podName := sandbox.Name
+	if trackedPodName, exists := sandbox.Labels[sandboxPodNameLabel]; exists && trackedPodName != "" {
+		podName = trackedPodName
+		log.Info("Using tracked pod name from sandbox label", "podName", podName)
+	}
+
 	pod := &corev1.Pod{}
-	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod)
+	err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod)
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			log.Error(err, "Failed to get Pod")
@@ -311,6 +424,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			} else {
 				log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 			}
+			// Clear the tracked pod name label
+			if err := r.clearPodNameLabel(ctx, sandbox); err != nil {
+				log.Error(err, "Failed to clear pod name label")
+			}
 		}
 		return nil, nil
 	}
@@ -322,7 +439,29 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
-	// Create a pod object from the sandbox
+	// Compute hash of the pod template to check warm pool
+	podTemplateHash, err := hashPodTemplate(sandbox.Spec.PodTemplate)
+	if err != nil {
+		log.Error(err, "Failed to compute pod template hash")
+		return nil, err
+	}
+
+	// Try to adopt a pod from the warm pool
+	adoptedPod, err := r.tryAdoptPodFromPool(ctx, sandbox, podTemplateHash)
+	if err != nil {
+		log.Error(err, "Failed to adopt pod from warm pool")
+		// Continue to create a new pod if adoption fails
+	} else if adoptedPod != nil {
+		log.Info("Using adopted pod from warm pool", "pod", adoptedPod.Name)
+		// Track the adopted pod's name in the sandbox labels
+		if err := r.setPodNameLabel(ctx, sandbox, adoptedPod.Name); err != nil {
+			log.Error(err, "Failed to set pod name label")
+			// Don't fail the reconciliation, the pod was successfully adopted
+		}
+		return adoptedPod, nil
+	}
+
+	// No pod available from warm pool, create a new one
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
 		sandboxLabel: nameHash,
@@ -365,7 +504,32 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
+
+	// Track the newly created pod's name in the sandbox labels
+	if err := r.setPodNameLabel(ctx, sandbox, pod.Name); err != nil {
+		log.Error(err, "Failed to set pod name label")
+		// Don't fail the reconciliation, the pod was successfully created
+	}
+
 	return pod, nil
+}
+
+// setPodNameLabel sets the pod name label on the sandbox to track the associated pod
+func (r *SandboxReconciler) setPodNameLabel(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, podName string) error {
+	if sandbox.Labels == nil {
+		sandbox.Labels = make(map[string]string)
+	}
+	sandbox.Labels[sandboxPodNameLabel] = podName
+	return r.Update(ctx, sandbox)
+}
+
+// clearPodNameLabel removes the pod name label from the sandbox
+func (r *SandboxReconciler) clearPodNameLabel(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+	if sandbox.Labels == nil {
+		return nil
+	}
+	delete(sandbox.Labels, sandboxPodNameLabel)
+	return r.Update(ctx, sandbox)
 }
 
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {

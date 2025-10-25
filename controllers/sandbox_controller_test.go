@@ -293,7 +293,7 @@ func TestReconcile(t *testing.T) {
 							},
 						},
 					},
-					ObjectMeta: sandboxv1alpha1.PodMetadata{
+					ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
 						Labels: map[string]string{
 							"custom-label": "label-val",
 						},
@@ -466,7 +466,7 @@ func TestReconcilePod(t *testing.T) {
 						},
 					},
 				},
-				ObjectMeta: sandboxv1alpha1.PodMetadata{
+				ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
 					Labels: map[string]string{
 						"custom-label": "label-val",
 					},

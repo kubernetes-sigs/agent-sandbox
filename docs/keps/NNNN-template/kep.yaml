@@ -1,0 +1,18 @@
+title: KEP Template
+kep-number: NNNN
+authors:
+  - "@jane.doe"
+status: provisional|implementable|implemented|deferred|rejected|withdrawn|replaced
+creation-date: yyyy-mm-dd
+reviewers:
+  - TBD
+  - "@alice.doe"
+approvers:
+  - TBD
+  - "@oscar.doe"
+
+see-also:
+  - "/keps/1234-we-heard-you-like-keps"
+  - "/keps/2345-everyone-gets-a-kep"
+replaces:
+  - "/keps/3456-replaced-kep"

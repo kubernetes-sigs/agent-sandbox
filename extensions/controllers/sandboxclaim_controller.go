@@ -179,7 +179,13 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Name:      claim.Name,
 		},
 	}
+	// This ensures compliance with the ValidatingAdmissionPolicy by always
+	// disabling the automatic mounting of the service account token, which is
+	// a security best practice for sandboxed environments.
+	automount := false
+
 	sandbox.Spec.PodTemplate.Spec = template.Spec.PodTemplate.Spec
+	sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = template.Spec.PodTemplate.Labels
 	sandbox.Spec.PodTemplate.ObjectMeta.Annotations = template.Spec.PodTemplate.Annotations
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {

@@ -74,9 +74,9 @@ func TestSandboxShutdownTime(t *testing.T) {
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
-			// TODO: should Service/ServiceFQDN be cleared from status when the Service is deleted?
-			Service:     "my-sandbox",
-			ServiceFQDN: "my-sandbox.my-sandbox-ns.svc.cluster.local",
+			// Service/ServiceFQDN should be cleared from status when the Service is deleted
+			Service:     "",
+			ServiceFQDN: "",
 			Replicas:    0,
 			Conditions: []metav1.Condition{
 				{

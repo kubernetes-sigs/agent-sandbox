@@ -95,7 +95,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if !sandbox.ObjectMeta.DeletionTimestamp.IsZero() {
 		log.Info("Sandbox is being deleted")
+		//sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseTerminating
 		return ctrl.Result{}, nil
+	}
+
+	// Set a default phase
+	if sandbox.Status.Phase == "" {
+		sandbox.Status.Phase = sandboxv1alpha1.SandboxPhasePending
 	}
 
 	oldStatus := sandbox.Status.DeepCopy()
@@ -137,9 +143,20 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	if pod == nil {
 		sandbox.Status.Replicas = 0
 		sandbox.Status.LabelSelector = ""
+		if sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0 {
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhasePaused
+		}
 	} else {
 		sandbox.Status.Replicas = 1
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		switch pod.Status.Phase {
+		case corev1.PodRunning:
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseRunning
+		case corev1.PodPending:
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhasePending
+		case corev1.PodFailed:
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseFailed
+		}
 	}
 
 	// Reconcile Service
@@ -186,9 +203,9 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 			}
 		}
 	} else {
-		if sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0 {
-			message = "Pod does not exist, replicas is 0"
+		if sandbox.Status.Phase == sandboxv1alpha1.SandboxPhasePaused {
 			// This is intended behaviour. So marking it ready.
+			message = "Sandbox is paused"
 			podReady = true
 		} else {
 			message = "Pod does not exist"
@@ -431,6 +448,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		Message:            "Sandbox has expired",
 	})
 
+	sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseTerminating
 	sandbox.Status.Replicas = 0
 	sandbox.Status.LabelSelector = ""
 

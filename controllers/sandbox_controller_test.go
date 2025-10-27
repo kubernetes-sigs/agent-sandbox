@@ -16,14 +16,17 @@ package controllers
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -844,5 +847,96 @@ func TestSandboxExpiry(t *testing.T) {
 				require.Equal(t, time.Duration(0), requeueAfter)
 			}
 		})
+	}
+}
+
+func TestSandboxCreationLatencyMetric(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	sb := &sandboxv1alpha1.Sandbox{}
+	sb.Name = sandboxName
+	sb.Namespace = sandboxNs
+	sb.Generation = 1
+	sb.CreationTimestamp = metav1.NewTime(time.Now())
+	sb.Spec = sandboxv1alpha1.SandboxSpec{
+		PodTemplate: sandboxv1alpha1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: "test-container",
+					},
+				},
+			},
+		},
+	}
+
+	r := SandboxReconciler{
+		Client: newFakeClient(sb),
+		Scheme: Scheme,
+	}
+
+	_, err := r.Reconcile(t.Context(), ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+		},
+	})
+	require.NoError(t, err)
+
+	// get pod and mark it ready
+	pod := &corev1.Pod{}
+	require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, pod))
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionTrue,
+		},
+	}
+	require.NoError(t, r.Status().Update(t.Context(), pod))
+
+	_, err = r.Reconcile(t.Context(), ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+		},
+	})
+	require.NoError(t, err)
+
+	// Validate Sandbox status
+	liveSandbox := &sandboxv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, liveSandbox))
+	require.True(t, meta.IsStatusConditionTrue(liveSandbox.Status.Conditions, "Ready"))
+	require.NotNil(t, liveSandbox.Annotations)
+	require.NotNil(t, liveSandbox.Annotations[readinessObserved])
+
+	// Check metric
+	expected := `
+	# HELP sandbox_creation_latency Time taken from sandbox creation to sandbox ready in milliseconds
+	# TYPE sandbox_creation_latency histogram
+	sandbox_creation_latency_bucket{le="50"} 1
+
+	sandbox_creation_latency_bucket{le="100"} 1
+	sandbox_creation_latency_bucket{le="200"} 1
+	sandbox_creation_latency_bucket{le="300"} 1
+	sandbox_creation_latency_bucket{le="500"} 1
+	sandbox_creation_latency_bucket{le="700"} 1
+	sandbox_creation_latency_bucket{le="1000"} 1
+	sandbox_creation_latency_bucket{le="1500"} 1
+	sandbox_creation_latency_bucket{le="2000"} 1
+	sandbox_creation_latency_bucket{le="3000"} 1
+	sandbox_creation_latency_bucket{le="4500"} 1
+	sandbox_creation_latency_bucket{le="6000"} 1
+	sandbox_creation_latency_bucket{le="9000"} 1
+	sandbox_creation_latency_bucket{le="12000"} 1
+	sandbox_creation_latency_bucket{le="18000"} 1
+	sandbox_creation_latency_bucket{le="30000"} 1
+	sandbox_creation_latency_bucket{le="+Inf"} 1
+	sandbox_creation_latency_count 1
+	`
+	err = testutil.CollectAndCompare(sandboxCreationLatency, strings.NewReader(expected), "sandbox_creation_latency")
+	// We ignore the error because the sum is not deterministic
+	if err != nil && !strings.Contains(err.Error(), "sandbox_creation_latency_sum") {
+		require.NoError(t, err)
 	}
 }

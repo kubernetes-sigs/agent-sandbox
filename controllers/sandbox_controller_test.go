@@ -178,6 +178,22 @@ func TestComputeReadyCondition(t *testing.T) {
 			expectedReason: "DependenciesNotReady",
 		},
 		{
+			name: "sandbox paused",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+				Status: sandboxv1alpha1.SandboxStatus{
+					Phase: sandboxv1alpha1.SandboxPhasePaused,
+				},
+			},
+			err:            nil,
+			svc:            &corev1.Service{},
+			pod:            nil,
+			expectedStatus: metav1.ConditionTrue,
+			expectedReason: "DependenciesReady",
+		},
+		{
 			name: "all not ready",
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -231,6 +247,7 @@ func TestReconcile(t *testing.T) {
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Phase:         sandboxv1alpha1.SandboxPhasePending,
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
 				Replicas:      1,
@@ -324,6 +341,7 @@ func TestReconcile(t *testing.T) {
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Phase:         sandboxv1alpha1.SandboxPhasePending,
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
 				Replicas:      1,
@@ -406,6 +424,28 @@ func TestReconcile(t *testing.T) {
 								"storage": resource.MustParse("10Gi"),
 							},
 						},
+					},
+				},
+			},
+		},
+		{
+			name: "paused sandbox",
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				Replicas: ptr.To(int32(0)),
+			},
+			// Verify Sandbox status
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Phase:       sandboxv1alpha1.SandboxPhasePaused,
+				Replicas:    0,
+				ServiceFQDN: "sandbox-name.sandbox-ns.svc.cluster.local",
+				Service:     "sandbox-name",
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             "DependenciesReady",
+						Message:            "Sandbox is paused; Service Exists",
 					},
 				},
 			},

@@ -28,6 +28,78 @@ spec:
             type: object
           spec:
             properties:
+              networkPolicy:
+                properties:
+                  additionalEgressRules:
+                    items:
+                      properties:
+                        description:
+                          type: string
+                        inNamespaceSelector:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        ports:
+                          items:
+                            properties:
+                              port:
+                                format: int32
+                                type: integer
+                              protocol:
+                                type: string
+                            type: object
+                          type: array
+                        toIPBlock:
+                          properties:
+                            cidr:
+                              type: string
+                            except:
+                              items:
+                                type: string
+                              type: array
+                          type: object
+                        toPodSelector:
+                          additionalProperties:
+                            type: string
+                          type: object
+                      type: object
+                    type: array
+                  additionalIngressRules:
+                    items:
+                      properties:
+                        description:
+                          type: string
+                        fromPodSelector:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        inNamespaceSelector:
+                          additionalProperties:
+                            type: string
+                          type: object
+                      type: object
+                    type: array
+                  enabled:
+                    type: boolean
+                  ingressControllerSelectors:
+                    properties:
+                      namespaceSelector:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      podSelector:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
+                  ingressFromIPBlocks:
+                    items:
+                      properties:
+                        cidr:
+                          type: string
+                      type: object
+                    type: array
+                type: object
               podTemplate:
                 properties:
                   metadata:

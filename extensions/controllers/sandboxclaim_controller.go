@@ -179,6 +179,19 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Name:      claim.Name,
 		},
 	}
+
+	// Determine the effective shutdownTime
+	// Precedence: Claim.Spec.ShutdownTime > Template.Spec.ShutdownTime > nil
+	var effectiveShutdownTime *metav1.Time
+	if claim.Spec.ShutdownTime != nil {
+		effectiveShutdownTime = claim.Spec.ShutdownTime
+		logger.Info("Using shutdownTime override from SandboxClaim")
+	} else if template.Spec.ShutdownTime != nil {
+		effectiveShutdownTime = template.Spec.ShutdownTime
+		logger.Info("Using shutdownTime from SandboxTemplate")
+	}
+	sandbox.Spec.ShutdownTime = effectiveShutdownTime
+
 	sandbox.Spec.PodTemplate.Spec = template.Spec.PodTemplate.Spec
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = template.Spec.PodTemplate.Labels
 	sandbox.Spec.PodTemplate.ObjectMeta.Annotations = template.Spec.PodTemplate.Annotations

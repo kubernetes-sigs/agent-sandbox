@@ -3803,6 +3803,9 @@ spec:
                     - containers
                     type: object
                 type: object
+              shutdownTime:
+                format: date-time
+                type: string
             required:
             - podTemplate
             type: object

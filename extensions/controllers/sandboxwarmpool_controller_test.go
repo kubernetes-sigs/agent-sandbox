@@ -71,7 +71,7 @@ func createTemplate(name, namespace string) *extensionsv1alpha1.SandboxTemplate 
 			Namespace: namespace,
 		},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: corev1.PodTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -392,7 +392,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				},
 			},
 			Spec: extensionsv1alpha1.SandboxTemplateSpec{
-				PodTemplate: corev1.PodTemplateSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{

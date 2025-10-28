@@ -43,7 +43,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: corev1.PodTemplateSpec{
+			PodTemplate: v1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -251,7 +251,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: corev1.PodTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{

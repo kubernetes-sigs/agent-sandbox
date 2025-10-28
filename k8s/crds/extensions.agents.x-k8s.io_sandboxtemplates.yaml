@@ -28,9 +28,18 @@ spec:
             type: object
           spec:
             properties:
-              podTemplate:
+              template:
                 properties:
                   metadata:
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
                     type: object
                   spec:
                     properties:
@@ -3802,9 +3811,11 @@ spec:
                     required:
                     - containers
                     type: object
+                required:
+                - spec
                 type: object
             required:
-            - podTemplate
+            - template
             type: object
           status:
             type: object

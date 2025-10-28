@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -28,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,7 +53,8 @@ var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 // SandboxClaimReconciler reconciles a SandboxClaim object
 type SandboxClaimReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -60,10 +63,12 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
@@ -76,31 +81,137 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// cache the original status from sandboxclaim
 	originalClaimStatus := claim.Status.DeepCopy()
-	var err error
-	var sandbox *v1alpha1.Sandbox
-	var template *extensionsv1alpha1.SandboxTemplate
 
+	// Check Expiration
+	// We calculate this upfront to decide the flow.
+	claimExpired, timeLeft := r.checkExpiration(claim)
+
+	// Handle "Delete" Policy immediately
+	// If we delete the claim, we return immediately.
+	// Continuing would try to update the status of a deleted object, causing a crash/error.
+	if claimExpired && claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDelete {
+		log.Info("Deleting Claim because ShutdownPolicy=Delete and time has expired")
+		if r.Recorder != nil {
+			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Deleting Claim (ShutdownPolicy=Delete)")
+		}
+		if err := r.Delete(ctx, claim); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Manage Resources based on State
+	var sandbox *v1alpha1.Sandbox
+	var reconcileErr error
+
+	if claimExpired {
+		// Policy=Retain (since Delete handled above)
+		// Ensure Sandbox is deleted, but keep the Claim.
+		sandbox, reconcileErr = r.reconcileExpired(ctx, claim)
+	} else {
+		// Ensure Sandbox exists and is configured.
+		sandbox, reconcileErr = r.reconcileActive(ctx, claim)
+	}
+
+	// Update Status & Events
+	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
+
+	if !hasExpiredCondition(originalClaimStatus.Conditions) && hasExpiredCondition(claim.Status.Conditions) {
+		if r.Recorder != nil {
+			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Claim expired")
+		}
+	}
+
+	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+		return ctrl.Result{}, errors.Join(reconcileErr, updateErr)
+	}
+
+	// Determine Result
+	var result ctrl.Result
+	if !claimExpired && timeLeft > 0 {
+		result = ctrl.Result{RequeueAfter: timeLeft}
+	}
+
+	// Suppress expected user errors (like missing templates) to avoid crash loops
+	if errors.Is(reconcileErr, ErrTemplateNotFound) {
+		return result, nil
+	}
+
+	return result, reconcileErr
+}
+
+// checkExpiration calculates if the claim is expired and how much time is left.
+func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1alpha1.SandboxClaim) (bool, time.Duration) {
+	if claim.Spec.Lifecycle == nil || claim.Spec.Lifecycle.ShutdownTime == nil {
+		return false, 0
+	}
+
+	now := time.Now()
+	expiry := claim.Spec.Lifecycle.ShutdownTime.Time
+
+	if now.After(expiry) {
+		return true, 0
+	}
+
+	return false, expiry.Sub(now)
+}
+
+// reconcileActive handles the creation and updates of running sandboxes.
+func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	// Try getting template
-	if template, err = r.getTemplate(ctx, claim); err == nil || k8errors.IsNotFound(err) {
+	template, templateErr := r.getTemplate(ctx, claim)
+
+	// If getting template failed with a real error (not just NotFound), fail fast.
+	if templateErr != nil && !k8errors.IsNotFound(templateErr) {
+		return nil, templateErr
+	}
+
+	// Only attempt network policy reconciliation if template was found.
+	if templateErr == nil || k8errors.IsNotFound(templateErr) {
 		// This ensures the firewall is up before the pod starts.
-		if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to reconcile network policy: %w", npErr)
+		if template != nil {
+			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
+				return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
+			}
 		}
 
 		// Try getting sandbox even if template is not found
 		// It is possible that the template was deleted after the sandbox was created
-		sandbox, err = r.getOrCreateSandbox(ctx, claim, template)
+		sandbox, err := r.getOrCreateSandbox(ctx, claim, template)
+
+		// Special Case: If we failed to create because template was missing, return that specific error
+		if sandbox == nil && err == nil && templateErr != nil {
+			return nil, ErrTemplateNotFound
+		}
+		return sandbox, err
 	}
 
-	// Update claim status
-	r.computeAndSetStatus(claim, sandbox, err)
-	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
-		err = errors.Join(err, updateErr)
+	return nil, templateErr
+}
+
+// reconcileExpired ensures the Sandbox is deleted for Retained claims.
+func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
+	log := log.FromContext(ctx)
+	sandbox := &v1alpha1.Sandbox{}
+
+	// Check if Sandbox exists
+	if err := r.Get(ctx, client.ObjectKeyFromObject(claim), sandbox); err != nil {
+		if k8errors.IsNotFound(err) {
+			return nil, nil // Sandbox is gone, life is good.
+		}
+		return nil, err
 	}
 
-	return ctrl.Result{}, err
+	// Sandbox exists, delete it.
+	if sandbox.DeletionTimestamp.IsZero() {
+		log.Info("Deleting Sandbox because Claim expired (Policy=Retain)", "Sandbox", sandbox.Name)
+		if err := r.Delete(ctx, sandbox); err != nil {
+			return sandbox, fmt.Errorf("failed to delete expired sandbox: %w", err)
+		}
+	}
+
+	return sandbox, nil
 }
 
 func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1alpha1.SandboxClaimStatus, claim *extensionsv1alpha1.SandboxClaim) error {
@@ -125,45 +236,78 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 	return nil
 }
 
-func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error) metav1.Condition {
-	readyCondition := metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionReady),
-		ObservedGeneration: claim.Generation,
-		Status:             metav1.ConditionFalse,
-	}
-
-	// Reconciler errors take precedence. They are expected to be transient.
+func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) metav1.Condition {
 	if err != nil {
+		reason := "ReconcilerError"
 		if errors.Is(err, ErrTemplateNotFound) {
-			readyCondition.Reason = "TemplateNotFound"
-			readyCondition.Message = fmt.Sprintf("SandboxTemplate %q not found", claim.Spec.TemplateRef.Name)
-			return readyCondition
-		}
-		readyCondition.Reason = "ReconcilerError"
-		readyCondition.Message = "Error seen: " + err.Error()
-		return readyCondition
-	}
-
-	// Sandbox should be non-nil if err is nil
-	for _, condition := range sandbox.Status.Conditions {
-		if condition.Type == string(sandboxv1alpha1.SandboxConditionReady) {
-			if condition.Status == metav1.ConditionTrue {
-				readyCondition.Status = metav1.ConditionTrue
-				readyCondition.Reason = "SandboxReady"
-				readyCondition.Message = "Sandbox is ready"
-				return readyCondition
+			reason = "TemplateNotFound"
+			return metav1.Condition{
+				Type:               string(sandboxv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            fmt.Sprintf("SandboxTemplate %q not found", claim.Spec.TemplateRef.Name),
+				ObservedGeneration: claim.Generation,
 			}
 		}
+		return metav1.Condition{
+			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            "Error seen: " + err.Error(),
+			ObservedGeneration: claim.Generation,
+		}
 	}
 
-	readyCondition.Reason = "SandboxNotReady"
-	readyCondition.Message = "Sandbox is not ready"
-	return readyCondition
+	if isClaimExpired {
+		return metav1.Condition{
+			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             extensionsv1alpha1.ClaimExpiredReason,
+			Message:            "Claim expired. Sandbox resources deleted.",
+			ObservedGeneration: claim.Generation,
+		}
+	}
+
+	if sandbox == nil {
+		// Only handle genuine missing sandbox here (expired case is handled above)
+		return metav1.Condition{
+			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             "SandboxMissing",
+			Message:            "Sandbox does not exist",
+			ObservedGeneration: claim.Generation,
+		}
+	}
+
+	// Check if Core Controller marked it as Expired
+	if isSandboxExpired(sandbox) {
+		return metav1.Condition{
+			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             sandboxv1alpha1.SandboxReasonExpired,
+			Message:            "Underlying Sandbox resource has expired independently of the Claim.",
+			ObservedGeneration: claim.Generation,
+		}
+	}
+
+	// Forward the condition from Sandbox Status
+	for _, condition := range sandbox.Status.Conditions {
+		if condition.Type == string(sandboxv1alpha1.SandboxConditionReady) {
+			return condition
+		}
+	}
+
+	return metav1.Condition{
+		Type:               string(sandboxv1alpha1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             "SandboxNotReady",
+		Message:            "Sandbox is not ready",
+		ObservedGeneration: claim.Generation,
+	}
 }
 
-func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error) {
-	// compute and set overall Ready condition
-	readyCondition := r.computeReadyCondition(claim, sandbox, err)
+func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
+	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 
 	if sandbox != nil {
@@ -311,6 +455,11 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	logger.Info("Created sandbox for claim", "claim", claim.Name)
+
+	if r.Recorder != nil {
+		r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxProvisioned", fmt.Sprintf("Created Sandbox %q", sandbox.Name))
+	}
+
 	return sandbox, nil
 }
 
@@ -429,4 +578,21 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 
 	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
 	return nil
+}
+
+// isSandboxExpired checks the Sandbox status condition set by the Core Controller
+func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
+	return hasExpiredCondition(sandbox.Status.Conditions)
+}
+
+// hasExpiredCondition Helper to check if conditions list contains the expired reason
+func hasExpiredCondition(conditions []metav1.Condition) bool {
+	for _, cond := range conditions {
+		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) {
+			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == sandboxv1alpha1.SandboxReasonExpired {
+				return true
+			}
+		}
+	}
+	return false
 }

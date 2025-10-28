@@ -28,6 +28,18 @@ spec:
             type: object
           spec:
             properties:
+              lifecycle:
+                properties:
+                  shutdownPolicy:
+                    default: Retain
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                  shutdownTime:
+                    format: date-time
+                    type: string
+                type: object
               sandboxTemplateRef:
                 properties:
                   name:

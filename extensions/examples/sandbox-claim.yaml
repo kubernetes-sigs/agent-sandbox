@@ -10,3 +10,11 @@ spec:
   sandboxTemplateRef:
     # This name must exactly match the 'metadata.name' of your SandboxTemplate.
     name: secure-datascience-template
+  lifecycle:
+    # Policy can be "Delete" (clean up everything) or "Retain" (stop resources but keep objects).
+    # Default is "Retain".
+    shutdownPolicy: Delete
+
+    # Absolute timestamp when the sandbox should expire (RFC3339 format).
+    # If omitted, the sandbox will run indefinitely.
+    shutdownTime: "2025-12-31T23:59:59Z"

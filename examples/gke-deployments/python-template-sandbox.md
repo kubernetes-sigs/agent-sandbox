@@ -34,10 +34,10 @@ gcloud auth configure-docker "${GKE_LOCATION}-docker.pkg.dev"
 Deploy the agent-sandbox controller using the published manifest:
 
 ```bash
-# Deploy the core controller
+# Installs the core CRD (Sandbox) and the controller that manages Sandbox resources.
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.1.0-rc.0/manifest.yaml
 
-# Deploy the extensions (SandboxTemplate and SandboxClaim CRDs)
+# Installs the extension CRDs (SandboxClaim, SandboxTemplate, SandboxWarmPool) and grants the necessary RBAC permissions to the main controller for managing them.
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.1.0-rc.0/extensions.yaml
 ```
 
@@ -48,6 +48,8 @@ Check that the controller pod is running:
 ```bash
 kubectl get pods -n agent-sandbox-system
 # Wait for the pod to show STATUS 'Running' and READY '1/1'
+NAME                         READY   STATUS    RESTARTS   AGE
+agent-sandbox-controller-0   1/1     Running   0          40s
 ```
 
 ## 3. Build & Push the Python Sandbox

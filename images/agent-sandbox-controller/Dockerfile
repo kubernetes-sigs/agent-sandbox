@@ -1,9 +1,11 @@
 ARG GO_VERSION="1.25.3"
-ARG TARGETARCH
 
 # Build go binaries
 # See https://github.com/golang/go/issues/69255#issuecomment-2523276831
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS builder
+
+# Declare TARGETARCH to make it available in this build stage
+ARG TARGETARCH
 
 WORKDIR /workspace
 

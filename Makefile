@@ -1,5 +1,5 @@
 .PHONY: all
-all: fix-go-generate build lint-go test-unit
+all: fix-go-generate build lint-go test-unit toc-verify
 
 .PHONY: fix-go-generate
 fix-go-generate:
@@ -32,3 +32,11 @@ test-e2e:
 .PHONY: lint-go
 lint-go:
 	./dev/tools/lint-go
+
+.PHONY: toc-update
+toc-update:
+	./dev/tools/update-toc
+
+.PHONY: toc-verify
+toc-verify:
+	./dev/tools/verify-toc

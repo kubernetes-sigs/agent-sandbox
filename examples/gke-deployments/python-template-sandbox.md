@@ -8,7 +8,7 @@ This guide walks you through deploying the Agent Sandbox Controller and [Python 
 - Docker installed locally (for building the Python sandbox image only; controller images are pre-built)
 - `gcloud` CLI installed and authenticated
 
-## 1. Environment & GKE Setup
+## 1. Set Up Your GKE Environment
 
 Set up your project environment variables and enable required services:
 
@@ -27,6 +27,34 @@ gcloud artifacts repositories create $AR_REPO_NAME \
 
 # Authenticate Docker
 gcloud auth configure-docker "${GKE_LOCATION}-docker.pkg.dev"
+```
+
+Option A (**Recommended**): Create a GKE Autopilot Cluster
+```
+gcloud container clusters create-auto $CLUSTER_NAME \
+    --location=$GKE_LOCATION
+
+# Get credentials for your new cluster
+gcloud container clusters get-credentials $CLUSTER_NAME --location $GKE_LOCATION
+```
+
+Option B: Create a GKE Standard Cluster with a gVisor Node Pool
+
+If you need to manage your own nodes, create a Standard cluster and add a dedicated node pool with GKE Sandbox (gVisor) enabled.
+```
+gcloud container clusters create $CLUSTER_NAME \
+    --location=$GKE_LOCATION \
+    --workload-pool=${PROJECT_ID}.svc.id.goog
+
+gcloud container node-pools create gvisor-nodes \
+  --cluster=$CLUSTER_NAME \
+  --location=$GKE_LOCATION \
+  --sandbox type=gvisor \
+  --machine-type=e2-standard-4 \
+  --num-nodes=1
+
+# Get credentials for your new cluster
+gcloud container clusters get-credentials $CLUSTER_NAME --location $GKE_LOCATION
 ```
 
 ## 2. Deploy the Controller
@@ -55,13 +83,15 @@ agent-sandbox-controller-0   1/1     Running   0          40s
 ## 3. Build & Push the Python Sandbox
 
 ```bash
-cd examples/python-template-sandbox
+cd examples/python-runtime-sandbox
 export PYTHON_SANDBOX_IMG="${GKE_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO_NAME}/sandbox-runtime:latest"
 docker build -t $PYTHON_SANDBOX_IMG .
 docker push $PYTHON_SANDBOX_IMG
 ```
 
-## 4. Deploy & Test the Python Sandbox Application
+## 4. Deploy & Test the Python Sandbox with gVisor
+
+We will now create a SandboxTemplate that explicitly requests this secure runtime.
 
 ### Create the SandboxTemplate
 
@@ -71,14 +101,12 @@ Create a file named `sandbox-template-gke.yaml` with the following content:
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
-  name: python-sandbox-template-gke
+  name: python-sandbox-template
 spec:
-  runtimeClassName: ""
   podTemplate:
-    metadata:
-      labels:
-        sandbox: my-python-sandbox-gke
     spec:
+      # This line requests the gVisor runtime
+      runtimeClassName: "gvisor"
       containers:
       - name: python-sandbox
         image: us-central1-docker.pkg.dev/${PROJECT_ID}/${AR_REPO_NAME}/sandbox-runtime:latest
@@ -89,51 +117,21 @@ spec:
 
 **Note:** Update the image field with your actual PROJECT_ID and AR_REPO_NAME values.
 
-### Create the SandboxClaim
-
-Create a file named `sandbox-claim-gke.yaml` with the following content:
-
-```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
-kind: SandboxClaim
-metadata:
-  name: python-sandbox-claim-gke
-spec:
-  sandboxTemplateRef:
-    name: python-sandbox-template-gke
-```
 
 ### Deploy the Template and Claim
 
 ```bash
 # Deploy the template
 kubectl apply -f sandbox-template-gke.yaml
-
-# Deploy the claim
-kubectl apply -f sandbox-claim-gke.yaml
 ```
 
-### Test the API
+### Run the Test
 
-Wait for the sandbox to be created and become ready, then test the API:
-
+Execute the Test Script
 ```bash
-# Wait for the sandbox pod to become ready
-kubectl wait --for=condition=ready pod --selector=sandbox=my-python-sandbox-gke --timeout=120s
-
-# Get the sandbox name
-SANDBOX_NAME=$(kubectl get sandboxclaim python-sandbox-claim-gke -o jsonpath='{.status.sandboxName}')
-echo "Sandbox name: $SANDBOX_NAME"
-
-# Start port-forwarding in the background
-kubectl port-forward "pod/${SANDBOX_NAME}" 8888:8888 &
-PF_PID=$!
-trap "kill $PF_PID" EXIT
-sleep 3
-
 # Install tester dependencies and run the test
-pip3 install requests
-python3 tester.py 127.0.0.1 8888
+pip install requests
+python agent-sandbox/examples/python-template-sandbox/agentic-sandbox-client/test_client.py
 ```
 
 ### Example Output
@@ -158,9 +156,6 @@ Response JSON: {'stdout': 'hello world\n', 'stderr': '', 'exit_code': 0}
 When you're done, clean up the deployed resources:
 
 ```bash
-# Delete the sandbox claim (this will also delete the sandbox)
-kubectl delete -f sandbox-claim-gke.yaml
-
 # Delete the sandbox template
 kubectl delete -f sandbox-template-gke.yaml
 

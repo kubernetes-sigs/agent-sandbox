@@ -137,18 +137,54 @@ python agent-sandbox/examples/python-template-sandbox/agentic-sandbox-client/tes
 ### Example Output
 
 ```
-$ python3 tester.py 127.0.0.1 8888
---- Testing Health Check endpoint ---
-Sending GET request to http://127.0.0.1:8888/
-Handling connection for 8888
-Health check successful!
-Response JSON: {'status': 'ok', 'message': 'Sandbox Runtime is active.'}
+$ python agent-sandbox/examples/python-template-sandbox/agentic-sandbox-client/test_client.py
+--- Starting Sandbox Client Test ---
+Creating SandboxClaim: sandbox-claim-a1b2c3d4...
+Watching for Sandbox to become ready...
+Sandbox sandbox-claim-a1b2c3d4 is ready.
+Starting port-forwarding for sandbox sandbox-claim-a1b2c3d4...
 
---- Testing Execute endpoint ---
-Sending POST request to http://127.0.0.1:8888/execute with payload: {'command': "echo 'hello world'"}
-Handling connection for 8888
-Execute command successful!
-Response JSON: {'stdout': 'hello world\n', 'stderr': '', 'exit_code': 0}
+--- Testing Command Execution ---
+Executing command: 'echo 'Hello from the sandbox!''
+Stdout: Hello from the sandbox!
+Stderr: 
+Exit Code: 0
+
+--- Command Execution Test Passed! ---
+
+--- Testing File Operations ---
+Writing content to 'test.txt'...
+File 'test.txt' uploaded successfully.
+Reading content from 'test.txt'...
+Read content: 'This is a test file.'
+--- File Operations Test Passed! ---
+
+--- Testing Pod Introspection ---
+
+--- Listing files in /app ---
+total 16
+drwxr-xr-x 1 1000 1000 4096 Oct 31 17:50 .
+drwxr-xr-x 1 root root 4096 Oct 31 17:49 ..
+-rw-r--r-- 1 1000 1000 2410 Oct 31 17:49 main.py
+-rw-r--r-- 1 1000 1000  324 Oct 31 17:49 requirements.txt
+-rw-r--r-- 1 1000 1000   20 Oct 31 17:50 test.txt
+
+
+--- Printing environment variables ---
+HOSTNAME=sandbox-claim-a1b2c3d4
+PYTHON_VERSION=3.11.5
+PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LANG=C.UTF-8
+GPG_KEY=...
+PYTHON_PIP_VERSION=23.2.1
+HOME=/app
+
+
+--- Introspection Tests Finished ---
+Stopping port-forwarding...
+Deleting SandboxClaim: sandbox-claim-a1b2c3d4
+
+--- Sandbox Client Test Finished ---
 ```
 
 ## 5. Cleanup

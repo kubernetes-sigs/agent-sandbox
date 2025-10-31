@@ -1,0 +1,9 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: sandbox-example
+spec:
+  podTemplate:
+    spec:
+      # Set runtimeClassName to use gVisor
+      runtimeClassName: gvisor

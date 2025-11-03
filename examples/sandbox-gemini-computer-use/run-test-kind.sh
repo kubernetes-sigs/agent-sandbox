@@ -70,7 +70,7 @@ echo "Applying CRD and deployment..."
 kubectl apply -f sandbox-gemini-computer-use.yaml
 
 echo "Running the programmatic test..."
-python3 -m agentic_sandbox.test_computeruse
+python3 -m agentic-sandbox-client.test_computeruse
 
 
 echo "Test finished."

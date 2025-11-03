@@ -1,7 +1,9 @@
 README.md
 pyproject.toml
 agentic_sandbox/__init__.py
+agentic_sandbox/computer_use_sandbox.py
 agentic_sandbox/sandbox.py
+agentic_sandbox/test_computeruse.py
 agentic_sandbox.egg-info/PKG-INFO
 agentic_sandbox.egg-info/SOURCES.txt
 agentic_sandbox.egg-info/dependency_links.txt

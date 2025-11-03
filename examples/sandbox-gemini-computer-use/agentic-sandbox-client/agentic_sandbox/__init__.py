@@ -14,4 +14,3 @@
 
 from .sandbox import Sandbox
 from .computer_use_sandbox import ComputerUseSandbox
-from .test_computeruse import main as test_computeruse_main

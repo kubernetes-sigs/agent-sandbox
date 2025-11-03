@@ -1,6 +1,6 @@
 # Python Runtime Sandbox for Gemini Computer Use Agent
 
-This example implements a simple Python server in a sandbox container that can run the `computer-use-preview` agent.
+This example implements a simple Python server in a sandbox container that can run the Gemini `computer-use-preview` agent.
 It includes a FastAPI server that can execute browser tasks and a Python script to test it (`tester.py`).
 
 **Setup**
@@ -16,6 +16,16 @@ export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
 Before running the tests, you need to clone the `computer-use-preview` repository:
 ```bash
 git clone https://github.com/google-gemini/computer-use-preview
+```
+
+### Python Client Setup
+
+To interact with the sandbox, you need to set up a Python virtual environment and install the `agentic-sandbox-client`.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ./agentic-sandbox-client/
 ```
 
 ## Running the Docker Test Script (`run-test-docker.sh`)
@@ -50,7 +60,7 @@ Usage:
 You can run the script in interactive mode by using the `--interactive` flag. This is useful for running custom queries against the agent inside the container. In this mode, the script will:
 1.  Build the Docker image (unless `--nobuild` is specified).
 2.  Start the container in the background.
-3.  Execute a sample query (`python computer-use-preview/main.py --query "Go to Google and type 'Hello World' into the search bar"`) inside the container, attaching your terminal to it.
+3.  The script executes a sample query (`Go to YouTube.com, search for funny cats, scroll a few pages down, return the name of the title of a video that has cats in the name."`) inside the container, attaching your terminal to it.
 
 To run in interactive mode:
 ```bash
@@ -83,7 +93,7 @@ This script will:
 2.  Build and deploy the agent sandbox controller to the cluster.
 3.  Build the python runtime sandbox image.
 4.  Load the image into the kind cluster.
-5.  Deploy the sandbox and run the tests using `sandbox-gemini-computer-use.yaml`
+5.  Deploy the sandbox and run the tests using the template `sandbox-gemini-computer-use.yaml`
 6.  Clean up all the resources.
 
 To run the script:

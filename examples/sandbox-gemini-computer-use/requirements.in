@@ -9,6 +9,7 @@ rich
 playwright
 browserbase
 python-multipart
+kubernetes
 
 # For the ML agent's tasks
 termcolor==3.1.0

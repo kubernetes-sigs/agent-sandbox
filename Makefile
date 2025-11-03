@@ -32,3 +32,10 @@ test-e2e:
 .PHONY: lint-go
 lint-go:
 	./dev/tools/lint-go
+
+# Example usage: make release TAG=v0.1.0
+.PHONY: release
+release:
+	go mod tidy
+	go generate ./...
+	./dev/tools/release --tag=${TAG}

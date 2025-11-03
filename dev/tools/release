@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import glob
+import re
+import argparse
+
+def main():
+    parser = argparse.ArgumentParser(description='Generate release manifests.')
+    parser.add_argument('--tag', required=True, help='The git tag for the release.')
+    args = parser.parse_args()
+
+    # Create the release_assets directory if it doesn't exist
+    if not os.path.exists('release_assets'):
+        os.makedirs('release_assets')
+
+    all_yaml_files = glob.glob('k8s/**/*.yaml', recursive=True)
+    image_url = f'registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}'
+
+    # --- Generate manifest.yaml ---
+    print('INFO: Preparing core manifest.yaml')
+    manifest_files = [f for f in all_yaml_files if 'extensions' not in os.path.basename(f)]
+    with open('release_assets/manifest.yaml', 'w') as outfile:
+        for fname in sorted(manifest_files):
+            with open(fname) as infile:
+                outfile.write(infile.read())
+                outfile.write('---\n')
+
+
+    # Replace image placeholder in manifest.yaml
+    print(f'INFO: Replacing image placeholder in core manifest.yaml with: {image_url}')
+    with open('release_assets/manifest.yaml', 'r') as file:
+        filedata = file.read()
+
+    filedata = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata)
+
+    with open('release_assets/manifest.yaml', 'w') as file:
+        file.write(filedata)
+    print('INFO: Successfully created release_assets/manifest.yaml')
+
+    # --- Generate extensions.yaml ---
+    print('INFO: Preparing extensions.yaml')
+    extension_files = [f for f in all_yaml_files if 'extensions' in os.path.basename(f)]
+    with open('release_assets/extensions.yaml', 'w') as outfile:
+        for fname in sorted(extension_files):
+            with open(fname) as infile:
+                outfile.write(infile.read())
+                outfile.write('---\n')
+
+    # Replace image placeholder in extensions.yaml
+    print(f'INFO: Replacing image placeholder in extensions.yaml with: {image_url}')
+    with open('release_assets/extensions.yaml', 'r') as file:
+        filedata = file.read()
+
+    filedata = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata)
+
+    with open('release_assets/extensions.yaml', 'w') as file:
+        file.write(filedata)
+    print('INFO: Successfully created release_assets/extensions.yaml')
+
+
+if __name__ == '__main__':
+    main()

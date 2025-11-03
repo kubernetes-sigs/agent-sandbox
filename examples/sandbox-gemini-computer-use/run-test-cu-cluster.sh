@@ -44,41 +44,31 @@ if [ "$NO_BUILD" = false ]; then
     # following develop guide to make and deploy agent-sandbox to kind cluster
     cd ../../
     #pip install pyyaml
-    echo "Building agent-sandbox controller"
+    echo "Building and deploying agent-sandbox to kind cluster..."
     make build
-    #make deploy-kind EXTENSIONS=true
+    make deploy-kind EXTENSIONS=true
     cd examples/sandbox-gemini-computer-use
     echo "Building sandbox-gemini-runtime image..."
     docker build -t sandbox-gemini-runtime  .
 fi
 
-echo "Deploying kind cluster with agent-sandbox controller..."
-cd ../../
-make deploy-kind EXTENSIONS=true
-cd examples/sandbox-gemini-computer-use
-
 # Cleanup function
 cleanup() {
-    echo "Cleaning up template, secrets, controller..."
+    echo "Cleaning up..."
     kubectl delete --ignore-not-found secret gemini-api-key
     kubectl delete --ignore-not-found -f sandbox-gemini-computer-use.yaml
-    kubectl delete --ignore-not-found statefulset agent-sandbox-controller -n agent-sandbox-system
-    kubectl delete --ignore-not-found crd sandboxes.agents.x-k8s.io
-    echo "Deleting kind cluster..."
-    cd ../../
-    make delete-kind || true
-    cd examples/sandbox-gemini-computer-use
 }
 
+trap cleanup EXIT
 
 echo "Loading sandbox-runtime image into kind cluster..."
 kind load docker-image sandbox-gemini-runtime:latest --name "${KIND_CLUSTER_NAME}"
 
-echo "Applying CRD template for gemini computer use..."
+echo "Applying sandbox template CRD..."
 kubectl apply -f sandbox-gemini-computer-use.yaml
 
-echo "========= $0 - Running the Python client tester... ========="
+echo "Running a claim test using the python sdk..."
 python3 -m agentic-sandbox-client.test_computeruse
-echo "========= $0 - Finished running the Python client tester. ========="
 
-trap cleanup EXIT
+read -p "Cluster is running. Press Enter to shutdown and cleanup..."
+echo "Test finished."

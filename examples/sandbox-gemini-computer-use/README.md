@@ -100,3 +100,24 @@ To run the script:
 ```bash
 ./run-test-kind.sh
 ```
+
+## Running the Cluster Test Script (`run-test-cu-cluster.sh`)
+
+To test the sandbox on a Kubernetes cluster, you can use the `run-test-cu-cluster.sh` script.
+This script will:
+1.  Clone the `computer-use-preview` repository if it doesn't exist.
+2.  Build and deploy the agent sandbox controller to the cluster.
+3.  Build the python runtime sandbox image.
+4.  Load the image into the kind cluster.
+5.  Deploy the sandbox and run the tests using the template `sandbox-gemini-computer-use.yaml`
+6.  Clean up all the resources.
+
+### Flags
+
+- `--nobuild`: Skips the build steps.
+- `--interactive`: Runs the script in interactive mode (currently a placeholder).
+
+To run the script:
+```bash
+./run-test-cu-cluster.sh
+```

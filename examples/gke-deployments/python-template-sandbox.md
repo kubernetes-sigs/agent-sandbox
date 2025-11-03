@@ -38,20 +38,13 @@ gcloud container clusters create-auto $CLUSTER_NAME \
 gcloud container clusters get-credentials $CLUSTER_NAME --location $GKE_LOCATION
 ```
 
-Option B: Create a GKE Standard Cluster with a gVisor Node Pool
+Option B: Create a GKE Standard Cluster
 
-If you need to manage your own nodes, create a Standard cluster and add a dedicated node pool with GKE Sandbox (gVisor) enabled.
+If you prefer to manage your own nodes, create a GKE Standard cluster. This command will create the cluster along with a default node pool.
 ```
 gcloud container clusters create $CLUSTER_NAME \
     --location=$GKE_LOCATION \
     --workload-pool=${PROJECT_ID}.svc.id.goog
-
-gcloud container node-pools create gvisor-nodes \
-  --cluster=$CLUSTER_NAME \
-  --location=$GKE_LOCATION \
-  --sandbox type=gvisor \
-  --machine-type=e2-standard-4 \
-  --num-nodes=1
 
 # Get credentials for your new cluster
 gcloud container clusters get-credentials $CLUSTER_NAME --location $GKE_LOCATION
@@ -89,7 +82,7 @@ docker build -t $PYTHON_SANDBOX_IMG .
 docker push $PYTHON_SANDBOX_IMG
 ```
 
-## 4. Deploy & Test the Python Sandbox with gVisor
+## 4. Deploy & Test the Python Sandbox
 
 We will now create a SandboxTemplate that explicitly requests this secure runtime.
 
@@ -105,8 +98,6 @@ metadata:
 spec:
   podTemplate:
     spec:
-      # This line requests the gVisor runtime
-      runtimeClassName: "gvisor"
       containers:
       - name: python-sandbox
         image: us-central1-docker.pkg.dev/${PROJECT_ID}/${AR_REPO_NAME}/sandbox-runtime:latest

@@ -41,6 +41,22 @@ with Sandbox(template_name="python-sandbox-template", namespace="default") as sa
     print(result.stdout)
 ```
 
+### `ComputerUseSandbox`
+
+For the Gemini computer-use example, a specialized client `ComputerUseSandbox` is provided in `agentic_sandbox/computer_use_sandbox.py`. This class inherits from the base `Sandbox` and adds a convenient method for interacting with the agent running inside the sandbox.
+
+-   **`agent(query: str)`**: Sends a query to the agent's `/agent` endpoint and returns an `ExecutionResult` with the stdout, stderr, and exit code.
+
+**Example:**
+
+```python
+from agentic_sandbox import ComputerUseSandbox
+
+with ComputerUseSandbox(template_name="sandbox-gemini-computer-use") as sandbox:
+    result = sandbox.agent("Go to google.com and search for cats.")
+    print(result.stdout)
+```
+
 ## How to Test the Client
 
 A test script, `test_client.py`, is included to verify the client's functionality.
@@ -74,6 +90,47 @@ python test_client.py
 ```
 
 You should see output indicating that the tests for command execution and file operations have passed.
+
+## How to Test the Computer Use Client
+
+The `test_computeruse.py` script is included to verify the `ComputerUseSandbox` client's functionality.
+
+### 1. Set Up the Environment
+
+Before running the test, you need to set up the Kubernetes environment. From the `examples/sandbox-gemini-computer-use` directory, you can run the test script `run-test-cu-cluster.sh` or `run-test-kind.sh`.
+
+Alternatively, to set it up manually from the root of the `agent-sandbox` repository:
+
+```bash
+# 1. Build and deploy the controller
+make deploy-kind EXTENSIONS=true
+
+# 2. Navigate to the example directory
+cd examples/sandbox-gemini-computer-use
+
+# 3. Build the runtime image and apply the sandbox template
+docker build -t sandbox-gemini-runtime:latest .
+kind load docker-image sandbox-gemini-runtime:latest --name agent-sandbox
+kubectl apply -f sandbox-gemini-computer-use.yaml
+```
+
+### 2. Install the Client
+
+Install the client in editable mode from the `examples/sandbox-gemini-computer-use` directory:
+
+```bash
+pip install -e ./agentic-sandbox-client/
+```
+
+### 3. Run the Test Script
+
+Execute the `test_computeruse.py` script from the `examples/sandbox-gemini-computer-use` directory:
+
+```bash
+python -m agentic-sandbox-client.test_computeruse
+```
+
+This will create a sandbox, execute a sample query against the agent, and print the result.
 
 ## Packaging and Installation
 

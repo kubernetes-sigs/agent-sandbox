@@ -30,6 +30,7 @@ def main():
     
     try:
         
+        print("Passing GEMINI KEY")
         # Create the gemini-api-key secret
         subprocess.run(f"kubectl create secret generic gemini-api-key --from-literal=key={os.environ['GEMINI_API_KEY']} --dry-run=client -o yaml | kubectl apply -f -", shell=True)
         

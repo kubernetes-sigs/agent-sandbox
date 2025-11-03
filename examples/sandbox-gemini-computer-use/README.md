@@ -71,7 +71,7 @@ To run in interactive mode without rebuilding the image:
 ./run-test-docker.sh --nobuild --interactive
 ```
 
-## Python Classes in `main.py`
+## Python Classes
 
 The `main.py` file defines the following Pydantic models to ensure type-safe data for the API endpoints:
 
@@ -84,6 +84,9 @@ This class models the response body for the `/agent` endpoint.
 - **`stdout: str`**: The standard output from the agent execution.
 - **`stderr: str`**: The standard error from the agent execution.
 - **`exit_code: int`**: The exit code of the agent execution.
+
+### `ComputerUseSandbox`
+This class is a specialized `Sandbox` client for the computer-use example. It provides an `agent` method to execute queries using the agent by making an HTTP POST request to the `/agent` endpoint.
 
 ## Testing on a local kind cluster using agent-sandbox
 

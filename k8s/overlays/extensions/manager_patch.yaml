@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name:  agent-sandbox-controller
+  namespace: agent-sandbox-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: agent-sandbox-controller
+        args:
+        - "--extensions=true"

@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# This file assembles the "base" install
+resources:
+# 1. The static base files
+- base
+
+# 2. The generated base files
+- rbac.generated.yaml
+- crds/agents.x-k8s.io_sandboxes.yaml

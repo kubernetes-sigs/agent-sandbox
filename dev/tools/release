@@ -2,7 +2,7 @@
 # Copyright 2025 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# you may not in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -14,9 +14,9 @@
 # limitations under the License.
 
 import os
-import glob
 import re
 import argparse
+import subprocess
 
 def main():
     parser = argparse.ArgumentParser(description='Generate release manifests.')
@@ -27,50 +27,49 @@ def main():
     if not os.path.exists('release_assets'):
         os.makedirs('release_assets')
 
-    all_yaml_files = glob.glob('k8s/**/*.yaml', recursive=True)
     image_url = f'registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}'
+    
+    # --- Kustomize build paths ---
+    base_dir = "k8s/base"
+    extensions_dir = "k8s/overlays/extensions"
+    
+    # --- Output file paths ---
+    base_output_file = 'release_assets/manifest.yaml'
+    extensions_output_file = 'release_assets/extensions.yaml'
 
-    # --- Generate manifest.yaml ---
-    print('INFO: Preparing core manifest.yaml')
-    manifest_files = [f for f in all_yaml_files if 'extensions' not in os.path.basename(f)]
-    with open('release_assets/manifest.yaml', 'w') as outfile:
-        for fname in sorted(manifest_files):
-            with open(fname) as infile:
-                outfile.write(infile.read())
-                outfile.write('---\n')
+    try:
+        # --- Generate manifest.yaml (Base) ---
+        print(f'INFO: Building base manifest from {base_dir}')
+        cmd_base = ["kustomize", "build", base_dir]
+        result_base = subprocess.run(cmd_base, capture_output=True, check=True, text=True)
+        filedata_base = result_base.stdout
+        
+        print(f'INFO: Replacing image placeholder in base manifest.yaml with: {image_url}')
+        filedata_base = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata_base)
 
+        with open(base_output_file, 'w') as file:
+            file.write(filedata_base)
+        print(f'INFO: Successfully created {base_output_file}')
 
-    # Replace image placeholder in manifest.yaml
-    print(f'INFO: Replacing image placeholder in core manifest.yaml with: {image_url}')
-    with open('release_assets/manifest.yaml', 'r') as file:
-        filedata = file.read()
+        # --- Generate extensions.yaml (Overlay) ---
+        print(f'INFO: Building extensions manifest from {extensions_dir}')
+        cmd_ext = ["kustomize", "build", extensions_dir]
+        result_ext = subprocess.run(cmd_ext, capture_output=True, check=True, text=True)
+        filedata_ext = result_ext.stdout
 
-    filedata = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata)
+        print(f'INFO: Replacing image placeholder in extensions.yaml with: {image_url}')
+        filedata_ext = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata_ext)
 
-    with open('release_assets/manifest.yaml', 'w') as file:
-        file.write(filedata)
-    print('INFO: Successfully created release_assets/manifest.yaml')
+        with open(extensions_output_file, 'w') as file:
+            file.write(filedata_ext)
+        print(f'INFO: Successfully created {extensions_output_file}')
 
-    # --- Generate extensions.yaml ---
-    print('INFO: Preparing extensions.yaml')
-    extension_files = [f for f in all_yaml_files if 'extensions' in os.path.basename(f)]
-    with open('release_assets/extensions.yaml', 'w') as outfile:
-        for fname in sorted(extension_files):
-            with open(fname) as infile:
-                outfile.write(infile.read())
-                outfile.write('---\n')
-
-    # Replace image placeholder in extensions.yaml
-    print(f'INFO: Replacing image placeholder in extensions.yaml with: {image_url}')
-    with open('release_assets/extensions.yaml', 'r') as file:
-        filedata = file.read()
-
-    filedata = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata)
-
-    with open('release_assets/extensions.yaml', 'w') as file:
-        file.write(filedata)
-    print('INFO: Successfully created release_assets/extensions.yaml')
-
+    except FileNotFoundError:
+        print("Error: 'kustomize' command not found. Please ensure it's installed and in your PATH.")
+        exit(1) # Fail the build
+    except subprocess.CalledProcessError as e:
+        print(f"Error running kustomize: {e.stderr}")
+        exit(1) # Fail the build
 
 if __name__ == '__main__':
     main()

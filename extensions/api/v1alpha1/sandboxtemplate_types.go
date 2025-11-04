@@ -31,8 +31,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
@@ -43,7 +43,7 @@ type SandboxTemplateSpec struct {
 	// template is the object that describes the pod spec that will be used to create
 	// an agent sandbox.
 	// +kubebuilder:validation:Required
-	PodTemplate corev1.PodTemplateSpec `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

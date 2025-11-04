@@ -26,6 +26,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -42,6 +43,7 @@ import (
 
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	SanboxPodNameAnnotation     = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
 
@@ -290,12 +292,44 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
+
+	// List all pods with the pool label matching the warm pool name hash
+	// TODO: find a better way to make sure one sandbox has at most one pod
+	podList := &corev1.PodList{}
+	labelSelector := labels.SelectorFromSet(labels.Set{
+		sandboxLabel: nameHash,
+	})
+
+	if err := r.List(ctx, podList, &client.ListOptions{
+		LabelSelector: labelSelector,
+		Namespace:     sandbox.Namespace,
+	}); err != nil {
+		log.Error(err, "Failed to list pods")
+	}
+
+	if len(podList.Items) > 1 {
+		log.Info("Multiple pods found for sandbox, this should not happen", "Sandbox", sandbox.Name, "PodCount", len(podList.Items))
+	}
+
+	// Determine the pod name to look up
+	podName := sandbox.Name
+	var trackedPodName string
+	var podNameAnnotationExists bool
+	if trackedPodName, podNameAnnotationExists = sandbox.Annotations[SanboxPodNameAnnotation]; podNameAnnotationExists && trackedPodName != "" {
+		podName = trackedPodName
+		log.Info("Using tracked pod name from sandbox annotation", "podName", podName)
+	}
+
 	pod := &corev1.Pod{}
-	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod)
+	err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod)
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			log.Error(err, "Failed to get Pod")
 			return nil, fmt.Errorf("Pod Get Failed: %w", err)
+		}
+		if k8serrors.IsNotFound(err) && podNameAnnotationExists {
+			log.Error(err, "Pod not found")
+			return nil, fmt.Errorf("Pod in Annotation Get Failed: %w", err)
 		}
 		pod = nil
 	}
@@ -312,17 +346,46 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 			}
 		}
+
+		// Remove the pod name annotation from the sandbox if it exists
+		if _, exists := sandbox.Annotations[SanboxPodNameAnnotation]; exists {
+			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
+			// Create a patch to update only the annotations
+			patch := client.MergeFrom(sandbox.DeepCopy())
+			delete(sandbox.Annotations, SanboxPodNameAnnotation)
+
+			if err := r.Patch(ctx, sandbox, patch); err != nil {
+				return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
+			}
+		}
+
 		return nil, nil
 	}
 
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		pod.Labels[sandboxLabel] = nameHash
+
+		// Set controller reference if the pod is not controlled by anything.
+		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
+			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
+				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+			}
+		}
+
+		if err := r.Update(ctx, pod); err != nil {
+			return nil, fmt.Errorf("failed to update pod: %w", err)
+		}
+
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
 	}
 
-	// Create a pod object from the sandbox
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
 		sandboxLabel: nameHash,
@@ -365,6 +428,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
+
 	return pod, nil
 }
 

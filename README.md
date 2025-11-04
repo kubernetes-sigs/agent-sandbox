@@ -4,6 +4,19 @@
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
 
+## Installation
+
+You can install the agent-sandbox controller and its CRDs with the following command.
+
+```sh
+export VERSION="vX.Y.Z" # Replace with your desired version from https://github.com/kubernetes-sigs/agent-sandbox/releases
+
+# To install only the core components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+# To install extensions components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+```
+
 ## Motivation
 
 Kubernetes excels at managing stateless, replicated applications (Deployments) and stable, numbered sets of stateful pods (StatefulSets). However, there's a growing need for an abstraction to handle use cases such as:

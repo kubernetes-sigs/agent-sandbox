@@ -1,0 +1,24 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: secure-datascience-template
+  namespace: default
+spec:
+  #enableDisruptionControl: true
+  #shutdownTime: "2025-12-31T23:59:59Z"
+  podTemplate:
+    spec:
+      # This pod uses a non-root user and gVisor for runtime sandboxing.
+      #runtimeClassName: gvisor
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        runAsNonRoot: true
+      containers:
+      - name: my-container
+        image: busybox
+        command: ["/bin/sh", "-c", "sleep 36000"]
+        ports:
+        - containerPort: 8888
+          protocol: TCP

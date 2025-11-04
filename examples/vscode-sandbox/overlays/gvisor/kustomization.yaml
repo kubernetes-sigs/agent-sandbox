@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../base
+
+# This example adds the "gvisor" runtimeClassName to the Sandbox Pod spec
+patches:
+- path: patch-gvisor.yaml
+  target:
+    kind: Sandbox
+    name: sandbox-example

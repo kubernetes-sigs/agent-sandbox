@@ -13,18 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import datetime
 import os
 import subprocess
 
 
-def get_git_commit_short():
-    """Gets the short git commit hash for HEAD."""
-    return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+def git_describe():
+    """Gets the git describe output for HEAD."""
+    return subprocess.check_output(
+        ["git", "describe", "--always", "--dirty"], text=True).strip()
 
 
 def get_image_tag():
-    """Gets the image tag based on the git commit."""
-    return f"git-{get_git_commit_short()}"
+    """Gets the image tag based on the date and git commit."""
+    day = datetime.today().strftime("%Y%m%d")
+    return f"v{day}-{git_describe()}"
 
 
 def get_image_prefix(args):
@@ -34,10 +37,11 @@ def get_image_prefix(args):
     raise Exception(f"--image-prefix arg or IMAGE_PREFIX environment variable must be set")
 
 
-def get_full_image_name(args, image_id):
+def get_full_image_name(args, image_id, tag=None):
     """Constructs the full GCR image name for an image."""
     image_prefix = get_image_prefix(args)
-    tag = get_image_tag()
+    if not tag:
+        tag = get_image_tag()
     return f"{image_prefix}{image_id}:{tag}"
 
 

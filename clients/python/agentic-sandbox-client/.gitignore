@@ -1,0 +1,14 @@
+build/
+venv/
+
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.idea/
+.vscode/
+logs/
+*.log
+
+agentic_sandbox.egg-info/
+dist/

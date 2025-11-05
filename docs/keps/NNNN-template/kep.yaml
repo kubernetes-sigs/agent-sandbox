@@ -2,7 +2,7 @@ title: KEP Template
 kep-number: NNNN
 authors:
   - "@jane.doe"
-status: provisional|implementable|implemented|deferred|rejected|withdrawn|replaced
+status: implementable|implemented
 creation-date: yyyy-mm-dd
 reviewers:
   - TBD

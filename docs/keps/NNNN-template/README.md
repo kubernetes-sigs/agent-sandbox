@@ -13,7 +13,7 @@ TOC is auto-generated via `make toc-update`.
     - [API Changes](#api-changes)
     - [Implementation Guidance](#implementation-guidance)
 - [Scalability](#scalability)
-- [Alternatives](#alternatives)
+- [Alternatives (Optional)](#alternatives-optional)
 <!-- /toc -->
 
 ## Summary
@@ -53,7 +53,7 @@ It should focus on the "what" and "how" at a system level, not the implementatio
 #### API Changes
 
 <!--
-Describe any changes to the APIs of agent-sandbox.
+Describe any changes to the APIs of agent-sandbox. N/A if no API changes are needed.
 -->
 
 #### Implementation Guidance
@@ -67,6 +67,8 @@ It can include:
 - Suggestions for libraries or frameworks to use.
 - High-level descriptions of algorithms or logic, without writing the full code.
 - Any other context that would be helpful for implementation.
+
+Optional if the design is trivial and can be covered in High-Level Design section.
 -->
 
 ## Scalability
@@ -82,7 +84,7 @@ For example:
 - How will the feature behave in large-scale environments (e.g., many nodes, high request rates, large number of objects)?
 -->
 
-## Alternatives
+## Alternatives (Optional)
 
 <!--
 What other approaches did you consider, and why did you rule them out? 

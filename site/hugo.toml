@@ -59,9 +59,8 @@ ignoreFiles = []
 ###############################################################################
 # Docsy - Services configuration
 ###############################################################################
-[services]
-  [services.googleAnalytics]
-  id = "CHANGEME"
+#[services]
+#  [services.googleAnalytics]
 
 ###############################################################################
 # Docsy - Language configuration
@@ -106,9 +105,6 @@ ignoreFiles = []
   # branch of the repository. Used in the "version-banner" partial to display a
   # version number for this doc set.
   version = "0.1.0"
-
-  # Version of Agent Sandbox without the leading "v", as used for Helm charts.
-  chart_version = "0.1.0"
 
   # Flag used in the "version-banner" partial to decide whether to display a
   # banner on every page indicating that this is an archived version of the docs.

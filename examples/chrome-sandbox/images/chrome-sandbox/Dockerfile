@@ -38,20 +38,12 @@ RUN apt-get update  \
 
 # We need xdpyinfo to check that the X server is up
 RUN apt-get update  \
-    && apt-get install --yes x11-utils tar --no-install-recommends \
+    && apt-get install --yes x11-utils --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Precreate X11 stuff
 RUN mkdir -p /tmp/.X11-unix
 RUN chmod 1777 /tmp/.X11-unix
-
-# Install Kustomize for the deployment scripts
-# We assume 'wget' and 'tar' are already installed
-RUN KUSTOMIZE_VERSION=v5.4.1 \
-    && wget -O kustomize.tar.gz "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
-    && tar -zxvf kustomize.tar.gz \
-    && mv kustomize /usr/local/bin/kustomize \
-    && rm kustomize.tar.gz
 
 #----------------------
 # Add our entrypoint script

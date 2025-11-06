@@ -58,65 +58,64 @@ def walk_object(obj, fn, field_path=""):
         raise Exception(f"unexpected type: {type(obj)}")
 
 
+def patch_extensions(doc):
+    """Adds --extensions=true to the controller container if it's a StatefulSet."""
+    if doc.get("kind") != "StatefulSet": return
+    try:
+        for c in doc["spec"]["template"]["spec"]["containers"]:
+            if c["name"] in ["agent-sandbox-controller", "manager"]:
+                # Ensure args list exists and doesn't already have the flag
+                if "--extensions=true" not in c.get("args", []):
+                    c.setdefault("args", []).append("--extensions=true")
+                    print(f"Patched {doc['metadata']['name']}: added --extensions=true")
+    except (KeyError, TypeError):
+        pass
+
+
 def main(args):
     repo_root = utils.get_repo_root()
 
-    # Kustomize's security model blocks loading files from outside the
-    # build directory. We must disable this restriction to allow our
-    # overlays to access the generated files at the k8s/ root.
-    kustomize_sec_flag = "--load-restrictor=LoadRestrictionsNone"
-    
-    if args.extensions:
-        # Build the extensions overlay directory
-        build_path = os.path.join(repo_root, "k8s", "overlays", "extensions")
-        print(f"Building extensions overlay from: {build_path}")
-        kustomize_cmd = ["kustomize", "build", build_path, kustomize_sec_flag]
-    else:
-        # Build the base directory
-        build_path = os.path.join(repo_root, "k8s", "base")
-        print(f"Building base from: {build_path}")
-        kustomize_cmd = ["kustomize", "build", build_path, kustomize_sec_flag]
+    manifests_path = os.path.join(repo_root, "k8s")
 
-    # Run `kustomize build` to get the consolidated YAML
-    try:
-        kustomize_process = subprocess.run(
-            kustomize_cmd, 
-            cwd=repo_root, 
-            check=True, 
-            capture_output=True, 
-            text=True
-        )
-        yaml_content = kustomize_process.stdout
-    except subprocess.CalledProcessError as e:
-        print(f"Error running kustomize: {e.stderr}")
-        raise
-    except FileNotFoundError:
-        print("Error: 'kustomize' command not found. Please ensure it's installed and in your PATH.")
+    if not os.path.isdir(manifests_path):
+        print("k8s directory not found")
         return
 
-    # Now we have all YAML docs in one string, load them
-    docs = list(yaml.safe_load_all(yaml_content))
+    for root, dirs, files in os.walk(manifests_path):
+        for filename in files:
+            if not (filename.endswith(".yaml") or filename.endswith(".yml")):
+                continue
 
-    image_prefix = utils.get_image_prefix(args)
-    image_tag = utils.get_image_tag()
+            path = os.path.join(root, filename)
 
-    # Process each document in the file
-    for doc in docs:
-        if not doc: # Skip empty documents
-            continue
-        
-        # This function still works perfectly
-        find_and_replace_images(doc, "manager", image_prefix, image_tag)
+            with open(path, "r") as f:
+                # Use safe_load_all for multi-document YAML files
+                docs = list(yaml.safe_load_all(f))
 
-    # Dump the modified documents back to a string
-    string_stream = io.StringIO()
-    yaml.dump_all(docs, string_stream)
-    modified_content = string_stream.getvalue()
+            service_name = os.path.basename(root)
+            image_prefix = utils.get_image_prefix(args)
+            image_tag = utils.get_image_tag()
 
-    print("Applying all manifests to cluster...")
-    cmd = ["kubectl", "apply", "-f", "-"]
-    subprocess.run(cmd, cwd=repo_root, check=True, input=modified_content, text=True)
-    print("Deployment complete.")
+            # Process each document in the file
+            for doc in docs:
+                if not doc: # Skip empty documents
+                    continue
+
+                find_and_replace_images(doc, service_name, image_prefix, image_tag)
+
+                if args.extensions:
+                    patch_extensions(doc)
+
+            # Dump the modified documents back to a string
+            string_stream = io.StringIO()
+            yaml.dump_all(docs, string_stream)
+            modified_content = string_stream.getvalue()
+
+            rel_path = os.path.relpath(path, repo_root)
+            print(f"applying manifest {rel_path}")
+
+            cmd = ["kubectl", "apply", "-f", "-"]
+            subprocess.run(cmd, cwd=repo_root, check=True, input=modified_content, text=True)
 
 
 if __name__ == "__main__":
@@ -127,10 +126,10 @@ if __name__ == "__main__":
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
     
-    # New, cleaner flag
+    # Added flag for extensions
     parser.add_argument("--extensions",
                         action="store_true",
-                        help="Enable the extensions overlay (adds --extensions flag to controller)")
+                        help="Enable extensions (adds --extensions flag to controller)")
 
     args = parser.parse_args()
     main(args)

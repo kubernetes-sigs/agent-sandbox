@@ -1,8 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-
-# List all the resources for the default install
-resources:
-- controller.yaml
-- ../rbac.generated.yaml
-- ../crds/agents.x-k8s.io_sandboxes.yaml

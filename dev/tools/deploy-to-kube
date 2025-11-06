@@ -68,6 +68,10 @@ def main(args):
         return
 
     for root, dirs, files in os.walk(manifests_path):
+        # Process files in alphabetical order
+        # This works now because k8s/ doesn't contain CRs, and Namespace is defined in the first file (controller.yaml).
+        # TODO: Handle file ordering better so that CRDs and Namespaces are deployed first
+        files.sort()
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
                 continue

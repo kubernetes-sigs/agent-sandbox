@@ -4,6 +4,26 @@
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
 
+## Overview
+
+### Core: Sandbox
+
+The `Sandbox` CRD is the core of agent-sandbox. It provides a declarative API for managing a single, stateful pod with a stable identity and persistent storage. This is useful for workloads that don't fit well into the stateless, replicated model of Deployments or the numbered, stable model of StatefulSets.
+
+Key features of the `Sandbox` CRD include:
+
+*   **Stable Identity:** Each Sandbox has a stable hostname and network identity.
+*   **Persistent Storage:** Sandboxes can be configured with persistent storage that survives restarts.
+*   **Lifecycle Management:** The Sandbox controller manages the lifecycle of the pod, including creation, scheduled deletion, pausing and resuming.
+
+### Extensions
+
+The `extensions` module provides additional CRDs and controllers that build on the core `Sandbox` API to provide more advanced features.
+
+*   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
+*   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
+*   `SandboxWarmPool`: Manages a pool of pre-warmed Sandbox Pods that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
+
 ## Installation
 
 You can install the agent-sandbox controller and its CRDs with the following command.
@@ -13,9 +33,31 @@ export VERSION="vX.Y.Z" # Replace with your desired version from https://github.
 
 # To install only the core components:
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
-# To install extensions components:
+
+# To install the extensions components:
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```
+
+## Getting Started
+
+Once you have installed the controller, you can create a simple Sandbox by applying the following YAML to your cluster:
+
+```yaml
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: my-sandbox
+spec:
+  template:
+    spec:
+      containers:
+      - name: my-container
+        image: <IMAGE>
+```
+
+This will create a new Sandbox named `my-sandbox` running the image you specify. You can then access the Sandbox using its stable hostname, `my-sandbox`.
+
+For more complex examples, including how to use the extensions, please see the [examples/](examples/) and [extensions/examples/](extensions/examples/) directories.
 
 ## Motivation
 

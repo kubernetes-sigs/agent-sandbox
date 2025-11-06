@@ -1,0 +1,13 @@
+{{ $valid_states := "alpha, beta, deprecated, stable" }}
+{{ $project := .Get "project" | default "Agent Sandbox" }}
+{{ $state := .Get "state" }}
+{{ $for_version := .Get "for_version" | default (.Page.Param "version")}}
+{{ $is_valid := strings.Contains $valid_states $state }}
+
+{{ if not $is_valid }}
+{{ errorf "%q is not a valid feature-state, use one of %q" $state $valid_states }}
+{{ else }}
+<div class="feature-state-notice feature-{{ $state }}">
+  <span class="feature-state-name">Feature state</span> {{ $state }} since {{ $project }} {{ $for_version }}
+</div>
+{{ end }}

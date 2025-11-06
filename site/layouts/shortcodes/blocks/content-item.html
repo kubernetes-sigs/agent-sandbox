@@ -1,0 +1,9 @@
+{{ $url_text := .Get "url_text" }}
+<div class="col-lg-12 mb-5 mb-lg-0 ">
+  {{ with .Get "title" }}<h4 class="h3 mt-3">{{ . }}</h4>{{ end }}
+
+  <p class="text-muted">{{ .Get "date" }}</p>
+
+  <p class="mb-0">{{ .Inner }}</p>
+  {{ with .Get "url" }}<p><a href="{{ . }}">{{ with $url_text }}{{ $url_text }}{{ else }}{{ "Read" }}{{ end }}</a></p>{{ end }}
+</div>

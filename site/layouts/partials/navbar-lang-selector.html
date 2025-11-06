@@ -1,0 +1,29 @@
+<a class="nav-link dropdown-toggle" href="#" id="navbarLanguageDropdown" role="button" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+	<i class="fa fa-globe"></i>
+	{{ .Site.Language.LanguageName }}
+</a>
+<div class="dropdown-menu dropdown-menu-md-right dropdown-menu-lg-left" aria-labelledby="navbarLanguageDropdown">
+	{{ range .AllTranslations }}
+		{{ if ne .Language.Lang $.Site.Language.Lang }}
+			<a class="dropdown-item" href="{{ .RelPermalink }}" lang="{{ .Language.Lang }}">
+				{{ .Language.LanguageName }}
+			</a>
+		{{ end }}
+	{{ end }}
+	{{/* Fallback for languages without current page translation */}}
+	{{ range .Site.Languages }}
+		{{ if ne .Lang $.Site.Language.Lang }}
+			{{ $hasTranslation := false }}
+			{{ range $.AllTranslations }}
+				{{ if eq .Language.Lang .Lang }}
+					{{ $hasTranslation = true }}
+				{{ end }}
+			{{ end }}
+			{{ if not $hasTranslation }}
+				<a class="dropdown-item text-muted" href="{{ .Lang | relLangURL }}" lang="{{ .Lang }}" title="Translation not available for this page">
+					{{ .LanguageName }} <small>(Home)</small>
+				</a>
+			{{ end }}
+		{{ end }}
+	{{ end }}
+</div>

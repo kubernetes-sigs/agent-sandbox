@@ -1,0 +1,13 @@
+{{ $col_id := .Get "color" | default .Ordinal }}
+{{ $height := .Get "height" | default "auto"  }}
+
+<a id="td-block-{{ .Ordinal }}" class="td-offset-anchor"></a>
+<section class="row td-box td-box--{{ $col_id }} td-box--gradient td-box--height-{{ $height }}">
+	<div class="col">
+    <h4 class="h2 mb-3 mt-5">{{ .Get "title" | markdownify }}</h4>
+		<div class="row">
+			{{ .Inner }}THIS
+		</div>
+	</div>
+</section>
+

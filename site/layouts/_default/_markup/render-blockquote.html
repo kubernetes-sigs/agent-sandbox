@@ -1,0 +1,21 @@
+{{ $emojis := dict
+  "caution" "error"
+  "note" "star"
+  "important" "star"
+  "success" "check_circle"
+  "warning" "warning"
+}}
+{{ if eq .Type "alert" }}
+<div class="alert alert-{{ .AlertType }}">
+  <div style="display: flex;"><span class="material-symbols-outlined">
+    {{ index $emojis .AlertType }}
+    </span></div>
+  <div class="alert-body">
+    <span class="title-{{ .AlertType }}">{{ .Text | safeHTML }}</span>
+  </div>
+</div>
+{{ else }}
+<blockquote>
+  {{ .Text }}
+</blockquote>
+{{ end }}

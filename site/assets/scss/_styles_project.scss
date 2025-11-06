@@ -1,0 +1,215 @@
+a {
+  text-decoration: none;
+}
+
+// --------------------------------------------------
+// remove whitespace after footer
+// --------------------------------------------------
+footer {
+  min-height: auto;
+}
+
+// --------------------------------------------------
+// prevent overflow of long names in sidebar
+// --------------------------------------------------
+.td-sidebar-nav__section > ul {
+  overflow-wrap: break-word;
+}
+
+.td-overlay--dark::after {
+  background-color: rgba(33, 61, 122, 0.6);
+}
+
+#main_navbar {
+  justify-content: end;
+  padding-right: 16px;
+}
+
+.row > * {
+  flex-shrink: 1;
+}
+
+.row > .container {
+  max-width: 1200px;
+}
+
+// --------------------------------------------------
+// custom navbar with larger logo, dropdown on mobile
+// --------------------------------------------------
+.td-navbar {
+  min-height: auto;
+
+  .navbar-brand {
+    margin: 0;
+    padding: 0;
+
+    .text-uppercase {
+      display: none;
+    }
+
+    .navbar-logo {
+      svg {
+        display: inline-block;
+        position: absolute;
+        top: 0;
+        z-index: 33;
+        padding: 10px;
+        height: 95px;
+        background: white;
+        border: 2px solid #4279f4;
+        border-top: none;
+
+        @include media-breakpoint-down(md) {
+          width: 80px;
+          height: auto;
+          padding: 6px;
+        }
+      }
+    }
+  }
+
+  .navbar-nav {
+    @include media-breakpoint-down(md) {
+      font-size: .875rem;
+      .dropdown {
+        min-width: inherit;
+      }
+    }
+  }
+}
+
+.td-sidebar {
+  padding-bottom: 0.5rem;
+
+  .td-sidebar__inner {
+    padding-top: 30px;
+
+    @include media-breakpoint-down(md) {
+      padding-top: 10px;
+    }
+  }
+}
+
+.td-sidebar-toc {
+  @supports (position: sticky) {
+      position: sticky;
+      top: 60px;
+      height: calc(100vh - 120px);
+      overflow-y: auto;
+  }
+}
+
+
+// --------------------------------------------------
+// 404 page
+// --------------------------------------------------
+.error-page {
+  margin-top: 120px;
+
+  ul {
+    margin-bottom: 50px;
+    list-style-type: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    padding-left: 0;
+  }
+
+  li {
+    margin-left: 10px;
+    margin-right: 10px;
+  }
+
+  h1 {
+    text-align: center;
+    margin-bottom: 20px;
+  }
+
+  @media (min-width: 768px) and (max-width: 991px) {
+    margin-top: 100px;
+  }
+
+  @media (max-width: 767px) {
+    margin-top: 50px;
+  }
+}
+
+figcaption {
+  font-size: 0.8rem;
+  text-align: center;
+  font-style: italic;
+  color: #6c757d;
+}
+
+// --------------------------------------------------
+// for tabbed code blocks
+// --------------------------------------------------
+.nav-tabs {
+  border-bottom: none !important;
+}
+
+.td-content > ul li,
+.td-content > ol li.nav-item {
+  margin-bottom: 0px;
+}
+
+.td-content .tab-content .highlight {
+  margin: 0;
+}
+
+.tab-pane {
+  border-radius: 0.25rem;
+  padding: 0 16px 16px;
+
+  border: 1px solid #dee2e6;
+
+  &:first-of-type.active {
+    border-top-left-radius: 0;
+  }
+}
+
+nav.foldable-nav .ul-1 .with-child>label:hover:before {
+  transform: none;
+}
+
+nav.foldable-nav .ul-1 .with-child>input:checked~label:hover:before {
+  transform: rotate(90deg) !important;
+}
+
+div.feature-state-notice {
+    background-color: #daeaf9;
+    border-radius: 0.75rem;
+    padding: 1rem;
+    margin-bottom: 1em;
+
+    font-size: 1.2em;
+
+    > .feature-state-name::before {
+      content: 'ⓘ  ';
+      color: #326ce5; // Kubernetes blue
+    }
+    > .feature-state-name {
+      display: inline-block;
+      font-size: 0.95em;
+      font-weight: bold;
+      color: #000;
+    }
+
+    code {
+      color: #000;
+      font-size: 1em;
+      background-color: #daeaf9;
+    }
+
+    margin-right: 2em;
+    max-width: 80%;
+
+    &.feature-deprecated {
+      > .feature-state-name::before {
+        color: #ed6a5a;
+      }
+
+      background-color: #fbe1de;
+    }
+  }

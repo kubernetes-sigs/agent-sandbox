@@ -1,0 +1,43 @@
+
+{{/* Handle the "file" and "lang" named parameter or two unnamed parameter as the filepath and coding language*/}}
+{{/* The first parameter should be a relative path to the "static" directory. Ex: "examples/jobs/sample-job.yaml" */}}
+{{ if .IsNamedParams }}
+	{{ $.Scratch.Set "fparameter" ( .Get "file" ) }}
+  {{ $.Scratch.Set "lang" ( .Get "lang") }}
+{{ else }}
+	{{ $.Scratch.Set "fparameter" ( .Get 0 ) }}
+  {{ $.Scratch.Set "lang" ( .Get 1 ) }}
+{{ end }}
+
+{{/* If coding language are specified, then the static file is a code file; If not, then the static are non-code file. */}}
+{{ if eq ($.Scratch.Get "lang") "" }}
+{{ $.Scratch.Set "iscode" "false"}}
+{{ else }}
+{{ $.Scratch.Set "iscode" "true" }}
+{{ end }}
+
+{{/* `fparameter is a relative path of the static file from the `static` directory. For example, `/example/python/install-sandbo.py` */}}
+{{ $.Scratch.Set "filepath" "/" }}
+{{ $.Scratch.Add "filepath" "static/" }}
+{{ $.Scratch.Add "filepath" ($.Scratch.Get "fparameter") }}
+
+{{/* If the file exists, read it and highlight it if it's code.
+Throw a compile error or print an error on the page if the file is not found */}}
+
+{{ if fileExists ($.Scratch.Get "filepath") }}
+  {{ $filename := (path.Split ($.Scratch.Get "filepath")).File }}
+  {{ $link := printf "/%s"  ($.Scratch.Get "fparameter") | safeURL }}
+  <div class="highlight">
+    <a href="{{ $link }}" download="{{ $filename }}" class="d-flex flex-row-reverse p-2"> <button class="btn btn-outline-primary btn-sm position-absolute"> <i class="fa-solid fa-file-arrow-down"></i> {{ $filename }}   </button> </a>
+  {{ if eq ($.Scratch.Get "iscode") "true" }}
+    {{- highlight ($.Scratch.Get "filepath" | readFile | htmlUnescape |
+    safeHTML ) ($.Scratch.Get "lang") "" -}}
+  {{ else }}
+    {{- $.Scratch.Get "filepath" | os.ReadFile | .Page.RenderString | safeHTML -}}
+  {{ end }}
+ </div> 
+{{ else if eq (.Get "draft") "true" }}
+
+  <p style="color: #D74848"><b><i>The file <code>{{ $.Scratch.Get "filepath" }}</code> was not found.</i></b></p> 
+
+{{ else }}{{- errorf "Shortcode %q: file %q not found at %s" .Name ($.Scratch.Get "filepath") .Position -}}{{ end }}

@@ -1,7 +1,17 @@
 [build]
   base = "site/"
   publish = "public/"
+  command = "npm ci && hugo build -e production"
 
-  # A placeholder command that creates the publish directory and a single index.html file.
-  # This ensures the build succeeds without needing a full site generator like Hugo yet.
-  command = "mkdir -p public && echo 'Placeholder Page' > public/index.html"
+[build.environment]
+  HUGO_VERSION = "0.150.0"
+
+[context.production.environment]
+  HUGO_ENV = "production"
+  HUGO_BASEURL = "https://agent-sandbox.sigs.k8s.io/"
+
+[context.deploy-preview]
+  command = "hugo --enableGitInfo --buildFuture -b $DEPLOY_PRIME_URL"
+
+[context.branch-deploy]
+  command = "hugo --enableGitInfo --buildFuture -b $DEPLOY_PRIME_URL"

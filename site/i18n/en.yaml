@@ -1,0 +1,36 @@
+- id: nav_docs
+  translation: "Documentation"
+- id: nav_concepts
+  translation: "Concepts"
+- id: nav_tasks
+  translation: "Tasks"
+- id: nav_reference
+  translation: "Reference"
+- id: search_placeholder
+  translation: "Search documentation..."
+- id: edit_page
+  translation: "Edit this page"
+- id: last_modified
+  translation: "Last modified"
+- id: language_switch
+  translation: "Language"
+- id: post_create_child_page
+  translation: "Create child page"
+- id: ui_read_more
+  translation: "Read more"
+- id: post_view_this
+  translation: "View this page"
+- id: post_edit_this
+  translation: "Edit this page"
+- id: post_create_issue
+  translation: "Create issue"
+- id: post_create_project_issue
+  translation: "Create project issue"
+- id: feedback_title
+  translation: "Feedback"
+- id: feedback_question
+  translation: "Was this page helpful?"
+- id: feedback_positive
+  translation: "Yes"
+- id: feedback_negative
+  translation: "No"

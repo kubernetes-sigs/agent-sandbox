@@ -1,0 +1,19 @@
+{{ define "main"}}
+<div class="contain error-page">
+  <h1>404 Page not found</h1>
+  <ul>
+    {{ range .Site.Menus.main }}
+    <li>
+      {{ $url := urls.Parse .URL }}
+      {{ $baseurl := urls.Parse $.Site.Params.Baseurl }}
+      <a
+        href="{{ with .Page }}{{ .RelPermalink }}{{ else }}{{ .URL | relLangURL }}{{ end }}"
+        {{ if ne $url.Host $baseurl.Host }}target="_blank"{{ end }}
+      >
+        {{ .Name }}
+      </a>
+    </li>
+    {{ end }}
+  </ul>
+</div>
+{{ end }}

@@ -1,0 +1,50 @@
++++
+title = "Agent Sandbox"
+linkTitle = "Agent Sandbox"
+description = "Agent Sandbox is a cloud native controller for sandboxes"
++++
+
+{{< blocks/cover title="Agent Sandbox" image_anchor="top" height="full" color="black" >}}
+<div class="mx-auto">
+	<a class="btn btn-lg btn-primary me-3 mb-4" href="/docs/">
+		Read the docs <i class="fas fa-arrow-alt-circle-right ms-2"></i>
+	</a>
+	<a class="btn btn-lg btn-secondary me-3 mb-4" href="https://github.com/kubernetes-sigs/agent-sandbox">
+		GitHub <i class="fab fa-github ms-2 "></i>
+	</a>
+	<p class="lead mt-5">Secure Agent Execution Environment</p>
+	{{< blocks/link-down color="info" id="description" >}}
+</div>
+{{< /blocks/cover >}}
+
+<div id="description" ></div>
+
+{{% blocks/lead color="primary"%}}
+<h1  class="text-center">Agent Sandbox provides a secure, and isolated execution layer to safely deploy autonomous AI agents on Kubernetes that generate and run untrusted code at scale.</h1>
+{{% /blocks/lead %}}
+
+{{% blocks/lead color="secondary" %}}
+<h1 class="text-center">Users can leverage Agent Sandbox to safely execute arbitrary, untrusted code within an isolated environment, enabling applications such as stateful code interpretation, agentic web browsing, computer use, and sophisticated data analysis.</h1>
+{{% /blocks/lead %}}
+
+{{% blocks/lead color="dark" %}}
+<h1 class="text-center">The Agent Sandbox is specifically designed for interoperability by defining a standardized Kubernetes API that decouples the execution layer from the underlying technology. This abstraction allows the sandbox to support various backends, such as gVisor, and Kata Containers, enabling users to choose the isolation technology that best fits their security, performance, or workload requirements.</h1>
+{{% /blocks/lead %}}
+
+{{< blocks/section color="light" type="row">}}
+
+{{% blocks/feature icon="fab fa-github" title="Contributions welcome!" url="https://github.com/kubernetes-sigs/agent-sandbox" %}}
+We do a [Pull Request](https://github.com/kubernetes-sigs/agent-sandbox/pulls) contributions workflow on **GitHub**. New users are always welcome!
+{{% /blocks/feature %}}
+
+{{% blocks/feature icon="fab fa-slack" title="Connect with us" url="https://kubernetes.slack.com" %}}
+Talk to contributors on [#agent-sandbox](https://kubernetes.slack.com/messages/agent-sandbox) channel
+
+{{% /blocks/feature %}}
+
+{{% blocks/feature icon="fa fa-envelope" title="Join the mailing group" url="https://groups.google.com/a/kubernetes.io/g/sig-apps" %}}
+Join the conversation on the [mailing group](https://groups.google.com/a/kubernetes.io/g/sig-apps)
+{{% /blocks/feature %}}
+
+
+{{< /blocks/section >}}

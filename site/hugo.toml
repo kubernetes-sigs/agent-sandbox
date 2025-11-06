@@ -96,23 +96,8 @@ ignoreFiles = []
   trademark_link = "https://www.linuxfoundation.org/legal/trademark-usage"
 
   # Google Custom Search Engine ID.
-  # gcs_engine_id = "CHANGEME"
+  # gcs_engine_id = ""
   prism_syntax_highlighting = true
-  # Text label for the version menu in the top bar of the website.
-  version_menu = "Version"
-
-  # The major.minor version tag for the version of the docs represented in this
-  # branch of the repository. Used in the "version-banner" partial to display a
-  # version number for this doc set.
-  version = "0.1.0"
-
-  # Flag used in the "version-banner" partial to decide whether to display a
-  # banner on every page indicating that this is an archived version of the docs.
-  archived_version = false
-
-  # A link to latest version of the docs. Used in the "version-banner" partial to
-  # point people to the main doc site.
-  url_latest_version = "https://agent-sandbox.sigs.k8s.io/docs"
 
   # A variable used in various docs to determine URLs for config files etc.
   # To find occurrences, search the repo for 'params "githubbranch"'.

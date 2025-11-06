@@ -105,10 +105,34 @@ def push_image_for_go_mod(args, mod_dir):
             build_and_push_image(args, service_name, mod_dir, dockerfile_path)
 
 
+def push_images_for_examples(args):
+    """Builds and pushes docker images for examples."""
+    examples_dir = "examples"
+    if not os.path.isdir(examples_dir):
+        return
+
+    for example in os.listdir(examples_dir):
+        example_dir = os.path.join(examples_dir, example)
+        if not os.path.isdir(example_dir):
+            continue
+
+        dockerfile_path = os.path.join(example_dir, "Dockerfile")
+        if not os.path.isfile(dockerfile_path):
+            continue
+
+        service_name = example.replace("-", "_")
+
+        print(f"create Docker buildx builder for {service_name}")
+        create_buildx_builder_if_not_exists()
+        print(f"building image for {service_name}")
+        build_and_push_image(args, service_name, example_dir, dockerfile_path)
+
+
 def main(args):
     """Builds and pushes docker images."""
     golang.for_each_module(lambda mod_dir: push_image_for_go_mod(args, mod_dir))
-
+    push_images_for_examples(args)
+    
 
 if __name__ == "__main__":
     # parse arguments and call

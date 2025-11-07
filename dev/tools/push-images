@@ -124,7 +124,7 @@ def push_images_for_examples(args):
         if not os.path.isfile(dockerfile_path):
             continue
 
-        service_name = example.replace("-", "_")
+        service_name = example
 
         print(f"create Docker buildx builder for {service_name}")
         create_buildx_builder_if_not_exists()

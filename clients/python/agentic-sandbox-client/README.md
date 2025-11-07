@@ -23,7 +23,11 @@ This Python client provides a simple, high-level interface for creating and inte
     ```
 3. **Option 1: Install from source via git:**
     ```bash
-    pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client"
+    # Replace "main" with a specific version tag (e.g., "v0.1.0") from 
+    # https://github.com/kubernetes-sigs/agent-sandbox/releases to pin a version tag.
+    export VERSION="main"
+
+    pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
     ```
 4. **Option 2: Install from source in editable mode:**
     ```bash

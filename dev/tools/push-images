@@ -83,7 +83,9 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path):
     if args.kind_cluster_name:
         load_kind_image(args.kind_cluster_name, service_name, srcdir)
 
-
+# This only builds and pushes images in directories with
+# 1) go.mod file
+# 2) images/*/Dockerfile
 def push_image_for_go_mod(args, mod_dir):
     """Builds and pushes docker images."""
     images_dir = os.path.join(mod_dir, "images")
@@ -105,6 +107,7 @@ def push_image_for_go_mod(args, mod_dir):
             build_and_push_image(args, service_name, mod_dir, dockerfile_path)
 
 
+# This only builds and pushes images in examples/*/Dockerfile
 def push_images_for_examples(args):
     """Builds and pushes docker images for examples."""
     examples_dir = "examples"
@@ -132,6 +135,7 @@ def main(args):
     """Builds and pushes docker images."""
     golang.for_each_module(lambda mod_dir: push_image_for_go_mod(args, mod_dir))
     push_images_for_examples(args)
+    # TODO: Handle image building and pushing logic better
     
 
 if __name__ == "__main__":

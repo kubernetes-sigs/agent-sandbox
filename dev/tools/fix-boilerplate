@@ -30,6 +30,8 @@ def main():
 
     excludes = [
         "**/zz_generated.*",
+        #TODO:  make hugo files work with the necessary headers
+        "**/site/**",
     ]
 
     print(f"Scanning for license headers in {repo_root}")

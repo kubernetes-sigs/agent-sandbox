@@ -1,0 +1,25 @@
+---
+kind: StatefulSet
+apiVersion: apps/v1
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  serviceName: agent-sandbox-controller
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox-controller
+    spec:
+      serviceAccountName: agent-sandbox-controller
+      containers:
+      - name: agent-sandbox-controller
+        image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # placeholder value, replaced by deployment scripts
+        args:
+        - "--extensions"

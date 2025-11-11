@@ -33,7 +33,9 @@ SANDBOX_API_GROUP = "agents.x-k8s.io"
 SANDBOX_API_VERSION = "v1alpha1"
 SANDBOX_PLURAL_NAME = "sandboxes"
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
+
 
 @dataclass
 class ExecutionResult:
@@ -42,15 +44,17 @@ class ExecutionResult:
     stderr: str
     exit_code: int
 
+
 class SandboxClient:
     """
     The main client for creating and interacting with a stateful Sandbox (now named SandboxClient).
     This class is a context manager, designed to be used with a `with` statement.
     """
+
     def __init__(
-        self, 
-        template_name: str, 
-        namespace: str = "default", 
+        self,
+        template_name: str,
+        namespace: str = "default",
         server_port: int = 8888,
         sandbox_ready_timeout: int = 180,
         port_forward_ready_timeout: int = 30
@@ -62,6 +66,7 @@ class SandboxClient:
         self.port_forward_ready_timeout = port_forward_ready_timeout
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
+        self.pod_name: str | None = None
         self.base_url = f"http://127.0.0.1:{self.server_port}"
         self.port_forward_process: subprocess.Popen | None = None
 
@@ -97,11 +102,39 @@ class SandboxClient:
 
     def _wait_for_sandbox_ready(self):
         """
-        Waits for the Sandbox custom resource to have a 'Ready' status condition.
+        Waits for the SandboxClaim to be populated with the Sandbox name, and then
+        waits for the Sandbox custom resource to have a 'Ready' status condition.
         This indicates that the underlying pod is running and has passed its checks.
         """
         if not self.claim_name:
-            raise RuntimeError("Cannot wait for sandbox, claim has not been created.")
+            raise RuntimeError(
+                "Cannot wait for sandbox, claim has not been created.")
+
+        # Watch for the SandboxClaim to be updated with the sandbox name
+        w_claim = watch.Watch()
+        for event in w_claim.stream(
+                self.custom_objects_api.list_namespaced_custom_object,
+                namespace=self.namespace,
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                plural=CLAIM_PLURAL_NAME,
+                field_selector=f"metadata.name={self.claim_name}",
+                timeout_seconds=self.sandbox_ready_timeout
+        ):
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                claim_obj = event["object"]
+                status = claim_obj.get("status", {})
+                sandbox_status = status.get("sandbox", {})
+                if sandbox_status and sandbox_status.get("Name"):
+                    self.sandbox_name = sandbox_status.get("Name")
+                    w_claim.stop()
+                    break
+        else:
+            self.__exit__(None, None, None)  # Attempt cleanup
+            raise TimeoutError(
+                f"SandboxClaim did not become ready within {self.sandbox_ready_timeout} seconds.")
+
+        # Watch for the Sandbox to become ready
         w = watch.Watch()
         logging.info("Watching for Sandbox to become ready...")
         for event in w.stream(
@@ -110,40 +143,52 @@ class SandboxClient:
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             plural=SANDBOX_PLURAL_NAME,
-            field_selector=f"metadata.name={self.claim_name}",
+            field_selector=f"metadata.name={self.sandbox_name}",
             timeout_seconds=self.sandbox_ready_timeout
         ):
-            sandbox_object = event['object']
-            status = sandbox_object.get('status', {})
-            conditions = status.get('conditions', [])
-            is_ready = False
-            for cond in conditions:
-                if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                    is_ready = True
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                sandbox_object = event['object']
+                status = sandbox_object.get('status', {})
+                conditions = status.get('conditions', [])
+                is_ready = False
+                for cond in conditions:
+                    if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                        is_ready = True
+                        break
+
+                if is_ready:
+                    annotations = sandbox_object.get(
+                        'metadata', {}).get('annotations', {})
+                    pod_name_annotation = "agents.x-k8s.io/pod-name"
+                    if pod_name_annotation in annotations:
+                        self.pod_name = annotations[pod_name_annotation]
+                        logging.info(
+                            f"Found pod name from annotation: {self.pod_name}")
+                    else:
+                        self.pod_name = self.sandbox_name
+                    w.stop()
+                    logging.info(f"Sandbox {self.sandbox_name} is ready.")
                     break
 
-            if is_ready:
-                self.sandbox_name = sandbox_object['metadata']['name']
-                w.stop()
-                logging.info(f"Sandbox {self.sandbox_name} is ready.")
-                break
-
-        if not self.sandbox_name:
+        if not self.pod_name:
             self.__exit__(None, None, None)
-            raise TimeoutError(f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
+            raise TimeoutError(
+                f"Sandbox did not become ready or pod name could not be determined within {self.sandbox_ready_timeout} seconds.")
 
     def _start_and_wait_for_port_forward(self):
         """
         Starts the 'kubectl port-forward' subprocess and waits for the local port
         to be open and listening, ensuring the tunnel is ready for traffic.
         """
-        if not self.sandbox_name:
-            raise RuntimeError("Cannot start port-forwarding, sandbox name is not known.")
-        logging.info(f"Starting port-forwarding for sandbox {self.sandbox_name}...")
+        if not self.pod_name:
+            raise RuntimeError(
+                "Cannot start port-forwarding, sandbox pod name is not known.")
+        logging.info(
+            f"Starting port-forwarding for sandbox {self.sandbox_name} with sandbox pod {self.pod_name}...")
         self.port_forward_process = subprocess.Popen(
             [
                 "kubectl", "port-forward",
-                f"pod/{self.sandbox_name}",
+                f"pod/{self.pod_name}",
                 f"{self.server_port}:{self.server_port}",
                 "-n", self.namespace
             ],
@@ -165,14 +210,16 @@ class SandboxClient:
 
             try:
                 with socket.create_connection(("127.0.0.1", self.server_port), timeout=0.1):
-                    logging.info(f"Port-forwarding is ready on port {self.server_port}.")
+                    logging.info(
+                        f"Port-forwarding is ready on port {self.server_port}.")
                     return
             except (socket.timeout, ConnectionRefusedError):
                 time.sleep(0.2)  # Wait before retrying
 
         # If the loop finishes, it timed out
         self.__exit__(None, None, None)
-        raise TimeoutError(f"Port-forwarding did not become ready within {self.port_forward_ready_timeout} seconds.")
+        raise TimeoutError(
+            f"Port-forwarding did not become ready within {self.port_forward_ready_timeout} seconds.")
 
     def __enter__(self) -> 'SandboxClient':
         """Creates the SandboxClaim resource and waits for the Sandbox to become ready."""
@@ -200,7 +247,8 @@ class SandboxClient:
                 )
             except client.ApiException as e:
                 if e.status != 404:
-                    logging.error(f"Error deleting sandbox claim: {e}", exc_info=True)
+                    logging.error(
+                        f"Error deleting sandbox claim: {e}", exc_info=True)
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """
@@ -210,22 +258,24 @@ class SandboxClient:
         if not self.is_ready():
             raise RuntimeError("Sandbox is not ready. Cannot send requests.")
 
-        url = f"http://127.0.0.1:{self.server_port}/{endpoint}"
+        url = f"{self.base_url}/{endpoint}"
         try:
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
             return response
         except requests.exceptions.RequestException as e:
             logging.error(f"Request to sandbox failed: {e}")
-            raise RuntimeError(f"Failed to communicate with the sandbox at {url}.") from e
+            raise RuntimeError(
+                f"Failed to communicate with the sandbox at {url}.") from e
 
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
         """
         Executes a shell command inside the running sandbox.
         """
         payload = {"command": command}
-        response = self._request("POST", "execute", json=payload, timeout=timeout)
-        
+        response = self._request(
+            "POST", "execute", json=payload, timeout=timeout)
+
         response_data = response.json()
         return ExecutionResult(
             stdout=response_data['stdout'],

@@ -39,7 +39,8 @@ SANDBOX_API_VERSION = "v1alpha1"
 SANDBOX_PLURAL_NAME = "sandboxes"
 
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    stream=sys.stdout)
 
 
 @dataclass
@@ -129,39 +130,13 @@ class SandboxClient:
 
     def _wait_for_sandbox_ready(self):
         """
-        Waits for the SandboxClaim to be populated with the Sandbox name, and then
-        waits for the Sandbox custom resource to have a 'Ready' status condition.
+        Waits for the Sandbox custom resource to have a 'Ready' status condition.
         This indicates that the underlying pod is running and has passed its checks.
         """
         if not self.claim_name:
             raise RuntimeError(
                 "Cannot wait for sandbox, claim has not been created.")
 
-        # Watch for the SandboxClaim to be updated with the sandbox name
-        w_claim = watch.Watch()
-        for event in w_claim.stream(
-                self.custom_objects_api.list_namespaced_custom_object,
-                namespace=self.namespace,
-                group=CLAIM_API_GROUP,
-                version=CLAIM_API_VERSION,
-                plural=CLAIM_PLURAL_NAME,
-                field_selector=f"metadata.name={self.claim_name}",
-                timeout_seconds=self.sandbox_ready_timeout
-        ):
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                claim_obj = event["object"]
-                status = claim_obj.get("status", {})
-                sandbox_status = status.get("sandbox", {})
-                if sandbox_status and sandbox_status.get("Name"):
-                    self.sandbox_name = sandbox_status.get("Name")
-                    w_claim.stop()
-                    break
-        else:
-            self.__exit__(None, None, None)  # Attempt cleanup
-            raise TimeoutError(
-                f"SandboxClaim did not become ready within {self.sandbox_ready_timeout} seconds.")
-
-        # Watch for the Sandbox to become ready
         w = watch.Watch()
         logging.info("Watching for Sandbox to become ready...")
         for event in w.stream(
@@ -170,7 +145,7 @@ class SandboxClient:
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             plural=SANDBOX_PLURAL_NAME,
-            field_selector=f"metadata.name={self.sandbox_name}",
+            field_selector=f"metadata.name={self.claim_name}",
             timeout_seconds=self.sandbox_ready_timeout
         ):
             if event["type"] in ["ADDED", "MODIFIED"]:
@@ -184,6 +159,7 @@ class SandboxClient:
                         break
 
                 if is_ready:
+                    self.sandbox_name = sandbox_object['metadata']['name']
                     annotations = sandbox_object.get(
                         'metadata', {}).get('annotations', {})
                     pod_name_annotation = "agents.x-k8s.io/pod-name"
@@ -197,7 +173,7 @@ class SandboxClient:
                     logging.info(f"Sandbox {self.sandbox_name} is ready.")
                     break
 
-        if not self.pod_name:
+        if not self.sandbox_name:
             self.__exit__(None, None, None)
             raise TimeoutError(
                 f"Sandbox did not become ready or pod name could not be determined within {self.sandbox_ready_timeout} seconds.")

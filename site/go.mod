@@ -1,5 +1,5 @@
-module sigs.k8s.io/agent-sandbox/site
+module github.com/kubernetes-sigs/agent-sandbox
 
-go 1.25
+go 1.25.4
 
-require github.com/google/docsy v0.11.0 // indirect
+require github.com/google/docsy v0.12.0 // indirect

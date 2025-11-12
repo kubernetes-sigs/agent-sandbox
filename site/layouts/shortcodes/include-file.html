@@ -1,0 +1,6 @@
+{{ $file := (.Get "file") }}
+{{ $md := resources.Get $file }}
+
+{{ $newContent := replaceRE `(\s*#[^\n$]*\n*)` "" $md.Content 1 }}
+
+{{ $newContent | markdownify }}

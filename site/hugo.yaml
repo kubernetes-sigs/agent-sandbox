@@ -1,0 +1,147 @@
+baseURL: 'https://agent-sandbox.sigs.k8s.io/'
+languageCode: 'en-us'
+title: 'Agent Sandbox'
+
+enableRobotsTXT: true
+
+## Docsy
+enableGitInfo: true
+disableKinds:
+  - taxonomy
+
+menu:
+  main:
+    - name: "Github"
+      weight: 99
+      pre: "<i class='fab fa-github pe-2'></i>"
+      url: "https://github.com/kubernetes-sigs/agent-sandbox"
+
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
+    parser:
+      attribute:
+        block: true
+  highlight:
+    guessSyntax: true
+    style: tango
+  tableOfContents:
+    startLevel: 2
+    endLevel: 3
+    ordered: false
+
+imaging:
+  resampleFilter: CatmullRom
+  quality: 75
+  anchor: Smart
+
+params:
+  github_repo: "https://github.com/kubernetes-sigs/agent-sandbox"
+  github_project_repo: "https://github.com/kubernetes-sigs/agent-sandbox"
+  github_subdir: "site"
+  RSSLink: "/index.xml"
+  author: "kubernetes" # add your company name
+  github: "kubernetes" # add your github profile name
+  twitter: "kubernetesio" # add your twitter profile
+
+  copyright: "The Kubernetes Authors"
+  trademark_link: "https://www.linuxfoundation.org/legal/trademark-usage"
+
+  # Google Custom Search Engine ID.
+  # gcs_engine_id: ""
+  prism_syntax_highlighting: true
+
+  # A variable used in various docs to determine URLs for config files etc.
+  # To find occurrences, search the repo for 'params "githubbranch"'.
+  githubbranch: "main"
+
+  # These entries appear in the drop-down menu at the top of the website.
+  # versions:
+  #   version: "main"
+  #   githubbranch: "main"
+  #   url: "https://agent-sandbox.sigs.k8s.io/"
+
+  ui:
+      # Enable the logo
+    navbar_logo: true
+    # Enable to show the side bar menu in its compact state.
+    sidebar_menu_compact: true
+    # Enable the search box in the side bar.
+    sidebar_search_disable: false
+    # Set to true to disable breadcrumb navigation.
+    breadcrumb_disable: false
+    # Show expand/collapse icon for sidebar sections
+    sidebar_menu_foldable: true
+    # Disable about button in footer
+    footer_about_disable: true
+
+      # Adds a H2 section titled "Feedback" to the bottom of each doc. The responses are sent to Google Analytics as events.
+      # This feature depends on [services.googleAnalytics] and will be disabled if "services.googleAnalytics.id" is not set.
+      # If you want this feature, but occasionally need to remove the "Feedback" section from a single page,
+      # add "hide_feedback: true" to the page's front matter.
+    feedback:
+      enable: true
+      # The responses that the user sees after clicking "yes" (the page was helpful) or "no" (the page was not helpful).
+      yes: 'Glad to hear it! Please <a href="https://github.com/kubernetes-sigs/agent-sandbox/issues/new">tell us how we can improve</a>.'
+      no: 'Sorry to hear that. Please <a href="https://github.com/kubernetes-sigs/agent-sandbox/issues/new">tell us how we can improve</a>.'
+    
+    links:
+      user:
+        - name: User mailing list
+          url: "https://groups.google.com/a/kubernetes.io/g/sig-apps"
+          icon: "fa fa-envelope"
+          desc: "Discussion and help from your fellow users"
+        - name: Twitter
+          url: "https://x.com/kubernetesio"
+          icon: "fab fa-x-twitter"
+          desc: "Follow us on Twitter to get the latest news!"
+        - name: "Stack Overflow"
+          url: "https://stackoverflow.com/questions/tagged/kubernetes"
+          icon: "fab fa-stack-overflow"
+          desc: "Practical questions and curated answers"
+        - name: "Slack"
+          url: "https://kubernetes.slack.com/messages/agent-sandbox"
+          icon: "fab fa-slack"
+          desc: "Chat with other project developers"
+
+module:
+  proxy: direct
+  hugoVersion:
+    extended: true
+    min: 0.73.0
+  mounts:
+  - disableWatch: false
+    source: content
+    target: content
+  - disableWatch: false
+    source: data
+    target: data
+  - disableWatch: false
+    source: layouts
+    target: layouts
+  - disableWatch: false
+    source: i18n
+    target: i18n
+  - disableWatch: false
+    source: archetypes
+    target: archetypes
+  - disableWatch: false
+    source: assets
+    target: assets
+  - disableWatch: false
+    source: static
+    target: static
+  - disableWatch: false
+    source: assets
+    target: assets
+  - disableWatch: true
+    source: ../
+    target: assets/additional
+    includeFiles: ["CONTRIBUTING.md", "README.md"]
+  - disableWatch: true
+    source: ../examples
+    target: assets/additional/examples
+  imports:
+    - path: github.com/google/docsy
+      disable: false

@@ -1,0 +1,6 @@
+{{ $fileType := (.Get "type") }}
+```{{$fileType }}
+{{ $file := (.Get "file") }}
+{{ $code := resources.Get $file }}
+{{ $code.Content | safeHTML }}
+```

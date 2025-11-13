@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"reflect"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -348,7 +349,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 
 		// Remove the pod name annotation from the sandbox if it exists
-		if _, exists := sandbox.Annotations[SanboxPodNameAnnotation]; exists {
+		if podNameAnnotationExists {
 			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 			// Create a patch to update only the annotations
 			patch := client.MergeFrom(sandbox.DeepCopy())
@@ -360,6 +361,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 
 		return nil, nil
+	}
+
+	// For pod adopted from warm pool, we donot create it in this controller
+	if trackedPodName != "" {
+		return pod, nil
 	}
 
 	if pod != nil {
@@ -541,7 +547,21 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.Sandbox{}).
-		Watches(&corev1.Pod{}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(labelSelectorPredicate)).
-		Watches(&corev1.Service{}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(labelSelectorPredicate)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
+			return []reconcile.Request{
+				{NamespacedName: types.NamespacedName{
+					Name:      a.GetLabels()[sandboxLabel],
+					Namespace: a.GetNamespace(),
+				}},
+			}
+		}), builder.WithPredicates(labelSelectorPredicate)).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
+			return []reconcile.Request{
+				{NamespacedName: types.NamespacedName{
+					Name:      a.GetLabels()[sandboxLabel],
+					Namespace: a.GetNamespace(),
+				}},
+			}
+		}), builder.WithPredicates(labelSelectorPredicate)).
 		Complete(r)
 }

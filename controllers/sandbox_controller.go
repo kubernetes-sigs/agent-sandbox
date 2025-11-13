@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -272,6 +273,12 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			},
 		},
 	}
+
+	ports := buildServicePorts(&sandbox.Spec.PodTemplate.Spec)
+	if len(ports) > 0 {
+		service.Spec.Ports = ports
+	}
+
 	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 		log.Error(err, "Failed to set controller reference")
@@ -288,6 +295,48 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
 	sandbox.Status.Service = service.Name
 	return service, nil
+}
+
+func buildServicePorts(podSpec *corev1.PodSpec) []corev1.ServicePort {
+	if podSpec == nil {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	var ports []corev1.ServicePort
+
+	for _, container := range podSpec.Containers {
+		for _, containerPort := range container.Ports {
+			if containerPort.ContainerPort <= 0 {
+				continue
+			}
+
+			protocol := containerPort.Protocol
+			if protocol == "" {
+				protocol = corev1.ProtocolTCP
+			}
+
+			key := fmt.Sprintf("%d/%s", containerPort.ContainerPort, protocol)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+
+			port := corev1.ServicePort{
+				Port:       containerPort.ContainerPort,
+				Protocol:   protocol,
+				TargetPort: intstr.FromInt32(containerPort.ContainerPort),
+			}
+
+			if containerPort.Name != "" {
+				port.Name = containerPort.Name
+			}
+
+			ports = append(ports, port)
+			seen[key] = struct{}{}
+		}
+	}
+
+	return ports
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {

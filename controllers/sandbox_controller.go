@@ -363,14 +363,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, nil
 	}
 
-	// For pod adopted from warm pool, we donot create it in this controller
-	if trackedPodName != "" {
-		return pod, nil
-	}
-
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
@@ -389,6 +383,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
+		return pod, nil
+	}
+
+	// For pod adopted from warm pool, we donot create it in this controller
+	if trackedPodName != "" {
 		return pod, nil
 	}
 
@@ -546,7 +545,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	mapFunc := func(ctx context.Context, a client.Object) []reconcile.Request {
+	mapFunc := func(_ context.Context, a client.Object) []reconcile.Request {
 		owners := a.GetOwnerReferences()
 		if len(owners) != 1 || owners[0].Kind != "Sandbox" {
 			return nil

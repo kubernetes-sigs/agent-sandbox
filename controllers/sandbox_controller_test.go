@@ -628,7 +628,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						SandboxLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},

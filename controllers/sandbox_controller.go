@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"reflect"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -38,12 +37,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	SandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	SanboxPodNameAnnotation     = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
@@ -142,7 +142,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.LabelSelector = ""
 	} else {
 		sandbox.Status.Replicas = 1
-		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", SandboxLabel, NameHash(sandbox.Name))
 	}
 
 	// Reconcile Service
@@ -263,13 +263,13 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			Name:      sandbox.Name,
 			Namespace: sandbox.Namespace,
 			Labels: map[string]string{
-				sandboxLabel: nameHash,
+				SandboxLabel: nameHash,
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
 			Selector: map[string]string{
-				sandboxLabel: nameHash,
+				SandboxLabel: nameHash,
 			},
 		},
 	}
@@ -298,7 +298,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
 	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxLabel: nameHash,
+		SandboxLabel: nameHash,
 	})
 
 	if err := r.List(ctx, podList, &client.ListOptions{
@@ -374,7 +374,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
-		pod.Labels[sandboxLabel] = nameHash
+		pod.Labels[SandboxLabel] = nameHash
 
 		// Set controller reference if the pod is not controlled by anything.
 		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
@@ -394,7 +394,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
-		sandboxLabel: nameHash,
+		SandboxLabel: nameHash,
 	}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		labels[k] = v
@@ -536,7 +536,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{
-				Key:      sandboxLabel,
+				Key:      SandboxLabel,
 				Operator: metav1.LabelSelectorOpExists,
 				Values:   []string{},
 			},
@@ -545,23 +545,24 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
+
+	mapFunc := func(ctx context.Context, a client.Object) []reconcile.Request {
+		owners := a.GetOwnerReferences()
+		if len(owners) != 1 || owners[0].Kind != "Sandbox" {
+			return nil
+		}
+
+		return []reconcile.Request{
+			{NamespacedName: types.NamespacedName{
+				Name:      owners[0].Name,
+				Namespace: a.GetNamespace(),
+			}},
+		}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.Sandbox{}).
-		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
-			return []reconcile.Request{
-				{NamespacedName: types.NamespacedName{
-					Name:      a.GetLabels()[sandboxLabel],
-					Namespace: a.GetNamespace(),
-				}},
-			}
-		}), builder.WithPredicates(labelSelectorPredicate)).
-		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
-			return []reconcile.Request{
-				{NamespacedName: types.NamespacedName{
-					Name:      a.GetLabels()[sandboxLabel],
-					Namespace: a.GetNamespace(),
-				}},
-			}
-		}), builder.WithPredicates(labelSelectorPredicate)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapFunc), builder.WithPredicates(labelSelectorPredicate)).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapFunc), builder.WithPredicates(labelSelectorPredicate)).
 		Complete(r)
 }

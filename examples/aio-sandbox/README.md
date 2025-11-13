@@ -1,14 +1,13 @@
+# All-in-One (AIO) Sandbox Example
 
-# AIO Sandbox Example
-
-This example demonstrates how to create and access an [AIO Sandbox](https://github.com/agent-infra/sandbox) via Agent-Sandbox.
+This example demonstrates how to create and access an [All-in-One (AIO) Sandbox](https://github.com/agent-infra/sandbox) via Agent-Sandbox.
 
 ## Create an AIO Sandbox
 
 Apply the sandbox manifest with AIO Sandbox runtime.
 
 ```sh
-kubectl apply -k base
+kubectl apply -f aio-sandbox.yaml
 # sandbox.agents.x-k8s.io/aio-sandbox-example created
 ```
 
@@ -27,16 +26,31 @@ kubectl get pod aio-sandbox-example
 # aio-sandbox-example   1/1     Running   0          49s
 ```
 
+The AIO Sandbox has multiple tools pre-installed, including VNC, VSCode, Jupyter and Terminal in one unified environment.
+
 ## Accessing the AIO Sandbox Server
 
 Port forward the aio-sandbox server port.
 
 ```sh
-kubectl port-forward --address 0.0.0.0 pod/aio-sandbox-example 8080
+# set ingress host and port
+export INGRESS_HOST="localhost"
+export INGRESS_PORT="8080"
+
+# port forward to the aio-sandbox pod
+kubectl port-forward --address ${INGRESS_HOST} pod/aio-sandbox-example ${INGRESS_PORT}:8080
 ```
 
-Connect to the aio-sandbox on a browser via http://localhost:8080 or <machine-dns>:8080
+Setup GATEWAY_URL environment variable:
 
+```sh
+export GATEWAY_URL="http://${INGRESS_HOST}:${INGRESS_PORT}"
+
+echo "$GATEWAY_URL"
+# http://localhost:8080
+```
+
+Connect to the aio-sandbox on a browser via `http://<INGRESS_HOST>:<INGRESS_PORT>`
 
 ## Access the AIO Sandbox via Python SDK
 
@@ -46,7 +60,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # install the agent-sandbox package
-pip install agent-sandbox
+pip install agent-sandbox==0.0.18
 ```
 
 Run the basic python example:
@@ -54,11 +68,21 @@ Run the basic python example:
 python3 main.py
 ```
 
-Run the site to markdown example:
+## More examples
+
+For more examples of using the AIO Sandbox, refer to agents-infra/sandbox [examples](https://github.com/agent-infra/sandbox/tree/main/examples).
+
+## Cleanup
+
+To remove the sandbox and related resources when you are done, run:
 
 ```sh
-# install the playwright package
-pip install playwright
+kubectl delete -f aio-sandbox.yaml
 
-python3 site_to_markdown.py
+# Cleanup sandbox_screenshot.png from main.py if needed
+rm sandbox_screenshot.png
 ```
+
+## References
+- [Agent Sandbox](https://github.com/agent-infra/sandbox/tree/main)
+- [Agent Sandbox Python SDK](https://github.com/agent-infra/sandbox/tree/main/sdk/python)

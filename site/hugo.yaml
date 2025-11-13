@@ -127,9 +127,6 @@ module:
     source: archetypes
     target: archetypes
   - disableWatch: false
-    source: assets
-    target: assets
-  - disableWatch: false
     source: static
     target: static
   - disableWatch: false
@@ -138,7 +135,7 @@ module:
   - disableWatch: true
     source: ../
     target: assets/additional
-    includeFiles: ["CONTRIBUTING.md", "README.md"]
+    includeFiles: ["CONTRIBUTING.md"]
   - disableWatch: true
     source: ../examples
     target: assets/additional/examples

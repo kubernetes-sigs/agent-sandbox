@@ -8,3 +8,7 @@ bin/
 # Added by goreleaser init:
 dist/
 release_assets/
+
+# Ignore temporary folders
+tmp/
+temp/

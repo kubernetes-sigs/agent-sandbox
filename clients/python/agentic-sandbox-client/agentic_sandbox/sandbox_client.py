@@ -37,6 +37,7 @@ CLAIM_PLURAL_NAME = "sandboxclaims"
 SANDBOX_API_GROUP = "agents.x-k8s.io"
 SANDBOX_API_VERSION = "v1alpha1"
 SANDBOX_PLURAL_NAME = "sandboxes"
+POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -62,8 +63,8 @@ class SandboxClient:
         namespace: str = "default",
         server_port: int = 8888,
         sandbox_ready_timeout: int = 180,
-        gateway_ready_timeout: int = 180,
         port_forward_ready_timeout: int = 30,
+        pod_name_ready_timeout: int = 1
     ):
         self.template_name = template_name
         self.namespace = namespace
@@ -74,9 +75,7 @@ class SandboxClient:
         self.sandbox_ready_timeout = sandbox_ready_timeout
         self.gateway_ready_timeout = gateway_ready_timeout
         self.port_forward_ready_timeout = port_forward_ready_timeout
-
-        self.port_forward_process: subprocess.Popen | None = None
-
+        self.pod_name_ready_timeout = pod_name_ready_timeout
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
         self.pod_name: str | None = None
@@ -159,24 +158,60 @@ class SandboxClient:
                         break
 
                 if is_ready:
-                    self.sandbox_name = sandbox_object['metadata']['name']
-                    annotations = sandbox_object.get(
-                        'metadata', {}).get('annotations', {})
-                    pod_name_annotation = "agents.x-k8s.io/pod-name"
-                    if pod_name_annotation in annotations:
-                        self.pod_name = annotations[pod_name_annotation]
-                        logging.info(
-                            f"Found pod name from annotation: {self.pod_name}")
-                    else:
-                        self.pod_name = self.sandbox_name
-                    w.stop()
-                    logging.info(f"Sandbox {self.sandbox_name} is ready.")
-                    break
+                    metadata = sandbox_object.get(
+                        "metadata", {})
+                    self.sandbox_name = metadata.get(
+                        "name")
+                    if not self.sandbox_name:
+                        raise RuntimeError(
+                            "Could not determine sandbox name from sandbox object.")
 
-        if not self.sandbox_name:
-            self.__exit__(None, None, None)
-            raise TimeoutError(
-                f"Sandbox did not become ready or pod name could not be determined within {self.sandbox_ready_timeout} seconds.")
+                    logging.info(f"Sandbox {self.sandbox_name} is ready.")
+                    self._wait_for_pod_name()
+                    w.stop()
+                    return
+
+        self.__exit__(None, None, None)
+        raise TimeoutError(
+            f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
+
+    def _wait_for_pod_name(self, timeout: int = 30):
+        """
+        Waits for the pod-name annotation to be present on the sandbox object.
+        This wait is only necessary when using SandboxWarmPool.
+        """
+        if self.pod_name_ready_timeout <= 0:
+            logging.info(
+                f"pod_name_ready_timeout {self.pod_name_ready_timeout} is <= 0. Defaulting pod to sandbox name {self.sandbox_name}.")
+            self.pod_name = self.sandbox_name
+            return
+        w = watch.Watch()
+        logging.info(
+            f"Waiting for pod name annotation on sandbox {self.sandbox_name}...")
+        for event in w.stream(
+            func=self.custom_objects_api.list_namespaced_custom_object,
+            namespace=self.namespace,
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            plural=SANDBOX_PLURAL_NAME,
+            field_selector=f"metadata.name={self.sandbox_name}",
+            timeout_seconds=self.pod_name_ready_timeout
+        ):
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                sandbox_object = event['object']
+                annotations = sandbox_object.get(
+                    'metadata', {}).get('annotations', {})
+                pod_name = annotations.get(POD_NAME_ANNOTATION)
+                if pod_name:
+                    self.pod_name = pod_name
+                    logging.info(
+                        f"Found pod name from annotation: {self.pod_name}")
+                    w.stop()
+                    return
+
+        logging.warning(
+            f"Pod name annotation not found after {self.pod_name_ready_timeout} seconds. Defaulting to sandbox name {self.sandbox_name}.")
+        self.pod_name = self.sandbox_name
 
     def _start_and_wait_for_port_forward(self):
         """
@@ -187,7 +222,7 @@ class SandboxClient:
             raise RuntimeError(
                 "Cannot start port-forwarding, sandbox pod name is not known.")
         logging.info(
-            f"Starting port-forwarding for sandbox {self.sandbox_name} with sandbox pod {self.pod_name}...")
+            f"Starting port-forwarding for sandbox {self.sandbox_name} in namespace {self.namespace} with sandbox pod {self.pod_name}...")
         self.port_forward_process = subprocess.Popen(
             [
                 "kubectl", "port-forward",

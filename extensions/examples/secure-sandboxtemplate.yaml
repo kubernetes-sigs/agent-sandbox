@@ -1,0 +1,62 @@
+# How This Template Fulfills Your Requirements:
+# Restrict Pod-to-Pod Communication: Because enabled is true, your controller will create a unique NetworkPolicy for each sandbox. 
+# This individual policy is what guarantees that sandbox-1 cannot talk to sandbox-2.
+
+# Only Allow Pod Ingress from MST L7XLB: The ingressControllerSelectors block explicitly defines the L7XLB's labels as the only allowed ingress source.
+
+# Only Allow Egress if Required: The controller adds a DNS rule by default. 
+# creates a rule to allow TCP and UDP traffic on port 53 to the pods labeled k8s-app: kube-dns in the kube-system namespace.
+# By providing an empty additionalEgressRules: [], you are declaring that no other egress is required, so everything else will be blocked.
+
+# Don't Allow Access to API Server: This is a direct result of the "default-deny" egress policy. Since there is no rule in additionalEgressRules that allows traffic to the API server, it is blocked.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: secure-datascience-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      # This pod uses a non-root user and gVisor for runtime sandboxing.
+      runtimeClassName: gvisor
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        runAsNonRoot: true
+      containers:
+      - name: my-container
+        image: busybox
+        command: ["/bin/sh", "-c", "sleep 36000"]
+        ports:
+        - containerPort: 8888
+          protocol: TCP
+
+
+  # 2. Define the Network Policy to enforce the security requirements.
+  networkPolicy:
+    # This enables the "default-deny" NetworkPolicy creation.
+    enabled: true
+
+    # REQUIREMENT #3: Only allow pod ingress from MST L7XLB.
+    # This section defines the trusted ingress source. Traffic from any
+    # other source, including other sandbox pods, will be blocked.
+    ingressControllerSelectors:
+      namespaceSelector:
+        # Example: The L7XLB pods are in a namespace with this label
+        istio-injection: enabled
+      podSelector:
+        # Example: The L7XLB pods have this label
+        app: istio-ingressgateway
+    
+    # For an external L7XLB, we use 'ingressFromIPBlocks' to specify
+    # its known internal IP range as the trusted source.
+    #ingressFromIPBlocks:
+    #  - cidr: "10.200.10.0/24" # Example: The known internal IP range of your external L7XLB
+
+    # REQUIREMENT #2 & #4: Only allow egress if required & block API server access.
+    # The controller automatically adds a rule to allow DNS. By providing
+    # an empty 'additionalEgressRules' list, we are explicitly stating that
+    # no other outgoing traffic is required or permitted. This blocks all
+    # other egress, including to the Kubernetes API server and other pods.
+    additionalEgressRules: []

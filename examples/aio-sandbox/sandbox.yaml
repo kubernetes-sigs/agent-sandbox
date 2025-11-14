@@ -1,0 +1,18 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: aio-sandbox-example
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: aio-sandbox
+      annotations:
+        test: "yes"
+    spec:
+      containers:
+      - name: aio-sandbox
+        image: ghcr.io/agent-infra/sandbox:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080

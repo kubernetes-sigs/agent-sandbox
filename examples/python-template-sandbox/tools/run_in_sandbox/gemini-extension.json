@@ -1,0 +1,7 @@
+{
+  "name": "run-in-sandbox",
+  "version": "0.1.0",
+  "mcp": {
+    "command": ["${extensionPath}/run", "${code}"]
+  }
+}

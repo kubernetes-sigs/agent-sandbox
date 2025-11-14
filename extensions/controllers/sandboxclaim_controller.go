@@ -255,6 +255,18 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 	sandbox.Spec.PodTemplate = template.Spec.PodTemplate
+	// This ensures compliance with the ValidatingAdmissionPolicy by always
+	// disabling the automatic mounting of the service account token, which is
+	// a security best practice for sandboxed environments.
+	automount := false
+
+	if template.Spec.PodTemplate.Spec.AutomountServiceAccountToken != nil {
+		automount = *template.Spec.PodTemplate.Spec.AutomountServiceAccountToken
+	}
+
+	sandbox.Spec.PodTemplate.Spec = template.Spec.PodTemplate.Spec
+	sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)

@@ -393,6 +393,15 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 			},
 			Spec: extensionsv1alpha1.SandboxTemplateSpec{
 				PodTemplate: sandboxv1alpha1.PodTemplate{
+					ObjectMeta: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{
+							"pod-label": "from-podtemplate",
+							"version":   "2.0", // Override template label
+						},
+						Annotations: map[string]string{
+							"pod-annotation": "from-podtemplate",
+						},
+					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
@@ -446,12 +455,18 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 			require.Equal(t, sandboxcontrollers.NameHash(templateName), pod.Labels[sandboxTemplateRefHash],
 				"pod %s should have correct sandbox template ref label", pod.Name)
 
-			// Verify template labels are also present
+			// Verify labels from sandbox template metadata
 			require.Equal(t, "test-app", pod.Labels["app"])
-			require.Equal(t, "1.0", pod.Labels["version"])
 
-			// Verify annotations
+			// Verify labels from pod template (should override template labels)
+			require.Equal(t, "2.0", pod.Labels["version"], "pod template label should override template label")
+			require.Equal(t, "from-podtemplate", pod.Labels["pod-label"])
+
+			// Verify annotations from sandbox template
 			require.Equal(t, "test pod", pod.Annotations["description"])
+
+			// Verify annotations from pod template
+			require.Equal(t, "from-podtemplate", pod.Annotations["pod-annotation"])
 		}
 	})
 }

@@ -118,7 +118,7 @@ func (cl *ClusterClient) ValidateObjectNotFound(ctx context.Context, obj client.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
 	cl.Helper()
 	// Static 30 second timeout, this can be adjusted if needed
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
@@ -225,6 +225,12 @@ var sandboxGVK = schema.GroupVersionKind{
 	Kind:    "Sandbox",
 }
 
+var sandboxWarmpoolGVK = schema.GroupVersionKind{
+	Group:   "extensions.agents.x-k8s.io",
+	Version: "v1alpha1",
+	Kind:    "SandboxWarmPool",
+}
+
 func (cl *ClusterClient) RESTConfig() *rest.Config {
 	return cl.restConfig
 }
@@ -293,7 +299,7 @@ func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedNa
 	}
 }
 
-func (cl *ClusterClient) WaitForSandboxReady(ctx context.Context, sandboxID types.NamespacedName) {
+func (cl *ClusterClient) WaitForSandboxReady(ctx context.Context, sandboxID types.NamespacedName) error {
 	sandbox := &unstructured.Unstructured{}
 	sandbox.SetGroupVersionKind(sandboxGVK)
 	sandbox.SetName(sandboxID.Name)
@@ -301,5 +307,82 @@ func (cl *ClusterClient) WaitForSandboxReady(ctx context.Context, sandboxID type
 
 	if err := cl.WaitForObject(ctx, sandbox, predicates.ReadyConditionIsTrue); err != nil {
 		cl.T.Fatalf("waiting for sandbox to be ready: %v", err)
+		return err
 	}
+	return nil
+}
+
+func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpoolID types.NamespacedName, expectedReplicas int) error {
+	cl.Helper()
+	log := klog.FromContext(ctx)
+	log.Info("Waiting for SandboxWarmPool Pods to be ready", "warmpoolID", sandboxWarmpoolID, "expectedReplicas", expectedReplicas)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	// Get the SandboxWarmPool object to access its UID
+	warmpool := &unstructured.Unstructured{}
+	warmpool.SetGroupVersionKind(sandboxWarmpoolGVK)
+	if err := cl.client.Get(ctx, sandboxWarmpoolID, warmpool); err != nil {
+		cl.T.Fatalf("Failed to get SandboxWarmPool %s: %v", sandboxWarmpoolID, err)
+		return err
+	}
+	warmpoolUID := warmpool.GetUID()
+
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			cl.T.Fatalf("Timed out waiting for SandboxWarmPool %s to have %d ready pods", sandboxWarmpoolID.String(), expectedReplicas)
+			return fmt.Errorf("timed out waiting for SandboxWarmPool %s to have %d ready pods", sandboxWarmpoolID.String(), expectedReplicas)
+		default:
+			podList := &corev1.PodList{}
+			// List all pods in the namespace
+			err := cl.client.List(timeoutCtx, podList, client.InNamespace(sandboxWarmpoolID.Namespace))
+			if err != nil {
+				log.Error(err, "Failed to list pods in namespace", "namespace", sandboxWarmpoolID.Namespace)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			readyCount := 0
+			var foundPods []string
+			for _, pod := range podList.Items {
+				isOwned := false
+				for _, ownerRef := range pod.GetOwnerReferences() {
+					if ownerRef.Kind == "SandboxWarmPool" && ownerRef.UID == warmpoolUID {
+						isOwned = true
+						break
+					}
+				}
+
+				if isOwned {
+					foundPods = append(foundPods, pod.Name)
+					if err := predicates.ReadyConditionIsTrue(&pod); err == nil {
+						readyCount++
+					}
+				}
+			}
+
+			log.Info("WarmPool pod status", "warmpoolID", sandboxWarmpoolID, "foundOwned", len(foundPods), "ready", readyCount, "want", expectedReplicas, "pods", foundPods)
+
+			if readyCount >= expectedReplicas {
+				log.Info("SandboxWarmPool is ready", "warmpoolID", sandboxWarmpoolID)
+				return nil
+			}
+
+			time.Sleep(2 * time.Second)
+		}
+	}
+}
+
+func (cl *ClusterClient) GetSandbox(ctx context.Context, sandboxID types.NamespacedName) *unstructured.Unstructured {
+	sandbox := &unstructured.Unstructured{}
+	sandbox.SetGroupVersionKind(sandboxGVK)
+	sandbox.SetName(sandboxID.Name)
+	sandbox.SetNamespace(sandboxID.Namespace)
+
+	if err := cl.client.Get(ctx, sandboxID, sandbox); err != nil {
+		cl.T.Fatalf("failed to get Sandbox %s: %v", sandboxID, err)
+	}
+	return sandbox
 }

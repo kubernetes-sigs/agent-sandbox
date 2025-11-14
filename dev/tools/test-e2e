@@ -19,6 +19,57 @@ import sys
 
 from shared import utils
 
+def run_go_e2e_tests(repo_root, artifact_dir, env):
+    """ Runs the Go e2e tests """
+    print("========= Running Go E2E tests... =========")
+    go_test_cmd = utils.go_tool_args(
+        "gotestsum",
+        f"--junitfile={artifact_dir}/e2e-go-junit.xml",
+        f"--jsonfile={artifact_dir}/test-e2e.json",
+        "--", "./test/e2e/...", "--parallel=1", "-v"
+    )
+    print(f"Running command: {' '.join(go_test_cmd)}")
+    return subprocess.run(go_test_cmd, env=env, cwd=repo_root).returncode
+
+def setup_python_sdk(repo_root, env):
+    """ Installs the Python SDK and its dependencies """
+    print("========= Ensuring Python SDK is installed... =========")
+    sdk_path = os.path.join(repo_root, "clients", "python", "agentic-sandbox-client")
+    # Install in editable mode
+    install_cmd = [sys.executable, "-m", "pip", "install", "-e", ".[test]"]
+    print(f"Running command: {' '.join(install_cmd)} in {sdk_path}")
+    result = subprocess.run(install_cmd, env=env, cwd=sdk_path, check=False)
+    if result.returncode != 0:
+        print("Failed to install Python SDK.")
+        return False
+    print("Python SDK installed successfully.")
+    return True
+
+def run_python_e2e_tests(repo_root, artifact_dir, env):
+    """ Runs the Python e2e tests and generates a junit report """
+    print("========= Running Python SDK E2E tests... =========")
+
+    # Define the path for the JUnit report
+    junit_report_path = f"{artifact_dir}/e2e-python-sdk-junit.xml"
+
+    # Set the environment variable for the test namespace
+    test_env = env.copy()
+    # Ensure the python client can be imported
+    python_path = os.path.join(repo_root, "clients", "python", "agentic-sandbox-client")
+    test_env["PYTHONPATH"] = f"{python_path}:{test_env.get('PYTHONPATH', '')}"
+
+    pytest_cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        f"--junitxml={junit_report_path}",
+        "-v",
+        os.path.join(repo_root, "test", "e2e/")
+    ]
+
+    print(f"Running command: {' '.join(pytest_cmd)}")
+    result = subprocess.run(pytest_cmd, env=test_env, cwd=repo_root)
+    return result.returncode
 
 def main():
     """ invokes unit tests and outputs a junit results file """
@@ -27,17 +78,30 @@ def main():
     artifact_dir = os.getenv("ARTIFACTS")
     if not artifact_dir:
         artifact_dir = f"{repo_root}/bin"
+    os.makedirs(artifact_dir, exist_ok=True)
 
     env = os.environ.copy()
     env["IMAGE_TAG"] = utils.get_image_tag()
 
-    result = subprocess.run(utils.go_tool_args(
-        "gotestsum",
-        f"--junitfile={repo_root}/bin/e2e-junit.xml",
-        f"--jsonfile={artifact_dir}/test-e2e.json",
-        "--", "./test/e2e/...", "--parallel=1"
-    ), env=env, cwd=repo_root)
-    return result.returncode
+    if not setup_python_sdk(repo_root, env):
+         return 1
+
+    go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
+    python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
+
+    if go_test_result != 0:
+        print("Go E2E tests failed.")
+
+    if python_test_result != 0:
+        print("Python SDK E2E tests failed.")
+        return 1
+
+    if go_test_result != 0 or python_test_result != 0:
+         print("One or more E2E tests failed.")
+         return 1
+
+    print("All E2E tests passed.")
+    return 0
 
 
 if __name__ == "__main__":

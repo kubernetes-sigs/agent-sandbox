@@ -1,9 +1,0 @@
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
-kind: SandboxWarmPool
-metadata:
-  name: python-sandbox-warmpool
-  namespace: default
-spec:
-  replicas: 2
-  sandboxTemplateRef:
-    name: python-sandbox-template

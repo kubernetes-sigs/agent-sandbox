@@ -49,6 +49,13 @@ type SandboxClaimSpec struct {
 	// SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox
 	// +kubebuilder:validation:Required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+
+	// ShutdownTime is the absolute time when this specific sandbox
+	// should be deleted. If set, this overrides the shutdownTime
+	// specified in the SandboxTemplate.
+	// +kubebuilder:validation:Format="date-time"
+	// +optional
+	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

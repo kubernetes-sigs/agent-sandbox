@@ -44,6 +44,12 @@ type SandboxTemplateSpec struct {
 	// an agent sandbox.
 	// +kubebuilder:validation:Required
 	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+
+	// ShutdownTime is the absolute time when sandboxes created from this
+	// template should be deleted.
+	// +kubebuilder:validation:Format="date-time"
+	// +optional
+	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

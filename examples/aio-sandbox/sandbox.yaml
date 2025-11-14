@@ -14,5 +14,6 @@ spec:
       - name: aio-sandbox
         image: ghcr.io/agent-infra/sandbox:latest
         imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-c", "/opt/gem/run.sh"]
         ports:
         - containerPort: 8080

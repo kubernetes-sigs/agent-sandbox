@@ -1,0 +1,91 @@
+# A Gateway to create an endpoint for external HTTP traffic.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: external-http-gateway
+  namespace: default
+spec:
+  gatewayClassName: gke-l7-global-external-managed # Specific to GKE; creates all necessary GatewayClass resources
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: Same
+---
+# A ClusterIP Service to provide a stable endpoint for the router pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: sandbox-router
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8080 # The port the service will listen on
+    targetPort: 8080 # The port the router container listens on (from the sandbox_router/Dockerfile)
+---
+# The Deployment to manage and run the router pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router-deployment
+  namespace: default
+spec:
+  replicas: 2 # Run at least two replicas for high availability
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      containers:
+      - name: router
+        # IMPORTANT: Replace this with the full path to the router image you pushed.
+        # sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
+        image: IMAGE_PLACEHOLDER
+        ports:
+        - containerPort: 8080
+---
+# The HTTPRoute to connect the Gateway to the router service.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sandbox-router-route
+  namespace: default
+spec:
+  parentRefs:
+  - name: external-http-gateway # This must match the name of the Gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: sandbox-router-svc # Route all traffic to the router service
+      port: 8080
+---
+# HealthCheckPolicy tells the GKE Gateway to use the router app "/healthz" endpoint for its health
+# checks instead of the default "/".
+apiVersion: networking.gke.io/v1 # Specific to GKE; not yet available in gateway.networking.k8s.io
+kind: HealthCheckPolicy
+metadata:
+  name: router-health-check-policy
+  namespace: default
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: sandbox-router-svc # This must match the name of the router's service
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /healthz # Tell the health checker to use this path

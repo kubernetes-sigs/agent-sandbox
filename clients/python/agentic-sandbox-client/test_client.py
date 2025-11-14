@@ -17,31 +17,33 @@ import asyncio
 from asyncio import sleep
 from agentic_sandbox import SandboxClient
 
-async def main(template_name: str):
+
+async def main(template_name: str, gateway_name: str):
     """
     Tests the Sandbox client by creating a sandbox, running a command,
     and then cleaning up.
     """
     namespace = "default"
-    
+
     print("--- Starting Sandbox Client Test ---")
-    
+
     try:
-        with SandboxClient(template_name, namespace) as sandbox:
-            await sleep(2)  # Wait for the sandbox to be fully ready
+        # Pass the gateway_name to the client for dynamic IP discovery
+        with SandboxClient(template_name, namespace, gateway_name) as sandbox:
+
             print("\n--- Testing Command Execution ---")
             command_to_run = "echo 'Hello from the sandbox!'"
             print(f"Executing command: '{command_to_run}'")
-            
+
             result = sandbox.run(command_to_run)
-            
+
             print(f"Stdout: {result.stdout.strip()}")
             print(f"Stderr: {result.stderr.strip()}")
             print(f"Exit Code: {result.exit_code}")
-            
+
             assert result.exit_code == 0
             assert result.stdout.strip() == "Hello from the sandbox!"
-                        
+
             print("\n--- Command Execution Test Passed! ---")
 
             # Test file operations
@@ -61,7 +63,7 @@ async def main(template_name: str):
 
             # Test introspection commands
             print("\n--- Testing Pod Introspection ---")
-            
+
             print("\n--- Listing files in /app ---")
             list_files_result = sandbox.run("ls -la /app")
             print(list_files_result.stdout)
@@ -85,5 +87,11 @@ if __name__ == "__main__":
         default="python-sandbox-template",
         help="The name of the sandbox template to use for the test."
     )
+    parser.add_argument(
+        "--gateway-name",
+        default="external-http-gateway",
+        help="The name of the Gateway resource to discover the IP from."
+    )
     args = parser.parse_args()
-    asyncio.run(main(template_name=args.template_name))
+    asyncio.run(main(template_name=args.template_name,
+                gateway_name=args.gateway_name))

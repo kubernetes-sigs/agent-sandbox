@@ -21,3 +21,8 @@ dependencies = [
 [project.urls]
 "Homepage" = "https://github.com/kubernetes-sigs/agent-sandbox"
 "Bug Tracker" = "https://github.com/kubernetes-sigs/agent-sandbox/issues"
+
+[tool.setuptools]
+# This line tells setuptools to only include the 'agentic_sandbox'
+# package and to ignore other directories like 'sandbox_router'.
+packages = ["agentic_sandbox"]

@@ -14,6 +14,9 @@
 
 import os
 import sys
+import time
+import socket
+import subprocess
 import logging
 from dataclasses import dataclass
 
@@ -55,13 +58,14 @@ class SandboxClient:
     def __init__(
         self,
         template_name: str,
-        namespace: str = "default", # Where Sandbox lives
-        gateway_name: str = "external-http-gateway",
-        gateway_namespace: str = "default", # Where Gateway lives
+        namespace: str = "default",  # Where Sandbox lives
+        gateway_name: str | None = None,  # Name of the Gateway
+        gateway_namespace: str = "default",  # Where Gateway lives
         api_url: str | None = None,  # Allow custom URL (DNS or Localhost)
         server_port: int = 8888,     # The port the runtime inside the sandbox listens on
         sandbox_ready_timeout: int = 180,
         gateway_ready_timeout: int = 180,
+        port_forward_ready_timeout: int = 30,
     ):
         self.template_name = template_name
         self.namespace = namespace
@@ -71,6 +75,9 @@ class SandboxClient:
         self.server_port = server_port
         self.sandbox_ready_timeout = sandbox_ready_timeout
         self.gateway_ready_timeout = gateway_ready_timeout
+        self.port_forward_ready_timeout = port_forward_ready_timeout
+
+        self.port_forward_process: subprocess.Popen | None = None
 
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
@@ -157,6 +164,60 @@ class SandboxClient:
             raise TimeoutError(
                 f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
 
+    def _get_free_port(self):
+        """Finds a free port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+
+    def _start_and_wait_for_port_forward(self):
+        """
+        Starts 'kubectl port-forward' to the Router Service.
+        This allows 'Dev Mode' without needing a public Gateway IP.
+        """
+        local_port = self._get_free_port()
+
+        # Assumes the router service name from sandbox_router.yaml
+        router_svc = "svc/sandbox-router-svc"
+
+        logging.info(
+            f"Starting Dev Mode tunnel: localhost:{local_port} -> {router_svc}:8080...")
+
+        self.port_forward_process = subprocess.Popen(
+            [
+                "kubectl", "port-forward",
+                router_svc,
+                f"{local_port}:8080",  # Tunnel to Router (8080), not Sandbox (8888)
+                # The router lives in the Gateway/Default NS
+                "-n", self.gateway_namespace
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+
+        # Wait for tunnel to be ready
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < 10:
+            if self.port_forward_process.poll() is not None:
+                stdout, stderr = self.port_forward_process.communicate()
+                raise RuntimeError(
+                    f"Tunnel crashed: {stderr.decode(errors='ignore')}")
+
+            try:
+                # Connect to localhost
+                with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
+                    self.base_url = f"http://127.0.0.1:{local_port}"
+                    logging.info(
+                        f"Dev Mode ready. Tunneled to Router at {self.base_url}")
+                    # No need for huge sleeps; the Router service is stable.
+                    time.sleep(0.5)
+                    return
+            except (socket.timeout, ConnectionRefusedError):
+                time.sleep(0.5)
+
+        self.__exit__(None, None, None)
+        raise TimeoutError("Failed to establish tunnel to Router Service.")
+
     def _wait_for_gateway_ip(self):
         """Waits for the Gateway to be assigned an external IP."""
         # NEW: Check if we already have a manually provided URL
@@ -195,11 +256,33 @@ class SandboxClient:
     def __enter__(self) -> 'SandboxClient':
         self._create_claim()
         self._wait_for_sandbox_ready()
-        # This will now skip if api_url was passed in __init__
-        self._wait_for_gateway_ip()
+
+        # STRATEGY SELECTION
+        if self.base_url:
+            # Case 1: API URL provided manually (DNS / Internal) -> Do nothing, just use it.
+            logging.info(f"Using configured API URL: {self.base_url}")
+
+        elif self.gateway_name:
+            # Case 2: Gateway Name provided -> Production Mode (Discovery)
+            self._wait_for_gateway_ip()
+
+        else:
+            # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)
+            self._start_and_wait_for_port_forward()
+
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # Cleanup Port Forward if it exists
+        if self.port_forward_process:
+            logging.info("Stopping port-forwarding...")
+            self.port_forward_process.terminate()
+            try:
+                self.port_forward_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.port_forward_process.kill()
+
+        # Delete the SandboxClaim
         if self.claim_name:
             logging.info(f"Deleting SandboxClaim: {self.claim_name}")
             try:
@@ -219,21 +302,35 @@ class SandboxClient:
         if not self.is_ready():
             raise RuntimeError("Sandbox is not ready for communication.")
 
+        # Check if port-forward died silently
+        if self.port_forward_process and self.port_forward_process.poll() is not None:
+            stdout, stderr = self.port_forward_process.communicate()
+            raise RuntimeError(
+                f"Kubectl Port-Forward crashed BEFORE request!\n"
+                f"Stderr: {stderr.decode(errors='ignore')}"
+            )
+
         url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.get("headers", {})
         headers["X-Sandbox-ID"] = self.claim_name
-        # Inject Namespace and Port so the router knows where to go
         headers["X-Sandbox-Namespace"] = self.namespace
         headers["X-Sandbox-Port"] = str(self.server_port)
         kwargs["headers"] = headers
 
         try:
-            #Use self.session to utilize the retry logic
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
+            # Check if port-forward died DURING request
+            if self.port_forward_process and self.port_forward_process.poll() is not None:
+                stdout, stderr = self.port_forward_process.communicate()
+                raise RuntimeError(
+                    f"Kubectl Port-Forward crashed DURING request!\n"
+                    f"Stderr: {stderr.decode(errors='ignore')}"
+                ) from e
+
             logging.error(f"Request to gateway router failed: {e}")
             raise RuntimeError(
                 f"Failed to communicate with the sandbox via the gateway at {url}.") from e

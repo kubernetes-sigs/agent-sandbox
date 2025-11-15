@@ -58,7 +58,7 @@ spec:
       - name: router
         # IMPORTANT: Replace this with the full path to the router image you pushed.
         # sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
-        image: PLACEHOLDER
+        image: IMAGE_PLACEHOLDER
         ports:
         - containerPort: 8080
         livenessProbe:

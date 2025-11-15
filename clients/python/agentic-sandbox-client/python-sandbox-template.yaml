@@ -3,7 +3,7 @@ kind: SandboxTemplate
 metadata:
   # The test_client.py expects the template to have this name
   name: python-sandbox-template
-  namespace: dev
+  namespace: default
 spec:
   podTemplate:
     spec:
@@ -13,15 +13,17 @@ spec:
       - name: python-runtime
         # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox
         # sed -i "s|IMAGE_PLACEHOLDER|${PYTHON_RUNTIME_SANDBOX_IMG}|g" python-sandbox-template.yaml
-        image: PLACEHOLDER
+        image: IMAGE_PLACEHOLDER
         ports:
         - containerPort: 8888
         readinessProbe:
           httpGet:
             path: "/"
             port: 8888
-          initialDelaySeconds: 0
-          periodSeconds: 1
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          successThreshold: 2
+          failureThreshold: 3
         resources:
           requests:
             cpu: "250m"

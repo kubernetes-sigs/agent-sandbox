@@ -1,127 +1,138 @@
 # Agentic Sandbox Client Python
 
-This Python client provides a simple, high-level interface for creating and interacting with
-sandboxes managed by the Agent Sandbox controller. It's designed to be used as a context manager,
-ensuring that sandbox resources are properly created and cleaned up.
+This Python client provides a simple, high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller. It's designed to be used as a context manager, ensuring that sandbox resources are properly created and cleaned up.
 
-This client is designed for a scalable architecture where a central Kubernetes Gateway routes
-traffic to a router pod, which then forwards requests to the correct sandbox based on an HTTP header.
+It supports a **scalable, cloud-native architecture** using Kubernetes Gateways and a specialized Router, while maintaining a convenient **Developer Mode** for local testing.
 
-## Usage
+## Architecture
 
-### Prerequisites
+The client operates in two modes:
 
-- A running Kubernetes cluster with the Gateway API enabled.
-- The Agent Sandbox controller must be deployed with the extensions feature enabled.
-- The Sandbox Router and `Gateway` must be deployed in the cluster. This includes the router
-  `Deployment` and `Service`, and the gateway `HTTPRoute` and `HealthCheckPolicy`. These can be
-  found in the `clients/python/agentic-sandbox-client/sandbox_router/sandbox_router.yaml` config.
-- A `SandboxTemplate` resource must be created in the cluster.
-- The `kubectl` command-line tool must be installed and configured to connect to your cluster.
+1.  **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway) -> Router Service -> Sandbox Pod. This supports GKE Autopilot and high-scale deployments.
+2.  **Development (Tunnel Mode):** Traffic flows from Localhost -> `kubectl port-forward` -> Router Service -> Sandbox Pod. This requires no public IP and works on Kind/Minikube.
 
-### Installation
+## Prerequisites
+
+- A running Kubernetes cluster (GKE Autopilot recommended for production; Kind/Minikube supported for dev).
+- The **Agent Sandbox Controller** installed.
+- The **Sandbox Router** deployed in the cluster (see instructions below).
+- `kubectl` installed and configured locally.
+
+## Setup: Deploying the Router
+
+Before using the client, you must deploy the `sandbox-router`. This is a one-time setup.
+
+1.  **Build and Push the Router Image:**
+    ```bash
+    cd sandbox_router
+    # Export your registry path (e.g. Google Artifact Registry)
+    export IMAGE=us-central1-docker.pkg.dev/your-project/repo/sandbox-router:v1
+    
+    docker build -t $IMAGE .
+    docker push $IMAGE
+    ```
+
+2.  **Deploy to Kubernetes:**
+    Update `sandbox_router.yaml` to use your image, then apply it.
+    *Note: The provided YAML is optimized for GKE (Autopilot & Standard).*
+    
+    ```bash
+    # Edit image field in sandbox_router.yaml first!
+    kubectl apply -f sandbox_router.yaml
+    ```
+
+3.  **Create a Sandbox Template:**
+    Ensure a `SandboxTemplate` exists in your target namespace.
+    ```bash
+    kubectl apply -f python-sandbox-template.yaml
+    ```
+
+## Installation
 
 1.  **Create a virtual environment:**
     ```bash
     python3 -m venv .venv
-    ```
-2.  **Activate the virtual environment:**
-    ```bash
     source .venv/bin/activate
     ```
-3.  **Option 1: Install from source via git:**
 
+2.  **Install the package:**
     ```bash
-    # Replace "main" with a specific version tag (e.g., "v0.1.0") from
-    # https://github.com/kubernetes-sigs/agent-sandbox/releases to pin a version tag.
-    export VERSION="main"
-
-    pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
-    ```
-
-4.  **Option 2: Install from source in editable mode:**
-    ```bash
-    git clone https://github.com/kubernetes-sigs/agent-sandbox.git
-    cd agent-sandbox/clients/agentic-sandbox-client-python
-    cd ~/path_to_venv
     pip install -e .
     ```
 
-### Example:
+## Usage Examples
+
+### 1. Production Mode (GKE Gateway)
+Use this when running against a real cluster with a public Gateway IP. The client automatically discovers the Gateway.
 
 ```python
 from agentic_sandbox import SandboxClient
 
-# The client will dynamically discover the IP of the 'external-http-gateway'
-with SandboxClient(template_name="python-sandbox-template", namespace="default", gateway_name="external-http-gateway") as sandbox:
-    result = sandbox.run("echo 'Hello, World!'")
-    print(result.stdout)
+# Connect via the GKE Gateway
+with SandboxClient(
+    template_name="python-sandbox-template",
+    gateway_name="external-http-gateway",  # Name of the Gateway resource
+    namespace="default"
+) as sandbox:
+    print(sandbox.run("echo 'Hello from Cloud!'").stdout)
 ```
 
-## How It Works
+### 2. Developer Mode (Local Tunnel)
 
-The `SandboxClient` client automates the entire lifecycle of a temporary sandbox environment:
+Use this for local development or CI. If you omit `gateway_name`, the client automatically opens a secure tunnel to the Router Service using `kubectl`.
 
-1. **Initialization (`with SandboxClient(...)`):** The client is initialized with the names of the
-   `SandboxTemplate` and the `Gateway` you want to use.
+```python
+from agentic_sandbox import SandboxClient
 
-- **`template_name` (str):** The name of the `SandboxTemplate` resource to use.
-- **`namespace` (str, optional):** The Kubernetes namespace for all resources. Defaults to "default".
-- **`gateway_name` (str, optional):** The name of the `Gateway` resource that provides the external
-  entry point. The client will query this resource to find its public IP.
-
-2. **Claim Creation:** It creates a `SandboxClaim` Kubernetes resource. This claim tells the
-   agent-sandbox controller to provision a new sandbox pod and its associated headless service.
-
-3. **Waiting for Readiness:** The client watches the Kubernetes API for two events:
-
-- The `Sandbox` resource to become "Ready," indicating the pod is running and has passed its health checks.
-- The `Gateway` resource to be assigned an external IP address by the cloud provider.
-
-4. **Interaction via Gateway:** Once ready, the `SandboxClient` sends all requests to the discovered
-   external IP of the `Gateway`. On each request, it adds an `X-Sandbox-ID` header containing the
-   unique name of the `SandboxClaim`. The sandbox router pod in the cluster uses this header to
-   forward the request to the correct sandbox pod.
-
-5. **Interaction Methods:** The client provides three main methods:
-
-- `run(command)`: Executes a shell command inside the sandbox.
-- `write(path, content)`: Uploads a file to the sandbox.
-- `read(path)`: Downloads a file from the sandbox.
-
-6. **Cleanup (`__exit__`):** When the `with` block is exited (either normally or due to an error),
-   the client automatically deletes the `SandboxClaim`, which in turn causes the controller to
-   delete the `Sandbox` pod and its associated resources.
-
-## How to Test the Client
-
-A test script, `test_client.py`, is included to verify the client's functionality. You can run it
-with the following command:
-
-```bash
-python test_client.py --gateway-name="external-http-gateway"`
+# Automatically tunnels to svc/sandbox-router-svc
+with SandboxClient(
+    template_name="python-sandbox-template",
+    namespace="dev"
+) as sandbox:
+    print(sandbox.run("echo 'Hello from Local!'").stdout)
 ```
 
-You should see output indicating that the tests for command execution and file operations have passed.
+### 3. Advanced / Internal Mode
 
-## Packaging and Installation
+Use `api_url` to bypass discovery entirely. Useful for:
 
-This client is configured as a standard Python package using `pyproject.toml`.
+- **Internal Agents:** Running inside the cluster (connect via K8s DNS).
+- **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.acme.com`).
 
-### Prerequisites
-
-- Python 3.7+
-- `pip`
-- `build` (install with `pip install build`)
-
-### Building the Package
-
-To build the package from the source, navigate to the `agentic-sandbox-client` directory and run
-the following command:
-
-```bash
-python -m build
+```python
+with SandboxClient(
+    template_name="python-sandbox-template",
+    # Connect directly to a URL
+    api_url="[http://sandbox-router-svc.default.svc.cluster.local:8080](http://sandbox-router-svc.default.svc.cluster.local:8080)",
+    namespace="dev"
+) as sandbox:
+    sandbox.run("ls -la")
 ```
 
-This will create a `dist` directory containing the packaged distributables: a `.whl` (wheel) file
-and a `.tar.gz` (source archive).
+### 4. Custom Ports
+
+If your sandbox runtime listens on a port other than 8888 (e.g., a Node.js app on 3000), specify `server_port`.
+
+```python
+with SandboxClient(
+    template_name="node-sandbox-template",
+    server_port=3000 
+) as sandbox:
+    # ...
+```
+
+## Testing
+
+A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).
+
+### Run in Dev Mode:
+
+```
+python test_client.py --namespace dev
+```
+
+### Run in Production Mode:
+
+```
+python test_client.py --gateway-name external-http-gateway
+```

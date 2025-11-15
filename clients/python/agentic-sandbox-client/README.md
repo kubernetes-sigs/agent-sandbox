@@ -11,7 +11,7 @@ traffic to a router pod, which then forwards requests to the correct sandbox bas
 
 ### Prerequisites
 
-- A running Kubernetes cluster (e.g., Kind) with the Gateway API enabled.
+- A running Kubernetes cluster with the Gateway API enabled.
 - The Agent Sandbox controller must be deployed with the extensions feature enabled.
 - The Sandbox Router and `Gateway` must be deployed in the cluster. This includes the router
   `Deployment` and `Service`, and the gateway `HTTPRoute` and `HealthCheckPolicy`. These can be

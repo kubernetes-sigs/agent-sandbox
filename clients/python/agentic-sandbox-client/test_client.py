@@ -18,18 +18,17 @@ from asyncio import sleep
 from agentic_sandbox import SandboxClient
 
 
-async def main(template_name: str, gateway_name: str):
+async def main(template_name: str, gateway_name: str, api_url: str = None, namespace: str = "default", server_port: int = 8888):
     """
     Tests the Sandbox client by creating a sandbox, running a command,
     and then cleaning up.
     """
-    namespace = "default"
 
     print("--- Starting Sandbox Client Test ---")
 
     try:
         # Pass the gateway_name to the client for dynamic IP discovery
-        with SandboxClient(template_name, namespace, gateway_name) as sandbox:
+        with SandboxClient(template_name, namespace, gateway_name, api_url=api_url, server_port=server_port) as sandbox:
 
             print("\n--- Testing Command Execution ---")
             command_to_run = "echo 'Hello from the sandbox!'"
@@ -92,6 +91,9 @@ if __name__ == "__main__":
         default="external-http-gateway",
         help="The name of the Gateway resource to discover the IP from."
     )
+    parser.add_argument("--api-url", help="Direct URL to router (e.g. http://localhost:8080)", default=None)
+    parser.add_argument("--namespace", default="default", help="Namespace to create sandbox in")
+    parser.add_argument("--server-port", type=int, default=8888, help="Port the sandbox container listens on")
     args = parser.parse_args()
     asyncio.run(main(template_name=args.template_name,
-                gateway_name=args.gateway_name))
+                gateway_name=args.gateway_name, api_url=args.api_url, namespace=args.namespace))

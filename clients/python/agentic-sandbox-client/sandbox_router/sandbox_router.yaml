@@ -46,13 +46,43 @@ spec:
       labels:
         app: sandbox-router
     spec:
+      # Ensure pods are spread across different zones for HA
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: sandbox-router
       containers:
       - name: router
         # IMPORTANT: Replace this with the full path to the router image you pushed.
         # sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
-        image: IMAGE_PLACEHOLDER
+        image: PLACEHOLDER
         ports:
         - containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
 ---
 # The HTTPRoute to connect the Gateway to the router service.
 apiVersion: gateway.networking.k8s.io/v1

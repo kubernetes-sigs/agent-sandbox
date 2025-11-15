@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#      http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,15 +17,12 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 
-app = FastAPI()
-
-
 # Initialize the FastAPI application
 app = FastAPI()
 
 # Configuration
-KUBE_DNS_SUFFIX = ".default.svc.cluster.local"
-SANDBOX_PORT = 8888
+DEFAULT_SANDBOX_PORT = 8888
+DEFAULT_NAMESPACE = "default"
 client = httpx.AsyncClient(timeout=180.0)
 
 
@@ -38,16 +35,29 @@ async def health_check():
 @app.api_route("/{full_path:path}", methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 async def proxy_request(request: Request, full_path: str):
     """
-    Receives all incoming requests, determines the target sandbox from the
-    'X-Sandbox-ID' header, and asynchronously proxies the request to it.
+    Receives all incoming requests, determines the target sandbox from headers,
+    and asynchronously proxies the request to it.
     """
     sandbox_id = request.headers.get("X-Sandbox-ID")
     if not sandbox_id:
         raise HTTPException(
             status_code=400, detail="X-Sandbox-ID header is required.")
 
-    target_host = f"{sandbox_id}{KUBE_DNS_SUFFIX}"
-    target_url = f"http://{target_host}:{SANDBOX_PORT}/{full_path}"
+    # Dynamic discovery via headers
+    namespace = request.headers.get("X-Sandbox-Namespace", DEFAULT_NAMESPACE)
+    
+    # Sanitize namespace to prevent DNS injection
+    if not namespace.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid namespace format.")
+
+    try:
+        port = int(request.headers.get("X-Sandbox-Port", DEFAULT_SANDBOX_PORT))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid port format.")
+
+    # Construct the K8s internal DNS name
+    target_host = f"{sandbox_id}.{namespace}.svc.cluster.local"
+    target_url = f"http://{target_host}:{port}/{full_path}"
 
     print(f"Proxying request for sandbox '{sandbox_id}' to URL: {target_url}")
 

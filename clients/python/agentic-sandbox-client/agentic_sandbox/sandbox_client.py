@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#      http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,8 @@ import logging
 from dataclasses import dataclass
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from kubernetes import client, config, watch
 
 # Constants for API Groups and Resources
@@ -48,34 +50,28 @@ class ExecutionResult:
 class SandboxClient:
     """
     A client for creating and interacting with a stateful Sandbox via a router.
-    This client dynamically discovers the Gateway IP address at runtime.
     """
 
     def __init__(
         self,
         template_name: str,
-        namespace: str = "default",
+        namespace: str = "default", # Where Sandbox lives
         gateway_name: str = "external-http-gateway",
+        gateway_namespace: str = "default", # Where Gateway lives
+        api_url: str | None = None,  # Allow custom URL (DNS or Localhost)
+        server_port: int = 8888,     # The port the runtime inside the sandbox listens on
         sandbox_ready_timeout: int = 180,
         gateway_ready_timeout: int = 180,
     ):
-        """
-        Initializes the SandboxClient.
-
-        Args:
-            template_name: The name of the SandboxTemplate to use.
-            namespace: The Kubernetes namespace to operate in.
-            gateway_name: The name of the Gateway resource to discover the IP from.
-            sandbox_ready_timeout: Timeout for the sandbox pod to become ready.
-            gateway_ready_timeout: Timeout for the Gateway to get an external IP.
-        """
         self.template_name = template_name
         self.namespace = namespace
         self.gateway_name = gateway_name
+        self.gateway_namespace = gateway_namespace
+        self.base_url = api_url  # If provided, we skip discovery
+        self.server_port = server_port
         self.sandbox_ready_timeout = sandbox_ready_timeout
         self.gateway_ready_timeout = gateway_ready_timeout
 
-        self.base_url: str | None = None
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
 
@@ -85,6 +81,17 @@ class SandboxClient:
             config.load_kube_config()
 
         self.custom_objects_api = client.CustomObjectsApi()
+
+        # HTTP session with retries
+        self.session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=0.5,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "POST", "PUT", "DELETE"]
+        )
+        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
     def is_ready(self) -> bool:
         """Returns True if the sandbox is ready and the Gateway IP has been found."""
@@ -100,7 +107,11 @@ class SandboxClient:
             "spec": {"sandboxTemplateRef": {"name": self.template_name}}
         }
 
-        logging.info(f"Creating SandboxClaim: {self.claim_name}...")
+        logging.info(
+            f"Creating SandboxClaim '{self.claim_name}' "
+            f"in namespace '{self.namespace}' "
+            f"using template '{self.template_name}'..."
+        )
         self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
@@ -110,10 +121,7 @@ class SandboxClient:
         )
 
     def _wait_for_sandbox_ready(self):
-        """
-        Waits for the Sandbox custom resource to have a 'Ready' status condition.
-        This indicates that the underlying pod is running and has passed its checks.
-        """
+        """Waits for the Sandbox custom resource to have a 'Ready' status."""
         if not self.claim_name:
             raise RuntimeError(
                 "Cannot wait for sandbox; a sandboxclaim has not been created.")
@@ -150,14 +158,19 @@ class SandboxClient:
                 f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
 
     def _wait_for_gateway_ip(self):
-        """Waits for the Gateway to be assigned an external IP and sets the base_url."""
+        """Waits for the Gateway to be assigned an external IP."""
+        # NEW: Check if we already have a manually provided URL
+        if self.base_url:
+            logging.info(f"Using configured API URL: {self.base_url}")
+            return
+
         logging.info(
-            f"Waiting for Gateway '{self.gateway_name}' to get an external IP...")
+            f"Waiting for Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}'...")
 
         w = watch.Watch()
         for event in w.stream(
             func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=self.namespace, group=GATEWAY_API_GROUP,
+            namespace=self.gateway_namespace, group=GATEWAY_API_GROUP,
             version=GATEWAY_API_VERSION, plural=GATEWAY_PLURAL,
             field_selector=f"metadata.name={self.gateway_name}",
             timeout_seconds=self.gateway_ready_timeout,
@@ -180,14 +193,13 @@ class SandboxClient:
                 f"Gateway '{self.gateway_name}' did not get an IP within {self.gateway_ready_timeout} seconds.")
 
     def __enter__(self) -> 'SandboxClient':
-        """Creates SandboxClaim and Sanbdox resources, waits for them to be ready, and discovers the gateway IP."""
         self._create_claim()
         self._wait_for_sandbox_ready()
+        # This will now skip if api_url was passed in __init__
         self._wait_for_gateway_ip()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Deletes the SandboxClaim resource."""
         if self.claim_name:
             logging.info(f"Deleting SandboxClaim: {self.claim_name}")
             try:
@@ -204,7 +216,6 @@ class SandboxClient:
                         f"Error deleting sandbox claim: {e}", exc_info=True)
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
-        """Helper method to make requests, injecting the sandbox ID header."""
         if not self.is_ready():
             raise RuntimeError("Sandbox is not ready for communication.")
 
@@ -212,10 +223,14 @@ class SandboxClient:
 
         headers = kwargs.get("headers", {})
         headers["X-Sandbox-ID"] = self.claim_name
+        # Inject Namespace and Port so the router knows where to go
+        headers["X-Sandbox-Namespace"] = self.namespace
+        headers["X-Sandbox-Port"] = str(self.server_port)
         kwargs["headers"] = headers
 
         try:
-            response = requests.request(method, url, **kwargs)
+            #Use self.session to utilize the retry logic
+            response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
@@ -224,9 +239,6 @@ class SandboxClient:
                 f"Failed to communicate with the sandbox via the gateway at {url}.") from e
 
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
-        """
-        Executes a shell command inside the running sandbox.
-        """
         payload = {"command": command}
         response = self._request(
             "POST", "execute", json=payload, timeout=timeout)
@@ -239,7 +251,6 @@ class SandboxClient:
         )
 
     def write(self, path: str, content: bytes | str, timeout: int = 60):
-        """Uploads content to a file inside the sandbox."""
         if isinstance(content, str):
             content = content.encode('utf-8')
 
@@ -250,6 +261,5 @@ class SandboxClient:
         logging.info(f"File '{filename}' uploaded successfully.")
 
     def read(self, path: str, timeout: int = 60) -> bytes:
-        """Downloads a file from the sandbox."""
         response = self._request("GET", f"download/{path}", timeout=timeout)
         return response.content

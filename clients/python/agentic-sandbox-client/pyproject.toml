@@ -21,3 +21,9 @@ dependencies = [
 [project.urls]
 "Homepage" = "https://github.com/kubernetes-sigs/agent-sandbox"
 "Bug Tracker" = "https://github.com/kubernetes-sigs/agent-sandbox/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio"
+]

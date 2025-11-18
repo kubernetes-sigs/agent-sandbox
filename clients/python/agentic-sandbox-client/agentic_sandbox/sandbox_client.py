@@ -37,6 +37,7 @@ CLAIM_PLURAL_NAME = "sandboxclaims"
 SANDBOX_API_GROUP = "agents.x-k8s.io"
 SANDBOX_API_VERSION = "v1alpha1"
 SANDBOX_PLURAL_NAME = "sandboxes"
+
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
 logging.basicConfig(level=logging.INFO,
@@ -60,11 +61,14 @@ class SandboxClient:
     def __init__(
         self,
         template_name: str,
-        namespace: str = "default",
-        server_port: int = 8888,
+        namespace: str = "default",  # Where Sandbox lives
+        gateway_name: str | None = None,  # Name of the Gateway
+        gateway_namespace: str = "default",  # Where Gateway lives
+        api_url: str | None = None,  # Allow custom URL (DNS or Localhost)
+        server_port: int = 8888,     # The port the runtime inside the sandbox listens on
         sandbox_ready_timeout: int = 180,
+        gateway_ready_timeout: int = 180,
         port_forward_ready_timeout: int = 30,
-        pod_name_ready_timeout: int = 1
     ):
         self.template_name = template_name
         self.namespace = namespace
@@ -75,12 +79,12 @@ class SandboxClient:
         self.sandbox_ready_timeout = sandbox_ready_timeout
         self.gateway_ready_timeout = gateway_ready_timeout
         self.port_forward_ready_timeout = port_forward_ready_timeout
-        self.pod_name_ready_timeout = pod_name_ready_timeout
+
+        self.port_forward_process: subprocess.Popen | None = None
+
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
         self.pod_name: str | None = None
-        self.base_url = f"http://127.0.0.1:{self.server_port}"
-        self.port_forward_process: subprocess.Popen | None = None
 
         try:
             config.load_incluster_config()
@@ -128,13 +132,10 @@ class SandboxClient:
         )
 
     def _wait_for_sandbox_ready(self):
-        """
-        Waits for the Sandbox custom resource to have a 'Ready' status condition.
-        This indicates that the underlying pod is running and has passed its checks.
-        """
+        """Waits for the Sandbox custom resource to have a 'Ready' status."""
         if not self.claim_name:
             raise RuntimeError(
-                "Cannot wait for sandbox, claim has not been created.")
+                "Cannot wait for sandbox; a sandboxclaim has not been created.")
 
         w = watch.Watch()
         logging.info("Watching for Sandbox to become ready...")
@@ -165,9 +166,17 @@ class SandboxClient:
                     if not self.sandbox_name:
                         raise RuntimeError(
                             "Could not determine sandbox name from sandbox object.")
-
                     logging.info(f"Sandbox {self.sandbox_name} is ready.")
-                    self._wait_for_pod_name()
+
+                    annotations = sandbox_object.get(
+                        'metadata', {}).get('annotations', {})
+                    pod_name = annotations.get(POD_NAME_ANNOTATION)
+                    if pod_name:
+                        self.pod_name = pod_name
+                        logging.info(
+                            f"Found pod name from annotation: {self.pod_name}")
+                    else:
+                        self.pod_name = self.sandbox_name
                     w.stop()
                     return
 
@@ -175,60 +184,33 @@ class SandboxClient:
         raise TimeoutError(
             f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
 
-    def _wait_for_pod_name(self, timeout: int = 30):
-        """
-        Waits for the pod-name annotation to be present on the sandbox object.
-        This wait is only necessary when using SandboxWarmPool.
-        """
-        if self.pod_name_ready_timeout <= 0:
-            logging.info(
-                f"pod_name_ready_timeout {self.pod_name_ready_timeout} is <= 0. Defaulting pod to sandbox name {self.sandbox_name}.")
-            self.pod_name = self.sandbox_name
-            return
-        w = watch.Watch()
-        logging.info(
-            f"Waiting for pod name annotation on sandbox {self.sandbox_name}...")
-        for event in w.stream(
-            func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=self.namespace,
-            group=SANDBOX_API_GROUP,
-            version=SANDBOX_API_VERSION,
-            plural=SANDBOX_PLURAL_NAME,
-            field_selector=f"metadata.name={self.sandbox_name}",
-            timeout_seconds=self.pod_name_ready_timeout
-        ):
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                sandbox_object = event['object']
-                annotations = sandbox_object.get(
-                    'metadata', {}).get('annotations', {})
-                pod_name = annotations.get(POD_NAME_ANNOTATION)
-                if pod_name:
-                    self.pod_name = pod_name
-                    logging.info(
-                        f"Found pod name from annotation: {self.pod_name}")
-                    w.stop()
-                    return
-
-        logging.warning(
-            f"Pod name annotation not found after {self.pod_name_ready_timeout} seconds. Defaulting to sandbox name {self.sandbox_name}.")
-        self.pod_name = self.sandbox_name
+    def _get_free_port(self):
+        """Finds a free port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
 
     def _start_and_wait_for_port_forward(self):
         """
         Starts 'kubectl port-forward' to the Router Service.
         This allows 'Dev Mode' without needing a public Gateway IP.
         """
-        if not self.pod_name:
-            raise RuntimeError(
-                "Cannot start port-forwarding, sandbox pod name is not known.")
+        local_port = self._get_free_port()
+
+        # Assumes the router service name from sandbox_router.yaml
+        router_svc = "svc/sandbox-router-svc"
+
         logging.info(
-            f"Starting port-forwarding for sandbox {self.sandbox_name} in namespace {self.namespace} with sandbox pod {self.pod_name}...")
+            f"Starting Dev Mode tunnel: localhost:{local_port} -> {router_svc}:8080...")
+
         self.port_forward_process = subprocess.Popen(
             [
                 "kubectl", "port-forward",
-                f"pod/{self.pod_name}",
-                f"{self.server_port}:{self.server_port}",
-                "-n", self.namespace
+                router_svc,
+                # Tunnel to Router (8080), not Sandbox (8888)
+                f"{local_port}:8080",
+                # The router lives in the Gateway/Default NS
+                "-n", self.gateway_namespace
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
@@ -243,16 +225,54 @@ class SandboxClient:
                     f"Tunnel crashed: {stderr.decode(errors='ignore')}")
 
             try:
-                with socket.create_connection(("127.0.0.1", self.server_port), timeout=0.1):
+                # Connect to localhost
+                with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
+                    self.base_url = f"http://127.0.0.1:{local_port}"
                     logging.info(
-                        f"Port-forwarding is ready on port {self.server_port}.")
+                        f"Dev Mode ready. Tunneled to Router at {self.base_url}")
+                    # No need for huge sleeps; the Router service is stable.
+                    time.sleep(0.5)
                     return
             except (socket.timeout, ConnectionRefusedError):
                 time.sleep(0.5)
 
         self.__exit__(None, None, None)
-        raise TimeoutError(
-            f"Port-forwarding did not become ready within {self.port_forward_ready_timeout} seconds.")
+        raise TimeoutError("Failed to establish tunnel to Router Service.")
+
+    def _wait_for_gateway_ip(self):
+        """Waits for the Gateway to be assigned an external IP."""
+        # Check if we already have a manually provided URL
+        if self.base_url:
+            logging.info(f"Using configured API URL: {self.base_url}")
+            return
+
+        logging.info(
+            f"Waiting for Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}'...")
+
+        w = watch.Watch()
+        for event in w.stream(
+            func=self.custom_objects_api.list_namespaced_custom_object,
+            namespace=self.gateway_namespace, group=GATEWAY_API_GROUP,
+            version=GATEWAY_API_VERSION, plural=GATEWAY_PLURAL,
+            field_selector=f"metadata.name={self.gateway_name}",
+            timeout_seconds=self.gateway_ready_timeout,
+        ):
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                gateway_object = event['object']
+                status = gateway_object.get('status', {})
+                addresses = status.get('addresses', [])
+                if addresses:
+                    ip_address = addresses[0].get('value')
+                    if ip_address:
+                        self.base_url = f"http://{ip_address}"
+                        logging.info(
+                            f"Gateway is ready. Base URL set to: {self.base_url}")
+                        w.stop()
+                        return
+
+        if not self.base_url:
+            raise TimeoutError(
+                f"Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}' did not get an IP within {self.gateway_ready_timeout} seconds.")
 
     def __enter__(self) -> 'SandboxClient':
         self._create_claim()
@@ -319,15 +339,22 @@ class SandboxClient:
         headers["X-Sandbox-Port"] = str(self.server_port)
         kwargs["headers"] = headers
 
-        url = f"{self.base_url}/{endpoint}"
         try:
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
-            logging.error(f"Request to sandbox failed: {e}")
+            # Check if port-forward died DURING request
+            if self.port_forward_process and self.port_forward_process.poll() is not None:
+                stdout, stderr = self.port_forward_process.communicate()
+                raise RuntimeError(
+                    f"Kubectl Port-Forward crashed DURING request!\n"
+                    f"Stderr: {stderr.decode(errors='ignore')}"
+                ) from e
+
+            logging.error(f"Request to gateway router failed: {e}")
             raise RuntimeError(
-                f"Failed to communicate with the sandbox at {url}.") from e
+                f"Failed to communicate with the sandbox via the gateway at {url}.") from e
 
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
         payload = {"command": command}
@@ -351,10 +378,6 @@ class SandboxClient:
         self._request("POST", "upload", files=files_payload, timeout=timeout)
         logging.info(f"File '{filename}' uploaded successfully.")
 
-    def read(self, path: str) -> bytes:
-        """
-        Downloads a file from the sandbox.
-        The base path for the download is the root of the sandbox's filesystem.
-        """
-        response = self._request("GET", f"download/{path}")
+    def read(self, path: str, timeout: int = 60) -> bytes:
+        response = self._request("GET", f"download/{path}", timeout=timeout)
         return response.content

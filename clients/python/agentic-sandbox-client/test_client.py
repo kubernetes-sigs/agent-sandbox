@@ -16,6 +16,8 @@ import argparse
 import asyncio
 from agentic_sandbox import SandboxClient
 
+POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
+
 
 async def main(template_name: str, gateway_name: str | None, api_url: str | None, namespace: str, server_port: int):
     """
@@ -23,7 +25,8 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
     and then cleaning up.
     """
 
-    print(f"--- Starting Sandbox Client Test (Namespace: {namespace}, Port: {server_port}) ---")
+    print(
+        f"--- Starting Sandbox Client Test (Namespace: {namespace}, Port: {server_port}) ---")
     if gateway_name:
         print(f"Mode: Gateway Discovery ({gateway_name})")
     elif api_url:
@@ -40,6 +43,20 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
             api_url=api_url,
             server_port=server_port
         ) as sandbox:
+
+            print("\n--- Testing Pod Name Discovery ---")
+            assert sandbox.annotations is not None, "Sandbox annotations were not stored on the client"
+
+            pod_name_annotation = sandbox.annotations.get(POD_NAME_ANNOTATION)
+
+            if pod_name_annotation:
+                print(f"Found pod name from annotation: {pod_name_annotation}")
+                assert sandbox.pod_name == pod_name_annotation, f"Expected pod_name to be '{pod_name_annotation}', but got '{sandbox.pod_name}'"
+                print("--- Pod Name Discovery Test Passed (Annotation) ---")
+            else:
+                print("Pod name annotation not found, falling back to sandbox name.")
+                assert sandbox.pod_name == sandbox.sandbox_name, f"Expected pod_name to be '{sandbox.sandbox_name}', but got '{sandbox.pod_name}'"
+                print("--- Pod Name Discovery Test Passed (Fallback) ---")
 
             print("\n--- Testing Command Execution ---")
             command_to_run = "echo 'Hello from the sandbox!'"
@@ -97,20 +114,23 @@ if __name__ == "__main__":
         default="python-sandbox-template",
         help="The name of the sandbox template to use for the test."
     )
-    
+
     # Default is None to allow testing the Port-Forward fallback
     parser.add_argument(
         "--gateway-name",
-        default=None, 
+        default=None,
         help="The name of the Gateway resource. If omitted, defaults to local port-forward mode."
     )
-    
-    parser.add_argument("--api-url", help="Direct URL to router (e.g. http://localhost:8080)", default=None)
-    parser.add_argument("--namespace", default="default", help="Namespace to create sandbox in")
-    parser.add_argument("--server-port", type=int, default=8888, help="Port the sandbox container listens on")
-    
+
+    parser.add_argument(
+        "--api-url", help="Direct URL to router (e.g. http://localhost:8080)", default=None)
+    parser.add_argument("--namespace", default="default",
+                        help="Namespace to create sandbox in")
+    parser.add_argument("--server-port", type=int, default=8888,
+                        help="Port the sandbox container listens on")
+
     args = parser.parse_args()
-    
+
     asyncio.run(main(
         template_name=args.template_name,
         gateway_name=args.gateway_name,

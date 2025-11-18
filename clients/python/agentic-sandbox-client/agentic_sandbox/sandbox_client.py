@@ -85,6 +85,7 @@ class SandboxClient:
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
         self.pod_name: str | None = None
+        self.annotations: dict | None = None
 
         try:
             config.load_incluster_config()
@@ -168,9 +169,9 @@ class SandboxClient:
                             "Could not determine sandbox name from sandbox object.")
                     logging.info(f"Sandbox {self.sandbox_name} is ready.")
 
-                    annotations = sandbox_object.get(
+                    self.annotations = sandbox_object.get(
                         'metadata', {}).get('annotations', {})
-                    pod_name = annotations.get(POD_NAME_ANNOTATION)
+                    pod_name = self.annotations.get(POD_NAME_ANNOTATION)
                     if pod_name:
                         self.pod_name = pod_name
                         logging.info(

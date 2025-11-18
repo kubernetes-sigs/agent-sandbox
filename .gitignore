@@ -9,6 +9,6 @@ bin/
 dist/
 release_assets/
 
-# Ignore temporary folders
+# Temporary folders
 tmp/
 temp/

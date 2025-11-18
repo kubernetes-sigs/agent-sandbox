@@ -1,0 +1,51 @@
+# A Gateway to create an endpoint for external HTTP traffic.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: external-http-gateway
+  namespace: default
+spec:
+  gatewayClassName: gke-l7-global-external-managed # Specific to GKE; creates all necessary GatewayClass resources; choose a different gateway class to use other Gateway implementations
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: Same
+---
+# The HTTPRoute to connect the Gateway to the router service.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sandbox-router-route
+  namespace: default
+spec:
+  parentRefs:
+  - name: external-http-gateway # This must match the name of the Gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: sandbox-router-svc # Route all traffic to the router service
+      port: 8080
+---
+# HealthCheckPolicy tells the GKE Gateway to use the router app "/healthz" endpoint for its health
+# checks instead of the default "/".
+apiVersion: networking.gke.io/v1 # Specific to GKE
+kind: HealthCheckPolicy
+metadata:
+  name: router-health-check-policy
+  namespace: default
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: sandbox-router-svc # This must match the name of the router's service
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /healthz # Tell the health checker to use this path

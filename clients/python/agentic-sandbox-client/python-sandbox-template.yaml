@@ -7,23 +7,26 @@ metadata:
 spec:
   podTemplate:
     spec:
-      # Optional, must have gVisor enabled node
+      # Optional, if gVisor is specified, must have gVisor enabled node
       runtimeClassName: gvisor
       containers:
       - name: python-runtime
         # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox
-        # sed -i "s|IMAGE_PLACEHOLDER|${PYTHON_RUNTIME_SANDBOX_IMG}|g" python-sandbox-template.yaml
-        image: IMAGE_PLACEHOLDER
+        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
         ports:
         - containerPort: 8888
         readinessProbe:
           httpGet:
             path: "/"
             port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
           initialDelaySeconds: 2
-          periodSeconds: 2
-          successThreshold: 2
-          failureThreshold: 3
+          periodSeconds: 10
         resources:
           requests:
             cpu: "250m"

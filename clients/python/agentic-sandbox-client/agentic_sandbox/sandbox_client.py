@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -39,7 +39,8 @@ SANDBOX_API_VERSION = "v1alpha1"
 SANDBOX_PLURAL_NAME = "sandboxes"
 
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    stream=sys.stdout)
 
 
 @dataclass
@@ -187,7 +188,8 @@ class SandboxClient:
             [
                 "kubectl", "port-forward",
                 router_svc,
-                f"{local_port}:8080",  # Tunnel to Router (8080), not Sandbox (8888)
+                # Tunnel to Router (8080), not Sandbox (8888)
+                f"{local_port}:8080",
                 # The router lives in the Gateway/Default NS
                 "-n", self.gateway_namespace
             ],
@@ -195,9 +197,9 @@ class SandboxClient:
             stderr=subprocess.PIPE
         )
 
-        # Wait for tunnel to be ready
+        logging.info("Waiting for port-forwarding to be ready...")
         start_time = time.monotonic()
-        while time.monotonic() - start_time < 10:
+        while time.monotonic() - start_time < self.port_forward_ready_timeout:
             if self.port_forward_process.poll() is not None:
                 stdout, stderr = self.port_forward_process.communicate()
                 raise RuntimeError(
@@ -220,7 +222,7 @@ class SandboxClient:
 
     def _wait_for_gateway_ip(self):
         """Waits for the Gateway to be assigned an external IP."""
-        # NEW: Check if we already have a manually provided URL
+        # Check if we already have a manually provided URL
         if self.base_url:
             logging.info(f"Using configured API URL: {self.base_url}")
             return
@@ -251,7 +253,7 @@ class SandboxClient:
 
         if not self.base_url:
             raise TimeoutError(
-                f"Gateway '{self.gateway_name}' did not get an IP within {self.gateway_ready_timeout} seconds.")
+                f"Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}' did not get an IP within {self.gateway_ready_timeout} seconds.")
 
     def __enter__(self) -> 'SandboxClient':
         self._create_claim()

@@ -27,7 +27,7 @@ The request flow is as follows:
 
 The router is a Python application built with FastAPI and Uvicorn.
 
-## Prerequisites
+### Prerequisites
 
 - Python 3.13+
 - Docker
@@ -37,18 +37,33 @@ The router is a Python application built with FastAPI and Uvicorn.
 Use the provided `Dockerfile` to build and push the image to your container registry.
 
 ```bash
-export IMAGE_PATH=your_registry_path/sandbox-router:latest
-docker build -t $IMAGE_PATH .
-docker push $IMAGE_PATH
+export SANDBOX_ROUTER_IMG=your_registry_path/sandbox-router:latest
+docker build -t $SANDBOX_ROUTER_IMG .
+docker push $SANDBOX_ROUTER_IMG
 ```
 
 ## Deployment
 
-To deploy the Gateway and router, you need several Kubernetes resources: a `Deployment`, `Service`,
-`Gateway`, `HTTPRoute`, and `HealthCheckPolicy`.
+### Deploy the Sandbox Router
 
-In `sandbox_router.yaml` replace `IMAGE_PLACEHOLDER` with the `$IMAGE_PATH` from the previous step.
+The Sandbox Router (or similar reverse proxy service) is needed for both the "Gateway Mode" and
+"Tunnel Mode" interactions with the Python client.
+
+In `sandbox_router.yaml` replace `IMAGE_PLACEHOLDER` with the `$SANDBOX_ROUTER_IMG` from the
+previous step, and then apply the manifest.
 
 ```bash
+sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml
+```
+
+### Deploy the Gateway
+
+In order to use the Python client in "Gateway Mode", you will need to create the Gateway resources.
+
+Note that the example Gateway resources are specific to GKE. If running on a different Kubernetes
+provider you will need to modify the `gateway.yaml`.
+
+```bash
+kubectl apply -f gateway.yaml
 ```

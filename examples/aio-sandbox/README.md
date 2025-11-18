@@ -4,7 +4,7 @@ This example demonstrates how to create and access an [All-in-One (AIO) Sandbox]
 
 ## Create an AIO Sandbox
 
-Apply the sandbox manifest with AIO Sandbox runtime.
+Apply the sandbox manifest with AIO Sandbox runtime. You can find the latest version [here](https://github.com/agent-infra/sandbox/pkgs/container/sandbox).
 
 ```sh
 kubectl apply -f aio-sandbox.yaml

@@ -69,7 +69,9 @@ spec:
 		Name:      "chrome-sandbox",
 	}
 
-	h.WaitForSandboxReady(ctx, sandboxID)
+	if err := h.WaitForSandboxReady(ctx, sandboxID); err != nil {
+		t.Fatalf("failed to wait for sandbox ready: %v", err)
+	}
 
 	podID := types.NamespacedName{
 		Namespace: ns,

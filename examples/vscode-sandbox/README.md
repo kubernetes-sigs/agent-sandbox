@@ -98,19 +98,47 @@ $ kubectl wait --for=condition=Ready sandbox sandbox-example
 $ kubectl get pods -o jsonpath=$'{range .items[*]}{.metadata.name}: {.spec.runtimeClassName}\n{end}'
 ```
 
-## Accesing vscode
+## Accessing VSCode
 
-Port forward the vscode server port.
+To access the VSCode instance securely and reliably, use the Sandbox Router.
 
+### Option 1: Production (via Gateway)
+
+If you have deployed the Gateway **and** Router (see `clients/python/agentic-sandbox-client/sandbox_router`), access VSCode via the external Gateway IP.
+
+1. Get the Gateway IP:
+```bash
+export GATEWAY_IP=$(kubectl get gateway external-http-gateway -n default -o jsonpath='{.status.addresses[0].value}')
+echo "Gateway IP: $GATEWAY_IP"
 ```
- kubectl port-forward --address 0.0.0.0 pod/sandbox-example 13337
+
+2. **Connect:** You must inject the routing headers. Use `curl` to test:
+```bash
+# Replace <GATEWAY_IP> with the actual IP
+curl -v -H "X-Sandbox-ID: sandbox-example" \
+        -H "X-Sandbox-Port: 13337" \
+        http://$GATEWAY_IP
 ```
 
-Connect to the vscode-server on a browser via  http://localhost:13337 or <machine-dns>:13337
+### Option 2: Development (via Router Tunnel)
 
-If should ask for a password.
+For local development, port-forward to the **Router Service** (do not port-forward to the pod directly, as it may fail with secure runtimes like gVisor).
 
-#### Getting vscode password
+1. Start the Tunnel: 
+```bash 
+# Forward local 8080 to the Router Service
+kubectl port-forward svc/sandbox-router-svc 8080:8080 -n default
+```
+
+2. Access via Curl: You need to send the correct headers to route traffic to your specific sandbox. Via curl, set:
+```bash
+curl -v -H "X-Sandbox-ID: sandbox-example" \
+        -H "X-Sandbox-Port: 13337" \
+        http://localhost:8080
+```
+
+
+#### Getting VSCode password
 
 In a separate terminal connect to the pod and get the password.
 

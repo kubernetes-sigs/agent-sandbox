@@ -131,11 +131,23 @@ def push_images_for_examples(args):
         print(f"building image for {service_name}")
         build_and_push_image(args, service_name, example_dir, "Dockerfile")
 
+def push_images_for_python_sdk(args):
+    """Builds and pushes docker images for python sdk."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    python_sdk_dir = os.path.join(repo_root, "clients", "python", "agentic-sandbox-client", "sandbox_router")
+    dockerfile_path = os.path.join(python_sdk_dir, "Dockerfile")
+    service_name = "sandbox-router"
+
+    print(f"create Docker buildx builder for {service_name}")
+    create_buildx_builder_if_not_exists()
+    print(f"building image for {service_name}")
+    build_and_push_image(args, service_name, python_sdk_dir, dockerfile_path)
 
 def main(args):
     """Builds and pushes docker images."""
     golang.for_each_module(lambda mod_dir: push_image_for_go_mod(args, mod_dir))
     push_images_for_examples(args)
+    push_images_for_python_sdk(args)
     # TODO: Handle image building and pushing logic better
     
 

@@ -65,9 +65,11 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
 
     # Set the environment variable for the test namespace
     test_env = env.copy()
-    # Ensure the python client can be imported
+
+    # Ensure the python client and test framework can be imported
     python_path = os.path.join(repo_root, "clients", "python", "agentic-sandbox-client")
-    test_env["PYTHONPATH"] = f"{python_path}:{test_env.get('PYTHONPATH', '')}"
+    existing_pythonpath = test_env.get('PYTHONPATH', '')
+    test_env["PYTHONPATH"] = f"{repo_root}:{python_path}:{existing_pythonpath}"
 
     python_executable = os.path.join(repo_root, ".venv", "bin", "python")
     pytest_cmd = [

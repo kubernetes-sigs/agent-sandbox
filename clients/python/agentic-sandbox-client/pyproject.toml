@@ -22,8 +22,7 @@ dependencies = [
 "Homepage" = "https://github.com/kubernetes-sigs/agent-sandbox"
 "Bug Tracker" = "https://github.com/kubernetes-sigs/agent-sandbox/issues"
 
-[project.optional-dependencies]
-test = [
-    "pytest",
-    "pytest-asyncio"
-]
+[tool.setuptools]
+# This line tells setuptools to only include the 'agentic_sandbox'
+# package and to ignore other directories like 'sandbox_router'.
+packages = ["agentic_sandbox"]

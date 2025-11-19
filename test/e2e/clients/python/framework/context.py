@@ -14,12 +14,16 @@
 
 import os
 import uuid
+import functools
+import time
 from typing import Optional, Dict
-from test.e2e.clients.python.framework.predicates import deployment_ready
+from test.e2e.clients.python.framework.predicates import (
+    deployment_ready,
+    pod_ready,
+)
 
 import kubernetes
 import yaml
-
 
 
 DEFAULT_KUBECONFIG_PATH = "bin/KUBECONFIG"
@@ -225,6 +229,11 @@ class TestContext:
             )
         except Exception as e:
             print(f"Error during watch: {e}")
+            # Check if the error is due to a timeout in the stream
+            if "timeout" in str(e).lower():
+                raise TimeoutError(
+                    f"Object {name} did not satisfy predicate within {timeout} seconds."
+                )
             raise
 
     def wait_for_deployment_ready(
@@ -249,6 +258,93 @@ class TestContext:
             deployment_ready(min_ready),
             timeout,
         )
+
+    def wait_for_warmpool_ready(
+        self,
+        name: str,
+        namespace: Optional[str] = None,
+        min_ready: int = 1,
+        timeout=120,
+    ):
+        """Waits for a SandboxWarmPool to have at least min_ready ready sandboxes"""
+        if namespace is None:
+            namespace = self.namespace
+        if not namespace:
+            raise ValueError("Namespace must be provided.")
+
+        custom_objects_api = self.get_custom_objects_api()
+        core_v1 = self.get_core_v1_api()
+        is_pod_ready = pod_ready()
+
+        try:
+            warmpool = custom_objects_api.get_namespaced_custom_object(
+                group="extensions.agents.x-k8s.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="sandboxwarmpools",
+                name=name,
+            )
+            warmpool_uid = warmpool["metadata"]["uid"]
+        except kubernetes.client.rest.ApiException as e:
+            print(f"Error fetching SandboxWarmPool {name}: {e}")
+            raise
+
+        w = kubernetes.watch.Watch()
+        ready_pods = set()
+        try:
+            for event in w.stream(
+                core_v1.list_namespaced_pod,
+                namespace=namespace,
+                timeout_seconds=timeout,
+            ):
+                pod = event["object"]
+                pod_name = pod.metadata.name
+
+                owner_references = pod.metadata.owner_references or []
+                is_owned = False
+                for owner_ref in owner_references:
+                    if (
+                        owner_ref.kind == "SandboxWarmPool"
+                        and owner_ref.uid == warmpool_uid
+                    ):
+                        is_owned = True
+                        break
+
+                if not is_owned:
+                    continue
+
+                event_type = event["type"]
+                if event_type == "DELETED":
+                    if pod_name in ready_pods:
+                        ready_pods.remove(pod_name)
+                    continue
+
+                if is_pod_ready(pod):
+                    ready_pods.add(pod_name)
+                elif pod_name in ready_pods:
+                    ready_pods.remove(pod_name)
+
+                print(
+                    f"WarmPool {name}: {len(ready_pods)}/{min_ready} pods ready. Current ready set: {ready_pods}"
+                )
+                if len(ready_pods) >= min_ready:
+                    print(
+                        f"SandboxWarmPool {name} is ready with {len(ready_pods)} pods."
+                    )
+                    w.stop()
+                    return True
+
+            # Fallthrough means timeout
+            raise TimeoutError(
+                f"SandboxWarmPool {name} did not become ready within {timeout} seconds."
+            )
+        except Exception as e:
+            print(f"Error during watch: {e}")
+            if "timeout" in str(e).lower():
+                raise TimeoutError(
+                    f"SandboxWarmPool {name} did not become ready within {timeout} seconds."
+                )
+            raise
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ def run_go_e2e_tests(repo_root, artifact_dir, env):
     print("========= Running Go E2E tests... =========")
     go_test_cmd = utils.go_tool_args(
         "gotestsum",
-        f"--junitfile={artifact_dir}/e2e-go-junit.xml",
+        f"--junitfile={repo_root}/e2e-go-junit.xml",
         f"--jsonfile={artifact_dir}/test-e2e.json",
         "--", "./test/e2e/...", "--parallel=1", "-v"
     )
@@ -61,7 +61,7 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
     print("========= Running Python SDK E2E tests... =========")
 
     # Define the path for the JUnit report
-    junit_report_path = f"{artifact_dir}/e2e-python-sdk-junit.xml"
+    junit_report_path = f"{repo_root}/e2e-python-sdk-junit.xml"
 
     # Set the environment variable for the test namespace
     test_env = env.copy()

@@ -13,44 +13,15 @@
 # limitations under the License.
 
 import os
-import time
 from test.e2e.clients.python.framework.context import TestContext
 
 import pytest
 import yaml
 from agentic_sandbox import SandboxClient
 
-# Assuming the template manifest from the other test is reusable
-TEMPLATE_MANIFEST = """
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: python-sdk-test-template
-spec:
-  podTemplate:
-    metadata:
-      labels:
-        app: python-sandbox
-        sandbox: sdk-test-sandbox
-    spec:
-      containers:
-      - name: python-sandbox
-        image: kind.local/python-runtime-sandbox:{image_tag}
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 8888
-"""
-
-WARMPOOL_MANIFEST = """
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
-kind: SandboxWarmPool
-metadata:
-  name: python-sdk-warmpool
-spec:
-  replicas: 1
-  sandboxTemplateRef:
-    name: python-sdk-test-template
-"""
+TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
+TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
+WARMPOOL_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_warmpool.yaml")
 
 ROUTER_YAML_PATH = (
     "clients/python/agentic-sandbox-client/sandbox_router/sandbox_router.yaml"
@@ -113,7 +84,8 @@ def deploy_router(tc, temp_namespace):
 def sandbox_template(tc, temp_namespace):
     """Deploys the sandbox template into the test namespace"""
     image_tag = get_image_tag()
-    manifest = TEMPLATE_MANIFEST.format(image_tag=image_tag)
+    with open(TEMPLATE_YAML_PATH, "r") as f:
+        manifest = f.read().format(image_tag=image_tag)
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     return "python-sdk-test-template"
 
@@ -121,9 +93,15 @@ def sandbox_template(tc, temp_namespace):
 @pytest.fixture(scope="function")
 def sandbox_warmpool(tc, temp_namespace):
     """Deploys the sandbox warmpool into the test namespace"""
-    tc.apply_manifest_text(WARMPOOL_MANIFEST, namespace=temp_namespace)
+    with open(WARMPOOL_YAML_PATH, "r") as f:
+        manifest = f.read()
+    tc.apply_manifest_text(manifest, namespace=temp_namespace)
     print("Warmpool manifest applied.")
-    time.sleep(10)  # Wait 10 seconds for the warmpool to start provisioning
+
+    tc.wait_for_warmpool_ready(
+        "python-sdk-warmpool", namespace=temp_namespace, timeout=180
+    )
+    print("Warmpool is ready.")
 
 
 def run_sdk_tests(sandbox):

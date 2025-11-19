@@ -14,11 +14,28 @@
 
 import kubernetes
 
+
 def deployment_ready(min_ready: int = 1):
     """Predicate to check if a Deployment has at least min_ready available replicas."""
+
     def check(obj: kubernetes.client.V1Deployment) -> bool:
         if obj.status:
             available_replicas = obj.status.available_replicas or 0
             return available_replicas >= min_ready
         return False
+
+    return check
+
+
+def pod_ready():
+    """Predicate to check if a Pod is ready."""
+
+    def check(obj: kubernetes.client.V1Pod) -> bool:
+        if not obj.status:
+            return False
+        for condition in obj.status.conditions or []:
+            if condition.type == "Ready" and condition.status == "True":
+                return True
+        return False
+
     return check

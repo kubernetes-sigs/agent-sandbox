@@ -1,0 +1,18 @@
+[
+  {
+    "service_name": "",
+    "context_dir": ""
+  },
+  {
+    "service_name": "chrome-sandbox",
+    "context_dir": "examples"
+  },
+  {
+    "service_name": "python-runtime-sandbox",
+    "context_dir": "examples"
+  },
+  {
+    "service_name": "sandbox_router",
+    "context_dir": "clients/python/agentic-sandbox-client"
+  }
+]

@@ -16,6 +16,7 @@
 import argparse
 import os
 import subprocess
+import json
 
 from shared import utils
 from shared import golang
@@ -135,19 +136,30 @@ def main(args):
     repo_root = os.path.dirname(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
-    dockerfiles = find_dockerfiles(repo_root)
 
-    if not dockerfiles:
-        print("No Dockerfiles found to build.")
-        return
+    images_json_path = os.path.join(repo_root, "dev/tools/shared/images.json")
+    if not os.path.isfile(images_json_path):
+        print(f"Error: images.json not found at {images_json_path}")
+
+    with open(images_json_path, "r") as f:
+        images_to_build = json.load(f)
 
     create_buildx_builder_if_not_exists()
 
-    for service_name, context_dir, dockerfile_path in dockerfiles:
+    for image_info in images_to_build:
+        service_name = image_info["service_name"]
+        context_dir = image_info["context_dir"]
+        dockerfile_path = os.path.join(context_dir, service_name, "Dockerfile")
+
+        build_context_abs = os.path.join(repo_root, context_dir, service_name)
+        dockerfile_path_abs = os.path.join(repo_root, dockerfile_path)
+
+        if not service_name:
+            service_name = "agent-sandbox-controller"
         print(
-            f"building image for {service_name} from {dockerfile_path} in {context_dir}"
+            f"building image for {service_name} from {dockerfile_path_abs} in {build_context_abs}"
         )
-        build_and_push_image(args, service_name, context_dir, dockerfile_path)
+        build_and_push_image(args, service_name, build_context_abs, dockerfile_path_abs)
 
 
 if __name__ == "__main__":

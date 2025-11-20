@@ -6,7 +6,6 @@ WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd ./cmd
 
-
 RUN CGO_ENABLED=0 go build -o /chrome-sandbox-entrypoint ./cmd/chrome-sandbox-entrypoint
 
 #----------------------
@@ -48,7 +47,7 @@ RUN chmod 1777 /tmp/.X11-unix
 
 #----------------------
 # Add our entrypoint script
-COPY --chmod=a+rx examples/chrome-sandbox/scripts/start-chrome /start-chrome
+COPY --chmod=a+rx scripts/start-chrome /start-chrome
 COPY --from=builder --chmod=a+rx /chrome-sandbox-entrypoint /chrome-sandbox-entrypoint
 
 #----------------------

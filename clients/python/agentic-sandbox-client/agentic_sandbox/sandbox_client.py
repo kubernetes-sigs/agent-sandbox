@@ -286,7 +286,8 @@ class SandboxClient:
 
         elif self.gateway_name:
             # Case 2: Gateway Name provided -> Production Mode (Discovery)
-            self._wait_for_gateway_ip()
+            #self._wait_for_gateway_ip()
+            self.base_url = "http://localhost:8080/"
 
         else:
             # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)

@@ -89,48 +89,6 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path):
         load_kind_image(args.kind_cluster_name, service_name, srcdir)
 
 
-def find_dockerfiles(repo_root):
-    """Finds all Dockerfiles to be built."""
-    dockerfiles = []
-
-    # Go module images
-    def find_go_mod_dockerfiles(mod_dir):
-        images_dir = os.path.join(mod_dir, "images")
-        if not os.path.isdir(images_dir):
-            return
-        for root, dirs, files in os.walk(images_dir):
-            for filename in files:
-                if filename == "Dockerfile":
-                    dockerfile_path = os.path.join(root, filename)
-                    service_name = os.path.basename(root)
-                    dockerfiles.append((service_name, mod_dir, dockerfile_path))
-
-    golang.for_each_module(find_go_mod_dockerfiles)
-
-    # Example images
-    examples_dir = os.path.join(repo_root, "examples")
-    if os.path.isdir(examples_dir):
-        for example in os.listdir(examples_dir):
-            example_dir = os.path.join(examples_dir, example)
-            if not os.path.isdir(example_dir):
-                continue
-            dockerfile_path = os.path.join(example_dir, "Dockerfile")
-            if os.path.isfile(dockerfile_path):
-                service_name = example
-                dockerfiles.append((service_name, example_dir, dockerfile_path))
-
-    # Python SDK image
-    python_sdk_dir = os.path.join(
-        repo_root, "clients", "python", "agentic-sandbox-client", "sandbox_router"
-    )
-    dockerfile_path = os.path.join(python_sdk_dir, "Dockerfile")
-    if os.path.isfile(dockerfile_path):
-        service_name = "sandbox-router"
-        dockerfiles.append((service_name, python_sdk_dir, dockerfile_path))
-
-    return dockerfiles
-
-
 def main(args):
     """Builds and pushes docker images."""
     repo_root = os.path.dirname(

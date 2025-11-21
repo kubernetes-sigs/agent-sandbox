@@ -107,13 +107,11 @@ def main(args):
     for image_info in images_to_build:
         service_name = image_info["service_name"]
         context_dir = image_info["context_dir"]
-        dockerfile_path = os.path.join(context_dir, service_name, "Dockerfile")
+        dockerfile_path = image_info["dockerfile"]
 
-        build_context_abs = os.path.join(repo_root, context_dir, service_name)
+        build_context_abs = os.path.join(repo_root, context_dir)
         dockerfile_path_abs = os.path.join(repo_root, dockerfile_path)
 
-        if not service_name:
-            service_name = "agent-sandbox-controller"
         print(
             f"building image for {service_name} from {dockerfile_path_abs} in {build_context_abs}"
         )

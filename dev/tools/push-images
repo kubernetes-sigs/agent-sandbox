@@ -82,23 +82,10 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path):
     if args.kind_cluster_name:
         load_kind_image(args.kind_cluster_name, service_name, srcdir)
 
+
 def main(args):
     """Builds and pushes all discovered Docker images."""
-    excluded_dirs = {
-        ".git",
-        ".venv",
-        "myenv",
-        ".pytest_cache",
-        "build",
-        "dist",
-        "bin",
-        ".vscode",
-        "__pycache__",
-        "site",
-        "k8s",
-        "dev",
-        "docs"
-    }
+    excluded_dirs = {"dev", "docs", "k8s", "site", "tests"}
 
     for root, dirs, files in os.walk(".", topdown=True):
         # Exclude directories
@@ -107,11 +94,11 @@ def main(args):
         if "Dockerfile" in files:
             dockerfile_path = os.path.join(root, "Dockerfile")
             context_dir = root
-            service_name = os.path.basename(root)
+            service_name = os.path.basename(root)  # same as image name
 
             if not service_name:
                 continue
-            
+
             if service_name == ".":
                 service_name = "agent-sandbox-controller"
 
@@ -123,6 +110,8 @@ def main(args):
             create_buildx_builder_if_not_exists()
             print(f"building image for {service_name}")
             build_and_push_image(args, service_name, context_dir, dockerfile_path)
+            # TODO: Handle duplicate service names in different paths
+
 
 if __name__ == "__main__":
     # parse arguments and call

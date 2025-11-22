@@ -16,10 +16,8 @@
 import argparse
 import os
 import subprocess
-import json
 
 from shared import utils
-from shared import golang
 
 
 def create_buildx_builder_if_not_exists():
@@ -40,9 +38,7 @@ def create_buildx_builder_if_not_exists():
     subprocess.run(["docker", "buildx", "use", builder_name], check=True)
 
 
-def build_and_push_image_with_docker_buildx(
-    args, service_name, srcdir, dockerfile_path
-):
+def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path):
     platforms = "linux/amd64,linux/arm64"
     build_cmd = [
         "docker",
@@ -58,13 +54,11 @@ def build_and_push_image_with_docker_buildx(
     for tag in args.extra_image_tags:  # additional image tags
         extra_tag = utils.get_full_image_name(args, service_name, tag=tag)
         build_cmd.extend(["-t", extra_tag])
-    build_cmd.extend(
-        [
-            "-f",
-            dockerfile_path,
-            ".",
-        ]
-    )
+    build_cmd.extend([
+        "-f",
+        os.path.basename(dockerfile_path),
+        ".",
+    ])
     subprocess.run(build_cmd, cwd=srcdir, check=True)
     print(f"pushed image {image_name}")
 
@@ -88,61 +82,67 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path):
     if args.kind_cluster_name:
         load_kind_image(args.kind_cluster_name, service_name, srcdir)
 
-
 def main(args):
-    """Builds and pushes docker images."""
-    repo_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    """Builds and pushes all discovered Docker images."""
+    excluded_dirs = {
+        ".git",
+        ".venv",
+        "myenv",
+        ".pytest_cache",
+        "build",
+        "dist",
+        "bin",
+        ".vscode",
+        "__pycache__",
+        "site",
+        "k8s",
+        "dev",
+        "docs"
+    }
 
-    images_json_path = os.path.join(repo_root, "dev/tools/shared/images.json")
-    if not os.path.isfile(images_json_path):
-        print(f"Error: images.json not found at {images_json_path}")
+    for root, dirs, files in os.walk(".", topdown=True):
+        # Exclude directories
+        dirs[:] = [d for d in dirs if d not in excluded_dirs]
 
-    with open(images_json_path, "r") as f:
-        images_to_build = json.load(f)
+        if "Dockerfile" in files:
+            dockerfile_path = os.path.join(root, "Dockerfile")
+            context_dir = root
+            service_name = os.path.basename(root)
 
-    create_buildx_builder_if_not_exists()
+            if not service_name:
+                continue
+            
+            if service_name == ".":
+                service_name = "agent-sandbox-controller"
 
-    for image_info in images_to_build:
-        service_name = image_info["service_name"]
-        context_dir = image_info["context_dir"]
-        dockerfile_path = image_info["dockerfile"]
+            print(f"--- Found Dockerfile at: {dockerfile_path}")
+            print(f"--- Service Name: {service_name}")
+            print(f"--- Context Dir: {context_dir}")
 
-        build_context_abs = os.path.join(repo_root, context_dir)
-        dockerfile_path_abs = os.path.join(repo_root, dockerfile_path)
-
-        print(
-            f"building image for {service_name} from {dockerfile_path_abs} in {build_context_abs}"
-        )
-        build_and_push_image(args, service_name, build_context_abs, dockerfile_path_abs)
-
+            print(f"create Docker buildx builder for {service_name}")
+            create_buildx_builder_if_not_exists()
+            print(f"building image for {service_name}")
+            build_and_push_image(args, service_name, context_dir, dockerfile_path)
 
 if __name__ == "__main__":
     # parse arguments and call
     parser = argparse.ArgumentParser(description="Build and push Docker images")
-    parser.add_argument(
-        "--image-prefix",
-        dest="image_prefix",
-        help="Prefix for the image name. requires slash at the end if a path",
-        type=str,
-        default=os.getenv("IMAGE_PREFIX"),
-    )
-    parser.add_argument(
-        "--extra-image-tag",
-        dest="extra_image_tags",
-        help="Additional tags to use when publishing images.",
-        type=str,
-        action="append",
-        default=[],
-    )
-    parser.add_argument(
-        "--kind-cluster-name",
-        dest="kind_cluster_name",
-        help="Name of the kind cluster. If set, images will be loaded into the cluster",
-        type=str,
-        default=os.getenv("KIND_CLUSTER_NAME"),
-    )
+    parser.add_argument("--image-prefix",
+                        dest="image_prefix",
+                        help="Prefix for the image name. requires slash at the end if a path",
+                        type=str,
+                        default=os.getenv("IMAGE_PREFIX"))
+    parser.add_argument("--extra-image-tag",
+                        dest="extra_image_tags",
+                        help="Additional tags to use when publishing images.",
+                        type=str,
+                        action="append",
+                        default=[])
+    parser.add_argument("--kind-cluster-name",
+                        dest="kind_cluster_name",
+                        help="Name of the kind cluster. If set, images will be loaded into the cluster",
+                        type=str,
+                        default=os.getenv("KIND_CLUSTER_NAME"))
     args = parser.parse_args()
 
     if args.kind_cluster_name:

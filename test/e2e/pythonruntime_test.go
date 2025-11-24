@@ -45,7 +45,7 @@ spec:
     spec:
       containers:
       - name: python-sandbox
-        image: kind.local/python-runtime-sandbox:%s
+        image: %s/python-runtime-sandbox:%s
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888
@@ -67,7 +67,7 @@ spec:
     spec:
       containers:
       - name: python-sandbox
-        image: kind.local/python-runtime-sandbox:%s
+        image: %s/python-runtime-sandbox:%s
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888
@@ -113,7 +113,11 @@ func TestRunPythonRuntimeSandbox(t *testing.T) {
 	if imageTag == "" {
 		imageTag = "latest"
 	}
-	manifest := fmt.Sprintf(sandboxManifest, imageTag)
+	imagePrefix := os.Getenv("IMAGE_PREFIX")
+	if imagePrefix == "" {
+		imagePrefix = "kind.local"
+	}
+	manifest := fmt.Sprintf(sandboxManifest, imagePrefix, imageTag)
 	h.Apply(ctx, ns, manifest)
 
 	// Pod and sandboxID have the same name
@@ -156,7 +160,11 @@ func TestRunPythonRuntimeSandboxClaim(t *testing.T) {
 	if imageTag == "" {
 		imageTag = "latest"
 	}
-	manifest := fmt.Sprintf(templateManifest, imageTag)
+	imagePrefix := os.Getenv("IMAGE_PREFIX")
+	if imagePrefix == "" {
+		imagePrefix = "kind.local"
+	}
+	manifest := fmt.Sprintf(templateManifest, imagePrefix, imageTag)
 	h.Apply(ctx, ns, manifest)
 
 	h.Apply(ctx, ns, claimManifest)
@@ -198,7 +206,11 @@ func TestRunPythonRuntimeSandboxWarmpool(t *testing.T) {
 	if imageTag == "" {
 		imageTag = "latest"
 	}
-	manifest := fmt.Sprintf(templateManifest, imageTag)
+	imagePrefix := os.Getenv("IMAGE_PREFIX")
+	if imagePrefix == "" {
+		imagePrefix = "kind.local"
+	}
+	manifest := fmt.Sprintf(templateManifest, imagePrefix, imageTag)
 	h.Apply(ctx, ns, manifest)
 
 	h.Apply(ctx, ns, warmPoolManifest)
@@ -252,6 +264,18 @@ func TestRunPythonRuntimeSandboxWarmpool(t *testing.T) {
 // runPodTests runs the health check, root endpoint, and execute endpoint tests on the given pod.
 func runPodTests(ctx context.Context, t *testing.T, h *framework.TestContext, podID types.NamespacedName) {
 	log := klog.FromContext(ctx)
+
+	// Get the template to check the runtime
+	templateID := types.NamespacedName{Namespace: podID.Namespace, Name: "python-sandbox-template"}
+	template := h.GetSandboxTemplate(ctx, templateID)
+	runtimeClassName, found, err := unstructured.NestedString(template.Object, "spec", "podTemplate", "spec", "runtimeClassName")
+	if err != nil {
+		t.Fatalf("Failed to get runtimeClassName from template: %v", err)
+	}
+	if found && runtimeClassName == "gvisor" {
+		log.Info("Skipping PortForward tests for gvisor runtime")
+		return
+	}
 
 	// Loop until we can query the python server for its health
 	for {

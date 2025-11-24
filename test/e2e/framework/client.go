@@ -33,10 +33,16 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const (
+	// DefaultTimeout is the default timeout for WaitForObject.
+	DefaultTimeout = 60 * time.Second
 )
 
 // ClusterClient is an abstraction layer for test cases to interact with the cluster.
@@ -117,9 +123,11 @@ func (cl *ClusterClient) ValidateObjectNotFound(ctx context.Context, obj client.
 // predicates.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
 	cl.Helper()
-	// Static 30 second timeout, this can be adjusted if needed
-	timeoutCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)
+		defer cancel()
+	}
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 	defer func() {
@@ -129,10 +137,10 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 	var validationErr error
 	for {
 		select {
-		case <-timeoutCtx.Done():
+		case <-ctx.Done():
 			return fmt.Errorf("timed out waiting for object: %w", validationErr)
 		default:
-			if validationErr = cl.ValidateObject(timeoutCtx, obj, p...); validationErr == nil {
+			if validationErr = cl.ValidateObject(ctx, obj, p...); validationErr == nil {
 				return nil
 			}
 			// Simple sleep for fixed duration (basic MVP)
@@ -223,6 +231,12 @@ var sandboxGVK = schema.GroupVersionKind{
 	Group:   "agents.x-k8s.io",
 	Version: "v1alpha1",
 	Kind:    "Sandbox",
+}
+
+var sandboxTemplateGVK = schema.GroupVersionKind{
+	Group:   "extensions.agents.x-k8s.io",
+	Version: "v1alpha1",
+	Kind:    "SandboxTemplate",
 }
 
 var sandboxWarmpoolGVK = schema.GroupVersionKind{
@@ -317,9 +331,6 @@ func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpo
 	log := klog.FromContext(ctx)
 	log.Info("Waiting for SandboxWarmPool Pods to be ready", "warmpoolID", sandboxWarmpoolID, "expectedReplicas", expectedReplicas)
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
 	// Get the SandboxWarmPool object to access its UID
 	warmpool := &unstructured.Unstructured{}
 	warmpool.SetGroupVersionKind(sandboxWarmpoolGVK)
@@ -329,50 +340,60 @@ func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpo
 	}
 	warmpoolUID := warmpool.GetUID()
 
-	for {
-		select {
-		case <-timeoutCtx.Done():
-			cl.T.Fatalf("Timed out waiting for SandboxWarmPool %s to have %d ready pods", sandboxWarmpoolID.String(), expectedReplicas)
-			return fmt.Errorf("timed out waiting for SandboxWarmPool %s to have %d ready pods", sandboxWarmpoolID.String(), expectedReplicas)
-		default:
-			podList := &corev1.PodList{}
-			// List all pods in the namespace
-			err := cl.client.List(timeoutCtx, podList, client.InNamespace(sandboxWarmpoolID.Namespace))
-			if err != nil {
-				log.Error(err, "Failed to list pods in namespace", "namespace", sandboxWarmpoolID.Namespace)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			readyCount := 0
-			var foundPods []string
-			for _, pod := range podList.Items {
-				isOwned := false
-				for _, ownerRef := range pod.GetOwnerReferences() {
-					if ownerRef.Kind == "SandboxWarmPool" && ownerRef.UID == warmpoolUID {
-						isOwned = true
-						break
-					}
-				}
-
-				if isOwned {
-					foundPods = append(foundPods, pod.Name)
-					if err := predicates.ReadyConditionIsTrue(&pod); err == nil {
-						readyCount++
-					}
-				}
-			}
-
-			log.Info("WarmPool pod status", "warmpoolID", sandboxWarmpoolID, "foundOwned", len(foundPods), "ready", readyCount, "want", expectedReplicas, "pods", foundPods)
-
-			if readyCount >= expectedReplicas {
-				log.Info("SandboxWarmPool is ready", "warmpoolID", sandboxWarmpoolID)
-				return nil
-			}
-
-			time.Sleep(2 * time.Second)
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
+		podList := &corev1.PodList{}
+		// List all pods in the namespace
+		err := cl.client.List(ctx, podList, client.InNamespace(sandboxWarmpoolID.Namespace))
+		if err != nil {
+			log.Error(err, "Failed to list pods in namespace", "namespace", sandboxWarmpoolID.Namespace)
+			return false, nil // Continue polling
 		}
+
+		readyCount := 0
+		var foundPods []string
+		for _, pod := range podList.Items {
+			isOwned := false
+			for _, ownerRef := range pod.GetOwnerReferences() {
+				if ownerRef.Kind == "SandboxWarmPool" && ownerRef.UID == warmpoolUID {
+					isOwned = true
+					break
+				}
+			}
+
+			if isOwned {
+				foundPods = append(foundPods, pod.Name)
+				if err := predicates.ReadyConditionIsTrue(&pod); err == nil {
+					readyCount++
+				}
+			}
+		}
+
+		log.Info("WarmPool pod status", "warmpoolID", sandboxWarmpoolID, "foundOwned", len(foundPods), "ready", readyCount, "want", expectedReplicas, "pods", foundPods)
+
+		if readyCount >= expectedReplicas {
+			log.Info("SandboxWarmPool is ready", "warmpoolID", sandboxWarmpoolID)
+			return true, nil // Done
+		}
+		return false, nil // Continue polling
+	})
+
+	if err != nil {
+		cl.T.Fatalf("Timed out waiting for SandboxWarmPool %s to have %d ready pods: %v", sandboxWarmpoolID.String(), expectedReplicas, err)
+		return err
 	}
+	return nil
+}
+
+func (cl *ClusterClient) GetSandboxTemplate(ctx context.Context, templateID types.NamespacedName) *unstructured.Unstructured {
+	template := &unstructured.Unstructured{}
+	template.SetGroupVersionKind(sandboxTemplateGVK)
+	template.SetName(templateID.Name)
+	template.SetNamespace(templateID.Namespace)
+
+	if err := cl.client.Get(ctx, templateID, template); err != nil {
+		cl.T.Fatalf("failed to get SandboxTemplate %s: %v", templateID, err)
+	}
+	return template
 }
 
 func (cl *ClusterClient) GetSandbox(ctx context.Context, sandboxID types.NamespacedName) *unstructured.Unstructured {

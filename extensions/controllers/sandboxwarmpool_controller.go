@@ -216,14 +216,13 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		return err
 	}
 
-	// Copy labels from pod template
-	for k, v := range template.ObjectMeta.Labels {
+	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {
 		podLabels[k] = v
 	}
 
 	// Create annotations for the pod
 	podAnnotations := make(map[string]string)
-	for k, v := range template.ObjectMeta.Annotations {
+	for k, v := range template.Spec.PodTemplate.ObjectMeta.Annotations {
 		podAnnotations[k] = v
 	}
 

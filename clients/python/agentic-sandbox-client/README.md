@@ -51,7 +51,28 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     source .venv/bin/activate
     ```
 
-2.  **Install the package:**
+2.  **Option 1: Install from source via git:**
+
+    ```bash
+    # Replace "main" with a specific version tag (e.g., "v0.1.0") from
+    # https://github.com/kubernetes-sigs/agent-sandbox/releases to pin a version tag.
+    export VERSION="main"
+
+    pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
+    ```
+
+2.  **Option 2: Install from source in editable mode:**
+
+    If you have not already done so, first clone this repository:
+
+    ```bash
+    cd ~
+    git clone https://github.com/kubernetes-sigs/agent-sandbox.git
+    cd agent-sandbox/clients/python/agentic-sandbox-client
+    ```
+
+    And then install the agentic-sandbox-client into your activated .venv:
+
     ```bash
     pip install -e .
     ```
@@ -86,7 +107,7 @@ from agentic_sandbox import SandboxClient
 # Automatically tunnels to svc/sandbox-router-svc
 with SandboxClient(
     template_name="python-sandbox-template",
-    namespace="dev"
+    namespace="default"
 ) as sandbox:
     print(sandbox.run("echo 'Hello from Local!'").stdout)
 ```
@@ -96,14 +117,14 @@ with SandboxClient(
 Use `api_url` to bypass discovery entirely. Useful for:
 
 - **Internal Agents:** Running inside the cluster (connect via K8s DNS).
-- **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.acme.com`).
+- **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.example.com`).
 
 ```python
 with SandboxClient(
     template_name="python-sandbox-template",
     # Connect directly to a URL
-    api_url="[http://sandbox-router-svc.default.svc.cluster.local:8080](http://sandbox-router-svc.default.svc.cluster.local:8080)",
-    namespace="dev"
+    api_url="http://sandbox-router-svc.default.svc.cluster.local:8080",
+    namespace="default"
 ) as sandbox:
     sandbox.run("ls -la")
 ```

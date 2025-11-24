@@ -118,33 +118,36 @@ func (c *Chrome) WaitForReady(ctx context.Context) error {
 			return fmt.Errorf("failed to create HTTP request: %w", err)
 		}
 
-		// Send the HTTP request
-		response, err := httpClient.Do(req)
-		if err != nil {
-			log.Info("Waiting for Chrome to be ready", "url", u, "error", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		defer response.Body.Close()
+		ready := func() bool {
+			// Send the HTTP request
+			response, err := httpClient.Do(req)
+			if err != nil {
+				log.Info("Waiting for Chrome to be ready", "url", u, "error", err)
+				return false
+			}
+			defer response.Body.Close()
 
-		// Check for HTTP 200 OK
-		if response.StatusCode != http.StatusOK {
-			log.Info("Waiting for Chrome to be ready", "url", u, "status", response.Status)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
+			// Check for HTTP 200 OK
+			if response.StatusCode != http.StatusOK {
+				log.Info("Waiting for Chrome to be ready", "url", u, "status", response.Status)
+				return false
+			}
 
-		b, err := io.ReadAll(response.Body)
-		if err != nil {
-			log.Info("Waiting for Chrome to be ready", "url", u, "error", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
+			b, err := io.ReadAll(response.Body)
+			if err != nil {
+				log.Info("Waiting for Chrome to be ready", "url", u, "error", err)
+				return false
+			}
 
-		log.Info("Chrome is ready", "url", u, "response", string(b))
-		break
+			log.Info("Chrome is ready", "url", u, "response", string(b))
+			return true
+		}()
+
+		if ready {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	return nil
 }
 
 type VNCServer struct {

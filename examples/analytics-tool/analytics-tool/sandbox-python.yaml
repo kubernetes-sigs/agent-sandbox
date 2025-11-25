@@ -1,0 +1,32 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: sandbox-python-example
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: my-python-sandbox
+      annotations:
+        test: "yes"
+    spec:
+      containers:
+      - name: python-sandbox
+        image: us-docker.pkg.dev/<PROJECT_ID>/analytics/analytics-tool:1.0.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8888
+        volumeMounts:
+        - name: my-pvc
+          mountPath: /my-data
+        env:
+        - name: MPLCONFIGDIR
+          value: /app/configs
+  volumeClaimTemplates:
+  - metadata:
+      name: my-pvc
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

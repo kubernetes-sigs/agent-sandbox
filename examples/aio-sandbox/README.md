@@ -63,6 +63,9 @@ source venv/bin/activate
 pip install agent-sandbox==0.0.18
 ```
 
+> **Note:**
+> The `agent-sandbox` Python SDK installed above is for controlling tools *inside* the AIO sandbox (e.g., browser, shell, file system). If you want to programmatically provision or manage sandbox infrastructure (Kubernetes resource lifecycle), use the complementary [`agentic-sandbox-client` Python SDK](../../clients/python/agentic-sandbox-client/). These two SDKs can be used together for a complete infrastructure + application workflow.
+
 Run the basic python example:
 ```sh
 python3 main.py

@@ -41,6 +41,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 	// Assert Sandbox object status reconciles as expected
 	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+			Phase:         "Running",
 			Service:       "my-sandbox",
 			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
 			Replicas:      1,
@@ -75,6 +76,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 	p = []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			// TODO: should Service/ServiceFQDN be cleared from status when the Service is deleted?
+			Phase:       "Terminating",
 			Service:     "my-sandbox",
 			ServiceFQDN: "my-sandbox.my-sandbox-ns.svc.cluster.local",
 			Replicas:    0,

@@ -16,8 +16,10 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+
 	"net/http"
 	"os"
 	"strings"
@@ -95,17 +97,17 @@ spec:
 `
 
 // TestRunPythonRuntimeSandbox tests that we can run the Python runtime inside a standard Pod.
-func TestRunPythonRuntimeSandbox(t *testing.T) {
+func TestRunPythonRuntimeSandbox(testingT *testing.T) {
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	log := klog.FromContext(ctx)
 
-	h := framework.NewTestContext(t)
+	testContext := framework.NewTestContext(testingT)
 
 	ns := fmt.Sprintf("python-runtime-sandbox-test-%d", time.Now().UnixNano())
-	h.CreateTempNamespace(ctx, ns)
+	testContext.CreateTempNamespace(ctx, ns)
 
 	startTime := time.Now()
 
@@ -118,7 +120,7 @@ func TestRunPythonRuntimeSandbox(t *testing.T) {
 		imagePrefix = "kind.local"
 	}
 	manifest := fmt.Sprintf(sandboxManifest, imagePrefix, imageTag)
-	h.Apply(ctx, ns, manifest)
+	testContext.Apply(ctx, ns, manifest)
 
 	// Pod and sandboxID have the same name
 	sandboxID := types.NamespacedName{
@@ -127,32 +129,32 @@ func TestRunPythonRuntimeSandbox(t *testing.T) {
 	}
 
 	// Wait for the pod to be ready
-	if err := h.WaitForSandboxReady(ctx, sandboxID); err != nil {
+	if err := testContext.WaitForSandboxReady(ctx, sandboxID); err != nil {
 		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		t.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
+		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
 	}
 
 	log.Info("Pod is ready", "podID", sandboxID.Name)
 
 	// Run the tests on the pod
-	runPodTests(ctx, t, h, sandboxID)
+	runPodTests(ctx, testingT, testContext, sandboxID)
 
 	duration := time.Since(startTime)
 	log.Info("Test completed successfully", "duration", duration)
 }
 
 // TestRunPythonRuntimeSandboxClaim tests that we can run the Python runtime inside a Sandbox without a WarmPool.
-func TestRunPythonRuntimeSandboxClaim(t *testing.T) {
+func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	log := klog.FromContext(ctx)
 
-	h := framework.NewTestContext(t)
+	testContext := framework.NewTestContext(testingT)
 
 	ns := fmt.Sprintf("python-sandbox-claim-test-%d", time.Now().UnixNano())
-	h.CreateTempNamespace(ctx, ns)
+	testContext.CreateTempNamespace(ctx, ns)
 
 	startTime := time.Now()
 
@@ -165,40 +167,40 @@ func TestRunPythonRuntimeSandboxClaim(t *testing.T) {
 		imagePrefix = "kind.local"
 	}
 	manifest := fmt.Sprintf(templateManifest, imagePrefix, imageTag)
-	h.Apply(ctx, ns, manifest)
+	testContext.Apply(ctx, ns, manifest)
 
-	h.Apply(ctx, ns, claimManifest)
+	testContext.Apply(ctx, ns, claimManifest)
 
 	sandboxID := types.NamespacedName{
 		Namespace: ns,
 		Name:      "python-sandbox-claim",
 	}
-	if err := h.WaitForSandboxReady(ctx, sandboxID); err != nil {
+	if err := testContext.WaitForSandboxReady(ctx, sandboxID); err != nil {
 		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		t.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
+		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
 	}
 
 	log.Info("Sandbox is ready", "sandboxName", sandboxID.Name)
 
 	// Run the tests on the pod
-	runPodTests(ctx, t, h, sandboxID)
+	runPodTests(ctx, testingT, testContext, sandboxID)
 
 	duration := time.Since(startTime)
 	log.Info("Test completed successfully", "duration", duration)
 }
 
 // TestRunPythonRuntimeSandboxWarmpool tests that we can run the Python runtime inside a Sandbox.
-func TestRunPythonRuntimeSandboxWarmpool(t *testing.T) {
+func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	log := klog.FromContext(ctx)
 
-	h := framework.NewTestContext(t)
+	testContext := framework.NewTestContext(testingT)
 
 	ns := fmt.Sprintf("python-sandbox-warmpool-test-%d", time.Now().UnixNano())
-	h.CreateTempNamespace(ctx, ns)
+	testContext.CreateTempNamespace(ctx, ns)
 
 	startTime := time.Now()
 
@@ -211,40 +213,40 @@ func TestRunPythonRuntimeSandboxWarmpool(t *testing.T) {
 		imagePrefix = "kind.local"
 	}
 	manifest := fmt.Sprintf(templateManifest, imagePrefix, imageTag)
-	h.Apply(ctx, ns, manifest)
+	testContext.Apply(ctx, ns, manifest)
 
-	h.Apply(ctx, ns, warmPoolManifest)
+	testContext.Apply(ctx, ns, warmPoolManifest)
 	sandboxWarmpoolID := types.NamespacedName{
 		Namespace: ns,
 		Name:      "python-warmpool",
 	}
 	// Wait for the warmpool to be ready
-	if err := h.WaitForWarmPoolReady(ctx, sandboxWarmpoolID, 1); err != nil {
+	if err := testContext.WaitForWarmPoolReady(ctx, sandboxWarmpoolID, 1); err != nil {
 		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		t.Fatalf("failed to wait for pod %s to be ready: %v", sandboxWarmpoolID.String(), err)
+		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxWarmpoolID.String(), err)
 	}
 
-	h.Apply(ctx, ns, claimManifest)
+	testContext.Apply(ctx, ns, claimManifest)
 	sandboxID := types.NamespacedName{
 		Namespace: ns,
 		Name:      "python-sandbox-claim",
 	}
 
-	if err := h.WaitForSandboxReady(ctx, sandboxID); err != nil {
+	if err := testContext.WaitForSandboxReady(ctx, sandboxID); err != nil {
 		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		t.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
+		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
 	}
 
 	// Get the SandboxClaim to extract the sandbox name
-	sandbox := h.GetSandbox(ctx, sandboxID)
+	sandbox := testContext.GetSandbox(ctx, sandboxID)
 	if sandbox == nil {
 		log.Error(nil, "failed to get sandbox", sandboxID.String())
-		t.Fatalf("Failed to get Sandbox %s after it was bound", sandboxID.String())
+		testingT.Fatalf("Failed to get Sandbox %s after it was bound", sandboxID.String())
 	}
 
 	sandboxName, found, err := unstructured.NestedString(sandbox.Object, "metadata", "annotations", "agents.x-k8s.io/pod-name")
 	if err != nil || !found || sandboxName == "" {
-		t.Fatalf("Failed to extract annotations sandboxName from bound Sandbox %+v: found=%v, err=%v, value=%s",
+		testingT.Fatalf("Failed to extract annotations sandboxName from bound Sandbox %+v: found=%v, err=%v, value=%s",
 			sandbox.Object, found, err, sandboxName)
 	}
 	log.Info("DEBUG: Extracted SandboxName from Sandbox", "sandboxName", sandboxName)
@@ -255,39 +257,41 @@ func TestRunPythonRuntimeSandboxWarmpool(t *testing.T) {
 	}
 
 	// Run the tests on the pod
-	runPodTests(ctx, t, h, podID)
+	runPodTests(ctx, testingT, testContext, podID)
 
 	duration := time.Since(startTime)
 	log.Info("Test completed successfully", "duration", duration)
 }
 
 // runPodTests runs the health check, root endpoint, and execute endpoint tests on the given pod.
-func runPodTests(ctx context.Context, t *testing.T, h *framework.TestContext, podID types.NamespacedName) {
+func runPodTests(ctx context.Context, testingT *testing.T, testContext *framework.TestContext, podID types.NamespacedName) {
 	log := klog.FromContext(ctx)
 
 	// Get the template to check the runtime
 	templateID := types.NamespacedName{Namespace: podID.Namespace, Name: "python-sandbox-template"}
-	template := h.GetSandboxTemplate(ctx, templateID)
-	runtimeClassName, found, err := unstructured.NestedString(template.Object, "spec", "podTemplate", "spec", "runtimeClassName")
-	if err != nil {
-		t.Fatalf("Failed to get runtimeClassName from template: %v", err)
-	}
-	if found && runtimeClassName == "gvisor" {
-		log.Info("Skipping PortForward tests for gvisor runtime")
-		return
+	template := testContext.GetSandboxTemplate(ctx, templateID)
+	if template != nil {
+		runtimeClassName, found, err := unstructured.NestedString(template.Object, "spec", "podTemplate", "spec", "runtimeClassName")
+		if err != nil {
+			testingT.Fatalf("Failed to get runtimeClassName from template: %v", err)
+		}
+		if found && runtimeClassName == "gvisor" {
+			log.Info("Skipping PortForward tests for gvisor runtime")
+			return
+		}
 	}
 
 	// Loop until we can query the python server for its health
 	for {
 		if ctx.Err() != nil {
-			t.Fatalf("context cancelled")
+			testingT.Fatalf("context cancelled")
 		}
 
 		portForwardCtx, portForwardCancel := context.WithCancel(ctx)
-		h.PortForward(portForwardCtx, podID, 8888, 8888)
+		testContext.PortForward(portForwardCtx, podID, 8888, 8888)
 
-		u := "http://localhost:8888/"
-		err := checkHealth(ctx, u)
+		url := "http://localhost:8888/"
+		err := checkHealth(ctx, url)
 		portForwardCancel()
 
 		if err != nil {
@@ -296,7 +300,7 @@ func runPodTests(ctx context.Context, t *testing.T, h *framework.TestContext, po
 			continue
 		}
 
-		log.Info("Python server is ready", "url", u)
+		log.Info("Python server is ready", "url", url)
 
 		break
 	}
@@ -304,23 +308,23 @@ func runPodTests(ctx context.Context, t *testing.T, h *framework.TestContext, po
 	// Test execute endpoint
 	{
 		portForwardCtx, portForwardCancel := context.WithCancel(ctx)
-		h.PortForward(portForwardCtx, podID, 8888, 8888)
-		u := "http://localhost:8888/execute"
-		err := checkExecute(ctx, u)
+		testContext.PortForward(portForwardCtx, podID, 8888, 8888)
+		url := "http://localhost:8888/execute"
+		err := checkExecute(ctx, url)
 		portForwardCancel()
 		if err != nil {
-			t.Fatalf("failed to verify execute endpoint: %v", err)
+			testingT.Fatalf("failed to verify execute endpoint: %v", err)
 		}
-		log.Info("Execute endpoint check successful", "url", u)
+		log.Info("Execute endpoint check successful", "url", url)
 	}
 }
 
 // checkHealth connects to the Python server health check endpoint.
-func checkHealth(ctx context.Context, u string) error {
+func checkHealth(ctx context.Context, url string) error {
 	httpClient := &http.Client{}
 	httpClient.Timeout = 200 * time.Millisecond
 
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -345,12 +349,12 @@ func checkHealth(ctx context.Context, u string) error {
 }
 
 // checkExecute connects to the Python server execute endpoint.
-func checkExecute(ctx context.Context, u string) error {
+func checkExecute(ctx context.Context, url string) error {
 	httpClient := &http.Client{}
 	httpClient.Timeout = 5 * time.Second // Increased timeout for execute
 
 	payload := `{"command": "echo 'hello world'"}`
-	req, err := http.NewRequestWithContext(ctx, "POST", u, strings.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -368,15 +372,23 @@ func checkExecute(ctx context.Context, u string) error {
 		return fmt.Errorf("non-200 response from execute endpoint: %d", response.StatusCode)
 	}
 
-	b, err := io.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		return fmt.Errorf("error reading response body from execute endpoint: %w", err)
 	}
 
-	// Basic check for stdout - more robust JSON parsing could be added if needed
-	bodyStr := string(b)
-	if !strings.Contains(bodyStr, `"stdout":"hello world\n"`) {
-		return fmt.Errorf("unexpected response from execute endpoint: %s", bodyStr)
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("failed to parse JSON response: %w", err)
+	}
+
+	stdout, ok := result["stdout"].(string)
+	if !ok {
+		return fmt.Errorf("stdout field not found or not a string in response: %s", string(body))
+	}
+
+	if stdout != "hello world\n" {
+		return fmt.Errorf("unexpected stdout in response: got %q, want %q", stdout, "hello world\n")
 	}
 	return nil
 }

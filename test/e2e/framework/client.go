@@ -385,12 +385,17 @@ func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpo
 }
 
 func (cl *ClusterClient) GetSandboxTemplate(ctx context.Context, templateID types.NamespacedName) *unstructured.Unstructured {
+	log := klog.FromContext(ctx)
 	template := &unstructured.Unstructured{}
 	template.SetGroupVersionKind(sandboxTemplateGVK)
 	template.SetName(templateID.Name)
 	template.SetNamespace(templateID.Namespace)
 
 	if err := cl.client.Get(ctx, templateID, template); err != nil {
+		if k8serrors.IsNotFound(err) {
+			log.Info("SandboxTemplate not found", "templateID", templateID)
+			return nil
+		}
 		cl.T.Fatalf("failed to get SandboxTemplate %s: %v", templateID, err)
 	}
 	return template

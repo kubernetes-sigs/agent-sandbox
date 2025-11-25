@@ -133,7 +133,20 @@ Open your browser to: http://localhost:13337 or `<machine-dns>`:13337
 
 If you are using gVisor or Kata Containers, direct pod port-forwarding isn't compatible. In this case, use the Sandbox Router.
 
-Deploy the Gateway **and** Router (see [`clients/python/agentic-sandbox-client/sandbox_router`](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/python/agentic-sandbox-client/sandbox_router)).
+**Prerequisites:**
+
+1.  **Deploy the Router (Required for All Modes):**
+    ```bash
+    # Deploys the Deployment and Service
+    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox_router/sandbox_router.yaml
+    ```
+
+2.  **Deploy the Gateway (Production Only):**
+    If you need external access via a Public IP (GKE), apply the Gateway configuration.
+    ```bash
+    # Deploys Gateway, HTTPRoute, and HealthCheckPolicy
+    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox_router/gateway.yaml
+    ```
 
 **For Production (via Gateway)**
 
@@ -143,13 +156,23 @@ export GATEWAY_IP=$(kubectl get gateway external-http-gateway -n default -o json
 echo "Gateway IP: $GATEWAY_IP"
 ```
 
-2. **Connect:** You must inject the routing headers. Use `curl` to test:
+2. **Connect: (Curl Test):** You must inject the routing headers. Use `curl` to test:
 ```bash
-# Replace <GATEWAY_IP> with the actual IP
 curl -v -H "X-Sandbox-ID: sandbox-example" \
         -H "X-Sandbox-Port: 13337" \
         http://$GATEWAY_IP
 ```
+
+3.  **Access via Browser (UI):**
+    To load the VSCode interface, your browser must send the routing headers.
+    
+    1.  Install a header-modifying extension (e.g., **ModHeader** for Chrome/Edge/Firefox).
+    2.  Configure the extension to send:
+        * `X-Sandbox-ID`: `sandbox-example`
+        * `X-Sandbox-Port`: `13337`
+    3.  Navigate to **`http://<GATEWAY_IP>`** (replace with the IP from step 1).
+
+    You should see the VSCode interface load immediately.
 
 **For Local Development (via Router Tunnel)**
 
@@ -167,16 +190,6 @@ curl -v -H "X-Sandbox-ID: sandbox-example" \
         -H "X-Sandbox-Port: 13337" \
         http://localhost:8080
 ```
-- **Access via Browser (UI):**
-    Standard browsers do not support adding custom headers (like `X-Sandbox-ID`) to the address bar requests by default. To access the VSCode UI:
-    
-    1.  Install a header-modifying extension (e.g., **ModHeader** for Chrome/Edge/Firefox).
-    2.  Configure the extension to send the following Request Headers:
-        * `X-Sandbox-ID`: `sandbox-example`
-        * `X-Sandbox-Port`: `13337`
-    3.  Navigate to **[http://localhost:8080](http://localhost:8080)**.
-    
-    You should see the VSCode interface load immediately.
 
 #### Getting VSCode password
 

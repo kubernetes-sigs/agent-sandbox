@@ -84,5 +84,5 @@ rm sandbox_screenshot.png
 ```
 
 ## References
-- [Agent Sandbox](https://github.com/agent-infra/sandbox/tree/main)
-- [Agent Sandbox Python SDK](https://github.com/agent-infra/sandbox/tree/main/sdk/python)
+- [AIO Sandbox](https://github.com/agent-infra/sandbox/tree/main)
+- [AIO Sandbox Python SDK](https://github.com/agent-infra/sandbox/tree/main/sdk/python)

@@ -24,7 +24,7 @@ TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
 WARMPOOL_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_warmpool.yaml")
 
 ROUTER_YAML_PATH = (
-    "clients/python/agentic-sandbox-client/sandbox_router/sandbox_router.yaml"
+    "clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"
 )
 
 

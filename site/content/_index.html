@@ -4,37 +4,52 @@ linkTitle = "Agent Sandbox"
 description = "Agent Sandbox is a cloud native controller for sandboxes"
 +++
 
-{{< blocks/cover title="Agent Sandbox" image_anchor="top" height="full" color="black" >}}
+
+{{< blocks/cover subtitle="Agent Sandbox" title="Build Agents in a Safer Environment" color="black" >}}
 <div class="mx-auto">
-	<a class="btn btn-lg btn-primary me-3 mb-4" href="/docs">
-		Read the docs <i class="fas fa-arrow-alt-circle-right ms-2"></i>
-	</a>
-	<a class="btn btn-lg btn-secondary me-3 mb-4" href="https://github.com/kubernetes-sigs/agent-sandbox">
-		GitHub <i class="fab fa-github ms-2 "></i>
-	</a>
-	<p class="lead mt-5">Secure Agent Execution Environment</p>
-	{{< blocks/link-down color="info" id="description" >}}
+	<div class="container">
+		<a class="link-card" href="https://github.com/kubernetes-sigs/agent-sandbox">
+			<p class="title">
+				GitHub
+			</p>
+			<p class="subtitle">
+				View Source Code
+			</p>
+		</a>
+		<a class="link-card" href="/docs">
+			<p class="title">
+				Documentation
+			</p>
+			<p class="subtitle">
+				Read and Deploy
+			</p>
+		</a>
+	</div>
+	{{< blocks/link-down color="light" id="description" >}}
 </div>
 {{< /blocks/cover >}}
 
 <div id="description" ></div>
 
-{{% blocks/lead color="primary"%}}
+{{% blocks/lead color="black"%}}
 <h1  class="text-center">Agent Sandbox provides a secure, and isolated execution layer to safely deploy autonomous AI agents on Kubernetes that generate and run untrusted code at scale.</h1>
-{{% /blocks/lead %}}
-
-{{% blocks/lead color="secondary" %}}
-<h1 class="text-center">Users can leverage Agent Sandbox to safely execute arbitrary, untrusted code within an isolated environment, enabling applications such as stateful code interpretation, agentic web browsing, computer use, and sophisticated data analysis.</h1>
-{{% /blocks/lead %}}
-
-{{% blocks/lead color="dark" %}}
-<h1 class="text-center">The Agent Sandbox is specifically designed for interoperability by defining a standardized Kubernetes API that decouples the execution layer from the underlying technology. This abstraction allows the sandbox to support various backends, such as gVisor, and Kata Containers, enabling users to choose the isolation technology that best fits their security, performance, or workload requirements.</h1>
+<div class="video-card">Placeholder</div>
+<div class="info-container">
+  <div class="info-card">
+    <p class="title">Enable Complex Agentic Workloads</p>
+    <p class="description">Safely execute arbitrary, untrusted code in a fully isolated environment to enable high-risk applications like stateful code interpretation, agentic web browsing, complex "computer use" tasks, and sophisticated data analysis</p>
+  </div>
+  <div class="info-card">
+    <p class="title">Decoupled Isolation. Built for Choice</p>
+    <p class="description">Interoperability is core to Agent Sandbox with a standardized Kubernetes API that fully decouples the execution layer from the underlying isolation technology. This abstraction supports various backends, including gVisor and Kata Containers, allowing you to select the isolation method that perfectly aligns with your specific security, performance, and workload needs</p>
+  </div>
+</div>
 {{% /blocks/lead %}}
 
 {{< blocks/section color="light" type="row">}}
 
 {{% blocks/feature icon="fab fa-github" title="Contributions welcome!" url="https://github.com/kubernetes-sigs/agent-sandbox" %}}
-We do a [Pull Request](https://github.com/kubernetes-sigs/agent-sandbox/pulls) contributions workflow on **GitHub**. New users are always welcome!
+We do a [Pull Request](https://github.com/kubernetes-sigs/agent-sandbox/pulls) contributions workflow on **GitHub**.
 {{% /blocks/feature %}}
 
 {{% blocks/feature icon="fab fa-slack" title="Connect with us" url="https://kubernetes.slack.com" %}}

@@ -50,7 +50,7 @@ kind: Sandbox
 metadata:
   name: my-sandbox
 spec:
-  template:
+  podTemplate:
     spec:
       containers:
       - name: my-container

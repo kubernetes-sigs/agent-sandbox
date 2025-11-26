@@ -103,7 +103,27 @@ def main(args):
 
             cmd = ["kubectl", "apply", "-f", "-"]
             subprocess.run(cmd, cwd=repo_root, check=True, input=modified_content, text=True)
+    
+    if args.gateway:
+        print("Setting up cloud-provider-kind for gateway ...")
+        cmd = ["go", "install", "sigs.k8s.io/cloud-provider-kind@latest"]
+        subprocess.run(cmd, cwd=repo_root, check=True)
+        
+        # Get current path
+        path = os.environ.get('PATH', '')
 
+        # Append the go/bin path
+        go_bin = os.path.expanduser('~/go/bin')
+        os.environ['PATH'] = f"{path}:{go_bin}"
+
+        print("Starting cloud-provider-kind in the background and enabling the Gateway API controller ...")
+        process = subprocess.Popen(
+            ["cloud-provider-kind", "--gateway-channel", "standard"],
+            stdout=subprocess.DEVNULL, # Silence output so it doesn't clutter terminal
+            stderr=subprocess.DEVNULL  # Silence errors
+        )
+    
+        print(f"Process started with PID: {process.pid}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Deploy manifests under k8s/ to Kubernetes cluster")
@@ -112,5 +132,8 @@ if __name__ == "__main__":
                         help="prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
+    parser.add_argument("--gateway",
+                        action='store_true',
+                        help="Deploy cloud provider kind for gateway support.")
     args = parser.parse_args()
     main(args)

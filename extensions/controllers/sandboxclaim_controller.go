@@ -225,9 +225,19 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Remove the pool labels
 	delete(pod.Labels, poolLabel)
 	delete(pod.Labels, sandboxTemplateRefHash)
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	// Add sandbox label
+	pod.Labels[sandboxcontrollers.SandboxLabel] = sandboxcontrollers.NameHash(sandbox.Name)
 
 	// Remove existing owner references (from SandboxWarmPool)
+	// And add sandbox as the new owner.
 	pod.OwnerReferences = nil
+	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
+		log.Error(err, "Failed to set controller reference")
+		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+	}
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {

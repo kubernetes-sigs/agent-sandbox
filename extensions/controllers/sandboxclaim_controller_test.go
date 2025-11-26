@@ -19,8 +19,9 @@ package controllers
 import (
 	"context"
 	"testing"
+	"time" // Added for shutdownTime
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp" // Added for ignoring fields
 	corev1 "k8s.io/api/core/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -251,7 +252,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+			PodTemplate: v1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -478,6 +479,102 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 						t.Errorf("expected no pod name label but found %q", podName)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestSandboxClaimShutdownTime(t *testing.T) {
+	// 1. Setup static "fake" times for deterministic tests
+	fakeTemplateTime := &metav1.Time{Time: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)}
+	fakeOverrideTime := &metav1.Time{Time: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC)}
+
+	// 2. Define the base template
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template",
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate:  v1alpha1.PodTemplate{}, // Not relevant for this test
+			ShutdownTime: fakeTemplateTime,
+		},
+	}
+
+	// 3. Define test cases
+	testCases := []struct {
+		name                 string
+		claimToReconcile     *extensionsv1alpha1.SandboxClaim
+		existingObjects      []client.Object
+		expectedShutdownTime *metav1.Time
+	}{
+		{
+			name: "should use template shutdownTime when claim has none",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-default-time", Namespace: "default", UID: "uid-1"},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+			},
+			existingObjects:      []client.Object{template},
+			expectedShutdownTime: fakeTemplateTime, // Expects the template's time
+		},
+		{
+			name: "should use claim shutdownTime as an override",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-override-time", Namespace: "default", UID: "uid-2"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef:  extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					ShutdownTime: fakeOverrideTime, // Override is set here
+				},
+			},
+			existingObjects:      []client.Object{template},
+			expectedShutdownTime: fakeOverrideTime, // Expects the claim's time
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			allObjects := append(tc.existingObjects, tc.claimToReconcile)
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(tc.claimToReconcile).Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client: client,
+				Scheme: scheme,
+			}
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      tc.claimToReconcile.Name,
+					Namespace: tc.claimToReconcile.Namespace,
+				},
+			}
+
+			// ACT
+			_, err := reconciler.Reconcile(context.Background(), req)
+			if err != nil {
+				t.Fatalf("reconcile: (%v)", err)
+			}
+
+			// ASSERT
+			// Check that the created Sandbox has the correct shutdownTime
+			var sandbox v1alpha1.Sandbox
+			err = client.Get(context.Background(), req.NamespacedName, &sandbox)
+			if err != nil {
+				t.Fatalf("get sandbox: (%v)", err)
+			}
+
+			// Use a comparer that treats the time values as equal
+			timeComparer := cmp.Comparer(func(x, y *metav1.Time) bool {
+				if x == nil && y == nil {
+					return true
+				}
+				if x != nil && y != nil {
+					return x.Time.Equal(y.Time)
+				}
+				return false
+			})
+
+			if diff := cmp.Diff(tc.expectedShutdownTime, sandbox.Spec.ShutdownTime, timeComparer); diff != "" {
+				t.Errorf("unexpected sandbox ShutdownTime (-want +got):\n%s", diff)
 			}
 		})
 	}

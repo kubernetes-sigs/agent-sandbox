@@ -255,6 +255,20 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 	sandbox.Spec.PodTemplate = template.Spec.PodTemplate
+
+	// Determine the effective shutdownTime
+	// Precedence: Claim.Spec.ShutdownTime > Template.Spec.ShutdownTime > nil
+	var effectiveShutdownTime *metav1.Time
+	if claim.Spec.ShutdownTime != nil {
+		effectiveShutdownTime = claim.Spec.ShutdownTime
+		logger.Info("Using shutdownTime override from SandboxClaim")
+	} else if template.Spec.ShutdownTime != nil {
+		effectiveShutdownTime = template.Spec.ShutdownTime
+		logger.Info("Using shutdownTime from SandboxTemplate")
+	}
+	sandbox.Spec.ShutdownTime = effectiveShutdownTime
+
+	sandbox.Spec.PodTemplate = template.Spec.PodTemplate
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)

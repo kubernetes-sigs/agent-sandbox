@@ -11,6 +11,13 @@ spec:
       containers:
         - name: devcontainer-main
           image: ghcr.io/coder/envbuilder
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+              ephemeral-storage: "4Gi"
+            limits:
+              ephemeral-storage: "4Gi"
           env:
             # URL to the repository where the .devcontainer folder we want to load is located
             # for a branch append "#refs/heads/branch-name"

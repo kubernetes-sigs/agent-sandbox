@@ -1,6 +1,7 @@
 {{ $cover := and (.HasShortcode "blocks/cover") (not .Site.Params.ui.navbar_translucent_over_cover_disable) }}
 <nav class="js-navbar-scroll navbar navbar-expand-md navbar-dark {{ if $cover}} td-navbar-cover {{ end }} td-navbar">
-        <span class="navbar-brand">{{ if .Site.Params.ui.navbar_logo }}{{ with resources.Get "icons/logo.svg" }}{{ ( . | minify).Content | safeHTML }}{{ end }}{{ end }}</span>
+	<a class="navbar-brand" href="{{ .Site.Home.RelPermalink }}">
+		<span class="navbar-brand">{{ if .Site.Params.ui.navbar_logo }}{{ with resources.Get "icons/logo.svg" }}{{ ( . | minify).Content | safeHTML }}{{ end }}{{ end }}</span>
 	</a>
 	<button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#main_navbar" aria-controls="main_navbar" aria-expanded="false" aria-label="Toggle navigation">
 		<span class="navbar-toggler-icon"></span>

@@ -11,7 +11,7 @@ spec:
     spec:
       containers:
       - name: python-sandbox
-        image: kind.local/python-runtime-sandbox:{image_tag}
+        image: {image_prefix}/python-runtime-sandbox:{image_tag}
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888

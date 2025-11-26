@@ -48,31 +48,28 @@ def get_image_tag(env_var="IMAGE_TAG", default="latest"):
     return os.environ.get(env_var, default)
 
 
+def get_image_prefix(env_var="IMAGE_PREFIX", default="kind.local"):
+    """Retrieves the image prefix from environment variable or returns default"""
+    return os.environ.get(env_var, default)
+
+
 @pytest.fixture(scope="function")
 def deploy_router(tc, temp_namespace):
     """Deploys the sandbox router into the test namespace"""
     image_tag = get_image_tag()
-    router_image = "kind.local/sandbox-router:{}".format(image_tag)
+    image_prefix = get_image_prefix()
+    router_image = "{}/sandbox-router:{}".format(image_prefix, image_tag)
     print(f"Using router image: {router_image}")
 
     with open(ROUTER_YAML_PATH, "r") as f:
-        router_manifests = list(yaml.safe_load_all(f.read()))
-
-    modified_manifests = []
-    for manifest in router_manifests:
-        if not manifest:
-            continue
-        manifest["metadata"]["namespace"] = temp_namespace
-        if manifest["kind"] == "Deployment":
-            manifest["spec"]["template"]["spec"]["containers"][0][
-                "image"
-            ] = router_image
-        modified_manifests.append(manifest)
-
-    router_manifest_text = yaml.dump_all(modified_manifests)
+        manifest = (
+            f.read()
+            .replace("IMAGE_PLACEHOLDER", router_image)
+            .replace("NAMESPACE_PLACEHOLDER", temp_namespace)
+        )
 
     print(f"Applying router manifest to namespace: {temp_namespace}")
-    tc.apply_manifest_text(router_manifest_text, namespace=temp_namespace)
+    tc.apply_manifest_text(manifest, namespace=temp_namespace)
 
     print("Waiting for router deployment to be ready...")
     tc.wait_for_deployment_ready(
@@ -84,8 +81,9 @@ def deploy_router(tc, temp_namespace):
 def sandbox_template(tc, temp_namespace):
     """Deploys the sandbox template into the test namespace"""
     image_tag = get_image_tag()
+    image_prefix = get_image_prefix()
     with open(TEMPLATE_YAML_PATH, "r") as f:
-        manifest = f.read().format(image_tag=image_tag)
+        manifest = f.read().format(image_prefix=image_prefix, image_tag=image_tag)
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     return "python-sdk-test-template"
 
@@ -155,39 +153,3 @@ def test_python_sdk_router_mode_warmpool(
 
     except Exception as e:
         pytest.fail(f"SDK test with warmpool failed: {e}")
-
-
-# Todo: Enable Gateway in kind cluster
-# def test_python_sdk_gateway_mode(tc, temp_namespace, sandbox_template, deploy_router):
-#     """Tests the Python SDK in Gateway (Production/Discovery) mode."""
-#     gateway_name = "sandbox-router-gateway"  # Assuming this is the gateway name
-#     try:
-#         with SandboxClient(
-#             template_name=sandbox_template,
-#             namespace=temp_namespace,
-#             gateway_name=gateway_name,
-#             gateway_namespace=temp_namespace,
-#         ) as sandbox:
-#             print("\n--- Running SDK tests in Gateway mode ---")
-#             run_sdk_tests(sandbox)
-#             print("SDK test in Gateway mode passed!")
-
-#     except Exception as e:
-#         pytest.fail(f"SDK test in Gateway mode failed: {e}")
-
-# def test_python_sdk_gateway_mode_warmpool(tc, temp_namespace, sandbox_template, deploy_router, sandbox_warmpool):
-#     """Tests the Python SDK in Gateway (Production/Discovery) mode."""
-#     gateway_name = "sandbox-router-gateway"  # Assuming this is the gateway name
-#     try:
-#         with SandboxClient(
-#             template_name=sandbox_template,
-#             namespace=temp_namespace,
-#             gateway_name=gateway_name,
-#             gateway_namespace=temp_namespace,
-#         ) as sandbox:
-#             print("\n--- Running SDK tests in Gateway mode ---")
-#             run_sdk_tests(sandbox)
-#             print("SDK test in Gateway mode passed!")
-
-#     except Exception as e:
-#         pytest.fail(f"SDK test in Gateway mode failed: {e}")

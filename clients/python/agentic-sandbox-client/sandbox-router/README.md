@@ -50,7 +50,7 @@ The Sandbox Router (or similar reverse proxy service) is needed for both the "Ga
 "Tunnel Mode" interactions with the Python client.
 
 In `sandbox_router.yaml` replace `IMAGE_PLACEHOLDER` with the `$SANDBOX_ROUTER_IMG` from the
-previous step, and then apply the manifest.
+previous step, and then apply the manifest. Additionaly, replace  `NAMESPACE_PLACEHOLDER` with the target Kubernetes namespace. 
 
 ```bash
 sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml

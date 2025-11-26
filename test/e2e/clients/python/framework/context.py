@@ -132,7 +132,6 @@ class TestContext:
                         )
                     else:
                         raise
-            # Add other v1 kinds if needed
         elif api_version == "apps/v1":
             apps_v1 = self.get_apps_v1_api()
             if kind == "Deployment":

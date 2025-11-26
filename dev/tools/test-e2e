@@ -78,6 +78,7 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
         "pytest",
         f"--junitxml={junit_report_path}",
         "-v",
+        "-n", "auto", # to run tests parallely 
         os.path.join(repo_root, "test", "e2e/")
     ]
 

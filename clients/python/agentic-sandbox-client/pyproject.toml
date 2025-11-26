@@ -30,4 +30,5 @@ packages = ["agentic_sandbox"]
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pytest-xdist",
 ]

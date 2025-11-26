@@ -15,11 +15,15 @@ KIND_CLUSTER=agent-sandbox
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
 	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/
+	./dev/tools/deploy-to-kube --image-prefix=kind.local/ --gateway
 
 .PHONY: delete-kind
 delete-kind:
 	kind delete cluster --name ${KIND_CLUSTER}
+
+.PHONY: kill-cloud-provider-kind
+kill-cloud-provider-kind:
+	killall cloud-provider-kind
 
 .PHONY: test-unit
 test-unit:

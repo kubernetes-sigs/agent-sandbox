@@ -22,7 +22,7 @@ export KIND_CLUSTER_NAME="agent-sandbox"
 cd ../../../../
 #pip install pyyaml
 make build
-make deploy-kind EXTENSIONS=true
+make deploy-kind EXTENSIONS=true 
 cd examples/python-runtime-sandbox
 
 echo "Building sandbox-runtime image..."
@@ -36,7 +36,7 @@ echo "Applying CRD for template - Sandbox claim will be applied by the sandbox c
 kubectl apply -f python-sandbox-template.yaml
 
 
-cd sandbox_router
+cd sandbox-router
 echo "Building sandbox-router image..."
 docker build -t sandbox-router .
 
@@ -47,14 +47,14 @@ echo "Applying CRD for router template"
 kubectl apply -f sandbox_router.yaml
 sleep 60  # wait for sandbox-router to be ready
 
-echo "Setting up cloud-provider-kind for gateway ..."
-
-echo "Starting cloud-provider-kind and enabling the Gateway API controller ..."
+# echo "Setting up cloud-provider-kind for gateway ..."
 # go install sigs.k8s.io/cloud-provider-kind@latest
 # sudo install ~/go/bin/cloud-provider-kind /usr/local/bin
-cloud-provider-kind --gateway-channel standard &
-echo "Cloud Provider started."
-sleep 60
+
+# echo "Starting cloud-provider-kind and enabling the Gateway API controller ..."
+# cloud-provider-kind --gateway-channel standard &
+# echo "Cloud Provider started."
+# sleep 60
 
 cd ../gateway-kind
 
@@ -86,7 +86,7 @@ python3 ./test_client.py --gateway-name kind-gateway
 echo "========= $0 - Finished running the Python client with gateway and router tester. ========="
 
 
-# trap cleanup EXIT
+trap cleanup EXIT
 
 echo "Test finished."
 # The 'trap' command will now execute the cleanup function.

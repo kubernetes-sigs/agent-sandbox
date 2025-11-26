@@ -22,7 +22,7 @@ export KIND_CLUSTER_NAME="agent-sandbox"
 cd ../../../../
 #pip install pyyaml
 make build
-make deploy-kind EXTENSIONS=true 
+make deploy-kind EXTENSIONS=true --gateway
 cd examples/python-runtime-sandbox
 
 echo "Building sandbox-runtime image..."

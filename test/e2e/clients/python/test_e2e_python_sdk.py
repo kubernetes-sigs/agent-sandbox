@@ -65,7 +65,6 @@ def deploy_router(tc, temp_namespace):
         manifest = (
             f.read()
             .replace("IMAGE_PLACEHOLDER", router_image)
-            .replace("NAMESPACE_PLACEHOLDER", temp_namespace)
         )
 
     print(f"Applying router manifest to namespace: {temp_namespace}")

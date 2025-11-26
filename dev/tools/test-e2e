@@ -100,6 +100,8 @@ def main():
 
     if not setup_python_sdk(repo_root, env):
          return 1
+    
+    exit_code=0
 
     go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
     python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
@@ -109,14 +111,13 @@ def main():
 
     if python_test_result != 0:
         print("Python SDK E2E tests failed.")
-        return 1
+        exit_code=1
 
     if go_test_result != 0 or python_test_result != 0:
-         print("One or more E2E tests failed.")
-         return 1
+        print("One or more E2E tests failed.")
+        exit_code=1
 
-    print("All E2E tests passed.")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

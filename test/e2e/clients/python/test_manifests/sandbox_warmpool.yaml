@@ -3,6 +3,6 @@ kind: SandboxWarmPool
 metadata:
   name: python-sdk-warmpool
 spec:
-  replicas: 1
+  replicas: 2
   sandboxTemplateRef:
     name: python-sdk-test-template

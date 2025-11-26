@@ -1,0 +1,367 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jupyter-init-files
+  namespace: default
+data:
+  welcome.ipynb: |
+    {
+    "cells": [
+      {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "6c9dcc71-f20c-40b5-8f42-88ef5f51e737",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import kagglehub\n",
+        "\n",
+        "# Download latest version\n",
+        "path = kagglehub.dataset_download(handle=\"saadaliyaseen/shopping-behaviour-dataset\")\n",
+        "\n",
+        "print(\"Path to dataset files:\", path)"
+      ]
+      },
+      {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "5d4362da-796b-4a10-bbfb-b5ddc3797777",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "os.listdir(path)[0]"
+      ]
+      },
+      {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "f8e1b20e-14e9-4cca-aa2f-b284596b91f9",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import os\n",
+        "import pandas as pd\n",
+        "\n",
+        "df = pd.read_csv(f\"{path}/{os.listdir(path)[0]}\")\n",
+        "df.head()"
+      ]
+      },
+      {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "4d0100a8-8a74-446d-be30-31b27e1e377c",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import base64\n",
+        "import os\n",
+        "import requests\n",
+        "from langchain.tools import tool\n",
+        "\n",
+        "\n",
+        "# Reuse your existing config\n",
+        "AGENT_SANDBOX_API_URL = \"http://python-sandbox-service:8888/execute\"\n",
+        "\n",
+        "\n",
+        "def exec_command(command) -> str:    \n",
+        "    response = requests.post(\n",
+        "        AGENT_SANDBOX_API_URL,\n",
+        "        json={\"command\": command}, \n",
+        "        timeout=120 # Larger files need more time\n",
+        "    )\n",
+        "    response.raise_for_status()\n",
+        "    \n",
+        "    result = response.json()\n",
+        "    stdout = result.get(\"stdout\", \"\")\n",
+        "    stderr = result.get(\"stderr\", \"\")\n",
+        "\n",
+        "    if stderr:\n",
+        "        return f\"Upload failed remotely:\\n{stderr}\"\n",
+        "    else:\n",
+        "        return f\"Upload Complete. Sandbox Output: {stdout}\"\n",
+        "\n",
+        "loader_code = \"curl -L -o /my-data/shopping-behaviour-dataset.zip  https://www.kaggle.com/api/v1/datasets/download/saadaliyaseen/shopping-behaviour-dataset\"\n",
+        "unzip_code = \"unzip /my-data/shopping-behaviour-dataset.zip -d /my-data\"\n",
+        "mv_code = \"mv '/my-data/shopping_behavior_updated (1).csv' /my-data/shopping_behavior_updated.csv\"\n",
+        "\n",
+        "print(exec_command(loader_code))\n",
+        "print(exec_command(unzip_code))\n",
+        "print(exec_command(mv_code))"
+      ]
+      },
+      {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "a23194b5-32de-4909-bc71-eb9f209fb4db",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import os\n",
+        "import requests\n",
+        "import base64\n",
+        "import re\n",
+        "from langchain_google_genai import ChatGoogleGenerativeAI\n",
+        "from langchain.agents import create_agent\n",
+        "from langchain.tools import tool\n",
+        "from IPython.display import Image, display\n",
+        "\n",
+        "\n",
+        "os.environ[\"GOOGLE_API_KEY\"] = \"\"\n",
+        "AGENT_SANDBOX_API_URL = \"http://python-sandbox-service:8888/execute\"\n",
+        "\n",
+        "\n",
+        "@tool\n",
+        "def analyze_movies(code: str) -> str:\n",
+        "    \"\"\"\n",
+        "    Execute Python code for data analysis.\n",
+        "\n",
+        "    IMPORTANT PLOTTING INSTRUCTIONS:\n",
+        "    If the user asks for a chart, graph, or plot, you MUST:\n",
+        "    1. Use matplotlib.pyplot.\n",
+        "    2. Instead of plt.show(), save the plot to a BytesIO buffer.\n",
+        "    3. Encode that buffer to base64.\n",
+        "    4. Print the base64 string wrapped in <IMG> tags.\n",
+        "\n",
+        "    If you see message: \"The image was rendered\", then the user can see the image, and everything is fine.\n",
+        "\n",
+        "    Example Python code to generate:\n",
+        "    ```python\n",
+        "    import matplotlib.pyplot as plt\n",
+        "    import io\n",
+        "    import base64\n",
+        "\n",
+        "    # ... your plotting code ...\n",
+        "    plt.figure()\n",
+        "    plt.plot([1, 2, 3], [1, 4, 9])\n",
+        "\n",
+        "    # Save to buffer\n",
+        "    buf = io.BytesIO()\n",
+        "    plt.savefig(buf, format='png')\n",
+        "    buf.seek(0)\n",
+        "    img_str = base64.b64encode(buf.read()).decode('utf-8')\n",
+        "    print(f\"<IMG>{img_str}</IMG>\")\n",
+        "    ```\n",
+        "    \"\"\"\n",
+        "    print(f\"--- Executing code ---\\n{code}\\n----------------------\")\n",
+        "\n",
+        "    try:\n",
+        "        encoded_code = base64.b64encode(code.encode('utf-8')).decode('utf-8')\n",
+        "        response = requests.post(\n",
+        "            AGENT_SANDBOX_API_URL,\n",
+        "            json={\"command\": f'python -c \"import base64; exec(base64.b64decode(\\'{encoded_code}\\'))\"'}, # Ensure your API accepts 'command' or 'code'\n",
+        "            timeout=60\n",
+        "        )\n",
+        "        response.raise_for_status()\n",
+        "        result_data = response.json()\n",
+        "        stdout = result_data.get(\"stdout\", \"\")\n",
+        "        stderr = result_data.get(\"stderr\", \"\")\n",
+        "    except Exception as e:\n",
+        "        return f\"System Error: {e}\"\n",
+        "\n",
+        "    # --- IMAGE EXTRACTION LOGIC ---\n",
+        "    # regex to find content between <IMG> tags\n",
+        "    img_pattern = r\"<IMG>(.*?)</IMG>\"\n",
+        "    match = re.search(img_pattern, stdout, re.DOTALL)\n",
+        "\n",
+        "    if match:\n",
+        "        img_data = match.group(1)\n",
+        "        try:\n",
+        "            # Decode base64\n",
+        "            image_bytes = base64.b64decode(img_data)\n",
+        "\n",
+        "            # Render the image\n",
+        "            display(Image(data=image_bytes))\n",
+        "\n",
+        "            # Remove the huge base64 string from stdout so we don't confuse the LLM\n",
+        "            stdout = re.sub(img_pattern, \"The image was rendered\", stdout)\n",
+        "\n",
+        "            return f\"Execution successful:\\n:\\n[stdout]: {stdout}\\n[stderr]: {stderr}\"\n",
+        "        except Exception as e:\n",
+        "            return f\"Image detected but failed to save: {e}\"\n",
+        "\n",
+        "    if stderr:\n",
+        "        return f\"Execution failed:\\n[stderr]: {stderr}\\n[stdout]: {stdout}\"\n",
+        "    else:\n",
+        "        return f\"Execution successful:\\n[stdout]: {stdout}\"\n",
+        "\n",
+        "model = ChatGoogleGenerativeAI(\n",
+        "    model=\"gemini-2.5-flash\",\n",
+        "    temperature=0,\n",
+        "    max_tokens=None,\n",
+        "    timeout=None,\n",
+        "    max_retries=2,\n",
+        ")\n",
+        "\n",
+        "agent = create_agent(model, tools=[analyze_movies])\n",
+        "\n",
+        "result = agent.invoke(\n",
+        "    {\"messages\": [{\"role\": \"user\", \"content\": \"Load /my-data/shopping_behavior_updated.csv. This data has 'Purchase Amount (USD)' column. Create a bar chart showing a sum of 'Purchase Amount (USD)' per column 'Location'.\"}]}\n",
+        ")\n",
+        "\n",
+        "print(result[\"messages\"][-1].content)"
+      ]
+      }
+    ],
+    "metadata": {
+      "kernelspec": {
+      "display_name": "Python 3 (ipykernel)",
+      "language": "python",
+      "name": "python3"
+      },
+      "language_info": {
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "file_extension": ".py",
+      "mimetype": "text/x-python",
+      "name": "python",
+      "nbconvert_exporter": "python",
+      "pygments_lexer": "ipython3",
+      "version": "3.12.10"
+      }
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5
+    }
+  requirements.txt: |
+    transformers>=4.51.0
+    torch
+    huggingface_hub
+    ipywidgets
+    langchain
+    langchain-google-genai
+    kagglehub
+    pandas
+---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: jupyterlab-sandbox
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: jupyterlab
+        sandbox: jupyterlab
+    spec:
+      initContainers:
+        - name: setup-environment
+          image: jupyterhub/k8s-singleuser-sample:4.2.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              if [ -f /home/jovyan/.initialized ]; then
+                echo "Already initialized, skipping..."
+                exit 0
+              fi
+
+              mkdir -p /home/jovyan/.pip-cache
+              mkdir -p /home/jovyan/.tmp
+              mkdir -p /home/jovyan/work
+              mkdir -p /home/jovyan/.local
+              mkdir -p /home/jovyan/.cache/huggingface
+
+              echo "Installing Python dependencies to persistent storage..."
+              pip install --no-cache-dir \
+                --target=/home/jovyan/.local/lib/python3.12/site-packages \
+                -r /config/requirements.txt
+
+              echo "Copying notebook files..."
+              cp /config/welcome.ipynb /home/jovyan/work/welcome.ipynb
+
+              touch /home/jovyan/.initialized
+              chown -R jovyan:users /home/jovyan
+
+              echo "Initialization complete!"
+          env:
+            - name: PIP_CACHE_DIR
+              value: /home/jovyan/.pip-cache
+            - name: TMPDIR
+              value: /home/jovyan/.tmp
+            - name: TEMP
+              value: /home/jovyan/.tmp
+            - name: TMP
+              value: /home/jovyan/.tmp
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/jovyan
+            - name: init-files
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+              ephemeral-storage: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+              ephemeral-storage: "1Gi"
+          securityContext:
+            runAsUser: 0  # Need root for chown
+
+      securityContext:
+        fsGroup: 100  # users group - for volume permissions
+
+      containers:
+        - name: jupyterlab
+          image: jupyterhub/k8s-singleuser-sample:4.2.0
+          command:
+            - jupyter
+            - lab
+          args:
+            - --ip=0.0.0.0
+            - --port=8888
+            - --notebook-dir=/home/jovyan/work
+            - --ServerApp.token=''
+            - --ServerApp.password=''
+            - --ServerApp.allow_origin='*'
+            - --ServerApp.disable_check_xsrf=True
+          env:
+            - name: JUPYTER_ENABLE_LAB
+              value: "yes"
+            - name: HF_HOME
+              value: /home/jovyan/.cache/huggingface
+            - name: PYTHONPATH
+              value: /home/jovyan/.local/lib/python3.12/site-packages
+          ports:
+            - containerPort: 8888
+              name: notebook
+              protocol: TCP
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/jovyan
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+              ephemeral-storage: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+              ephemeral-storage: "2Gi"
+          securityContext:
+            runAsUser: 1000  # jovyan user
+            runAsGroup: 100  # users group
+            allowPrivilegeEscalation: false
+
+      volumes:
+        - name: init-files
+          configMap:
+            name: jupyter-init-files
+
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi

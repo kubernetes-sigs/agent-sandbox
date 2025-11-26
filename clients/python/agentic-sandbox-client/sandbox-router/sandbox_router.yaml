@@ -3,7 +3,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: sandbox-router-svc
-  namespace: default
 spec:
   type: ClusterIP
   selector:
@@ -19,7 +18,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: sandbox-router-deployment
-  namespace: default
 spec:
   replicas: 2 # Run at least two replicas for high availability
   selector:

@@ -26,3 +26,9 @@ dependencies = [
 # This line tells setuptools to only include the 'agentic_sandbox'
 # package and to ignore other directories like 'sandbox_router'.
 packages = ["agentic_sandbox"]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-xdist",
+]

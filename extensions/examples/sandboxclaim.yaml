@@ -5,6 +5,10 @@ metadata:
   name: my-secure-sandbox
   # This MUST be in the same namespace as the SandboxTemplate.
   namespace: default
+  labels:
+    test-label: test-value
+  annotations:
+    test-annotation: test-annotation-value
 spec:
   #shutdownTime: "2025-10-28T02:50:00Z"
   # It points to the template.

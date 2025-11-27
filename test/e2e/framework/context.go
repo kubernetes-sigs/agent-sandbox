@@ -17,6 +17,7 @@ package framework
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -29,7 +30,7 @@ import (
 
 var (
 	// root directory of the agent-sandbox repository
-	repoRoot = filepath.FromSlash("../..")
+	repoRoot = getRepoRoot()
 	// The e2e tests use the context specified in the local KUBECONFIG file.
 	// A localized KUBECONFIG is used to create an explicit cluster contract with
 	// the tests.
@@ -39,6 +40,14 @@ var (
 func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(controllers.Scheme))
 	utilruntime.Must(extensionsv1alpha1.AddToScheme(controllers.Scheme))
+}
+
+func getRepoRoot() string {
+	// This file is at <repo>/test/e2e/framework/context.go, so 3 Dir() hops (framework -> e2e -> test -> repo)
+	// gives us the repository root regardless of the test package working directory.
+	_, filename, _, _ := runtime.Caller(0)
+	dir := filepath.Dir(filename)
+	return filepath.Dir(filepath.Dir(filepath.Dir(dir)))
 }
 
 // TestContext is a helper for managing e2e test scaffolding.

@@ -38,7 +38,7 @@ kubectl apply -f sandbox-python-kind.yaml
 cleanup() {
     echo "Cleaning up python-runtime and sandbox controller..."
     kubectl delete --ignore-not-found -f sandbox-python-kind.yaml
-    kubectl delete --ignore-not-found statefulset agent-sandbox-controller -n agent-sandbox-system
+    kubectl delete --ignore-not-found deployment agent-sandbox-controller -n agent-sandbox-system
     kubectl delete --ignore-not-found crd sandboxes.agents.x-k8s.io
     echo "Deleting kind cluster..." 
     cd ../../

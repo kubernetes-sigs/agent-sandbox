@@ -48,6 +48,35 @@ type ClusterClient struct {
 	client client.Client
 }
 
+// List retrieves a list of objects matching the provided options.
+func (cl *ClusterClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	cl.Helper()
+	if err := cl.client.List(ctx, list, opts...); err != nil {
+		return fmt.Errorf("list %T: %w", list, err)
+	}
+	return nil
+}
+
+// Delete deletes the specified object from the cluster.
+func (cl *ClusterClient) Delete(ctx context.Context, obj client.Object) error {
+	cl.Helper()
+	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	cl.Logf("Deleting object %T (%s)", obj, nn.String())
+	if err := cl.client.Delete(ctx, obj); err != nil {
+		return fmt.Errorf("delete %T (%s): %w", obj, nn.String(), err)
+	}
+	return nil
+}
+
+// Get retrieves an object from the cluster.
+func (cl *ClusterClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object) error {
+	cl.Helper()
+	if err := cl.client.Get(ctx, key, obj); err != nil {
+		return fmt.Errorf("get %T (%s): %w", obj, key.String(), err)
+	}
+	return nil
+}
+
 // Update an object that already exists on the cluster.
 func (cl *ClusterClient) Update(ctx context.Context, obj client.Object) error {
 	cl.Helper()
@@ -182,6 +211,7 @@ func (cl *ClusterClient) validateAgentSandboxInstallation(ctx context.Context) e
 		"sandboxes.agents.x-k8s.io",
 		"sandboxclaims.extensions.agents.x-k8s.io",
 		"sandboxtemplates.extensions.agents.x-k8s.io",
+		"sandboxwarmpools.extensions.agents.x-k8s.io",
 	}
 	for _, name := range crds {
 		crd := &apiextensionsv1.CustomResourceDefinition{}

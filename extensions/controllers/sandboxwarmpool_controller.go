@@ -154,6 +154,18 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// Update status replicas
 	warmPool.Status.Replicas = currentReplicas
 
+	// Calculate ready replicas
+	readyReplicas := int32(0)
+	for _, pod := range activePods {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				readyReplicas++
+				break
+			}
+		}
+	}
+	warmPool.Status.ReadyReplicas = readyReplicas
+
 	// Create new pods if we need more
 	if currentReplicas < desiredReplicas {
 		podsToCreate := desiredReplicas - currentReplicas

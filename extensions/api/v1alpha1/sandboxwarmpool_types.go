@@ -45,6 +45,7 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
+// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.replicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // SandboxWarmPool is the Schema for the sandboxwarmpools API
 type SandboxWarmPool struct {

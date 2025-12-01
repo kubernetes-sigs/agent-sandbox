@@ -41,8 +41,7 @@ spec:
       containers:
       - name: router
         # IMPORTANT: Replace this with the full path to the router image you pushed.
-        image: sandbox-router:latest
-        imagePullPolicy: IfNotPresent
+        image: IMAGE_PLACEHOLDER
         ports:
         - containerPort: 8080
         readinessProbe:

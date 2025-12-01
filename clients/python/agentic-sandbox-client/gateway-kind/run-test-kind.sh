@@ -18,32 +18,40 @@ set -e
 
 export KIND_CLUSTER_NAME="agent-sandbox"
 
+# Get the image tag using a temporary Python script
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+TEMP_PY_SCRIPT=$(mktemp /tmp/get_tag_XXXXXX.py)
+cat <<EOF > "$TEMP_PY_SCRIPT"
+import sys
+sys.path.append('$REPO_ROOT/dev/tools/shared')
+from utils import get_image_tag
+print(get_image_tag())
+EOF
+
+IMAGE_TAG=$(python3 "$TEMP_PY_SCRIPT")
+
+rm "$TEMP_PY_SCRIPT"
+echo "Using image tag: $IMAGE_TAG"
+
+
+export SANDBOX_ROUTER_IMG="kind.local/sandbox-router:${IMAGE_TAG}"
+export SANDBOX_PYTHON_RUNTIME_IMG="kind.local/python-runtime-sandbox:${IMAGE_TAG}"
+
 # following develop guide to make and deploy agent-sandbox to kind cluster
 cd ../../../../
-#pip install pyyaml
 make build
 make deploy-kind EXTENSIONS=true --gateway
-cd examples/python-runtime-sandbox
 
-echo "Building sandbox-runtime image..."
-docker build -t sandbox-runtime .
-
-echo "Loading sandbox-runtime image into kind cluster..."
-kind load docker-image sandbox-runtime:latest --name "${KIND_CLUSTER_NAME}"
-
-cd ../../clients/python/agentic-sandbox-client
+cd clients/python/agentic-sandbox-client
 echo "Applying CRD for template - Sandbox claim will be applied by the sandbox client in python code"
+sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_PYTHON_RUNTIME_IMG}|g" python-sandbox-template.yaml
 kubectl apply -f python-sandbox-template.yaml
 
 
 cd sandbox-router
-echo "Building sandbox-router image..."
-docker build -t sandbox-router .
-
-echo "Loading sandbox-router image into kind cluster..."
-kind load docker-image sandbox-router:latest --name "${KIND_CLUSTER_NAME}"
-
 echo "Applying CRD for router template"
+sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml
 sleep 60  # wait for sandbox-router to be ready
 
@@ -89,4 +97,3 @@ echo "========= $0 - Finished running the Python client with gateway and router 
 trap cleanup EXIT
 
 echo "Test finished."
-# The 'trap' command will now execute the cleanup function.

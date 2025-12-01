@@ -12,8 +12,7 @@ spec:
       containers:
       - name: python-runtime
         # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox
-        image: sandbox-runtime:latest
-        imagePullPolicy: IfNotPresent 
+        image: IMAGE_PLACEHOLDER
         ports:
         - containerPort: 8888
         readinessProbe:

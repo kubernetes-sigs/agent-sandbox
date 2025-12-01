@@ -2,7 +2,6 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: kind-gateway
-  namespace: default
 spec:
   gatewayClassName: cloud-provider-kind
   listeners:
@@ -21,7 +20,6 @@ apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
   name: sandbox-router-route
-  namespace: default
 spec:
   parentRefs:
   - name: kind-gateway # This must match the name of the Gateway

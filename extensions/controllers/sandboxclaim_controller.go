@@ -213,9 +213,30 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		return nil, nil
 	}
 
-	// Sort pods by creation timestamp (oldest first)
+	// Sort pods:
+	// 1. Ready pods first
+	// 2. Oldest pods first (CreationTimestamp)
 	sort.Slice(podList.Items, func(i, j int) bool {
-		return podList.Items[i].CreationTimestamp.Before(&podList.Items[j].CreationTimestamp)
+		podI := &podList.Items[i]
+		podJ := &podList.Items[j]
+
+		isReady := func(p *corev1.Pod) bool {
+			for _, cond := range p.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					return true
+				}
+			}
+			return false
+		}
+
+		readyI := isReady(podI)
+		readyJ := isReady(podJ)
+
+		if readyI != readyJ {
+			return readyI // if I is ready (true) and J is not (false), I comes first (true)
+		}
+
+		return podI.CreationTimestamp.Before(&podJ.CreationTimestamp)
 	})
 
 	// Get the first available pod

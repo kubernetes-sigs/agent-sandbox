@@ -41,7 +41,7 @@ export SANDBOX_PYTHON_RUNTIME_IMG="kind.local/python-runtime-sandbox:${IMAGE_TAG
 # following develop guide to make and deploy agent-sandbox to kind cluster
 cd ../../../../
 make build
-make deploy-kind EXTENSIONS=true --gateway
+make deploy-kind EXTENSIONS=true
 
 cd clients/python/agentic-sandbox-client
 echo "Applying CRD for template - Sandbox claim will be applied by the sandbox client in python code"

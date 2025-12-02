@@ -272,78 +272,26 @@ class TestContext:
             raise ValueError("Namespace must be provided.")
 
         custom_objects_api = self.get_custom_objects_api()
-        core_v1 = self.get_core_v1_api()
-        is_pod_ready = pod_ready()
 
-        try:
-            warmpool = custom_objects_api.get_namespaced_custom_object(
+        def warmpool_has_min_ready(obj):
+            ready_replicas = obj.get("status", {}).get("readyReplicas", 0)
+            print(
+                f"SandboxWarmPool {name} has {ready_replicas}/{min_ready} ready replicas."
+            )
+            return ready_replicas >= min_ready
+
+        return self.wait_for_object(
+            functools.partial(
+                custom_objects_api.list_namespaced_custom_object,
                 group="extensions.agents.x-k8s.io",
                 version="v1alpha1",
-                namespace=namespace,
                 plural="sandboxwarmpools",
-                name=name,
-            )
-            warmpool_uid = warmpool["metadata"]["uid"]
-        except kubernetes.client.rest.ApiException as e:
-            print(f"Error fetching SandboxWarmPool {name}: {e}")
-            raise
-
-        w = kubernetes.watch.Watch()
-        ready_pods = set()
-        try:
-            for event in w.stream(
-                core_v1.list_namespaced_pod,
-                namespace=namespace,
-                timeout_seconds=timeout,
-            ):
-                pod = event["object"]
-                pod_name = pod.metadata.name
-
-                owner_references = pod.metadata.owner_references or []
-                is_owned = False
-                for owner_ref in owner_references:
-                    if (
-                        owner_ref.kind == "SandboxWarmPool"
-                        and owner_ref.uid == warmpool_uid
-                    ):
-                        is_owned = True
-                        break
-
-                if not is_owned:
-                    continue
-
-                event_type = event["type"]
-                if event_type == "DELETED":
-                    if pod_name in ready_pods:
-                        ready_pods.remove(pod_name)
-                    continue
-
-                if is_pod_ready(pod):
-                    ready_pods.add(pod_name)
-                elif pod_name in ready_pods:
-                    ready_pods.remove(pod_name)
-
-                print(
-                    f"WarmPool {name}: {len(ready_pods)}/{min_ready} pods ready. Current ready set: {ready_pods}"
-                )
-                if len(ready_pods) >= min_ready:
-                    print(
-                        f"SandboxWarmPool {name} is ready with {len(ready_pods)} pods."
-                    )
-                    w.stop()
-                    return True
-
-            # Fallthrough means timeout
-            raise TimeoutError(
-                f"SandboxWarmPool {name} did not become ready within {timeout} seconds."
-            )
-        except Exception as e:
-            print(f"Error during watch: {e}")
-            if "timeout" in str(e).lower():
-                raise TimeoutError(
-                    f"SandboxWarmPool {name} did not become ready within {timeout} seconds."
-                )
-            raise
+            ),
+            name,
+            namespace,
+            warmpool_has_min_ready,
+            timeout,
+        )
 
 
 if __name__ == "__main__":

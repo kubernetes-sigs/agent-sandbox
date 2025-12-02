@@ -58,14 +58,6 @@ def walk_object(obj, fn, field_path=""):
         raise Exception(f"unexpected type: {type(obj)}")
 
 
-def apply_docs(docs, repo_root):
-    """Helper to apply a list of documents."""
-    if not docs: return
-    string_stream = io.StringIO()
-    yaml.dump_all(docs, string_stream)
-    subprocess.run(["kubectl", "apply", "-f", "-"], cwd=repo_root, check=True, input=string_stream.getvalue(), text=True)
-
-
 def main(args):
     repo_root = utils.get_repo_root()
 
@@ -75,15 +67,17 @@ def main(args):
         print("k8s directory not found")
         return
 
-    prereq_docs = []
-    other_docs = []
-
     for root, dirs, files in os.walk(manifests_path):
+        # Process files in alphabetical order
+        # This works now because k8s/ doesn't contain CRs, and Namespace is defined in the first file (controller.yaml).
+        # TODO: Handle file ordering better so that CRDs and Namespaces are deployed first
+        files.sort()
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
                 continue
 
             path = os.path.join(root, filename)
+
             with open(path, "r") as f:
                 # Use safe_load_all for multi-document YAML files
                 docs = list(yaml.safe_load_all(f))
@@ -94,37 +88,21 @@ def main(args):
 
             # Process each document in the file
             for doc in docs:
-                if not doc: continue
-
-                is_crd = doc.get("kind") == "CustomResourceDefinition"
-
-                # All CRDs are needed for the e2e tests
-                if is_crd:
-                     prereq_docs.append(doc)
-                     continue
-
-                # Rule 2: For non-CRDs, apply extension filtering.
-                if "extensions" in filename and not args.extensions:
+                if not doc: # Skip empty documents
                     continue
 
-                # Rule 3: Handle controller conflict (same as before)
-                if args.extensions and filename == "controller.yaml" and doc.get("kind") == "StatefulSet":
-                    continue
-
-                # If we got here, it's a resource we want to apply.
                 find_and_replace_images(doc, service_name, image_prefix, image_tag)
-                
-                if doc.get("kind") == "Namespace":
-                     prereq_docs.append(doc)
-                else:
-                     other_docs.append(doc)
 
-    print(f"Applying {len(prereq_docs)} prerequisite manifests (Namespace, CRDs)...")
-    apply_docs(prereq_docs, repo_root)
+            # Dump the modified documents back to a string
+            string_stream = io.StringIO()
+            yaml.dump_all(docs, string_stream)
+            modified_content = string_stream.getvalue()
 
-    print(f"Applying {len(other_docs)} other manifests...")
-    apply_docs(other_docs, repo_root)
-    print("Deployment complete.")
+            rel_path = os.path.relpath(path, repo_root)
+            print(f"applying manifest {rel_path}")
+
+            cmd = ["kubectl", "apply", "-f", "-"]
+            subprocess.run(cmd, cwd=repo_root, check=True, input=modified_content, text=True)
 
 
 if __name__ == "__main__":
@@ -134,10 +112,5 @@ if __name__ == "__main__":
                         help="prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
-    
-    parser.add_argument("--extensions",
-                        action="store_true",
-                        help="Enable extensions (adds --extensions flag to controller)")
-
     args = parser.parse_args()
     main(args)

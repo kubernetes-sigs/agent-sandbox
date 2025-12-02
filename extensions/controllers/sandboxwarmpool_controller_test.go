@@ -508,12 +508,12 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name                 string
-		initialPods          []runtime.Object
+		name                  string
+		initialPods           []runtime.Object
 		expectedReadyReplicas int32
 	}{
 		{
-			name:                 "no pods ready",
+			name: "no pods ready",
 			initialPods: []runtime.Object{
 				template,
 				createPodWithReadyCondition("abc123", corev1.ConditionFalse),
@@ -523,7 +523,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			expectedReadyReplicas: 0,
 		},
 		{
-			name:                 "some pods ready",
+			name: "some pods ready",
 			initialPods: []runtime.Object{
 				template,
 				createPodWithReadyCondition("abc123", corev1.ConditionTrue),
@@ -533,7 +533,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			expectedReadyReplicas: 2,
 		},
 		{
-			name:                 "all pods ready",
+			name: "all pods ready",
 			initialPods: []runtime.Object{
 				template,
 				createPodWithReadyCondition("abc123", corev1.ConditionTrue),
@@ -543,7 +543,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			expectedReadyReplicas: 3,
 		},
 		{
-			name:                 "pods with no ready condition",
+			name: "pods with no ready condition",
 			initialPods: []runtime.Object{
 				template,
 				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
@@ -576,4 +576,3 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 		})
 	}
 }
-

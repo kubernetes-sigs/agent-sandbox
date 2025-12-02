@@ -18,7 +18,6 @@ import os
 import subprocess
 
 from shared import utils
-from shared import golang
 
 
 def create_buildx_builder_if_not_exists():
@@ -57,7 +56,7 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
         build_cmd.extend(["-t", extra_tag])
     build_cmd.extend([
         "-f",
-        dockerfile_path,
+        os.path.basename(dockerfile_path),
         ".",
     ])
     subprocess.run(build_cmd, cwd=srcdir, check=True)
@@ -83,61 +82,36 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path):
     if args.kind_cluster_name:
         load_kind_image(args.kind_cluster_name, service_name, srcdir)
 
-# This only builds and pushes images in directories with
-# 1) go.mod file
-# 2) images/*/Dockerfile
-def push_image_for_go_mod(args, mod_dir):
-    """Builds and pushes docker images."""
-    images_dir = os.path.join(mod_dir, "images")
 
-    if not os.path.isdir(images_dir):
-        return
+def main(args):
+    """Builds and pushes all discovered Docker images."""
+    excluded_dirs = {"dev", "docs", "k8s", "site", "tests"}
 
-    for root, dirs, files in os.walk(images_dir):
-        for filename in files:
-            if filename != "Dockerfile":
+    for root, dirs, files in os.walk(".", topdown=True):
+        # Exclude directories
+        dirs[:] = [d for d in dirs if d not in excluded_dirs]
+
+        if "Dockerfile" in files:
+            dockerfile_path = os.path.join(root, "Dockerfile")
+            context_dir = root
+            service_name = os.path.basename(root)  # same as image name
+
+            if not service_name:
                 continue
 
-            dockerfile_path = os.path.join(root, filename)
-            service_name = os.path.basename(root)
+            if service_name == ".":
+                service_name = "agent-sandbox-controller"
+
+            print(f"--- Found Dockerfile at: {dockerfile_path}")
+            print(f"--- Service Name: {service_name}")
+            print(f"--- Context Dir: {context_dir}")
 
             print(f"create Docker buildx builder for {service_name}")
             create_buildx_builder_if_not_exists()
             print(f"building image for {service_name}")
-            build_and_push_image(args, service_name, mod_dir, dockerfile_path)
+            build_and_push_image(args, service_name, context_dir, dockerfile_path)
+            # TODO: Handle duplicate service names in different paths
 
-
-# This only builds and pushes images in examples/*/Dockerfile
-def push_images_for_examples(args):
-    """Builds and pushes docker images for examples."""
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    examples_dir = os.path.join(repo_root, "examples")
-    if not os.path.isdir(examples_dir):
-        return
-
-    for example in os.listdir(examples_dir):
-        example_dir = os.path.join(examples_dir, example)
-        if not os.path.isdir(example_dir):
-            continue
-
-        dockerfile_path = os.path.join(example_dir, "Dockerfile")
-        if not os.path.isfile(dockerfile_path):
-            continue
-
-        service_name = example
-
-        print(f"create Docker buildx builder for {service_name}")
-        create_buildx_builder_if_not_exists()
-        print(f"building image for {service_name}")
-        build_and_push_image(args, service_name, example_dir, "Dockerfile")
-
-
-def main(args):
-    """Builds and pushes docker images."""
-    golang.for_each_module(lambda mod_dir: push_image_for_go_mod(args, mod_dir))
-    push_images_for_examples(args)
-    # TODO: Handle image building and pushing logic better
-    
 
 if __name__ == "__main__":
     # parse arguments and call

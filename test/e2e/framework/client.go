@@ -21,7 +21,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,12 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/rest"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -48,8 +42,7 @@ const (
 // ClusterClient is an abstraction layer for test cases to interact with the cluster.
 type ClusterClient struct {
 	*testing.T
-	client     client.Client
-	restConfig *rest.Config
+	client client.Client
 }
 
 // Update an object that already exists on the cluster.
@@ -213,65 +206,18 @@ func (cl *ClusterClient) validateAgentSandboxInstallation(ctx context.Context) e
 	return nil
 }
 
-func (cl *ClusterClient) Apply(ctx context.Context, namespace string, manifest string) {
-	tempDir := cl.T.TempDir()
-	manifestPath := filepath.Join(tempDir, "manifest.yaml")
-	if err := os.WriteFile(manifestPath, []byte(manifest), 0644); err != nil {
-		cl.T.Fatalf("failed to write manifest file %q: %v", manifestPath, err)
-	}
-	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", manifestPath, "-n", namespace)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		cl.T.Fatalf("failed to apply manifest %q: %v", manifestPath, err)
-	}
-}
-
-var sandboxGVK = schema.GroupVersionKind{
-	Group:   "agents.x-k8s.io",
-	Version: "v1alpha1",
-	Kind:    "Sandbox",
-}
-
-var sandboxTemplateGVK = schema.GroupVersionKind{
-	Group:   "extensions.agents.x-k8s.io",
-	Version: "v1alpha1",
-	Kind:    "SandboxTemplate",
-}
-
-var sandboxWarmpoolGVK = schema.GroupVersionKind{
-	Group:   "extensions.agents.x-k8s.io",
-	Version: "v1alpha1",
-	Kind:    "SandboxWarmPool",
-}
-
-func (cl *ClusterClient) RESTConfig() *rest.Config {
-	return cl.restConfig
-}
-
-func (cl *ClusterClient) CreateTempNamespace(ctx context.Context, name string) {
-	ns := &unstructured.Unstructured{}
-	ns.SetAPIVersion("v1")
-	ns.SetKind("Namespace")
-	ns.SetName(name)
-
-	if err := cl.CreateWithCleanup(ctx, ns); err != nil {
-		cl.T.Fatalf("failed to create namespace %q: %v", name, err)
-	}
-}
-
-func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedName, localPort, remotePort int) {
-	log := klog.FromContext(ctx)
-
+func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedName, localPort, remotePort int) error {
+	cl.Helper()
 	// Set up a port-forward to the Chrome Debug Port
-	portForward := exec.CommandContext(ctx, "kubectl", "-n", pod.Namespace, "port-forward", "pod/"+pod.Name, fmt.Sprintf("%d:%d", localPort, remotePort))
-	log.Info("starting port-forward", "command", portForward.String())
+	portForward := exec.CommandContext(ctx, "kubectl", "-n", pod.Namespace,
+		"port-forward", "pod/"+pod.Name, fmt.Sprintf("%d:%d", localPort, remotePort))
+	cl.Logf("starting port-forward: %s", portForward.String())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	portForward.Stdout = io.MultiWriter(os.Stdout, &stdout)
 	portForward.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	if err := portForward.Start(); err != nil {
-		cl.T.Fatalf("failed to start port-forward: %v", err)
+		return fmt.Errorf("failed to start port-forward: %w", err)
 	}
 
 	stopProcess := func() {
@@ -280,18 +226,19 @@ func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedNa
 				return
 			}
 		}
-		log.Info("killing port-forward")
+		cl.Log("killing port-forward")
 		if err := portForward.Process.Kill(); err != nil {
-			log.Error(err, "failed to kill port-forward")
+			cl.Errorf("failed to kill port-forward: %s", err)
 		}
 	}
 	cl.T.Cleanup(stopProcess)
 
 	go func() {
+		cl.Helper()
 		if err := portForward.Wait(); err != nil {
-			log.Error(err, "port-forward exited with error")
+			cl.Logf("port-forward exited with error: %s", err)
 		} else {
-			log.Info("port-forward exited")
+			cl.Log("port-forward exited")
 		}
 	}()
 
@@ -300,115 +247,16 @@ func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedNa
 	for {
 		if portForward.ProcessState != nil {
 			if portForward.ProcessState.Exited() {
-				cl.T.Fatalf("port-forward process exited unexpectedly: stdout=%q stderr=%q", stdout.String(), stderr.String())
+				return fmt.Errorf("port-forward process exited unexpectedly: stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 		}
 
 		// Check stdout for the "Forwarding from" message
 		if strings.Contains(stdout.String(), "Forwarding from") {
-			log.Info("port-forward is ready", "stdout", stdout.String(), "stderr", stderr.String())
+			cl.Logf("port-forward is ready\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-}
-
-func (cl *ClusterClient) WaitForSandboxReady(ctx context.Context, sandboxID types.NamespacedName) error {
-	sandbox := &unstructured.Unstructured{}
-	sandbox.SetGroupVersionKind(sandboxGVK)
-	sandbox.SetName(sandboxID.Name)
-	sandbox.SetNamespace(sandboxID.Namespace)
-
-	if err := cl.WaitForObject(ctx, sandbox, predicates.ReadyConditionIsTrue); err != nil {
-		cl.T.Fatalf("waiting for sandbox to be ready: %v", err)
-		return err
-	}
 	return nil
-}
-
-func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpoolID types.NamespacedName, expectedReplicas int) error {
-	cl.Helper()
-	log := klog.FromContext(ctx)
-	log.Info("Waiting for SandboxWarmPool Pods to be ready", "warmpoolID", sandboxWarmpoolID, "expectedReplicas", expectedReplicas)
-
-	// Get the SandboxWarmPool object to access its UID
-	warmpool := &unstructured.Unstructured{}
-	warmpool.SetGroupVersionKind(sandboxWarmpoolGVK)
-	if err := cl.client.Get(ctx, sandboxWarmpoolID, warmpool); err != nil {
-		cl.T.Fatalf("Failed to get SandboxWarmPool %s: %v", sandboxWarmpoolID, err)
-		return err
-	}
-	warmpoolUID := warmpool.GetUID()
-
-	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
-		podList := &corev1.PodList{}
-		// List all pods in the namespace
-		err := cl.client.List(ctx, podList, client.InNamespace(sandboxWarmpoolID.Namespace))
-		if err != nil {
-			log.Error(err, "Failed to list pods in namespace", "namespace", sandboxWarmpoolID.Namespace)
-			return false, nil // Continue polling
-		}
-
-		readyCount := 0
-		var foundPods []string
-		for _, pod := range podList.Items {
-			isOwned := false
-			for _, ownerRef := range pod.GetOwnerReferences() {
-				if ownerRef.Kind == "SandboxWarmPool" && ownerRef.UID == warmpoolUID {
-					isOwned = true
-					break
-				}
-			}
-
-			if isOwned {
-				foundPods = append(foundPods, pod.Name)
-				if err := predicates.ReadyConditionIsTrue(&pod); err == nil {
-					readyCount++
-				}
-			}
-		}
-
-		log.Info("WarmPool pod status", "warmpoolID", sandboxWarmpoolID, "foundOwned", len(foundPods), "ready", readyCount, "want", expectedReplicas, "pods", foundPods)
-
-		if readyCount >= expectedReplicas {
-			log.Info("SandboxWarmPool is ready", "warmpoolID", sandboxWarmpoolID)
-			return true, nil // Done
-		}
-		return false, nil // Continue polling
-	})
-
-	if err != nil {
-		cl.T.Fatalf("Timed out waiting for SandboxWarmPool %s to have %d ready pods: %v", sandboxWarmpoolID.String(), expectedReplicas, err)
-		return err
-	}
-	return nil
-}
-
-func (cl *ClusterClient) GetSandboxTemplate(ctx context.Context, templateID types.NamespacedName) *unstructured.Unstructured {
-	log := klog.FromContext(ctx)
-	template := &unstructured.Unstructured{}
-	template.SetGroupVersionKind(sandboxTemplateGVK)
-	template.SetName(templateID.Name)
-	template.SetNamespace(templateID.Namespace)
-
-	if err := cl.client.Get(ctx, templateID, template); err != nil {
-		if k8serrors.IsNotFound(err) {
-			log.Info("SandboxTemplate not found", "templateID", templateID)
-			return nil
-		}
-		cl.T.Fatalf("failed to get SandboxTemplate %s: %v", templateID, err)
-	}
-	return template
-}
-
-func (cl *ClusterClient) GetSandbox(ctx context.Context, sandboxID types.NamespacedName) *unstructured.Unstructured {
-	sandbox := &unstructured.Unstructured{}
-	sandbox.SetGroupVersionKind(sandboxGVK)
-	sandbox.SetName(sandboxID.Name)
-	sandbox.SetNamespace(sandboxID.Namespace)
-
-	if err := cl.client.Get(ctx, sandboxID, sandbox); err != nil {
-		cl.T.Fatalf("failed to get Sandbox %s: %v", sandboxID, err)
-	}
-	return sandbox
 }

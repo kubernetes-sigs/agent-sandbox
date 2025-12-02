@@ -96,15 +96,12 @@ $google_font_family: "Open+Sans:300,300i,400,400i,600,600i,700,700i&display=swap
     margin: 0 0 1.5em 1.5em; }
 
 #overview, #community {
-  padding: 6em 1.5em 3em 1.5em;
-  text-align: center;
+  padding: 1em 1.5em 1em 0em;
   margin: 0; }
   #overview p, #community p {
     font-size: 1.125em;}
 
-#overview {
-  border-bottom: 2px solid #b6d0ff;
-}
+
 
 #community {
   border-top: 2px solid #b6d0ff;
@@ -120,8 +117,7 @@ $google_font_family: "Open+Sans:300,300i,400,400i,600,600i,700,700i&display=swap
     font-size: 1em; }
 
 @media screen and (min-width: 480px) {
-  #overview, #community {
-    font-size: 1.125em; }
+
   #pageContent .lead > .image {
     max-width: 35%;
     margin-bottom: 3em; }

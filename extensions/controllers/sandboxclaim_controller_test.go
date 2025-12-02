@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -399,7 +400,11 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 	warmPoolUID := types.UID("warmpool-uid-123")
 	poolNameHash := sandboxcontrollers.NameHash("test-pool")
 
-	createWarmPoolPod := func(name string, creationTime metav1.Time) *corev1.Pod {
+	createWarmPoolPod := func(name string, creationTime metav1.Time, ready bool) *corev1.Pod {
+		conditionStatus := corev1.ConditionFalse
+		if ready {
+			conditionStatus = corev1.ConditionTrue
+		}
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
@@ -416,6 +421,15 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 						Name:       "test-pool",
 						UID:        warmPoolUID,
 						Controller: ptr.To(true),
+					},
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: conditionStatus,
 					},
 				},
 			},
@@ -460,7 +474,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 	}
 
 	createDeletingPod := func(name string) *corev1.Pod {
-		pod := createWarmPoolPod(name, metav1.Now())
+		pod := createWarmPoolPod(name, metav1.Now(), true)
 		now := metav1.Now()
 		pod.DeletionTimestamp = &now
 		// Add a finalizer so the fake client accepts the object with deletionTimestamp
@@ -480,9 +494,9 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolPod("pool-pod-1", metav1.Time{Time: metav1.Now().Add(-3600)}), // oldest
-				createWarmPoolPod("pool-pod-2", metav1.Time{Time: metav1.Now().Add(-1800)}),
-				createWarmPoolPod("pool-pod-3", metav1.Now()),
+				createWarmPoolPod("pool-pod-1", metav1.Time{Time: metav1.Now().Add(-3600)}, true), // oldest
+				createWarmPoolPod("pool-pod-2", metav1.Time{Time: metav1.Now().Add(-1800)}, true),
+				createWarmPoolPod("pool-pod-3", metav1.Now(), true),
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "pool-pod-1",
@@ -503,7 +517,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				template,
 				claim,
 				createPodWithDifferentController("other-pod-1"),
-				createWarmPoolPod("pool-pod-1", metav1.Now()),
+				createWarmPoolPod("pool-pod-1", metav1.Now(), true),
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "pool-pod-1",
@@ -515,7 +529,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				template,
 				claim,
 				createDeletingPod("deleting-pod"),
-				createWarmPoolPod("pool-pod-1", metav1.Now()),
+				createWarmPoolPod("pool-pod-1", metav1.Now(), true),
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "pool-pod-1",
@@ -530,6 +544,19 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				createDeletingPod("deleting-pod"),
 			},
 			expectPodAdoption:   false,
+			expectSandboxCreate: true,
+		},
+		{
+			name: "prioritizes ready pods",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createWarmPoolPod("not-ready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
+				createWarmPoolPod("middle-ready", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
+				createWarmPoolPod("young-ready", metav1.Now(), true),
+			},
+			expectPodAdoption:   true,
+			expectedAdoptedPod:  "middle-ready",
 			expectSandboxCreate: true,
 		},
 	}

@@ -70,7 +70,7 @@ params:
     # Enable the search box in the side bar.
     sidebar_search_disable: false
     # Set to true to disable breadcrumb navigation.
-    breadcrumb_disable: false
+    breadcrumb_disable: true
     # Show expand/collapse icon for sidebar sections
     sidebar_menu_foldable: true
     # Disable about button in footer

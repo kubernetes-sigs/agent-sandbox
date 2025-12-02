@@ -398,3 +398,47 @@ div.feature-state-notice {
         padding-right: 16rem !important;
     }
 }
+
+.td-content p code {
+  color: gold;
+}
+
+.td-content .highlight pre {
+    margin: 0;
+    background-color: #111 !important;
+    padding: 2rem 1rem;
+    border-radius: 1rem;
+    border: solid #222;
+}
+
+.td-content pre > code {
+    background-color: inherit !important;
+    padding: 0;
+    margin: 0;
+    font-size: 100%;
+    text-shadow: none;
+    word-break: normal;
+    white-space: pre;
+    border: 0;
+    color: gold;
+}
+
+.language-css .token.string, .style .token.string, .token.entity, .token.operator, .token.url {
+    color: #9a6e3a;
+    background: inherit !important;
+}
+
+.td-content p code, .td-content li > code, .td-content table code {
+    color: gold;
+    padding: 0.2em 0.4em;
+    margin: 0;
+    font-size: 85%;
+    word-break: normal;
+    background-color: #111;
+    border-radius: 0.375rem;
+}
+
+.td-page-meta__lastmod {
+  color: #fff !important;
+  padding-bottom: 2rem;
+}

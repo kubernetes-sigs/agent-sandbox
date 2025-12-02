@@ -442,3 +442,51 @@ div.feature-state-notice {
   color: #fff !important;
   padding-bottom: 2rem;
 }
+
+.td-page-meta__lastmod a {
+  color: #fff !important;
+  text-decoration: underline;
+}
+
+.section-index .simple-list-item {
+  padding-bottom: 1rem;
+}
+
+.section-index .simple-list .simple-list-item .title a {
+  color: #bc3fff;
+  text-decoration: underline;
+}
+
+.section-index .simple-list-item .description {
+  font-size: 1.5rem;
+  font-weight: 100;
+}
+
+.section-index .simple-list-item .description a {
+  color: #eee;
+  text-decoration: underline;
+}
+
+.td-content a {
+  color: #bc3fff;
+  text-decoration: underline;
+}
+
+.section-index {
+  display: flex;
+  flex-direction: column;
+  flex-wrap:wrap;
+  gap: 2rem;
+}
+
+.section-index .entry {
+  padding: 4rem 3rem 6rem;
+}
+
+.section-index .entry a {
+  text-decoration: none;
+}
+
+.section-index .entry a > p {
+  color: #eee;
+}

@@ -19,12 +19,12 @@ footer {
 .td-overlay--dark::after {
   background-color: #000000;
   background-image: radial-gradient(
-      circle at 25% -10%,
+      circle at 25% -50px,
       #8800d6 0%,
       transparent 55%
     ),
-    radial-gradient(circle at 75% -10%, #cd0663 0%, transparent 55%),
-    radial-gradient(circle at 50% 0%, #af0eae 0%, transparent 30%);;
+    radial-gradient(circle at 75% -40px, #cd0663 0%, transparent 55%),
+    radial-gradient(circle at 50% -30px, #af0eae 0%, transparent 30%);;
 
   /* Ensure full coverage */
   min-height: 100vh;
@@ -101,11 +101,11 @@ footer {
 .td-section {
   background-color: $black;
   background-image: radial-gradient(
-      circle at 25% -10%,
+      circle at 25% -40%,
       #3c005f 0%,
-      transparent 25%
+      transparent 45%
     ),
-    radial-gradient(circle at 75% -10%, #5e0032 0%, transparent 35%);
+    radial-gradient(circle at 75% -40%, #5e0032 0%, transparent 45%);
   color: $white;
 
   .navbar {
@@ -356,4 +356,45 @@ div.feature-state-notice {
   min-height: 100vh;
   width: 100%;
   background-repeat: no-repeat;
+}
+
+.section-index .entry {
+  border: 1px solid;
+  border-radius: 2rem;
+  margin: 1rem 0;
+  padding: 2rem;
+}
+
+@media (min-width: 768px) {
+    .td-section .td-navbar {
+        position: static;
+        top: 0;
+        width: 100%;
+    }
+}
+
+@media (min-width: 768px) {
+    .td-section .td-404 main, .td-section .td-main main {
+        padding-top: 1rem;
+    }
+}
+
+.td-section .col-12 {
+    flex: 0 0 auto;
+    padding: 0 2rem;
+    width: 100%;
+}
+
+@media (min-width: 768px) {
+    .td-section .ps-md-5 {
+        padding-left: 8rem !important;
+        padding-right: 8rem !important;
+    }
+}
+
+@media (min-width: 1200px) {
+    .td-section .col-xl-8 {
+        padding-left: 16rem !important;
+        padding-right: 16rem !important;
+    }
 }

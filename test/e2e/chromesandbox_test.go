@@ -20,98 +20,96 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
+	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
+
+func chromeSandbox() *sandboxv1alpha1.Sandbox {
+	sandbox := &sandboxv1alpha1.Sandbox{}
+	sandbox.Name = "chrome-sandbox"
+	sandbox.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "chrome-sandbox",
+					// might be nice to remove the IMAGE_TAG env var so this is easier to run from IDE
+					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", os.Getenv("IMAGE_TAG")),
+					ImagePullPolicy: corev1.PullIfNotPresent,
+				},
+			},
+		},
+	}
+	return sandbox
+}
 
 // TestRunChromeSandbox tests that we can run Chrome inside a Sandbox,
 // it also measures how long it takes for Chrome to start serving the CDP protocol.
 func TestRunChromeSandbox(t *testing.T) {
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	tc := framework.NewTestContext(t)
 
-	log := klog.FromContext(ctx)
-
-	h := framework.NewTestContext(t)
-
-	ns := fmt.Sprintf("chrome-sandbox-test-%d", time.Now().UnixNano())
-	h.CreateTempNamespace(ctx, ns)
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("chrome-sandbox-test-%d", time.Now().UnixNano())
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 
 	startTime := time.Now()
-
-	manifest := `
-kind: Sandbox
-apiVersion: agents.x-k8s.io/v1alpha1
-metadata:
-  name: chrome-sandbox
-spec:
-  podTemplate:
-    spec:
-      containers:
-      - name: chrome-sandbox
-        image: kind.local/chrome-sandbox:latest
-        imagePullPolicy: IfNotPresent
-`
-
-	manifest = strings.ReplaceAll(manifest, ":latest", ":"+os.Getenv("IMAGE_TAG"))
-
-	h.Apply(ctx, ns, manifest)
-
-	sandboxID := types.NamespacedName{
-		Namespace: ns,
-		Name:      "chrome-sandbox",
-	}
-
-	h.WaitForSandboxReady(ctx, sandboxID)
+	sandboxObj := chromeSandbox()
+	sandboxObj.Namespace = ns.Name
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
+	require.NoError(t, tc.WaitForObject(t.Context(), sandboxObj, predicates.ReadyConditionIsTrue))
 
 	podID := types.NamespacedName{
-		Namespace: ns,
+		Namespace: ns.Name,
 		Name:      "chrome-sandbox",
 	}
-
+	podObj := &corev1.Pod{}
+	podObj.Name = podID.Name
+	podObj.Namespace = podID.Namespace
 	// Wait for the pod to be ready
-	{
-		waitForPodReady := exec.CommandContext(ctx, "kubectl", "-n", ns, "wait", "pod/"+podID.Name, "--for=condition=Ready", "--timeout=60s")
-		log.Info("waiting for pod to be ready", "command", waitForPodReady.String())
-		waitForPodReady.Stdout = os.Stdout
-		waitForPodReady.Stderr = os.Stderr
-		if err := waitForPodReady.Run(); err != nil {
-			t.Fatalf("failed to wait-for-pod-ready: %v", err)
-		}
-	}
-
-	// Loop until we can query chrome for its version via the debug port
-	for {
-		if ctx.Err() != nil {
-			t.Fatalf("context cancelled")
-		}
-
-		// We have to port-forward in the loop because port-forward exits when it sees an error
-		// https://github.com/kubernetes/kubectl/issues/1249
-		portForwardCtx, portForwardCancel := context.WithCancel(ctx)
-		h.PortForward(portForwardCtx, podID, 9222, 9222)
-
-		u := "http://localhost:9222/json/version"
-		info, err := getChromeInfo(ctx, u)
-		portForwardCancel()
-		if err != nil {
-			log.Error(err, "failed to get Chrome info")
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		log.Info("Chrome is ready", "url", u, "response", info)
-		break
-	}
-
+	require.NoError(t, tc.WaitForObject(t.Context(), podObj, predicates.ReadyConditionIsTrue))
+	// Wait for chrome to be ready
+	require.NoError(t, waitForChromeReady(t.Context(), tc, podID))
 	duration := time.Since(startTime)
-	log.Info("Test completed successfully", "duration", duration)
+	t.Logf("Test took %s", duration)
+}
+
+func waitForChromeReady(ctx context.Context, tc *framework.TestContext, podID types.NamespacedName) error {
+	tc.Helper()
+	// Loop until we can query chrome for its version via the debug port
+	pollDuration := 100 * time.Millisecond
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled")
+		default:
+			// We have to port-forward in the loop because port-forward exits when it sees an error
+			// https://github.com/kubernetes/kubectl/issues/1249
+			portForwardCtx, portForwardCancel := context.WithCancel(ctx)
+			if err := tc.PortForward(portForwardCtx, podID, 9222, 9222); err != nil {
+				tc.Logf("failed to port forward: %s", err)
+				portForwardCancel()
+				time.Sleep(pollDuration)
+				continue
+			}
+
+			u := "http://localhost:9222/json/version"
+			info, err := getChromeInfo(ctx, u)
+			portForwardCancel()
+			if err != nil {
+				tc.Logf("failed to get chrome info: %s", err)
+				time.Sleep(pollDuration)
+				continue
+			}
+			tc.Logf("Chrome is ready (%s). Response: %s", u, info)
+			return nil
+		}
+	}
 }
 
 // getChromeInfo connects to the Chrome Debug Port and retrieves the version information.

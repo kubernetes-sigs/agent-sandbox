@@ -26,10 +26,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
+	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
+	"sigs.k8s.io/yaml"
 )
 
 const sandboxManifest = `
@@ -96,51 +101,95 @@ spec:
     name: python-sandbox-template
 `
 
+func sandboxFromManifest(manifest string) (*sandboxv1alpha1.Sandbox, error) {
+	sandbox := &sandboxv1alpha1.Sandbox{}
+	if err := yaml.Unmarshal([]byte(manifest), sandbox); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal Sandbox: %w", err)
+	}
+	return sandbox, nil
+}
+
+func sandboxTemplateFromManifest(manifest string) (*extensionsv1alpha1.SandboxTemplate, error) {
+	template := &extensionsv1alpha1.SandboxTemplate{}
+	if err := yaml.Unmarshal([]byte(manifest), template); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal SandboxTemplate: %w", err)
+	}
+	return template, nil
+}
+
+func sandboxClaimFromManifest(manifest string) (*extensionsv1alpha1.SandboxClaim, error) {
+	claim := &extensionsv1alpha1.SandboxClaim{}
+	if err := yaml.Unmarshal([]byte(manifest), claim); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal SandboxClaim: %w", err)
+	}
+	return claim, nil
+}
+
+func sandboxWarmpoolFromManifest(manifest string) (*extensionsv1alpha1.SandboxWarmPool, error) {
+	warmpool := &extensionsv1alpha1.SandboxWarmPool{}
+	if err := yaml.Unmarshal([]byte(manifest), warmpool); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal SandboxWarmPool: %w", err)
+	}
+	return warmpool, nil
+}
+
+func getImageTag() string {
+	imageTag := os.Getenv("IMAGE_TAG")
+	if imageTag == "" {
+		imageTag = "latest"
+	}
+	return imageTag
+}
+
+func getImagePrefix() string {
+	imagePrefix := os.Getenv("IMAGE_PREFIX")
+	if imagePrefix == "" {
+		imagePrefix = "kind.local"
+	}
+	return imagePrefix
+}
+
 // TestRunPythonRuntimeSandbox tests that we can run the Python runtime inside a standard Pod.
 func TestRunPythonRuntimeSandbox(testingT *testing.T) {
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	log := klog.FromContext(ctx)
-
 	testContext := framework.NewTestContext(testingT)
 
-	ns := fmt.Sprintf("python-runtime-sandbox-test-%d", time.Now().UnixNano())
-	testContext.CreateTempNamespace(ctx, ns)
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("python-runtime-sandbox-test-%d", time.Now().UnixNano())
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), ns))
 
 	startTime := time.Now()
 
-	imageTag := os.Getenv("IMAGE_TAG")
-	if imageTag == "" {
-		imageTag = "latest"
-	}
-	imagePrefix := os.Getenv("IMAGE_PREFIX")
-	if imagePrefix == "" {
-		imagePrefix = "kind.local"
-	}
-	manifest := fmt.Sprintf(sandboxManifest, imagePrefix, imageTag)
-	testContext.Apply(ctx, ns, manifest)
+	// Apply python runtime sandbox manifest
+	manifest := fmt.Sprintf(sandboxManifest, getImagePrefix(), getImageTag())
+	sandboxObj, err := sandboxFromManifest(manifest)
+	require.NoError(testingT, err)
+	sandboxObj.Namespace = ns.Name
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxObj))
+	require.NoError(testingT, testContext.WaitForObject(testingT.Context(), sandboxObj, predicates.ReadyConditionIsTrue))
 
 	// Pod and sandboxID have the same name
 	sandboxID := types.NamespacedName{
-		Namespace: ns,
+		Namespace: ns.Name,
 		Name:      "sandbox-python-example",
 	}
 
+	podObj := &corev1.Pod{}
+	podObj.Name = sandboxID.Name
+	podObj.Namespace = sandboxID.Namespace
+
 	// Wait for the pod to be ready
-	if err := testContext.WaitForSandboxReady(ctx, sandboxID); err != nil {
-		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
-	}
+	require.NoError(testingT, testContext.WaitForObject(testingT.Context(), podObj, predicates.ReadyConditionIsTrue))
 
-	log.Info("Pod is ready", "podID", sandboxID.Name)
-
+	testingT.Logf("Pod is ready: podID - %s", sandboxID.Name)
 	// Run the tests on the pod
-	runPodTests(ctx, testingT, testContext, sandboxID)
+	require.NoError(testingT, runPodTests(ctx, testingT, testContext, sandboxID))
 
 	duration := time.Since(startTime)
-	log.Info("Test completed successfully", "duration", duration)
+	testingT.Logf("Test completed successfully: duration - %s", duration)
 }
 
 // TestRunPythonRuntimeSandboxClaim tests that we can run the Python runtime inside a Sandbox without a WarmPool.
@@ -149,44 +198,45 @@ func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	log := klog.FromContext(ctx)
-
 	testContext := framework.NewTestContext(testingT)
 
-	ns := fmt.Sprintf("python-sandbox-claim-test-%d", time.Now().UnixNano())
-	testContext.CreateTempNamespace(ctx, ns)
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("python-sandbox-claim-test-%d", time.Now().UnixNano())
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), ns))
 
 	startTime := time.Now()
 
-	imageTag := os.Getenv("IMAGE_TAG")
-	if imageTag == "" {
-		imageTag = "latest"
-	}
-	imagePrefix := os.Getenv("IMAGE_PREFIX")
-	if imagePrefix == "" {
-		imagePrefix = "kind.local"
-	}
-	manifest := fmt.Sprintf(templateManifest, imagePrefix, imageTag)
-	testContext.Apply(ctx, ns, manifest)
+	// Apply python runtime sandbox template and claim manifests
+	manifest := fmt.Sprintf(templateManifest, getImagePrefix(), getImageTag())
+	sandboxTemplate, err := sandboxTemplateFromManifest(manifest)
+	require.NoError(testingT, err)
+	sandboxTemplate.Namespace = ns.Name
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxTemplate))
 
-	testContext.Apply(ctx, ns, claimManifest)
+	sandboxClaim, err := sandboxClaimFromManifest(claimManifest)
+	require.NoError(testingT, err)
+	sandboxClaim.Namespace = ns.Name
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxClaim))
 
 	sandboxID := types.NamespacedName{
-		Namespace: ns,
+		Namespace: ns.Name,
 		Name:      "python-sandbox-claim",
 	}
-	if err := testContext.WaitForSandboxReady(ctx, sandboxID); err != nil {
-		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
-	}
 
-	log.Info("Sandbox is ready", "sandboxName", sandboxID.Name)
+	podObj := &corev1.Pod{}
+	podObj.Name = sandboxID.Name
+	podObj.Namespace = sandboxID.Namespace
+
+	// Wait for the pod to be ready
+	require.NoError(testingT, testContext.WaitForObject(testingT.Context(), podObj, predicates.ReadyConditionIsTrue))
+
+	testingT.Logf("Sandbox is ready: sandboxName - %s", sandboxID.Name)
 
 	// Run the tests on the pod
-	runPodTests(ctx, testingT, testContext, sandboxID)
+	require.NoError(testingT, runPodTests(ctx, testingT, testContext, sandboxID))
 
 	duration := time.Since(startTime)
-	log.Info("Test completed successfully", "duration", duration)
+	testingT.Logf("Test completed successfully: duration %s", duration)
 }
 
 // TestRunPythonRuntimeSandboxWarmpool tests that we can run the Python runtime inside a Sandbox.
@@ -195,64 +245,59 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	log := klog.FromContext(ctx)
-
 	testContext := framework.NewTestContext(testingT)
 
-	ns := fmt.Sprintf("python-sandbox-warmpool-test-%d", time.Now().UnixNano())
-	testContext.CreateTempNamespace(ctx, ns)
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("python-sandbox-warmpool-test-%d", time.Now().UnixNano())
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), ns))
 
 	startTime := time.Now()
 
-	imageTag := os.Getenv("IMAGE_TAG")
-	if imageTag == "" {
-		imageTag = "latest"
-	}
-	imagePrefix := os.Getenv("IMAGE_PREFIX")
-	if imagePrefix == "" {
-		imagePrefix = "kind.local"
-	}
-	manifest := fmt.Sprintf(templateManifest, imagePrefix, imageTag)
-	testContext.Apply(ctx, ns, manifest)
+	// Apply python runtime sandbox template, warmpool manifests
+	manifest := fmt.Sprintf(templateManifest, getImagePrefix(), getImageTag())
+	sandboxTemplate, err := sandboxTemplateFromManifest(manifest)
+	require.NoError(testingT, err)
+	sandboxTemplate.Namespace = ns.Name
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxTemplate))
 
-	testContext.Apply(ctx, ns, warmPoolManifest)
+	sandboxWarmpool, err := sandboxWarmpoolFromManifest(warmPoolManifest)
+	require.NoError(testingT, err)
+	sandboxWarmpool.Namespace = ns.Name
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxWarmpool))
+
 	sandboxWarmpoolID := types.NamespacedName{
-		Namespace: ns,
+		Namespace: ns.Name,
 		Name:      "python-warmpool",
 	}
-	// Wait for the warmpool to be ready
-	if err := testContext.WaitForWarmPoolReady(ctx, sandboxWarmpoolID, 1); err != nil {
-		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxWarmpoolID.String(), err)
-	}
 
-	testContext.Apply(ctx, ns, claimManifest)
+	// Wait for the warmpool to be ready
+	require.NoError(testingT, testContext.WaitForWarmPoolReady(testingT.Context(), sandboxWarmpoolID, 1))
+
+	time.Sleep(60 * time.Second)
+
+	// Apply python runtime sandbox claim manifest
+	sandboxClaim, err := sandboxClaimFromManifest(claimManifest)
+	require.NoError(testingT, err)
+	sandboxClaim.Namespace = ns.Name
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxClaim))
+
 	sandboxID := types.NamespacedName{
-		Namespace: ns,
+		Namespace: ns.Name,
 		Name:      "python-sandbox-claim",
 	}
 
-	if err := testContext.WaitForSandboxReady(ctx, sandboxID); err != nil {
-		log.Error(err, "DEBUG: failed to wait for pod ready using WaitForObject")
-		testingT.Fatalf("failed to wait for pod %s to be ready: %v", sandboxID.String(), err)
-	}
+	require.NoError(testingT, testContext.WaitForSandboxReady(testingT.Context(), sandboxID))
 
 	// Get the SandboxClaim to extract the sandbox name
-	sandbox := testContext.GetSandbox(ctx, sandboxID)
-	if sandbox == nil {
-		log.Error(nil, "failed to get sandbox", sandboxID.String())
-		testingT.Fatalf("Failed to get Sandbox %s after it was bound", sandboxID.String())
-	}
+	sandbox, err := testContext.GetSandbox(ctx, sandboxID)
+	require.NoError(testingT, err)
 
-	sandboxName, found, err := unstructured.NestedString(sandbox.Object, "metadata", "annotations", "agents.x-k8s.io/pod-name")
-	if err != nil || !found || sandboxName == "" {
-		testingT.Fatalf("Failed to extract annotations sandboxName from bound Sandbox %+v: found=%v, err=%v, value=%s",
-			sandbox.Object, found, err, sandboxName)
-	}
-	log.Info("DEBUG: Extracted SandboxName from Sandbox", "sandboxName", sandboxName)
+	sandboxName, _, err := unstructured.NestedString(sandbox.Object, "metadata", "annotations", "agents.x-k8s.io/pod-name")
+	require.NoError(testingT, err)
+	testingT.Logf("DEBUG: Extracted SandboxName from Sandbox: sandboxName - %s", sandboxName)
 
 	podID := types.NamespacedName{
-		Namespace: ns,
+		Namespace: ns.Name,
 		Name:      sandboxName,
 	}
 
@@ -260,26 +305,11 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	runPodTests(ctx, testingT, testContext, podID)
 
 	duration := time.Since(startTime)
-	log.Info("Test completed successfully", "duration", duration)
+	testingT.Logf("Test completed successfully: duration-%s", duration)
 }
 
 // runPodTests runs the health check, root endpoint, and execute endpoint tests on the given pod.
-func runPodTests(ctx context.Context, testingT *testing.T, testContext *framework.TestContext, podID types.NamespacedName) {
-	log := klog.FromContext(ctx)
-
-	// Get the template to check the runtime
-	templateID := types.NamespacedName{Namespace: podID.Namespace, Name: "python-sandbox-template"}
-	template := testContext.GetSandboxTemplate(ctx, templateID)
-	if template != nil {
-		runtimeClassName, found, err := unstructured.NestedString(template.Object, "spec", "podTemplate", "spec", "runtimeClassName")
-		if err != nil {
-			testingT.Fatalf("Failed to get runtimeClassName from template: %v", err)
-		}
-		if found && runtimeClassName == "gvisor" {
-			log.Info("Skipping PortForward tests for gvisor runtime")
-			return
-		}
-	}
+func runPodTests(ctx context.Context, testingT *testing.T, testContext *framework.TestContext, podID types.NamespacedName) error {
 
 	// Loop until we can query the python server for its health
 	for {
@@ -295,12 +325,12 @@ func runPodTests(ctx context.Context, testingT *testing.T, testContext *framewor
 		portForwardCancel()
 
 		if err != nil {
-			log.Error(err, "failed to get health check")
+			testingT.Logf("failed to get health check: %s", err)
 			// time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
-		log.Info("Python server is ready", "url", url)
+		testingT.Logf("Python server is ready: url - %s", url)
 
 		break
 	}
@@ -315,8 +345,9 @@ func runPodTests(ctx context.Context, testingT *testing.T, testContext *framewor
 		if err != nil {
 			testingT.Fatalf("failed to verify execute endpoint: %v", err)
 		}
-		log.Info("Execute endpoint check successful", "url", url)
+		testingT.Logf("Execute endpoint check successful: url - %s", url)
 	}
+	return nil
 }
 
 // checkHealth connects to the Python server health check endpoint.

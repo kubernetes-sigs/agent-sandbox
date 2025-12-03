@@ -10,6 +10,10 @@ spec:
       annotations:
         test: "yes"
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
       containers:
       - name: python-sandbox
         image: us-docker.pkg.dev/<PROJECT_ID>/analytics/analytics-tool:1.0.0

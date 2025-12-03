@@ -9,6 +9,26 @@ data:
     {
     "cells": [
       {
+      "cell_type": "markdown",
+      "id": "2204922e-eab7-45cc-b762-6c1bbbafc7bc",
+      "metadata": {},
+      "source": [
+        "# Data Analytics\n",
+        "\n",
+        "This is an example notebook that demostrates how to use agent-sandbox as an analytics-tool for an LLM."
+      ]
+      },
+      {
+      "cell_type": "markdown",
+      "id": "733114ba-2f5b-4bf3-85b8-59330c11a8a3",
+      "metadata": {},
+      "source": [
+        "## Download the data\n",
+        "\n",
+        "In this section you can investigate the dataset that we will explore further."
+      ]
+      },
+      {
       "cell_type": "code",
       "execution_count": null,
       "id": "6c9dcc71-f20c-40b5-8f42-88ef5f51e737",
@@ -30,6 +50,7 @@ data:
       "metadata": {},
       "outputs": [],
       "source": [
+        "import os\n",
         "os.listdir(path)[0]"
       ]
       },
@@ -45,6 +66,16 @@ data:
         "\n",
         "df = pd.read_csv(f\"{path}/{os.listdir(path)[0]}\")\n",
         "df.head()"
+      ]
+      },
+      {
+      "cell_type": "markdown",
+      "id": "6541cfec-a7af-4df0-b8a2-1f88f962af6c",
+      "metadata": {},
+      "source": [
+        "## Data Uploading\n",
+        "\n",
+        "The cell below will run the same kaggle dataset downloading command inside our analytics tool. This will allow us to access the data and perform some actions on it."
       ]
       },
       {
@@ -88,6 +119,16 @@ data:
         "print(exec_command(loader_code))\n",
         "print(exec_command(unzip_code))\n",
         "print(exec_command(mv_code))"
+      ]
+      },
+      {
+      "cell_type": "markdown",
+      "id": "ad2e0ab3-6d3d-4a6a-9165-17d8f64e6e3b",
+      "metadata": {},
+      "source": [
+        "## Data analytics\n",
+        "\n",
+        "In this section we will define a connection to our analytics tool and run an example query to get some data insights."
       ]
       },
       {

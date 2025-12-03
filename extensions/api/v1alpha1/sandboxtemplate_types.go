@@ -31,6 +31,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
@@ -38,12 +39,65 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 // Important: Run "make" to regenerate code after modifying this file
 
+// NetworkPolicySpec defines the desired state of the NetworkPolicy.
+type NetworkPolicySpec struct {
+	Enabled                    bool             `json:"enabled,omitempty"`
+	IngressControllerSelectors *IngressSelector `json:"ingressControllerSelectors,omitempty"`
+	IngressFromIPBlocks        []IPBlock        `json:"ingressFromIPBlocks,omitempty"`
+	AdditionalIngressRules     []IngressRule    `json:"additionalIngressRules,omitempty"`
+	AdditionalEgressRules      []EgressRule     `json:"additionalEgressRules,omitempty"`
+}
+
+// IngressSelector defines selectors for an in-cluster ingress controller.
+type IngressSelector struct {
+	NamespaceSelector map[string]string `json:"namespaceSelector,omitempty"`
+	PodSelector       map[string]string `json:"podSelector,omitempty"`
+}
+
+// IPBlock defines a CIDR block for ingress or egress rules.
+type IPBlock struct {
+	CIDR string `json:"cidr,omitempty"`
+}
+
+// EgressRule defines a single egress rule.
+type EgressRule struct {
+	Description         string             `json:"description,omitempty"`
+	ToIPBlock           *IPBlockWithExcept `json:"toIPBlock,omitempty"`
+	ToPodSelector       map[string]string  `json:"toPodSelector,omitempty"`
+	InNamespaceSelector map[string]string  `json:"inNamespaceSelector,omitempty"`
+	Ports               []NetworkPort      `json:"ports,omitempty"`
+}
+
+// IngressRule defines a single ingress rule from another pod.
+type IngressRule struct {
+	Description         string            `json:"description,omitempty"`
+	FromPodSelector     map[string]string `json:"fromPodSelector,omitempty"`
+	InNamespaceSelector map[string]string `json:"inNamespaceSelector,omitempty"`
+}
+
+// IPBlockWithExcept is for egress rules that need an "except" clause.
+type IPBlockWithExcept struct {
+	CIDR   string   `json:"cidr,omitempty"`
+	Except []string `json:"except,omitempty"`
+}
+
+// NetworkPort defines a port for a network policy rule.
+type NetworkPort struct {
+	Protocol *corev1.Protocol `json:"protocol,omitempty"`
+	Port     *int32           `json:"port,omitempty"`
+}
+
 // SandboxTemplateSpec defines the desired state of Sandbox
 type SandboxTemplateSpec struct {
 	// template is the object that describes the pod spec that will be used to create
 	// an agent sandbox.
 	// +kubebuilder:validation:Required
 	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+
+	// NetworkPolicy defines the network policy to be applied to the sandboxes
+	// created from this template.
+	// +optional
+	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

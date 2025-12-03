@@ -1,0 +1,12 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  # This will be the name of your sandbox pod and its associated resources.
+  name: my-secure-sandbox
+  # This MUST be in the same namespace as the SandboxTemplate.
+  namespace: default
+spec:
+  # It points to the template.
+  sandboxTemplateRef:
+    # This name must exactly match the 'metadata.name' of your SandboxTemplate.
+    name: secure-datascience-template

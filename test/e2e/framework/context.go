@@ -66,9 +66,8 @@ func NewTestContext(t *testing.T) *TestContext {
 		t.Fatal(err)
 	}
 	th.ClusterClient = ClusterClient{
-		T:          t,
-		client:     cl,
-		restConfig: restCfg,
+		T:      t,
+		client: cl,
 	}
 	t.Cleanup(func() {
 		t.Helper()

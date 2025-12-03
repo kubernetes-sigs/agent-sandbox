@@ -58,6 +58,14 @@ def walk_object(obj, fn, field_path=""):
         raise Exception(f"unexpected type: {type(obj)}")
 
 
+def kubectl_apply_objects(docs, repo_root):
+    """Helper to apply a list of k8s objects."""
+    if not docs: return
+    string_stream = io.StringIO()
+    yaml.dump_all(docs, string_stream)
+    subprocess.run(["kubectl", "apply", "-f", "-"], cwd=repo_root, check=True, input=string_stream.getvalue(), text=True)
+
+
 def main(args):
     repo_root = utils.get_repo_root()
 
@@ -67,17 +75,15 @@ def main(args):
         print("k8s directory not found")
         return
 
+    prereq_docs = []
+    other_docs = []
+
     for root, dirs, files in os.walk(manifests_path):
-        # Process files in alphabetical order
-        # This works now because k8s/ doesn't contain CRs, and Namespace is defined in the first file (controller.yaml).
-        # TODO: Handle file ordering better so that CRDs and Namespaces are deployed first
-        files.sort()
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
                 continue
 
             path = os.path.join(root, filename)
-
             with open(path, "r") as f:
                 # Use safe_load_all for multi-document YAML files
                 docs = list(yaml.safe_load_all(f))
@@ -88,42 +94,31 @@ def main(args):
 
             # Process each document in the file
             for doc in docs:
-                if not doc: # Skip empty documents
-                    continue
+                if not doc: continue
 
+                # Rule 1: CRDs need to be applied first
+                is_crd = doc.get("kind") == "CustomResourceDefinition"
+                if is_crd:
+                      prereq_docs.append(doc)
+                      continue
+
+                # Rule 2: Namespaces also need to be applied first
+                if doc.get("kind") == "Namespace":
+                      prereq_docs.append(doc)
+                      continue
+                
+                # Rule 3: Everything else (Deployments, StatefulSets, etc.)
+                # If we got here, it's a resource we want to apply.
                 find_and_replace_images(doc, service_name, image_prefix, image_tag)
+                other_docs.append(doc)
 
-            # Dump the modified documents back to a string
-            string_stream = io.StringIO()
-            yaml.dump_all(docs, string_stream)
-            modified_content = string_stream.getvalue()
+    print(f"Applying {len(prereq_docs)} prerequisite manifests (Namespace, CRDs)...")
+    kubectl_apply_objects(prereq_docs, repo_root)
 
-            rel_path = os.path.relpath(path, repo_root)
-            print(f"applying manifest {rel_path}")
+    print(f"Applying {len(other_docs)} other manifests...")
+    kubectl_apply_objects(other_docs, repo_root)
+    print("Deployment complete.")
 
-            cmd = ["kubectl", "apply", "-f", "-"]
-            subprocess.run(cmd, cwd=repo_root, check=True, input=modified_content, text=True)
-    
-    if args.gateway:
-        print("Setting up cloud-provider-kind for gateway ...")
-        cmd = ["go", "install", "sigs.k8s.io/cloud-provider-kind@latest"]
-        subprocess.run(cmd, cwd=repo_root, check=True)
-        
-        # Get current path
-        path = os.environ.get('PATH', '')
-
-        # Append the go/bin path
-        go_bin = os.path.expanduser('~/go/bin')
-        os.environ['PATH'] = f"{path}:{go_bin}"
-
-        print("Starting cloud-provider-kind in the background and enabling the Gateway API controller ...")
-        process = subprocess.Popen(
-            ["cloud-provider-kind", "--gateway-channel", "standard"],
-            stdout=subprocess.DEVNULL, # Silence output so it doesn't clutter terminal
-            stderr=subprocess.DEVNULL  # Silence errors
-        )
-    
-        print(f"Process started with PID: {process.pid}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Deploy manifests under k8s/ to Kubernetes cluster")
@@ -132,8 +127,5 @@ if __name__ == "__main__":
                         help="prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
-    parser.add_argument("--gateway",
-                        action='store_true',
-                        help="Deploy cloud provider kind for gateway support.")
     args = parser.parse_args()
     main(args)

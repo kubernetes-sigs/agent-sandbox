@@ -291,7 +291,7 @@ func (cl *ClusterClient) WaitForSandboxReady(ctx context.Context, sandboxID type
 
 func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpoolID types.NamespacedName, expectedReplicas int) error {
 	cl.Helper()
-	cl.Logf("Waiting for SandboxWarmPool Pods to be ready", "warmpoolID", sandboxWarmpoolID, "expectedReplicas", expectedReplicas)
+	cl.Logf("Waiting for SandboxWarmPool Pods to be ready: warmpoolID - %s; expectedReplicas - %d", sandboxWarmpoolID, expectedReplicas)
 
 	warmpool := &unstructured.Unstructured{}
 	warmpool.SetGroupVersionKind(sandboxWarmpoolGVK)

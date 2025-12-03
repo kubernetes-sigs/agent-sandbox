@@ -302,7 +302,7 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	}
 
 	// Run the tests on the pod
-	runPodTests(ctx, testingT, testContext, podID)
+	require.NoError(testingT, runPodTests(ctx, testingT, testContext, podID))
 
 	duration := time.Since(startTime)
 	testingT.Logf("Test completed successfully: duration-%s", duration)

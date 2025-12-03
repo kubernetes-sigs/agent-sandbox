@@ -297,7 +297,7 @@ div.feature-state-notice {
 }
 
 .info-container {
-  padding-top: 2rem;
+  padding-top: 4rem;
   display: flex;
   flex-direction: row;
   width: 100%;
@@ -316,15 +316,16 @@ div.feature-state-notice {
 
 .info-card {
   flex: 1 1 0;
+  gap: 2rem;
 }
 
 .info-card > .title {
-  font-size: 2rem;
+  font-size: 2.5rem;
   font-weight: 400;
 }
 
 .info-card > .description {
-  font-size: 1rem;
+  font-size: 1.5rem;
   font-weight: 100;
 }
 
@@ -472,21 +473,22 @@ div.feature-state-notice {
   text-decoration: underline;
 }
 
-.section-index {
-  display: flex;
-  flex-direction: column;
-  flex-wrap:wrap;
-  gap: 2rem;
+.section-index .list {
+  display: grid;
+  align-items: stretch;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 3rem;
 }
 
-.section-index .entry {
+.section-index .list .entry {
   padding: 4rem 3rem 6rem;
+  margin: 0;
 }
 
-.section-index .entry a {
+.section-index .list .entry a {
   text-decoration: none;
 }
 
-.section-index .entry a > p {
+.section-index .list .entry a > p {
   color: #eee;
 }

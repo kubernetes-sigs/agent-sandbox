@@ -26,17 +26,19 @@
             </div>
     {{ else -}}
     {{/* Otherwise we show a nice formatted list of subpages with page descriptions */}}
+        <div class="list">
         {{ range $pages -}}
-            {{ $manualLink := cond (isset .Params "manuallink") .Params.manualLink ( cond (isset .Params "manuallinkrelref") (relref . .Params.manualLinkRelref) .RelPermalink) -}}
-            <div class="entry">
-                <a href="{{ $manualLink }}"{{ with .Params.manualLinkTitle }} title="{{ . }}"{{ end }}{{ with .Params.manualLinkTarget }} target="{{ . }}"{{ if eq . "_blank" }} rel="noopener"{{ end }}{{ end }}>
-                    <h5 class="display-5">
-                        {{- .Title -}}
-                    </h5>
-
-                    <p class="display-3">{{ .Description | markdownify -}}</p>
-                </a>
-            </div>
-        {{ end -}}
+                {{ $manualLink := cond (isset .Params "manuallink") .Params.manualLink ( cond (isset .Params "manuallinkrelref") (relref . .Params.manualLinkRelref) .RelPermalink) -}}
+                <div class="entry">
+                    <a href="{{ $manualLink }}"{{ with .Params.manualLinkTitle }} title="{{ . }}"{{ end }}{{ with .Params.manualLinkTarget }} target="{{ . }}"{{ if eq . "_blank" }} rel="noopener"{{ end }}{{ end }}>
+                        <h5 class="display-5">
+                            {{- .Title -}}
+                        </h5>
+                        
+                        <p class="display-3">{{ .Description | markdownify -}}</p>
+                    </a>
+                </div>
+            {{ end -}}
+        </div>
     {{ end -}}
 </div>

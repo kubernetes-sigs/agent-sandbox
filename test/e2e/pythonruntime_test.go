@@ -96,7 +96,7 @@ kind: SandboxWarmPool
 metadata:
   name: python-warmpool
 spec:
-  replicas: 1
+  replicas: 2
   sandboxTemplateRef:
     name: python-sandbox-template
 `
@@ -273,8 +273,6 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	// Wait for the warmpool to be ready
 	require.NoError(testingT, testContext.WaitForWarmPoolReady(testingT.Context(), sandboxWarmpoolID, 1))
 
-	time.Sleep(60 * time.Second)
-
 	// Apply python runtime sandbox claim manifest
 	sandboxClaim, err := sandboxClaimFromManifest(claimManifest)
 	require.NoError(testingT, err)
@@ -310,44 +308,65 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 
 // runPodTests runs the health check, root endpoint, and execute endpoint tests on the given pod.
 func runPodTests(ctx context.Context, testingT *testing.T, testContext *framework.TestContext, podID types.NamespacedName) error {
-
-	// Loop until we can query the python server for its health
+	testContext.Helper()
+	pollDuration := 200 * time.Millisecond
 	for {
-		if ctx.Err() != nil {
-			testingT.Fatalf("context cancelled")
+		select {
+		case <-ctx.Done():
+			testingT.Logf("Context cancelled, exiting runPodTests")
+			return fmt.Errorf("context cancelled")
+		default:
+			testingT.Logf("Attempting port forward and checks...")
+
+			// Port forward for health check
+			portForwardCtxHealth, portForwardCancelHealth := context.WithCancel(ctx)
+			if err := testContext.PortForward(portForwardCtxHealth, podID, 8888, 8888); err != nil {
+				testingT.Logf("Failed to port forward for health check: %s", err)
+				portForwardCancelHealth()
+				time.Sleep(pollDuration)
+				continue
+			}
+			testingT.Logf("Port forward for health check established.")
+
+			// Perform health check
+			healthURL := "http://localhost:8888/"
+			err := checkHealth(ctx, healthURL)
+			portForwardCancelHealth()
+
+			if err != nil {
+				testingT.Logf("Failed to get health check: %s", err)
+				time.Sleep(pollDuration)
+				continue
+			}
+			testingT.Logf("Health check successful: url - %s", healthURL)
+
+			// Port forward for execute check
+			portForwardCtxExecute, portForwardCancelExecute := context.WithCancel(ctx)
+			if err := testContext.PortForward(portForwardCtxExecute, podID, 8888, 8888); err != nil {
+				testingT.Logf("Failed to port forward for execute check: %s", err)
+				portForwardCancelExecute()
+				time.Sleep(pollDuration)
+				continue
+			}
+			testingT.Logf("Port forward for execute check established.")
+
+			// Perform execute check
+			executeURL := "http://localhost:8888/execute"
+			err = checkExecute(ctx, executeURL)
+			portForwardCancelExecute()
+
+			if err != nil {
+				testingT.Logf("failed to verify execute endpoint: %v", err)
+				time.Sleep(pollDuration)
+				continue
+			}
+			testingT.Logf("Execute endpoint check successful: url - %s", executeURL)
+
+			// Both checks passed
+			testingT.Logf("Both health and execute checks passed.")
+			return nil
 		}
-
-		portForwardCtx, portForwardCancel := context.WithCancel(ctx)
-		testContext.PortForward(portForwardCtx, podID, 8888, 8888)
-
-		url := "http://localhost:8888/"
-		err := checkHealth(ctx, url)
-		portForwardCancel()
-
-		if err != nil {
-			testingT.Logf("failed to get health check: %s", err)
-			// time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		testingT.Logf("Python server is ready: url - %s", url)
-
-		break
 	}
-
-	// Test execute endpoint
-	{
-		portForwardCtx, portForwardCancel := context.WithCancel(ctx)
-		testContext.PortForward(portForwardCtx, podID, 8888, 8888)
-		url := "http://localhost:8888/execute"
-		err := checkExecute(ctx, url)
-		portForwardCancel()
-		if err != nil {
-			testingT.Fatalf("failed to verify execute endpoint: %v", err)
-		}
-		testingT.Logf("Execute endpoint check successful: url - %s", url)
-	}
-	return nil
 }
 
 // checkHealth connects to the Python server health check endpoint.

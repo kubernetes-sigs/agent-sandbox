@@ -27,7 +27,7 @@ import (
 type objectWithStatus struct {
 	Status struct {
 		Conditions    []metav1.Condition `json:"conditions,omitempty"`
-		ReadyReplicas int                `json:"replicas,omitempty"`
+		ReadyReplicas int                `json:"readyReplicas,omitempty"`
 	} `json:"status"`
 }
 

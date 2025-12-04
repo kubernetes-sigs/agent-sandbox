@@ -31,11 +31,8 @@
                 {{ $manualLink := cond (isset .Params "manuallink") .Params.manualLink ( cond (isset .Params "manuallinkrelref") (relref . .Params.manualLinkRelref) .RelPermalink) -}}
                 <div class="entry">
                     <a href="{{ $manualLink }}"{{ with .Params.manualLinkTitle }} title="{{ . }}"{{ end }}{{ with .Params.manualLinkTarget }} target="{{ . }}"{{ if eq . "_blank" }} rel="noopener"{{ end }}{{ end }}>
-                        <h5 class="display-5">
-                            {{- .Title -}}
-                        </h5>
-                        
-                        <p class="display-3">{{ .Description | markdownify -}}</p>
+                        <p class="title">{{- .Title -}}</p>
+                        <p class="description">{{ .Description | markdownify -}}</p>
                     </a>
                 </div>
             {{ end -}}

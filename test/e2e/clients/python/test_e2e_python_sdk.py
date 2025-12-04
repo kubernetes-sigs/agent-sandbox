@@ -16,7 +16,6 @@ import os
 from test.e2e.clients.python.framework.context import TestContext
 
 import pytest
-import yaml
 from agentic_sandbox import SandboxClient
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
@@ -40,7 +39,7 @@ def temp_namespace(tc):
     """Creates and yields a temporary namespace for testing"""
     namespace = tc.create_temp_namespace(prefix="py-sdk-e2e-")
     yield namespace
-    tc.delete_namespace(namespace)  # Uncomment for cleanup
+    tc.delete_namespace(namespace)
 
 
 def get_image_tag(env_var="IMAGE_TAG", default="latest"):
@@ -62,18 +61,13 @@ def deploy_router(tc, temp_namespace):
     print(f"Using router image: {router_image}")
 
     with open(ROUTER_YAML_PATH, "r") as f:
-        manifest = (
-            f.read()
-            .replace("IMAGE_PLACEHOLDER", router_image)
-        )
+        manifest = f.read().replace("IMAGE_PLACEHOLDER", router_image)
 
     print(f"Applying router manifest to namespace: {temp_namespace}")
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
 
     print("Waiting for router deployment to be ready...")
-    tc.wait_for_deployment_ready(
-        "sandbox-router-deployment", namespace=temp_namespace, timeout=180
-    )
+    tc.wait_for_deployment_ready("sandbox-router-deployment", namespace=temp_namespace)
 
 
 @pytest.fixture(scope="function")
@@ -95,9 +89,7 @@ def sandbox_warmpool(tc, temp_namespace):
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     print("Warmpool manifest applied.")
 
-    tc.wait_for_warmpool_ready(
-        "python-sdk-warmpool", namespace=temp_namespace, timeout=180
-    )
+    tc.wait_for_warmpool_ready("python-sdk-warmpool", namespace=temp_namespace)
     print("Warmpool is ready.")
 
 

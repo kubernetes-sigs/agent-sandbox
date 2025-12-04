@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import kubernetes
+from typing import Dict, Any
 
 
 def deployment_ready(min_ready: int = 1):
@@ -37,5 +38,23 @@ def pod_ready():
             if condition.type == "Ready" and condition.status == "True":
                 return True
         return False
+
+    return check
+
+
+def warmpool_ready(min_ready: int = 1):
+    """
+    Predicate to check if a SandboxWarmPool (CR) has at least min_ready ready sandboxes.
+    """
+
+    def check(obj: Dict[str, Any]) -> bool:
+        # Safety check: ensure obj is a dict (just in case)
+        if not isinstance(obj, dict):
+            return False
+
+        status = obj.get("status") or {}
+        ready_replicas = status.get("readyReplicas", 0)
+
+        return ready_replicas >= min_ready
 
     return check

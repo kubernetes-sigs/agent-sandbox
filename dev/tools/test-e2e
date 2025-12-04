@@ -78,7 +78,7 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
         "pytest",
         f"--junitxml={junit_report_path}",
         "-v",
-        "-n", "auto", # to run tests parallely 
+        "-n", "auto", # to run tests in parallel
         os.path.join(repo_root, "test", "e2e/")
     ]
 
@@ -97,6 +97,7 @@ def main():
 
     env = os.environ.copy()
     env["IMAGE_TAG"] = utils.get_image_tag()
+    env["IMAGE_PREFIX"] = "kind.local"
 
     if not setup_python_sdk(repo_root, env):
          return 1

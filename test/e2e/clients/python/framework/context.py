@@ -15,18 +15,18 @@
 import os
 import uuid
 import functools
-import time
-from typing import Optional, Dict
+from typing import Optional
 from test.e2e.clients.python.framework.predicates import (
     deployment_ready,
-    pod_ready,
+    warmpool_ready,
 )
-
+import subprocess
+from urllib3.exceptions import ReadTimeoutError
 import kubernetes
-import yaml
 
 
 DEFAULT_KUBECONFIG_PATH = "bin/KUBECONFIG"
+DEFAULT_TIMEOUT_SECONDS = 120
 
 
 class TestContext:
@@ -91,7 +91,7 @@ class TestContext:
                     raise
 
     def apply_manifest_text(self, manifest_text: str, namespace: Optional[str] = None):
-        """Applies the given manifest text to the cluster"""
+        """Applies the given manifest text to the cluster using kubectl."""
         if namespace is None:
             namespace = self.namespace
         if not namespace:
@@ -99,112 +99,28 @@ class TestContext:
                 "Namespace must be provided or created before applying manifests."
             )
 
-        manifests = yaml.safe_load_all(manifest_text)
-        for manifest in manifests:
-            if not manifest:
-                continue
-            self._apply_single_manifest(manifest, namespace)
-
-    def _apply_single_manifest(self, manifest: Dict, namespace: str):
-        api_version = manifest.get("apiVersion")
-        kind = manifest.get("kind")
-        metadata = manifest.get("metadata", {})
-        manifest_name = metadata.get("name")
-
-        # Set namespace if not present
-        if "namespace" not in metadata:
-            manifest["metadata"]["namespace"] = namespace
-
-        print(f"Applying {kind} '{manifest_name}' in namespace '{namespace}'")
-
-        if api_version == "v1":
-            core_v1 = self.get_core_v1_api()
-            if kind == "Service":
-                try:
-                    core_v1.create_namespaced_service(
-                        namespace=namespace, body=manifest
-                    )
-                except kubernetes.client.rest.ApiException as e:
-                    if e.status == 409:  # Conflict
-                        print(f"Service {manifest_name} already exists. Patching...")
-                        core_v1.patch_namespaced_service(
-                            name=manifest_name, namespace=namespace, body=manifest
-                        )
-                    else:
-                        raise
-        elif api_version == "apps/v1":
-            apps_v1 = self.get_apps_v1_api()
-            if kind == "Deployment":
-                try:
-                    apps_v1.create_namespaced_deployment(
-                        namespace=namespace, body=manifest
-                    )
-                except kubernetes.client.rest.ApiException as e:
-                    if e.status == 409:  # Conflict
-                        print(f"Deployment {manifest_name} already exists. Patching...")
-                        apps_v1.patch_namespaced_deployment(
-                            name=manifest_name, namespace=namespace, body=manifest
-                        )
-                    else:
-                        raise
-        else:
-            custom_objects_api = self.get_custom_objects_api()
-            group, version = api_version.split("/")
-            plural = self._get_plural_name(kind)  # Helper needed for this
-
-            try:
-                custom_objects_api.create_namespaced_custom_object(
-                    group=group,
-                    version=version,
-                    namespace=namespace,
-                    plural=plural,
-                    body=manifest,
-                )
-            except kubernetes.client.rest.ApiException as e:
-                if e.status == 409:  # Conflict
-                    print(f"{kind} {manifest_name} already exists. Replacing...")
-                    # Need to get the resource version for replace
-                    try:
-                        existing = custom_objects_api.get_namespaced_custom_object(
-                            group=group,
-                            version=version,
-                            namespace=namespace,
-                            plural=plural,
-                            name=manifest_name,
-                        )
-                        manifest["metadata"]["resourceVersion"] = existing["metadata"][
-                            "resourceVersion"
-                        ]
-                        custom_objects_api.replace_namespaced_custom_object(
-                            group=group,
-                            version=version,
-                            namespace=namespace,
-                            plural=plural,
-                            name=manifest_name,
-                            body=manifest,
-                        )
-                    except kubernetes.client.rest.ApiException as get_e:
-                        print(f"Error getting existing object for replace: {get_e}")
-                        raise
-                else:
-                    raise
-
-    def _get_plural_name(self, kind: str) -> str:
-        # Basic pluralization, may need refinement
-        if kind == "SandboxWarmPool":
-            return "sandboxwarmpools"
-        if kind == "SandboxClaim":
-            return "sandboxclaims"
-        if kind == "SandboxTemplate":
-            return "sandboxtemplates"
-        if kind == "Sandbox":
-            return "sandboxes"
-        if kind.endswith("s"):
-            return kind.lower() + "es"
-        return kind.lower() + "s"
+        cmd = ["kubectl", "apply", "-f", "-", "-n", namespace]
+        try:
+            result = subprocess.run(
+                cmd, input=manifest_text, text=True, capture_output=True, check=True
+            )
+            print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.strip()
+            print(f"kubectl apply failed with exit code {e.returncode}")
+            print(f"stdout: {e.stdout}")
+            print(f"stderr: {error_msg}")
+            raise RuntimeError(f"Failed to apply manifest: {error_msg}") from e
 
     def wait_for_object(
-        self, watch_func, name: str, namespace: str, predicate_func, timeout=120
+        self,
+        watch_func,
+        name: str,
+        namespace: str,
+        predicate_func,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
     ):
         """Waits for a Kubernetes object to satisfy a given predicate function"""
         w = kubernetes.watch.Watch()
@@ -226,13 +142,12 @@ class TestContext:
             raise TimeoutError(
                 f"Object {name} did not satisfy predicate within {timeout} seconds."
             )
+        except ReadTimeoutError:
+            raise TimeoutError(
+                f"Object {name} did not satisfy predicate within {timeout} seconds."
+            )
         except Exception as e:
             print(f"Error during watch: {e}")
-            # Check if the error is due to a timeout in the stream
-            if "timeout" in str(e).lower():
-                raise TimeoutError(
-                    f"Object {name} did not satisfy predicate within {timeout} seconds."
-                )
             raise
 
     def wait_for_deployment_ready(
@@ -240,7 +155,7 @@ class TestContext:
         name: str,
         namespace: Optional[str] = None,
         min_ready: int = 1,
-        timeout=120,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
     ):
         """Waits for a Deployment to have at least min_ready available replicas"""
         if namespace is None:
@@ -263,7 +178,7 @@ class TestContext:
         name: str,
         namespace: Optional[str] = None,
         min_ready: int = 1,
-        timeout=120,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
     ):
         """Waits for a SandboxWarmPool to have at least min_ready ready sandboxes"""
         if namespace is None:
@@ -272,13 +187,6 @@ class TestContext:
             raise ValueError("Namespace must be provided.")
 
         custom_objects_api = self.get_custom_objects_api()
-
-        def warmpool_has_min_ready(obj):
-            ready_replicas = obj.get("status", {}).get("readyReplicas", 0)
-            print(
-                f"SandboxWarmPool {name} has {ready_replicas}/{min_ready} ready replicas."
-            )
-            return ready_replicas >= min_ready
 
         return self.wait_for_object(
             functools.partial(
@@ -289,7 +197,7 @@ class TestContext:
             ),
             name,
             namespace,
-            warmpool_has_min_ready,
+            warmpool_ready(min_ready),
             timeout,
         )
 

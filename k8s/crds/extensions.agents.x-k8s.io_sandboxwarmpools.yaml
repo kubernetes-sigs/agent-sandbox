@@ -17,6 +17,9 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -49,6 +52,9 @@ spec:
             type: object
           status:
             properties:
+              readyReplicas:
+                format: int32
+                type: integer
               replicas:
                 format: int32
                 type: integer

@@ -43,13 +43,13 @@ cd ../../../../
 make build
 make deploy-kind EXTENSIONS=true
 
-cd clients/python/agentic-sandbox-client
+cd clients/python/agentic-sandbox-client/gateway-kind
 echo "Applying CRD for template - Sandbox claim will be applied by the sandbox client in python code"
 sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_PYTHON_RUNTIME_IMG}|g" python-sandbox-template.yaml
 kubectl apply -f python-sandbox-template.yaml
 
 
-cd sandbox-router
+cd ../sandbox-router
 echo "Applying CRD for router template"
 sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml

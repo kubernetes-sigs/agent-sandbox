@@ -57,7 +57,7 @@ def deploy_router(tc, temp_namespace):
     """Deploys the sandbox router into the test namespace"""
     image_tag = get_image_tag()
     image_prefix = get_image_prefix()
-    router_image = "{}/sandbox-router:{}".format(image_prefix, image_tag)
+    router_image = "{}sandbox-router:{}".format(image_prefix, image_tag)
     print(f"Using router image: {router_image}")
 
     with open(ROUTER_YAML_PATH, "r") as f:

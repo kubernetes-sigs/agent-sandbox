@@ -271,7 +271,7 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	}
 
 	// Wait for the warmpool to be ready
-	require.NoError(testingT, testContext.WaitForWarmPoolReady(testingT.Context(), sandboxWarmpoolID, 1))
+	require.NoError(testingT, testContext.WaitForWarmPoolReady(testingT.Context(), sandboxWarmpoolID))
 
 	// Apply python runtime sandbox claim manifest
 	sandboxClaim, err := sandboxClaimFromManifest(claimManifest)
@@ -319,10 +319,10 @@ func runPodTests(ctx context.Context, testingT *testing.T, testContext *framewor
 			testingT.Logf("Attempting port forward and checks...")
 
 			// Port forward for health check
-			portForwardCtxHealth, portForwardCancelHealth := context.WithCancel(ctx)
-			if err := testContext.PortForward(portForwardCtxHealth, podID, 8888, 8888); err != nil {
+			portForwardCtx, portForwardCancel := context.WithCancel(ctx)
+			if err := testContext.PortForward(portForwardCtx, podID, 8888, 8888); err != nil {
 				testingT.Logf("Failed to port forward for health check: %s", err)
-				portForwardCancelHealth()
+				portForwardCancel()
 				time.Sleep(pollDuration)
 				continue
 			}
@@ -331,32 +331,23 @@ func runPodTests(ctx context.Context, testingT *testing.T, testContext *framewor
 			// Perform health check
 			healthURL := "http://localhost:8888/"
 			err := checkHealth(ctx, healthURL)
-			portForwardCancelHealth()
 
 			if err != nil {
 				testingT.Logf("Failed to get health check: %s", err)
+				portForwardCancel()
 				time.Sleep(pollDuration)
 				continue
 			}
 			testingT.Logf("Health check successful: url - %s", healthURL)
 
-			// Port forward for execute check
-			portForwardCtxExecute, portForwardCancelExecute := context.WithCancel(ctx)
-			if err := testContext.PortForward(portForwardCtxExecute, podID, 8888, 8888); err != nil {
-				testingT.Logf("Failed to port forward for execute check: %s", err)
-				portForwardCancelExecute()
-				time.Sleep(pollDuration)
-				continue
-			}
-			testingT.Logf("Port forward for execute check established.")
-
 			// Perform execute check
 			executeURL := "http://localhost:8888/execute"
 			err = checkExecute(ctx, executeURL)
-			portForwardCancelExecute()
+			portForwardCancel()
 
 			if err != nil {
 				testingT.Logf("failed to verify execute endpoint: %v", err)
+				portForwardCancel()
 				time.Sleep(pollDuration)
 				continue
 			}

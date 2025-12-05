@@ -29,6 +29,9 @@ type objectWithStatus struct {
 		Conditions    []metav1.Condition `json:"conditions,omitempty"`
 		ReadyReplicas int                `json:"readyReplicas,omitempty"`
 	} `json:"status"`
+	Spec struct {
+		Replicas int `json:"replicas,omitempty"`
+	} `json:"spec"`
 }
 
 // ReadyConditionIsTrue checks if the given object has a Ready condition set to True.
@@ -75,8 +78,8 @@ func ReadyReplicasConditionIsTrue(obj client.Object) error {
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
 		return fmt.Errorf("failed to convert to objectWithStatus: %v", err)
 	}
-	if status.Status.ReadyReplicas > 0 {
+	if status.Status.ReadyReplicas == status.Spec.Replicas {
 		return nil
 	}
-	return fmt.Errorf("object does not have more than 0 replicas: %d", status.Status.ReadyReplicas)
+	return fmt.Errorf("Object has %d ready replicas and the required replicas are %d", status.Status.ReadyReplicas, status.Spec.Replicas)
 }

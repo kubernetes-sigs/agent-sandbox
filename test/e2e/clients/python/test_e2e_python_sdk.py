@@ -47,7 +47,7 @@ def get_image_tag(env_var="IMAGE_TAG", default="latest"):
     return os.environ.get(env_var, default)
 
 
-def get_image_prefix(env_var="IMAGE_PREFIX", default="kind.local"):
+def get_image_prefix(env_var="IMAGE_PREFIX", default="kind.local/"):
     """Retrieves the image prefix from environment variable or returns default"""
     return os.environ.get(env_var, default)
 

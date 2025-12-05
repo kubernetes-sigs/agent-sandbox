@@ -42,7 +42,7 @@ def pod_ready():
     return check
 
 
-def warmpool_ready(min_ready: int = 1):
+def warmpool_ready():
     """
     Predicate to check if a SandboxWarmPool (CR) has at least min_ready ready sandboxes.
     """
@@ -54,7 +54,8 @@ def warmpool_ready(min_ready: int = 1):
 
         status = obj.get("status") or {}
         ready_replicas = status.get("readyReplicas", 0)
+        replicas = obj.get("spec", {}).get("replicas", 0)
 
-        return ready_replicas >= min_ready
+        return ready_replicas == replicas
 
     return check

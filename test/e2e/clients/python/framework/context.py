@@ -177,7 +177,6 @@ class TestContext:
         self,
         name: str,
         namespace: Optional[str] = None,
-        min_ready: int = 1,
         timeout=DEFAULT_TIMEOUT_SECONDS,
     ):
         """Waits for a SandboxWarmPool to have at least min_ready ready sandboxes"""
@@ -197,7 +196,7 @@ class TestContext:
             ),
             name,
             namespace,
-            warmpool_ready(min_ready),
+            warmpool_ready(),
             timeout,
         )
 

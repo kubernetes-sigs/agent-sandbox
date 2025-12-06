@@ -109,12 +109,22 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 	}
 
+	claimWithMetadata := claim.DeepCopy()
+	claimWithMetadata.Labels = map[string]string{
+		"test-label": "test-value",
+	}
+	claimWithMetadata.Annotations = map[string]string{
+		"test-annotation": "test-annotation-value",
+	}
+
 	testCases := []struct {
-		name              string
-		existingObjects   []client.Object
-		expectSandbox     bool
-		expectError       bool
-		expectedCondition metav1.Condition
+		name                string
+		existingObjects     []client.Object
+		expectSandbox       bool
+		expectError         bool
+		expectedCondition   metav1.Condition
+		expectedLabels      map[string]string
+		expectedAnnotations map[string]string
 	}{
 		{
 			name:            "sandbox is created when a claim is made",
@@ -184,6 +194,23 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Message: "Sandbox is ready",
 			},
 		},
+		{
+			name:            "sandbox is created with labels and annotations from claim",
+			existingObjects: []client.Object{template, claimWithMetadata},
+			expectSandbox:   true,
+			expectedCondition: metav1.Condition{
+				Type:    string(sandboxv1alpha1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  "SandboxNotReady",
+				Message: "Sandbox is not ready",
+			},
+			expectedLabels: map[string]string{
+				"test-label": "test-value",
+			},
+			expectedAnnotations: map[string]string{
+				"test-annotation": "test-annotation-value",
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -220,6 +247,16 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			if tc.expectSandbox {
 				if diff := cmp.Diff(sandbox.Spec.PodTemplate.Spec, template.Spec.PodTemplate.Spec); diff != "" {
 					t.Errorf("unexpected sandbox spec:\n%s", diff)
+				}
+				if tc.expectedLabels != nil {
+					if diff := cmp.Diff(tc.expectedLabels, sandbox.Labels); diff != "" {
+						t.Errorf("unexpected sandbox labels:\n%s", diff)
+					}
+				}
+				if tc.expectedAnnotations != nil {
+					if diff := cmp.Diff(tc.expectedAnnotations, sandbox.Annotations); diff != "" {
+						t.Errorf("unexpected sandbox annotations:\n%s", diff)
+					}
 				}
 			}
 

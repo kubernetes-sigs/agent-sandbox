@@ -1,0 +1,17 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: secure-template
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      labels:
+        sandbox-disruption-policy: "manual-protection"
+        app: my-sandbox-app
+    spec:
+      containers:
+      - name: debug-container
+        image: nginx:alpine

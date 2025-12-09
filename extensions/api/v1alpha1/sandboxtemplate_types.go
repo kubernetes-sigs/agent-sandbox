@@ -42,6 +42,8 @@ import (
 type SandboxTemplateSpec struct {
 	// template is the object that describes the pod spec that will be used to create
 	// an agent sandbox.
+	// If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false
+	// to ensure a secure-by-default environment.
 	// +kubebuilder:validation:Required
 	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 }

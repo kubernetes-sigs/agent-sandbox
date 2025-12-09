@@ -12,11 +12,10 @@ build:
 KIND_CLUSTER=agent-sandbox
 
 .PHONY: deploy-kind
+# `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
 	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/
-
 	@if [ "$(EXTENSIONS)" = "true" ]; then \
 		echo "🔧 Patching controller to enable extensions..."; \
 		kubectl patch deployment agent-sandbox-controller \
@@ -85,7 +84,7 @@ release-manifests:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-manifests TAG=vX.Y.Z)"; exit 1; fi
 	go mod tidy
 	go generate ./...
-	./dev/tools/release --tag=${TAG} 
+	./dev/tools/release --tag=${TAG}
 
 # Example usage:
 # make release-python-sdk TAG=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
@@ -102,6 +101,7 @@ toc-update:
 .PHONY: toc-verify
 toc-verify:
 	./dev/tools/verify-toc
+
 
 .PHONY: clean
 clean:

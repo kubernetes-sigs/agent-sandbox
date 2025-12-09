@@ -5,7 +5,6 @@ metadata:
 spec:
   gatewayClassName: cloud-provider-kind
   listeners:
-  listeners:
     - name: http
       protocol: HTTP
       port: 80

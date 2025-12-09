@@ -12,16 +12,16 @@ build:
 KIND_CLUSTER=agent-sandbox
 
 .PHONY: deploy-kind
+# `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
 	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/
-
 	@if [ "$(EXTENSIONS)" = "true" ]; then \
-		echo "🔧 Patching controller to enable extensions..."; \
-		kubectl patch statefulset agent-sandbox-controller \
-			-n agent-sandbox-system \
-			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
+		echo "🚀 Deploying with extensions enabled..."; \
+		./dev/tools/deploy-to-kube --image-prefix=kind.local/ --extensions; \
+	else \
+		echo "🚀 Deploying without extensions..."; \
+		./dev/tools/deploy-to-kube --image-prefix=kind.local/; \
 	fi
 
 .PHONY: deploy-cloud-provider-kind

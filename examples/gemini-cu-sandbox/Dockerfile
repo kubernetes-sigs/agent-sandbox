@@ -1,8 +1,11 @@
 # Use an official Python runtime as a parent image
-FROM python:3.11-bookworm
+FROM python:3.13-bookworm
 
 # Set the working directory in the container
 WORKDIR /app
+
+# clone the computer-use-preview repository for the images and requirements
+RUN git clone https://github.com/google-gemini/computer-use-preview
 
 # Copy the requirements files
 COPY requirements.txt .

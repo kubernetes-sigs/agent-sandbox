@@ -52,7 +52,7 @@ spec:
     spec:
       containers:
       - name: python-sandbox
-        image: %s/python-runtime-sandbox:%s
+        image: %spython-runtime-sandbox:%s
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888
@@ -74,7 +74,7 @@ spec:
     spec:
       containers:
       - name: python-sandbox
-        image: %s/python-runtime-sandbox:%s
+        image: %spython-runtime-sandbox:%s
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888
@@ -144,7 +144,7 @@ func getImageTag() string {
 func getImagePrefix() string {
 	imagePrefix := os.Getenv("IMAGE_PREFIX")
 	if imagePrefix == "" {
-		imagePrefix = "kind.local"
+		imagePrefix = "kind.local/"
 	}
 	return imagePrefix
 }

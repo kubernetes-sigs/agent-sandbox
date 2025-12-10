@@ -55,17 +55,8 @@ sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml
 sleep 60  # wait for sandbox-router to be ready
 
-# echo "Setting up cloud-provider-kind for gateway ..."
-# go install sigs.k8s.io/cloud-provider-kind@latest
-# sudo install ~/go/bin/cloud-provider-kind /usr/local/bin
-
-# echo "Starting cloud-provider-kind and enabling the Gateway API controller ..."
-# cloud-provider-kind --gateway-channel standard &
-# echo "Cloud Provider started."
-# sleep 60
 
 cd ../gateway-kind
-
 echo "Setting up Cloud Provider Kind Gateway in the kind cluster..."
 echo "Applying Gateway configuration..."
 kubectl apply -f gateway-kind.yaml
@@ -76,23 +67,31 @@ cd ../
 
 # Cleanup function
 cleanup() {
-    echo "Cleaning up python-runtime and sandbox controller..."
-    killall cloud-provider-kind
-    kubectl delete --ignore-not-found -f python-sandbox-template.yaml
-    kubectl delete --ignore-not-found statefulset agent-sandbox-controller -n agent-sandbox-system
-    kubectl delete --ignore-not-found crd sandboxes.agents.x-k8s.io
+    echo "Cleaning up virtual environment..."
+    deactivate 
+    rm -rf .venv
+
+    cd ../../../
+    echo "Cleaning up cloud provider kind..."
+    make kill-cloud-provider-kind
+    
     echo "Deleting kind cluster..."
-    cd ../../../../
     make delete-kind || true
+
     echo "Cleanup completed."
 }
 trap cleanup EXIT
 
 
+echo "Starting virtual environment for Python client and install agentic sandbox client..."
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+
 echo "========= $0 - Running the Python client tester... ========="
 python3 ./test_client.py --gateway-name kind-gateway
 echo "========= $0 - Finished running the Python client with gateway and router tester. ========="
-
 
 trap cleanup EXIT
 

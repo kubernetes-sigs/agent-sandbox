@@ -210,8 +210,8 @@ class SandboxClient:
                 router_svc,
                 # Tunnel to Router (8080), not Sandbox (8888)
                 f"{local_port}:8080",
-                # The router lives in the Gateway/Default NS
-                "-n", self.gateway_namespace
+                # The router lives in the sandbox NS (no gateway)
+                "-n", self.namespace
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE

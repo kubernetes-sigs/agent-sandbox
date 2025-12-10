@@ -39,9 +39,10 @@ export SANDBOX_ROUTER_IMG="kind.local/sandbox-router:${IMAGE_TAG}"
 export SANDBOX_PYTHON_RUNTIME_IMG="kind.local/python-runtime-sandbox:${IMAGE_TAG}"
 
 # following develop guide to make and deploy agent-sandbox to kind cluster
-cd ../../../../
+cd $REPO_ROOT
 make build
 make deploy-kind EXTENSIONS=true
+make deploy-cloud-provider-kind
 
 cd clients/python/agentic-sandbox-client/gateway-kind
 echo "Applying CRD for template - Sandbox claim will be applied by the sandbox client in python code"
@@ -71,7 +72,7 @@ cleanup() {
     deactivate 
     rm -rf .venv
 
-    cd ../../../
+    cd $REPO_ROOT
     echo "Cleaning up cloud provider kind..."
     make kill-cloud-provider-kind
     

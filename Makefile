@@ -16,7 +16,6 @@ deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
 	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
 	./dev/tools/deploy-to-kube --image-prefix=kind.local/
-	./dev/tools/deploy-cloud-provider
 
 	@if [ "$(EXTENSIONS)" = "true" ]; then \
 		echo "🔧 Patching controller to enable extensions..."; \
@@ -24,6 +23,10 @@ deploy-kind:
 			-n agent-sandbox-system \
 			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
 	fi
+
+.PHONY: deploy-cloud-provider-kind
+deploy-cloud-provider-kind:
+	./dev/tools/deploy-cloud-provider
 
 .PHONY: delete-kind
 delete-kind:

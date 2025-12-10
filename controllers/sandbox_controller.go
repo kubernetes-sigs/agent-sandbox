@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	controllererror "sigs.k8s.io/agent-sandbox/controllers/error"
 )
 
 const (
@@ -118,9 +120,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// Surface update error
 		err = errors.Join(err, statusUpdateErr)
 	}
-
-	// return errors seen
-	return ctrl.Result{RequeueAfter: requeueAfter}, err
+	// Terminal errors (such as immutable fields being modified) only record the status and do not require retry triggers.
+	retryableErr := controllererror.FilterTerminalErrors(err)
+	return ctrl.Result{RequeueAfter: requeueAfter}, retryableErr
 }
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
@@ -144,7 +146,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
 	}
 
-	// Reconcile Service
+	// Reconcile Service, Create default headless Service or user-specified Service.
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
@@ -244,49 +246,139 @@ func NameHash(objectName string) string {
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
-	service := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
-		if !k8serrors.IsNotFound(err) {
-			log.Error(err, "Failed to get Service")
-			return nil, fmt.Errorf("Service Get Failed: %w", err)
-		}
-	} else {
-		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
-		return service, nil
-	}
+	serviceName := sandbox.Name
+	key := types.NamespacedName{Name: serviceName, Namespace: sandbox.Namespace}
 
-	log.Info("Creating a new Headless Service", "Service.Namespace", sandbox.Namespace, "Service.Name", sandbox.Name)
-	service = &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-			Labels: map[string]string{
-				sandboxLabel: nameHash,
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			ClusterIP: "None",
-			Selector: map[string]string{
-				sandboxLabel: nameHash,
-			},
-		},
-	}
-	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
-	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
-		log.Error(err, "Failed to set controller reference")
-		return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
-	}
-
-	err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner))
-	if err != nil {
-		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+	// Check if Service exists
+	currentService := &corev1.Service{}
+	err := r.Get(ctx, key, currentService)
+	if err != nil && !k8serrors.IsNotFound(err) {
+		log.Error(err, "Failed to get Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
 		return nil, err
 	}
 
+	// Get the desired Service specification
+	desiredSpec := r.getDesiredServiceSpec(sandbox, nameHash)
+	desiredLabels, desiredAnnotations := buildServiceMetadata(sandbox, nameHash)
+	// Handle Service exists
+	if err == nil {
+		return r.handleServiceExists(ctx, currentService, desiredSpec, desiredLabels, desiredAnnotations)
+	}
+
+	// Service doesn't exist, create it
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        serviceName,
+			Namespace:   sandbox.Namespace,
+			Labels:      desiredLabels,
+			Annotations: desiredAnnotations,
+		},
+		Spec: *desiredSpec,
+	}
+
+	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
+	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
+		return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
+	}
+	if err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		log.Error(err, "Failed to create Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
+		return nil, err
+	}
+	log.Info("Created Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
 	// TODO(barney-s) : hardcoded to svc.cluster.local which is the default. Need a way to change it.
 	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
 	sandbox.Status.Service = service.Name
 	return service, nil
+}
+
+func (r *SandboxReconciler) getDesiredServiceSpec(sandbox *sandboxv1alpha1.Sandbox, nameHash string) *corev1.ServiceSpec {
+	// Use user-specified Service configuration if provided
+	if sandbox.Spec.Service != nil && sandbox.Spec.Service.Spec != nil {
+		spec := sandbox.Spec.Service.Spec.DeepCopy()
+		// Ensure selector is correctly set
+		if spec.Selector == nil {
+			spec.Selector = make(map[string]string)
+		}
+		spec.Selector[sandboxLabel] = nameHash
+
+		return spec
+	}
+
+	// Default configuration: headless Service
+	return &corev1.ServiceSpec{
+		ClusterIP: corev1.ClusterIPNone,
+		Selector: map[string]string{
+			sandboxLabel: nameHash,
+		},
+	}
+}
+
+func (r *SandboxReconciler) handleServiceExists(ctx context.Context, currentService *corev1.Service, desiredSpec *corev1.ServiceSpec, desiredLabels map[string]string, desiredAnnotations map[string]string) (*corev1.Service, error) {
+	log := log.FromContext(ctx)
+	if err := validateServiceImmutability(currentService, desiredSpec); err != nil {
+		return nil, err
+	}
+	updatedService := currentService.DeepCopy()
+	updatedService.Spec = *desiredSpec
+	updatedService.Labels = desiredLabels
+	updatedService.Annotations = desiredAnnotations
+
+	if apiequality.Semantic.DeepEqual(currentService.Spec, updatedService.Spec) &&
+		apiequality.Semantic.DeepEqual(currentService.Labels, updatedService.Labels) &&
+		apiequality.Semantic.DeepEqual(currentService.Annotations, updatedService.Annotations) {
+		return currentService, nil
+	}
+
+	if err := r.Update(ctx, updatedService, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		log.Error(err, "Failed to apply Service", "Service.Namespace", updatedService.Namespace, "Service.Name", updatedService.Name)
+		return nil, err
+	}
+	log.Info("Updated Service", "Service.Namespace", updatedService.Namespace, "Service.Name", updatedService.Name)
+	return updatedService, nil
+}
+
+// buildServiceMetadata returns desired labels and annotations for the Service
+// by merging the controller-managed label with user-provided template metadata.
+func buildServiceMetadata(sandbox *sandboxv1alpha1.Sandbox, nameHash string) (map[string]string, map[string]string) {
+	labels := map[string]string{
+		sandboxLabel: nameHash,
+	}
+	annotations := map[string]string{}
+	if sandbox.Spec.Service != nil {
+		for k, v := range sandbox.Spec.Service.ObjectMeta.Labels {
+			labels[k] = v
+		}
+		for k, v := range sandbox.Spec.Service.ObjectMeta.Annotations {
+			annotations[k] = v
+		}
+	}
+	return labels, annotations
+}
+
+func validateServiceImmutability(current *corev1.Service, desiredSpec *corev1.ServiceSpec) error {
+	var allErrors error
+	if current.Spec.ClusterIP == corev1.ClusterIPNone && (desiredSpec.Type == corev1.ServiceTypeLoadBalancer ||
+		desiredSpec.Type == corev1.ServiceTypeNodePort) {
+		allErrors = errors.Join(allErrors, controllererror.NewTerminalError("cannot change Service from headless to non-headless"))
+	}
+	if desiredSpec.ClusterIP != "" && desiredSpec.ClusterIP != current.Spec.ClusterIP {
+		allErrors = errors.Join(allErrors, errImmutable("spec.ClusterIP"))
+	}
+	if len(desiredSpec.ClusterIPs) > 0 && !apiequality.Semantic.DeepEqual(current.Spec.ClusterIPs, desiredSpec.ClusterIPs) {
+		allErrors = errors.Join(allErrors, errImmutable("spec.clusterIPs"))
+	}
+	if len(desiredSpec.IPFamilies) > 0 && !apiequality.Semantic.DeepEqual(current.Spec.IPFamilies, desiredSpec.IPFamilies) {
+		allErrors = errors.Join(allErrors, errImmutable("spec.ipFamilies"))
+	}
+	if desiredSpec.LoadBalancerClass != nil && current.Spec.Type == corev1.ServiceTypeLoadBalancer &&
+		!apiequality.Semantic.DeepEqual(current.Spec.LoadBalancerClass, desiredSpec.LoadBalancerClass) {
+		allErrors = errors.Join(allErrors, errImmutable("spec.loadBalancerClass"))
+	}
+	return allErrors
+}
+
+func errImmutable(field string) error {
+	return controllererror.NewTerminalError("cannot change Service %s", field)
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {

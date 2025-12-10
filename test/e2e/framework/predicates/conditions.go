@@ -26,8 +26,12 @@ import (
 // objectWithStatus is a simplified struct to parse the status of a resource.
 type objectWithStatus struct {
 	Status struct {
-		Conditions []metav1.Condition `json:"conditions,omitempty"`
+		Conditions    []metav1.Condition `json:"conditions,omitempty"`
+		ReadyReplicas int                `json:"readyReplicas,omitempty"`
 	} `json:"status"`
+	Spec struct {
+		Replicas int `json:"replicas,omitempty"`
+	} `json:"spec"`
 }
 
 // ReadyConditionIsTrue checks if the given object has a Ready condition set to True.
@@ -61,4 +65,21 @@ func asUnstructured(obj client.Object) (*unstructured.Unstructured, error) {
 		return nil, fmt.Errorf("converting object of type %T to unstructured: %w", obj, err)
 	}
 	return &unstructured.Unstructured{Object: m}, nil
+}
+
+// ReadyReplicasConditionIsTrue checks if the given object has more than 0 replicas.
+func ReadyReplicasConditionIsTrue(obj client.Object) error {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+	if status.Status.ReadyReplicas == status.Spec.Replicas {
+		return nil
+	}
+	return fmt.Errorf("Object has %d ready replicas and the required replicas are %d", status.Status.ReadyReplicas, status.Spec.Replicas)
 }

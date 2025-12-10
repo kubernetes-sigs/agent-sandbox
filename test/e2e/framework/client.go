@@ -30,9 +30,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const (
+	// DefaultTimeout is the default timeout for WaitForObject.
+	DefaultTimeout = 60 * time.Second
 )
 
 // ClusterClient is an abstraction layer for test cases to interact with the cluster.
@@ -112,9 +119,11 @@ func (cl *ClusterClient) ValidateObjectNotFound(ctx context.Context, obj client.
 // predicates.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
 	cl.Helper()
-	// Static 30 second timeout, this can be adjusted if needed
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)
+		defer cancel()
+	}
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 	defer func() {
@@ -124,10 +133,11 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 	var validationErr error
 	for {
 		select {
-		case <-timeoutCtx.Done():
+		case <-ctx.Done():
+			cl.Logf("Timed out waiting for object %s/%s", obj.GetNamespace(), obj.GetName())
 			return fmt.Errorf("timed out waiting for object: %w", validationErr)
 		default:
-			if validationErr = cl.ValidateObject(timeoutCtx, obj, p...); validationErr == nil {
+			if validationErr = cl.ValidateObject(ctx, obj, p...); validationErr == nil {
 				return nil
 			}
 			// Simple sleep for fixed duration (basic MVP)
@@ -253,4 +263,63 @@ func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedNa
 		time.Sleep(5 * time.Millisecond)
 	}
 	return nil
+}
+
+var sandboxGVK = schema.GroupVersionKind{
+	Group:   "agents.x-k8s.io",
+	Version: "v1alpha1",
+	Kind:    "Sandbox",
+}
+
+var sandboxWarmpoolGVK = schema.GroupVersionKind{
+	Group:   "extensions.agents.x-k8s.io",
+	Version: "v1alpha1",
+	Kind:    "SandboxWarmPool",
+}
+
+func (cl *ClusterClient) WaitForSandboxReady(ctx context.Context, sandboxID types.NamespacedName) error {
+	sandbox := &unstructured.Unstructured{}
+	sandbox.SetGroupVersionKind(sandboxGVK)
+	sandbox.SetName(sandboxID.Name)
+	sandbox.SetNamespace(sandboxID.Namespace)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := cl.WaitForObject(timeoutCtx, sandbox, predicates.ReadyConditionIsTrue); err != nil {
+		cl.Logf("waiting for sandbox to be ready: %v", err)
+		return err
+	}
+	return nil
+}
+
+func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpoolID types.NamespacedName) error {
+	cl.Helper()
+	cl.Logf("Waiting for SandboxWarmPool Pods to be ready: warmpoolID - %s", sandboxWarmpoolID)
+
+	warmpool := &unstructured.Unstructured{}
+	warmpool.SetGroupVersionKind(sandboxWarmpoolGVK)
+	if err := cl.client.Get(ctx, sandboxWarmpoolID, warmpool); err != nil {
+		cl.T.Fatalf("Failed to get SandboxWarmPool %s: %v", sandboxWarmpoolID, err)
+		return err
+	}
+
+	if err := cl.WaitForObject(ctx, warmpool, predicates.ReadyReplicasConditionIsTrue); err != nil {
+		cl.T.Fatalf("waiting for warmpool to be ready: %v", err)
+		return err
+	}
+	return nil
+
+}
+
+// GetSandbox returns the Sandbox object from the cluster.
+func (cl *ClusterClient) GetSandbox(ctx context.Context, sandboxID types.NamespacedName) (*unstructured.Unstructured, error) {
+	sandbox := &unstructured.Unstructured{}
+	sandbox.SetGroupVersionKind(sandboxGVK)
+	sandbox.SetName(sandboxID.Name)
+	sandbox.SetNamespace(sandboxID.Namespace)
+
+	if err := cl.client.Get(ctx, sandboxID, sandbox); err != nil {
+		cl.Logf("failed to get Sandbox %s: %v", sandboxID, err)
+		return nil, err
+	}
+	return sandbox, nil
 }

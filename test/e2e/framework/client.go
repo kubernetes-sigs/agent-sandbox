@@ -17,6 +17,7 @@ package framework
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -220,7 +221,7 @@ func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedNa
 			}
 		}
 		cl.Log("killing port-forward")
-		if err := portForward.Process.Kill(); err != nil {
+		if err := portForward.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			cl.Errorf("failed to kill port-forward: %s", err)
 		}
 	}

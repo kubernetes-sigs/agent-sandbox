@@ -1,5 +1,5 @@
 ---
-kind: StatefulSet
+kind: Deployment
 apiVersion: apps/v1
 metadata:
   name: agent-sandbox-controller
@@ -7,7 +7,6 @@ metadata:
   labels:
     app: agent-sandbox-controller
 spec:
-  serviceName: agent-sandbox-controller
   replicas: 1
   selector:
     matchLabels:

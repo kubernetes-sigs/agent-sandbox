@@ -191,7 +191,7 @@ func (cl *ClusterClient) validateAgentSandboxInstallation(ctx context.Context) e
 		Name:      "agent-sandbox-controller",
 		Namespace: ns.Name,
 	}
-	ctrl := &appsv1.StatefulSet{}
+	ctrl := &appsv1.Deployment{}
 	ctrl.Name = ctrlNN.Name
 	ctrl.Namespace = ctrlNN.Namespace
 	if err := cl.ValidateObject(ctx, ctrl); err != nil {

@@ -267,6 +267,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
 
+	sandbox.Spec.ShutdownTime = claim.Spec.ShutdownTime
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)
@@ -315,12 +316,36 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	if sandbox != nil {
-		logger.Info("sandbox already exists, skipping update", "name", sandbox.Name)
 		if !r.isControlledByClaim(sandbox, claim) {
 			err := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", sandbox.Name, claim.Name)
 			logger.Error(err, "Sandbox controller mismatch")
 			return nil, err
 		}
+
+		needsUpdate := false
+
+		claimTime := claim.Spec.ShutdownTime
+		sandboxTime := sandbox.Spec.ShutdownTime
+
+		if claimTime == nil && sandboxTime != nil {
+			// Claim wants infinity, Sandbox has a limit -> UPDATE
+			needsUpdate = true
+		} else if claimTime != nil && sandboxTime == nil {
+			// Claim has a limit, Sandbox is infinite -> UPDATE
+			needsUpdate = true
+		} else if claimTime != nil && sandboxTime != nil && !claimTime.Equal(sandboxTime) {
+			// Both have limits, but they are different -> UPDATE
+			needsUpdate = true
+		}
+
+		if needsUpdate {
+			logger.Info("Updating Sandbox ShutdownTime", "old", sandboxTime, "new", claimTime)
+			sandbox.Spec.ShutdownTime = claimTime
+			if err := r.Update(ctx, sandbox); err != nil {
+				return nil, fmt.Errorf("failed to update sandbox shutdownTime: %w", err)
+			}
+		}
+
 		return sandbox, nil
 	}
 

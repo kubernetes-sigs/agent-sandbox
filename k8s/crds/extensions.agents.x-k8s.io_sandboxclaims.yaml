@@ -35,6 +35,9 @@ spec:
                 required:
                 - name
                 type: object
+              shutdownTime:
+                format: date-time
+                type: string
             required:
             - sandboxTemplateRef
             type: object

@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -31,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -44,7 +44,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: v1alpha1.PodTemplate{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -69,19 +69,19 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 	}
 
-	uncontrolledSandbox := &v1alpha1.Sandbox{
+	uncontrolledSandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim",
 			Namespace: "default",
 		},
-		Spec: v1alpha1.SandboxSpec{
-			PodTemplate: v1alpha1.PodTemplate{
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: template.Spec.PodTemplate.Spec,
 			},
 		},
 	}
 
-	controlledSandbox := &v1alpha1.Sandbox{
+	controlledSandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim",
 			Namespace: "default",
@@ -95,8 +95,8 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				},
 			},
 		},
-		Spec: v1alpha1.SandboxSpec{
-			PodTemplate: v1alpha1.PodTemplate{
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: template.Spec.PodTemplate.Spec,
 			},
 		},
@@ -151,7 +151,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 
 	// It checks that the PodSpec was copied correctly AND that the automount token field was injected as false (default).
-	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *v1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
+	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
 		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
 		// Expect false by default
 		expectedSpec.AutomountServiceAccountToken = ptr.To(false)
@@ -161,7 +161,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 
 	// New validation function to check for AutomountServiceAccountToken: true
-	validateSandboxAutomountTrue := func(t *testing.T, sandbox *v1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+	validateSandboxAutomountTrue := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
 		if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
 			t.Error("expected AutomountServiceAccountToken to be set, but it was nil")
 			return
@@ -177,7 +177,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		expectSandbox     bool
 		expectError       bool
 		expectedCondition metav1.Condition
-		validateSandbox   func(t *testing.T, sandbox *v1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
+		validateSandbox   func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
 	}{
 		{
 			name:            "sandbox is created when a claim is made",
@@ -301,7 +301,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				t.Fatalf("reconcile: (%v)", err)
 			}
 
-			var sandbox v1alpha1.Sandbox
+			var sandbox sandboxv1alpha1.Sandbox
 			err = client.Get(context.Background(), req.NamespacedName, &sandbox)
 			if tc.expectSandbox && err != nil {
 				t.Fatalf("get sandbox: (%v)", err)
@@ -535,7 +535,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			}
 
 			// Verify sandbox was created
-			var sandbox v1alpha1.Sandbox
+			var sandbox sandboxv1alpha1.Sandbox
 			err = client.Get(ctx, req.NamespacedName, &sandbox)
 			if tc.expectSandboxCreate && err != nil {
 				t.Fatalf("expected sandbox to be created but got error: %v", err)
@@ -574,9 +574,136 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimShutdownTime(t *testing.T) {
+	// 1. Setup static "fake" time for deterministic tests
+	fakeClaimTime := &metav1.Time{Time: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC)}
+
+	// 2. Define the base template
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template",
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{}, // Not relevant for this test
+		},
+	}
+
+	// 3. Define test cases
+	testCases := []struct {
+		name                 string
+		claimToReconcile     *extensionsv1alpha1.SandboxClaim
+		existingObjects      []client.Object
+		expectedShutdownTime *metav1.Time
+	}{
+		{
+			name: "should use claim shutdownTime",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-time", Namespace: "default", UID: "uid-2"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef:  extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					ShutdownTime: fakeClaimTime,
+				},
+			},
+			existingObjects:      []client.Object{template},
+			expectedShutdownTime: fakeClaimTime, // Expects the claim's time
+		},
+		{
+			name: "should handle nil shutdownTime (infinity)",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-forever", Namespace: "default", UID: "uid-3"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef:  extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					ShutdownTime: nil, // User did not specify a time
+				},
+			},
+			existingObjects:      []client.Object{template},
+			expectedShutdownTime: nil, // Result should also be nil
+		},
+		{
+			name: "should update existing sandbox shutdownTime",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-update", Namespace: "default", UID: "uid-4"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef:  extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					ShutdownTime: fakeClaimTime, // New desired time
+				},
+			},
+			existingObjects: []client.Object{
+				template,
+				// The Sandbox already exists, but with a different (nil) time
+				&sandboxv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "claim-update",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+								Kind:       "SandboxClaim",
+								Name:       "claim-update",
+								UID:        "uid-4", // Must match the claim UID
+								Controller: func(b bool) *bool { return &b }(true),
+							},
+						}},
+					Spec: sandboxv1alpha1.SandboxSpec{ShutdownTime: nil},
+				},
+			},
+			expectedShutdownTime: fakeClaimTime, // It should be patched to the new time
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			allObjects := append(tc.existingObjects, tc.claimToReconcile)
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(tc.claimToReconcile).Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client: client,
+				Scheme: scheme,
+			}
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      tc.claimToReconcile.Name,
+					Namespace: tc.claimToReconcile.Namespace,
+				},
+			}
+
+			// ACT
+			_, err := reconciler.Reconcile(context.Background(), req)
+			if err != nil {
+				t.Fatalf("reconcile: (%v)", err)
+			}
+
+			// ASSERT
+			// Check that the created Sandbox has the correct shutdownTime
+			var sandbox sandboxv1alpha1.Sandbox
+			err = client.Get(context.Background(), req.NamespacedName, &sandbox)
+			if err != nil {
+				t.Fatalf("get sandbox: (%v)", err)
+			}
+
+			// Use a comparer that treats the time values as equal
+			timeComparer := cmp.Comparer(func(x, y *metav1.Time) bool {
+				if x == nil && y == nil {
+					return true
+				}
+				if x != nil && y != nil {
+					return x.Time.Equal(y.Time)
+				}
+				return false
+			})
+
+			if diff := cmp.Diff(tc.expectedShutdownTime, sandbox.Spec.ShutdownTime, timeComparer); diff != "" {
+				t.Errorf("unexpected sandbox ShutdownTime (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func newScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("reconcile: (%v)", err)
 	}
 	if err := extensionsv1alpha1.AddToScheme(scheme); err != nil {

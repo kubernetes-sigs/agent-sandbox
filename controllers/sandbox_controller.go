@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -36,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
@@ -45,16 +47,26 @@ const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	SanboxPodNameAnnotation     = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
+	readinessObserved           = "agents.x-k8s.io/readiness-observed"
 )
 
 var (
 	// Scheme for use by sandbox controllers. Registers required types for client.
 	Scheme = runtime.NewScheme()
+
+	sandboxCreationLatency = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "sandbox_creation_latency_ms",
+			Help:    "Time taken from sandbox creation to sandbox ready in milliseconds",
+			Buckets: []float64{50, 100, 200, 300, 500, 700, 1000, 1500, 2000, 3000, 4500, 6000, 9000, 12000, 18000, 30000},
+		},
+	)
 )
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
 	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
+	metrics.Registry.MustRegister(sandboxCreationLatency)
 }
 
 // SandboxReconciler reconciles a Sandbox object
@@ -116,11 +128,46 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Update status
 	if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 		// Surface update error
+		statusUpdateErr = fmt.Errorf("faild to update status: %w", statusUpdateErr)
 		err = errors.Join(err, statusUpdateErr)
+	}
+
+	if recordErr := r.recordFirstReadyMetric(ctx, sandbox); recordErr != nil {
+		err = errors.Join(err, recordErr)
 	}
 
 	// return errors seen
 	return ctrl.Result{RequeueAfter: requeueAfter}, err
+}
+
+func (r *SandboxReconciler) recordFirstReadyMetric(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+	log := log.FromContext(ctx)
+
+	// If readiness was observed already dont re-record the metric
+	if sandbox.Annotations != nil && sandbox.Annotations[readinessObserved] != "" {
+		return nil
+	}
+
+	// If not ready dont record metric
+	if !meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady)) {
+		return nil
+	}
+
+	// record metric
+	latency := time.Since(sandbox.CreationTimestamp.Time).Milliseconds()
+	sandboxCreationLatency.Observe(float64(latency))
+
+	// add annotation
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[readinessObserved] = fmt.Sprintf("%d", latency)
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		log.Error(err, "Failed to add first-ready-metric annotation")
+		return err
+	}
+	return nil
 }
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {

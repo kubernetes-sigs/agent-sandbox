@@ -134,6 +134,7 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 	for {
 		select {
 		case <-ctx.Done():
+			cl.Logf("Timed out waiting for object %s/%s", obj.GetNamespace(), obj.GetName())
 			return fmt.Errorf("timed out waiting for object: %w", validationErr)
 		default:
 			if validationErr = cl.ValidateObject(ctx, obj, p...); validationErr == nil {

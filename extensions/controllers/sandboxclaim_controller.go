@@ -158,16 +158,6 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 	}
 }
 
-func (r *SandboxClaimReconciler) isControlledByClaim(sandbox *v1alpha1.Sandbox, claim *extensionsv1alpha1.SandboxClaim) bool {
-	// Check if the existing sandbox is owned by this claim
-	for _, ownerRef := range sandbox.OwnerReferences {
-		if ownerRef.UID == claim.UID && ownerRef.Controller != nil && *ownerRef.Controller {
-			return true
-		}
-	}
-	return false
-}
-
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
 func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
@@ -316,7 +306,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	if sandbox != nil {
 		logger.Info("sandbox already exists, skipping update", "name", sandbox.Name)
-		if !r.isControlledByClaim(sandbox, claim) {
+		if !metav1.IsControlledBy(sandbox, claim) {
 			err := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", sandbox.Name, claim.Name)
 			logger.Error(err, "Sandbox controller mismatch")
 			return nil, err

@@ -9,11 +9,10 @@ RUN git clone https://github.com/google-gemini/computer-use-preview
 
 # Copy the requirements files
 COPY requirements.txt .
-COPY computer-use-preview/requirements.txt computer-use-preview-requirements.txt
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -r computer-use-preview-requirements.txt
+    pip install --no-cache-dir -r computer-use-preview/requirements.txt
 
 RUN playwright install
 

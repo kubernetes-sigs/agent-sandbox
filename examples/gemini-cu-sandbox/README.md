@@ -70,7 +70,7 @@ To run in interactive mode without rebuilding the image:
 
 The `main.py` file defines the following Pydantic models to ensure type-safe data for the API endpoints:
 
-### `AgentRequest`
+### `AgentQuery`
 This class models the request body for the `/agent` endpoint.
 - **`query: str`**: The natural language query for the browser agent to execute.
 - **`api_key: str`**: The Gemini API key for authenticating with the agent.

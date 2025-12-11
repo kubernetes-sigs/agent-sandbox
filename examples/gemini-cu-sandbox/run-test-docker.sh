@@ -45,11 +45,6 @@ if [ -n "$INTERACTIVE_FLAG" ]; then
     DOCKER_RUN_FLAGS="$DOCKER_RUN_FLAGS -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix"
 fi
 
-
-if [ ! -d "computer-use-preview" ]; then
-    git clone https://github.com/google-gemini/computer-use-preview
-fi
-
 if [ "$NO_BUILD" = false ]; then
     echo "Building Docker image..."
     docker build --load -t sandbox-gemini-runtime "$SCRIPT_DIR"

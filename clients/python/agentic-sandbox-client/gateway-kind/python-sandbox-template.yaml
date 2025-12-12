@@ -1,0 +1,33 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  # The test_client.py expects the template to have this name
+  name: python-sandbox-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: python-runtime
+        # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox
+        image: IMAGE_PLACEHOLDER
+        ports:
+        - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+            ephemeral-storage: "512Mi"
+      restartPolicy: "OnFailure"

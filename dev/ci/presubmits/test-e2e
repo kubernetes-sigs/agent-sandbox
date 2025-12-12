@@ -37,6 +37,9 @@ def main():
     result = subprocess.run([f"{repo_root}/dev/tools/deploy-to-kube", "--image-prefix", "kind.local/"])
     if result.returncode != 0:
         return result.returncode
+    result = subprocess.run([f"{repo_root}/dev/tools/deploy-cloud-provider"])
+    if result.returncode != 0:
+        return result.returncode
     result = subprocess.run([f"{repo_root}/dev/tools/test-e2e", "--image-prefix", "kind.local/"])
 
     # Always create junit file whether tests pass or fail

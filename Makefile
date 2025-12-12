@@ -24,9 +24,17 @@ deploy-kind:
 			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
 	fi
 
+.PHONY: deploy-cloud-provider-kind
+deploy-cloud-provider-kind:
+	./dev/tools/deploy-cloud-provider
+
 .PHONY: delete-kind
 delete-kind:
 	kind delete cluster --name ${KIND_CLUSTER}
+
+.PHONY: kill-cloud-provider-kind
+kill-cloud-provider-kind:
+	killall cloud-provider-kind
 
 .PHONY: test-unit
 test-unit:

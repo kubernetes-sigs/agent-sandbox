@@ -1,27 +1,55 @@
 # Gateway API Support for KinD Clusters
 
-This directory contains resources to enable Kubernetes Gateway API support within KinD (Kubernetes in Docker) clusters.
+This directory contains resources to enable Kubernetes Gateway API support within KinD (Kubernetes in Docker) clusters. Since KinD doesn't have a native load balancer, we use `cloud-provider-kind` to provision an IP address for the Gateway resource. This enables the agentic-sandbox-client to connect to sandboxes in the cluster via a Kubernetes Gateway.
 
-## Problem
+### Step-by-step Guide for Local Kind Cluster
 
-The standard Kubernetes Gateway API implementation relies on a LoadBalancer service to provision an external IP address for Gateway resources. KinD clusters, running locally within Docker containers, do not have a built-in cloud provider to service LoadBalancer requests. This limitation prevents the Gateway API from functioning correctly in a typical KinD setup, making it difficult to test components like the Agentic Sandbox SDK client that depend on Gateway resources.
+This guide explains how to manually set up the Sandbox Router and Gateway API on a local KinD cluster.
 
-## Solution: Using `cloud-provider-kind`
+1.  **Setup Agentic Sandbox and Python SDK Client:** Follow the instructions in the [main client README](../README.md), which includes prerequisites, installing the SDK, and deploying the Sandbox Router.
 
-To bridge the gap, we leverage [`cloud-provider-kind`](https://github.com/kubernetes-sigs/cloud-provider-kind), a Kubernetes Cloud Provider for KinD. This tool simulates cloud provider functionalities, most importantly for our use case, the ability to service `LoadBalancer` type services and provision external IPs for Gateway resources within the KinD cluster.
+2.  **Install and Run cloud-provider-kind:**
+    This component provides a load balancer implementation for KinD.
 
-`cloud-provider-kind` monitors KinD clusters and automatically creates the necessary constructs (like Docker containers acting as load balancers) to expose services and Gateways. It has alpha support for the Gateway API, implementing Gateway and HTTPRoute functionalities.
+    Install the latest version and run `cloud-provider-kind` in the background, enabling the Gateway API controller::
+    ```bash
+    make deploy-cloud-provider-kind
+    ```
+    
+    *See [cloud-provider-kind documentation](https://github.com/kubernetes-sigs/cloud-provider-kind) for more details.*
 
-By running `cloud-provider-kind` alongside our KinD cluster, the Gateway API controller can successfully provision an IP address for Gateway resources, making them accessible. This allows us to test and develop applications that utilize the Gateway API within a local KinD environment, with the Gateway behaving as if it were provisioned by a cloud provider.
+3.  **Deploy KinD Gateway Resources:**
+    Apply the Gateway, and HTTPRoute from this directory:
+    ```bash
+    kubectl apply -f gateway-kind.yaml
+    ```
+    
+4.  **Test the Setup:**
+    a.  **Check Gateway Status:** After a short time, verify that the Gateway has been assigned an IP address by `cloud-provider-kind`:
+    ```bash  
+    kubectl get gateway
+    ```
+    You should see output similar to this, with an ADDRESS populated:
+    ```bash
+    NAME           CLASS                 ADDRESS       PROGRAMMED   AGE
+    kind-gateway   cloud-provider-kind   192.168.8.3   True         2m
+    ```
+    If the ADDRESS is empty, wait a bit longer or check the `cloud-provider-kind` logs.
+    
+    b.  **Run Test Client:** Use the `agentic-sandbox-client` in Gateway mode to test the end-to-end flow:
+    ```bash  
+    python ../test_client.py --gateway_name="kind-gateway"
+    ```
 
-### Components in this Directory
+5. **Clean up:** To stop the cloud-provider-kind process, run:
+    ```bash
+    make kill-cloud-provider-kind
+    ```
 
--   **`gateway-kind.yaml`**: This manifest deploys the necessary Gateway API resources (like GatewayClass) and a sample Gateway and HTTPRoute to be managed by `cloud-provider-kind`.
--   **`run-test-kind.sh`**: This script automates:
-    1.  Creation of the KinD cluster.
-    2.  Installation and running of `cloud-provider-kind`.
-    3.  Deployment of the Gateway resources from `gateway-kind.yaml`.
-    4.  Execution of tests against the Gateway endpoint.
--   **`python-sandbox-template.yaml`**: A sample SandboxTemplate manifest used for testing a full e2e scenario with the Agentic Sandbox.
+### Automated Setup & Test
 
-By using these components, we can create Gateway resources and route traffic to services within the KinD cluster, enabling comprehensive e2e testing of the Agentic Sandbox SDK client.
+For a fully automated setup and test run, you can use the `run-test-kind.sh` script provided in this directory:
+
+```bash
+./run-test-kind.sh
+```

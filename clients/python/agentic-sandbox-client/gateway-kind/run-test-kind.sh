@@ -54,14 +54,14 @@ cd ../sandbox-router
 echo "Applying CRD for router template"
 sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml
-sleep 60  # wait for sandbox-router to be ready
+kubectl rollout status deployment/sandbox-router-deployment --timeout=60s
 
 
 cd ../gateway-kind
 echo "Setting up Cloud Provider Kind Gateway in the kind cluster..."
 echo "Applying Gateway configuration..."
 kubectl apply -f gateway-kind.yaml
-sleep 60  # wait for the gateway to be ready
+kubectl wait --for=condition=Programmed=True gateway/kind-gateway --timeout=60s
 
 cd ../
 
@@ -81,7 +81,6 @@ cleanup() {
 
     echo "Cleanup completed."
 }
-trap cleanup EXIT
 
 
 echo "Starting virtual environment for Python client and install agentic sandbox client..."

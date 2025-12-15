@@ -65,23 +65,22 @@ echo "DEBUG: PROJECT_ROOT is $PROJECT_ROOT"
 # Cleanup function
 cleanup() {
     echo "Cleaning up..."
-    kubectl delete --ignore-not-found -f "$SCRIPT_DIR/service.yaml"
+    kubectl delete --ignore-not-found -f "$PROJECT_ROOT/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"
     kubectl delete --ignore-not-found sandboxclaim sandbox-computeruse-claim
     kubectl delete --ignore-not-found secret gemini-api-key
     kubectl delete --ignore-not-found -f "$SCRIPT_DIR/sandbox-gemini-computer-use.yaml"
     
 }
-#trap cleanup EXIT
+trap cleanup EXIT
 
 echo "Applying CRD and deployment..."
 (cd "$PROJECT_ROOT/clients/python/agentic-sandbox-client/sandbox-router" && kubectl apply -f sandbox_router.yaml)
 kubectl apply -f "$SCRIPT_DIR/sandbox-gemini-computer-use.yaml"
 
 # Ensure the local client is up-to-date for running tests
-(cd "$PROJECT_ROOT/clients/python/agentic-sandbox-client" && pip install -e .)
+(cd "$PROJECT_ROOT/clients/python/agentic-sandbox-client" && pip install -e . --break-system-packages)
 
 echo "Running the programmatic test..."
 (cd "$PROJECT_ROOT" && python3 -m unittest "clients.python.agentic-sandbox-client.test_computer_use_extension")
-(cd "$PROJECT_ROOT" && python3 -m unittest "clients.python.agentic-sandbox-client.test_computer_use_extension.TestComputerUseSandbox.test_agent_with_api_key")
 
 echo "Test finished."

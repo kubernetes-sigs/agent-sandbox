@@ -18,7 +18,7 @@ pip install kubernetes requests
 
 **Prerequisites**
 
-Before running the tests, you need to clone the `computer-use-preview` repository:
+The Runtime is based on the `computer-use-preview` repository, you can clone it or Docker build will do it automatically:
 ```bash
 git clone https://github.com/google-gemini/computer-use-preview
 ```
@@ -76,7 +76,7 @@ This class models the request body for the `/agent` endpoint.
 - **`api_key: str`**: The Gemini API key for authenticating with the agent.
 
 ### `AgentResponse`
-This class models the response body for the `/agent` endpoint.
+This class models the response body for the `/agent` endpoint. 
 - **`stdout: str`**: The standard output from the agent execution.
 - **`stderr: str`**: The standard error from the agent execution.
 - **`exit_code: int`**: The exit code of the agent execution.
@@ -95,5 +95,5 @@ This script will:
 
 To run the script from the project root:
 ```bash
-./examples/gemini-cua-sandbox/run-test-kind.sh
+./examples/gemini-cu-sandbox/run-test-kind.sh
 ```

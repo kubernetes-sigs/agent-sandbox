@@ -285,7 +285,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		sandbox.Annotations[sandboxcontrollers.SanboxPodNameAnnotation] = adoptedPod.Name
+		sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {

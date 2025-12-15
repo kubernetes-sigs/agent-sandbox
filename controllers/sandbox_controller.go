@@ -43,7 +43,7 @@ import (
 
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
-	SanboxPodNameAnnotation     = "agents.x-k8s.io/pod-name"
+	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
 
@@ -314,7 +314,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	podName := sandbox.Name
 	var trackedPodName string
 	var podNameAnnotationExists bool
-	if trackedPodName, podNameAnnotationExists = sandbox.Annotations[SanboxPodNameAnnotation]; podNameAnnotationExists && trackedPodName != "" {
+	if trackedPodName, podNameAnnotationExists = sandbox.Annotations[SandboxPodNameAnnotation]; podNameAnnotationExists && trackedPodName != "" {
 		podName = trackedPodName
 		log.Info("Using tracked pod name from sandbox annotation", "podName", podName)
 	}
@@ -347,11 +347,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 
 		// Remove the pod name annotation from the sandbox if it exists
-		if _, exists := sandbox.Annotations[SanboxPodNameAnnotation]; exists {
+		if _, exists := sandbox.Annotations[SandboxPodNameAnnotation]; exists {
 			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 			// Create a patch to update only the annotations
 			patch := client.MergeFrom(sandbox.DeepCopy())
-			delete(sandbox.Annotations, SanboxPodNameAnnotation)
+			delete(sandbox.Annotations, SandboxPodNameAnnotation)
 
 			if err := r.Patch(ctx, sandbox, patch); err != nil {
 				return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)

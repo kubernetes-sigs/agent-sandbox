@@ -565,7 +565,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			} else if tc.expectSandboxCreate {
 				// Verify no pod name label when no adoption occurred
 				if sandbox.Labels != nil {
-					if podName, exists := sandbox.Labels[sandboxcontrollers.SanboxPodNameAnnotation]; exists {
+					if podName, exists := sandbox.Labels[sandboxcontrollers.SandboxPodNameAnnotation]; exists {
 						t.Errorf("expected no pod name label but found %q", podName)
 					}
 				}

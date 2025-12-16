@@ -35,6 +35,8 @@ spec:
                 required:
                 - name
                 type: object
+              skipWarmPool:
+                type: boolean
             required:
             - sandboxTemplateRef
             type: object

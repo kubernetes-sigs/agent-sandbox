@@ -26,6 +26,8 @@ The `extensions` module provides additional CRDs and controllers that build on t
 
 ## Installation
 
+### Core Components & Extensions
+
 You can install the agent-sandbox controller and its CRDs with the following command.
 
 ```sh
@@ -39,6 +41,12 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 # To install the extensions components:
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```
+
+### Python SDK
+
+To interact with the agent-sandbox programmatically, you can use the Python SDK. This client library provides a high-level interface for creating and managing sandboxes.
+
+For detailed installation and usage instructions, please refer to the [Python SDK README](clients/python/agentic-sandbox-client/README.md).
 
 ## Getting Started
 

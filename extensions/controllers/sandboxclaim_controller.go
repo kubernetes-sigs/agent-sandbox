@@ -434,18 +434,23 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	// Before creating the sandbox, try to adopt a pod from the warm pool
-	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
-	if adoptErr != nil {
-		logger.Error(adoptErr, "Failed to adopt pod from warm pool")
-		return nil, adoptErr
-	}
-
-	if adoptedPod != nil {
-		logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
+	// unless skipWarmPool is set to true
+	if claim.Spec.SkipWarmPool == nil || !*claim.Spec.SkipWarmPool {
+		adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
+		if adoptErr != nil {
+			logger.Error(adoptErr, "Failed to adopt pod from warm pool")
+			return nil, adoptErr
 		}
-		sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
+
+		if adoptedPod != nil {
+			logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = make(map[string]string)
+			}
+			sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
+		}
+	} else {
+		logger.Info("Skipping warm pool adoption as skipWarmPool is set to true", "claim", claim.Name)
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {

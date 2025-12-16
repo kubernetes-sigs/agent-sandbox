@@ -74,6 +74,11 @@ type SandboxClaimSpec struct {
 	// Lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+
+	// SkipWarmPool, when set to true, prevents the controller from attempting
+	// to adopt a pre-warmed pod from a SandboxWarmPool. Instead, a new pod will always be created fresh.
+	// +optional
+	SkipWarmPool *bool `json:"skipWarmPool,omitempty" protobuf:"varint,4,opt,name=skipWarmPool"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

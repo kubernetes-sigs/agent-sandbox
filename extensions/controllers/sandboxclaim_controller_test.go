@@ -779,6 +779,71 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 		},
 	}
 
+	// Additional test for skipWarmPool functionality
+	t.Run("skips warm pool adoption when skipWarmPool is true", func(t *testing.T) {
+		scheme := newScheme(t)
+		claimWithSkipWarmPool := claim.DeepCopy()
+		skipWarmPool := true
+		claimWithSkipWarmPool.Spec.SkipWarmPool = &skipWarmPool
+
+		existingObjects := []client.Object{
+			template,
+			claimWithSkipWarmPool,
+			createWarmPoolPod("pool-pod-1", metav1.Now()),
+		}
+
+		client := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingObjects...).
+			WithStatusSubresource(claimWithSkipWarmPool).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client: client,
+			Scheme: scheme,
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "test-claim",
+				Namespace: "default",
+			},
+		}
+
+		ctx := context.Background()
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify sandbox was created
+		var sandbox v1alpha1.Sandbox
+		if err := client.Get(ctx, req.NamespacedName, &sandbox); err != nil {
+			t.Fatalf("expected sandbox to be created but got error: %v", err)
+		}
+
+		// Verify the warm pool pod was NOT adopted (labels should still be present)
+		var poolPod corev1.Pod
+		if err := client.Get(ctx, types.NamespacedName{Name: "pool-pod-1", Namespace: "default"}, &poolPod); err != nil {
+			t.Fatalf("failed to get pool pod: %v", err)
+		}
+
+		// Pool labels should still be present since the pod was not adopted
+		if _, exists := poolPod.Labels[poolLabel]; !exists {
+			t.Error("expected pool label to still be present on pod (not adopted)")
+		}
+		if _, exists := poolPod.Labels[sandboxTemplateRefHash]; !exists {
+			t.Error("expected sandbox template ref label to still be present on pod (not adopted)")
+		}
+
+		// Sandbox should not have the pod name annotation since no pod was adopted
+		if sandbox.Annotations != nil {
+			if podName, exists := sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation]; exists {
+				t.Errorf("expected no pod name annotation but found %q", podName)
+			}
+		}
+	})
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)

@@ -61,6 +61,10 @@ PROJECT_ROOT=$(readlink -f "$SCRIPT_DIR/../../")
 echo "DEBUG: SCRIPT_DIR is $SCRIPT_DIR"
 echo "DEBUG: PROJECT_ROOT is $PROJECT_ROOT"
 
+# Create a temporary kubeconfig file for kind
+KUBECFG_FILE=$(mktemp)
+kind get kubeconfig --name "${KIND_CLUSTER_NAME}" > "$KUBECFG_FILE"
+export KUBECONFIG="$KUBECFG_FILE"
 
 # Cleanup function
 cleanup() {
@@ -69,7 +73,7 @@ cleanup() {
     kubectl delete --ignore-not-found sandboxclaim sandbox-computeruse-claim
     kubectl delete --ignore-not-found secret gemini-api-key
     kubectl delete --ignore-not-found -f "$SCRIPT_DIR/sandbox-gemini-computer-use.yaml"
-    
+    rm -f "$KUBECFG_FILE" # Delete the temporary kubeconfig file
 }
 trap cleanup EXIT
 
@@ -78,7 +82,7 @@ echo "Applying CRD and deployment..."
 kubectl apply -f "$SCRIPT_DIR/sandbox-gemini-computer-use.yaml"
 
 # Ensure the local client is up-to-date for running tests
-(cd "$PROJECT_ROOT/clients/python/agentic-sandbox-client" && pip install -e . --break-system-packages)
+(cd "$PROJECT_ROOT" && pip install -e . --break-system-packages)
 
 echo "Running the programmatic test..."
 (cd "$PROJECT_ROOT" && python3 -m unittest "clients.python.agentic-sandbox-client.test_computer_use_extension")

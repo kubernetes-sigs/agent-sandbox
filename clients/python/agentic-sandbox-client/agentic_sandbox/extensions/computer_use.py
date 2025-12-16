@@ -22,20 +22,12 @@ class ComputerUseSandbox(SandboxClient):
     def __init__(self, template_name: str, namespace: str = "default", server_port: int = 8080):
         super().__init__(template_name, namespace, server_port=server_port)
 
-    def agent(self, query: str, api_key: str | None = None, timeout: int = 60) -> ExecutionResult:
+    def agent(self, query: str, timeout: int = 60) -> ExecutionResult:
         """Executes a query using the agent."""
         if not self.is_ready():
             raise ConnectionError("Sandbox is not ready. Cannot execute agent queries.")
 
         payload = {"query": query}
-        if api_key:
-            payload["api_key"] = api_key
-        else:
-            return ExecutionResult(
-                stdout="",
-                stderr="API key is required for agent execution.",
-                exit_code=1
-            )
 
         response = self._request("POST", "agent", json=payload, timeout=timeout)
         response.raise_for_status()

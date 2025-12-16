@@ -43,7 +43,7 @@ async def health_check():
     return {"status": "ok", "message": "Sandbox Runtime is active."}
 
 @app.post("/agent", summary="Run the browser agent with a query", response_model=AgentResponse)
-async def agent_command(request: AgentQuery):
+def agent_command(request: AgentQuery):
     """
     Executes the computer-use-preview agent with a given query.
     """
@@ -51,14 +51,17 @@ async def agent_command(request: AgentQuery):
     env = os.environ.copy()
     env["PLAYWRIGHT_HEADLESS"] = "1"
 
-    if "GEMINI_API_KEY" in os.environ:
-            env["GEMINI_API_KEY"] = os.environ["GEMINI_API_KEY"]
-    # Handle missing API key gracefully for testing purposes
-    elif "GEMINI_API_KEY" not in env:
+    # Prioritize API key from the request if provided.
+    if request.api_key:
+        env["GEMINI_API_KEY"] = request.api_key
+
+    # If GEMINI_API_KEY is still not set (neither from request nor initial environment),
+    # then return an error.
+    if "GEMINI_API_KEY" not in env:
         return AgentResponse(
             stdout="",
-            stderr="GEMINI_API_KEY environment variable not set. Please set it to use the agent.",
-            exit_code=0
+            stderr="GEMINI_API_KEY not found in request or environment variables. Please set it via request or environment variable (e.g., K8s secret).",
+            exit_code=1,
         )
 
     try:

@@ -14,7 +14,7 @@ spec:
       containers:
       - name: sandbox-python-computeruse
         image: sandbox-gemini-runtime:latest
-        imagePullPolicy: Never
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888
         env:

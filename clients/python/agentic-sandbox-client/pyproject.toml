@@ -22,15 +22,6 @@ dependencies = [
 "Homepage" = "https://github.com/kubernetes-sigs/agent-sandbox"
 "Bug Tracker" = "https://github.com/kubernetes-sigs/agent-sandbox/issues"
 
-# Define the "tracing" optional dependency group
-[project.optional-dependencies]
-tracing = [
-    "opentelemetry-api",
-    "opentelemetry-sdk",
-    "opentelemetry-exporter-otlp",
-    "opentelemetry-instrumentation-requests",
-]
-
 [tool.setuptools]
 # This line tells setuptools to only include the 'agentic_sandbox'
 # package and to ignore other directories like 'sandbox_router'.
@@ -40,4 +31,10 @@ packages = ["agentic_sandbox"]
 test = [
     "pytest",
     "pytest-xdist",
+]
+tracing = [
+    "opentelemetry-api~=1.39.0",
+    "opentelemetry-sdk~=1.39.0",
+    "opentelemetry-exporter-otlp~=1.39.0",
+    "opentelemetry-instrumentation-requests~=0.60b0",
 ]

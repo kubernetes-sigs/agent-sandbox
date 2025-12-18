@@ -102,23 +102,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	oldStatus := sandbox.Status.DeepCopy()
 	var err error
+	sandboxDeleted := false
 
 	expired, requeueAfter := checkSandboxExpiry(sandbox)
 
 	// Check if sandbox has expired
 	if expired {
-		log.Info("Sandbox has expired, deleting pod and service")
-		err = r.handleSandboxExpiry(ctx, sandbox)
+		log.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
+		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
 	} else {
 		err = r.reconcileChildResources(ctx, sandbox)
 	}
 
-	// Update status
-	if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
-		// Surface update error
-		err = errors.Join(err, statusUpdateErr)
+	if !sandboxDeleted {
+		// Update status
+		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+			// Surface update error
+			err = errors.Join(err, statusUpdateErr)
+		}
 	}
-
 	// return errors seen
 	return ctrl.Result{RequeueAfter: requeueAfter}, err
 }
@@ -465,7 +467,8 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 	return nil
 }
 
-func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+// handles sandbox expiry by deleting child resources and the sandbox itself if needed
+func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
 	var allErrors error
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -487,6 +490,15 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
 	}
 
+	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {
+		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
+			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
+		} else {
+			return true, nil
+		}
+	}
+
+	// If we reach here, sandbox is not deleted
 	// Clear all status fields explicitly
 	sandbox.Status = sandboxv1alpha1.SandboxStatus{}
 	// Update status to remove Ready condition
@@ -498,7 +510,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		Message:            "Sandbox has expired",
 	})
 
-	return allErrors
+	return false, allErrors
 }
 
 // checks if the sandbox has expired

@@ -308,7 +308,6 @@ class SandboxClient:
             f"Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}' did not get an IP within {self.gateway_ready_timeout} seconds.")
 
     def __enter__(self) -> 'SandboxClient':
-        logging.info("TODO: remove me again")
         trace_context_str = ""
         # We can't use the "with trace..." context management. This is the equivalent.
         # https://github.com/open-telemetry/opentelemetry-python/issues/2787
@@ -338,18 +337,18 @@ class SandboxClient:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Cleanup Trace if it exists
-        if self.tracing_manager:
-            self.tracing_manager.end_lifecycle_span()
-
         # Cleanup Port Forward if it exists
         if self.port_forward_process:
-            logging.info("Stopping port-forwarding...")
-            self.port_forward_process.terminate()
             try:
-                self.port_forward_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.port_forward_process.kill()
+                logging.info("Stopping port-forwarding...")
+                self.port_forward_process.terminate()
+                try:
+                    self.port_forward_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.port_forward_process.kill()
+            # Unlikely to fail, but catch just in case.
+            except Exception as e:
+                logging.error(f"Failed to stop port-forwarding: {e}")
 
         # Delete the SandboxClaim
         if self.claim_name:
@@ -366,6 +365,15 @@ class SandboxClient:
                 if e.status != 404:
                     logging.error(
                         f"Error deleting sandbox claim: {e}", exc_info=True)
+            except Exception as e:
+                logging.error(f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
+
+        # Cleanup Trace if it exists
+        if self.tracing_manager:
+            try:
+                self.tracing_manager.end_lifecycle_span()
+            except Exception as e:
+                logging.error(f"Failed to end tracing span: {e}")
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         if not self.is_ready():

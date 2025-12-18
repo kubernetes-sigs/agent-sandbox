@@ -131,7 +131,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 		return readyCondition
 	}
 
-	// Sanbox should be non-nil if err is nil
+	// Sandbox should be non-nil if err is nil
 	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == string(sandboxv1alpha1.SandboxConditionReady) {
 			if condition.Status == metav1.ConditionTrue {
@@ -273,7 +273,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		sandbox.Annotations[sandboxcontrollers.SanboxPodNameAnnotation] = adoptedPod.Name
+		sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {

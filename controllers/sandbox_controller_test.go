@@ -606,7 +606,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SanboxPodNameAnnotation: "adopted-pod-name",
+						SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -710,7 +710,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SanboxPodNameAnnotation: "non-existent-pod",
+						SandboxPodNameAnnotation: "non-existent-pod",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -745,8 +745,8 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SanboxPodNameAnnotation: "annotated-pod-name",
-						"other-annotation":      "other-value",
+						SandboxPodNameAnnotation: "annotated-pod-name",
+						"other-annotation":       "other-value",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -785,7 +785,7 @@ func TestReconcilePod(t *testing.T) {
 				livePod := &corev1.Pod{}
 				podName := sandboxName
 				// Check if there's an annotation with a non-empty value
-				if annotatedPod, exists := tc.sandbox.Annotations[SanboxPodNameAnnotation]; exists && annotatedPod != "" {
+				if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
 					podName = annotatedPod
 				}
 				err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)

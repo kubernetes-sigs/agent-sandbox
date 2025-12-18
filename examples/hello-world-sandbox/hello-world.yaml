@@ -1,7 +1,7 @@
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: Sandbox
 metadata:
-  name: shruti-hello-world-v9
+  name: {USERNAME}-hello-world
 spec:
   podTemplate:
     spec:

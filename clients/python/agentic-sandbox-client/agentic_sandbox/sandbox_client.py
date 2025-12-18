@@ -228,21 +228,26 @@ class SandboxClient:
         This allows 'Dev Mode' without needing a public Gateway IP.
         """
         local_port = self._get_free_port()
+
+        # Assumes the router service name from sandbox_router.yaml
         router_svc = "svc/sandbox-router-svc"
+
         logging.info(
             f"Starting Dev Mode tunnel: localhost:{local_port} -> {router_svc}:8080...")
+
         self.port_forward_process = subprocess.Popen(
             [
                 "kubectl", "port-forward",
                 router_svc,
                 # Tunnel to Router (8080), not Sandbox (8888)
                 f"{local_port}:8080",
-                # The router lives in the Gateway/Default NS
-                "-n", self.gateway_namespace
+                # The router lives in the sandbox NS (no gateway)
+                "-n", self.namespace
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
+
         logging.info("Waiting for port-forwarding to be ready...")
         start_time = time.monotonic()
         while time.monotonic() - start_time < self.port_forward_ready_timeout:
@@ -304,8 +309,11 @@ class SandboxClient:
                         w.stop()
                         return
 
-        raise TimeoutError(
-            f"Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}' did not get an IP within {self.gateway_ready_timeout} seconds.")
+        if not self.base_url:
+            raise TimeoutError(
+                f"Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}' did not get"
+                f" an IP within {self.gateway_ready_timeout} seconds."
+            )
 
     def __enter__(self) -> 'SandboxClient':
         trace_context_str = ""
@@ -366,7 +374,8 @@ class SandboxClient:
                     logging.error(
                         f"Error deleting sandbox claim: {e}", exc_info=True)
             except Exception as e:
-                logging.error(f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
+                logging.error(
+                    f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
 
         # Cleanup Trace if it exists
         if self.tracing_manager:

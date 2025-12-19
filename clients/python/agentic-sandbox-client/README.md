@@ -77,8 +77,8 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     pip install -e .
     ```
 
-    If you are using [tracing](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace), install
-    with the optional tracing dependencies:
+    If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
+    install with the optional tracing dependencies:
 
     ```
     pip install -e .[tracing]

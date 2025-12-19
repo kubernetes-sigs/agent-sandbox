@@ -30,7 +30,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
 
 1.  **Build and Push the Router Image:**
 
-    For both Gateway Mode and Tunnel mode, follow the instructions in [sandbox_router](sandbox_router/README.md)
+    For both Gateway Mode and Tunnel mode, follow the instructions in [sandbox-router](sandbox-router/README.md)
     to build, push, and apply the router image and resources.
 
 2.  **Create a Sandbox Template:**

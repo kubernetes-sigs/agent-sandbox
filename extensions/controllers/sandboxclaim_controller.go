@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +39,11 @@ import (
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
+// TODO: These constants should be imported from the main controller package Issue #216
+const (
+	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+)
+
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
@@ -52,6 +58,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -76,6 +83,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Try getting template
 	if template, err = r.getTemplate(ctx, claim); err == nil || k8errors.IsNotFound(err) {
+		// This ensures the firewall is up before the pod starts.
+		if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile network policy: %w", npErr)
+		}
+
 		// Try getting sandbox even if template is not found
 		// It is possible that the template was deleted after the sandbox was created
 		sandbox, err = r.getOrCreateSandbox(ctx, claim, template)
@@ -131,7 +143,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 		return readyCondition
 	}
 
-	// Sanbox should be non-nil if err is nil
+	// Sandbox should be non-nil if err is nil
 	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == string(sandboxv1alpha1.SandboxConditionReady) {
 			if condition.Status == metav1.ConditionTrue {
@@ -156,16 +168,6 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
 	}
-}
-
-func (r *SandboxClaimReconciler) isControlledByClaim(sandbox *v1alpha1.Sandbox, claim *extensionsv1alpha1.SandboxClaim) bool {
-	// Check if the existing sandbox is owned by this claim
-	for _, ownerRef := range sandbox.OwnerReferences {
-		if ownerRef.UID == claim.UID && ownerRef.Controller != nil && *ownerRef.Controller {
-			return true
-		}
-	}
-	return false
 }
 
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
@@ -229,6 +231,17 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Remove existing owner references (from SandboxWarmPool)
 	pod.OwnerReferences = nil
 
+	nameHash := sandboxcontrollers.NameHash(claim.Name)
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+
+	pod.Labels[sandboxLabel] = nameHash
+
+	// Label required by NetworkPolicy
+	// We add the new label with the Claim UID for unique targeting.
+	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
 		log.Error(err, "Failed to update adopted pod")
@@ -266,6 +279,10 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		automount := false
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
+	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
+		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+	}
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
@@ -285,7 +302,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		sandbox.Annotations[sandboxcontrollers.SanboxPodNameAnnotation] = adoptedPod.Name
+		sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {
@@ -316,7 +333,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	if sandbox != nil {
 		logger.Info("sandbox already exists, skipping update", "name", sandbox.Name)
-		if !r.isControlledByClaim(sandbox, claim) {
+		if !metav1.IsControlledBy(sandbox, claim) {
 			err := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", sandbox.Name, claim.Name)
 			logger.Error(err, "Sandbox controller mismatch")
 			return nil, err
@@ -350,4 +367,67 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&sandboxv1alpha1.Sandbox{}).
 		Complete(r)
+}
+
+// reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.
+func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
+	logger := log.FromContext(ctx)
+
+	// 1. Cleanup Check: If missing, delete existing policy
+	if template == nil || template.Spec.NetworkPolicy == nil {
+		existingNP := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claim.Name + "-network-policy",
+				Namespace: claim.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, existingNP); err != nil {
+			if !k8errors.IsNotFound(err) {
+				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
+				return err
+			}
+		} else {
+			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
+		}
+		return nil
+	}
+
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claim.Name + "-network-policy",
+			Namespace: claim.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		np.Spec.PodSelector = metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
+			},
+		}
+		np.Spec.PolicyTypes = []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeEgress,
+		}
+
+		templateNP := template.Spec.NetworkPolicy
+
+		if len(templateNP.Ingress) > 0 {
+			np.Spec.Ingress = templateNP.Ingress
+		}
+
+		if len(templateNP.Egress) > 0 {
+			np.Spec.Egress = templateNP.Egress
+		}
+
+		return controllerutil.SetControllerReference(claim, np, r.Scheme)
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
+		return err
+	}
+
+	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
+	return nil
 }

@@ -11,6 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+This module provides the SandboxClient for interacting with the Agentic Sandbox.
+It handles lifecycle management (claiming, waiting) and interaction (execution,
+file I/O) with the sandbox environment, including optional OpenTelemetry tracing.
+"""
 
 import json
 import os
@@ -44,8 +49,6 @@ SANDBOX_PLURAL_NAME = "sandboxes"
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
-_trace_service_name = "sandbox-client"
-
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     stream=sys.stdout)
@@ -78,15 +81,18 @@ class SandboxClient:
         enable_tracing: bool = False,
         trace_service_name: str = "sandbox-client",
     ):
-        global _trace_service_name
-        _trace_service_name = trace_service_name
+        self.trace_service_name = trace_service_name
         self.tracing_manager = None
         self.tracer = None
-        if enable_tracing and OPENTELEMETRY_AVAILABLE:
-            initialize_tracer(service_name=trace_service_name)
-            self.tracing_manager = TracerManager(
-                service_name=trace_service_name)
-            self.tracer = self.tracing_manager.tracer
+        if enable_tracing:
+            if not OPENTELEMETRY_AVAILABLE:
+                logging.error(
+                    "OpenTelemetry not installed; skipping tracer initialization.")
+            else:
+                initialize_tracer(service_name=trace_service_name)
+                self.tracing_manager = TracerManager(
+                    service_name=trace_service_name)
+                self.tracer = self.tracing_manager.tracer
 
         self.template_name = template_name
         self.namespace = namespace
@@ -127,7 +133,7 @@ class SandboxClient:
         """Returns True if the sandbox is ready and the Gateway IP has been found."""
         return self.base_url is not None
 
-    @trace_span(f"{_trace_service_name}.create_claim")
+    @trace_span("create_claim")
     def _create_claim(self, trace_context_str: str = ""):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
@@ -161,7 +167,7 @@ class SandboxClient:
             body=manifest
         )
 
-    @trace_span(f"{_trace_service_name}.wait_for_sandbox_ready")
+    @trace_span("wait_for_sandbox_ready")
     def _wait_for_sandbox_ready(self):
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
         if not self.claim_name:
@@ -221,7 +227,7 @@ class SandboxClient:
             s.bind(('', 0))
             return s.getsockname()[1]
 
-    @trace_span(f"{_trace_service_name}.dev_mode_tunnel")
+    @trace_span("dev_mode_tunnel")
     def _start_and_wait_for_port_forward(self):
         """
         Starts 'kubectl port-forward' to the Router Service.
@@ -271,7 +277,7 @@ class SandboxClient:
         self.__exit__(None, None, None)
         raise TimeoutError("Failed to establish tunnel to Router Service.")
 
-    @trace_span(f"{_trace_service_name}.wait_for_gateway")
+    @trace_span("wait_for_gateway")
     def _wait_for_gateway_ip(self):
         """Waits for the Gateway to be assigned an external IP."""
         span = trace.get_current_span()
@@ -421,7 +427,7 @@ class SandboxClient:
             raise RuntimeError(
                 f"Failed to communicate with the sandbox via the gateway at {url}.") from e
 
-    @trace_span(f"{_trace_service_name}.run")
+    @trace_span("run")
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
         span = trace.get_current_span()
         if span.is_recording():
@@ -442,7 +448,7 @@ class SandboxClient:
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result
 
-    @trace_span(f"{_trace_service_name}.write")
+    @trace_span("write")
     def write(self, path: str, content: bytes | str, timeout: int = 60):
         span = trace.get_current_span()
         if span.is_recording():
@@ -458,7 +464,7 @@ class SandboxClient:
                       files=files_payload, timeout=timeout)
         logging.info(f"File '{filename}' uploaded successfully.")
 
-    @trace_span(f"{_trace_service_name}.read")
+    @trace_span("read")
     def read(self, path: str, timeout: int = 60) -> bytes:
         span = trace.get_current_span()
         if span.is_recording():

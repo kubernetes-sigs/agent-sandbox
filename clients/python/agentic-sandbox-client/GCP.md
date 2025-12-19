@@ -51,7 +51,7 @@ docker run -d \
   --config /etc/otelcol/config.yaml
 ```
 
-Run `docker ps` to check that the `otel-collector` is running. Is you do not see it, run
+Run `docker ps` to check that the `otel-collector` is running. If you do not see it, run
 `docker logs otel-collector` to see the error message.
 
 #### 4. Run the Sandbox Client with Tracing

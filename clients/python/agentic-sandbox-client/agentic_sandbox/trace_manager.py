@@ -11,6 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+This module manages OpenTelemetry tracing integration for the Agentic Sandbox client.
+It provides a wrapper for the OpenTelemetry SDK to handle tracing initialization,
+span creation, and context propagation. If OpenTelemetry is not installed, it
+falls back to no-op mock objects.
+"""
 
 import functools
 import logging
@@ -30,34 +36,70 @@ try:
 except ImportError:
     OPENTELEMETRY_AVAILABLE = False
     logging.debug("OpenTelemetry not installed; using MockTracer.")
+
     class MockSpan:
-        def is_recording(self): return False
-        def set_attribute(self, key, value): pass
-        def end(self): pass
+        """Mock class for OpenTelemetry Span."""
+
+        def is_recording(self):
+            """Mock is_recording."""
+            return False
+
+        def set_attribute(self, key, value):
+            """Mock set_attribute."""
+
+        def end(self):
+            """Mock end."""
 
     class MockTracer:
-        def start_as_current_span(self, *args, **kwargs): return nullcontext()
-        def start_span(self, *args, **kwargs): return MockSpan()
+        """Mock class for OpenTelemetry Tracer."""
 
-    class trace:
-        @staticmethod
-        def get_current_span(): return MockSpan()
-        @staticmethod
-        def set_tracer_provider(provider): pass
-        @staticmethod
-        def get_tracer(name, version=None): return MockTracer()
-        @staticmethod
-        def set_span_in_context(span, context=None): return None
+        def start_as_current_span(self, *args, **kwargs):
+            """Mock start_as_current_span."""
+            return nullcontext()
 
-    class propagate:
-        @staticmethod
-        def inject(*args, **kwargs): pass
+        def start_span(self, *args, **kwargs):
+            """Mock start_span."""
+            return MockSpan()
 
-    class context:
+    class TraceStub:
+        """Mock class for OpenTelemetry trace module."""
         @staticmethod
-        def attach(*args, **kwargs): return None
+        def get_current_span():
+            """Mock get_current_span."""
+            return MockSpan()
+
         @staticmethod
-        def detach(*args, **kwargs): pass
+        def set_tracer_provider(_):
+            """Mock set_tracer_provider."""
+        @staticmethod
+        def get_tracer(name, version=None):
+            """Mock get_tracer."""
+            return MockTracer()
+
+        @staticmethod
+        def set_span_in_context(span, context=None):
+            """Mock set_span_in_context."""
+
+    class PropagateStub:
+        """Mock class for OpenTelemetry propagate module."""
+        @staticmethod
+        def inject(*args, **kwargs):
+            """Mock inject."""
+
+    class ContextStub:
+        """Mock class for OpenTelemetry context module."""
+        @staticmethod
+        def attach(*args, **kwargs):
+            """Mock attach."""
+
+        @staticmethod
+        def detach(*args, **kwargs):
+            """Mock detach."""
+
+    # Assign mock stubs to match import names
+    trace = TraceStub
+    propagate = PropagateStub
+    context = ContextStub
 
 # --- Global state for the singleton TracerProvider ---
 _TRACER_PROVIDER = None
@@ -65,10 +107,38 @@ _TRACER_PROVIDER_LOCK = threading.Lock()
 
 
 def initialize_tracer(service_name: str):
-    """Initializes and registers a global tracer provider using double-checked locking."""
-    global _TRACER_PROVIDER, _TRACER_PROVIDER_LOCK
+    """
+    Initializes the global OpenTelemetry TracerProvider using the singleton pattern.
+
+    This function uses double-checked locking to ensure thread-safe, one-time initialization.
+
+    Behavior:
+    - If OpenTelemetry is not installed, this is a no-op.
+    - If the Provider is already initialized, it verifies that the requested 'service_name'
+      matches the existing global service name. If they differ, a warning is logged
+      indicating that the requested name will be ignored in favor of the existing one.
+    - Configures a BatchSpanProcessor and OTLPSpanExporter for sending traces.
+    """
+    global _TRACER_PROVIDER
+
+    if not OPENTELEMETRY_AVAILABLE:
+        logging.error(
+            "OpenTelemetry not installed; skipping tracer initialization.")
+        return
+
     # First check (no lock) for performance.
-    if (not OPENTELEMETRY_AVAILABLE) or (_TRACER_PROVIDER is not None):
+    if _TRACER_PROVIDER is not None:
+        try:
+            existing_name = _TRACER_PROVIDER.resource.attributes.get(
+                "service.name")
+            if existing_name and existing_name != service_name:
+                logging.warning(
+                    f"Global TracerProvider already initialized with service name '{existing_name}'. "
+                    f"Ignoring request to initialize with '{service_name}'."
+                )
+        except Exception:
+            # Fallback if accessing attributes fails for any reason
+            pass
         return
 
     with _TRACER_PROVIDER_LOCK:
@@ -86,14 +156,30 @@ def initialize_tracer(service_name: str):
                 f"Global OpenTelemetry TracerProvider configured for service '{service_name}'.")
 
 
-def trace_span(span_name):
-    """A decorator to automatically wrap a method with an OpenTelemetry span."""
+def trace_span(span_suffix):
+    """
+    Decorator to wrap a method in an OpenTelemetry span with a dynamic name.
+
+    The final span name is constructed at runtime as:
+        "{self.trace_service_name}.{span_suffix}"
+
+    The decorated method must belong to an instance (`self`) that has:
+        1. `self.tracer`: An initialized OpenTelemetry Tracer.
+        2. `self.trace_service_name`: The string name of the service (e.g., 'sandbox-client').
+
+    If `self.tracer` is None (tracing disabled), the method runs without decoration.
+    """
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             tracer = getattr(self, 'tracer', None)
             if not tracer:
                 return func(self, *args, **kwargs)
+
+            # Determine the service name at runtime
+            service_name = getattr(
+                self, 'trace_service_name', 'sandbox-client')
+            span_name = f"{service_name}.{span_suffix}"
 
             with tracer.start_as_current_span(span_name):
                 return func(self, *args, **kwargs)
@@ -102,7 +188,14 @@ def trace_span(span_name):
 
 
 class TracerManager:
-    """A lightweight manager for a single client's tracing lifecycle."""
+    """
+    Manages the tracing lifecycle for a single client instance.
+
+    This manager isolates the client's tracing context by:
+    1. Creating a tracer with a unique 'instrumentation scope' based on the client's name.
+    2. Managing a 'lifecycle' span that serves as the parent for all operations.
+    3. Handling the attachment/detachment of the OTel context to the current thread.
+    """
 
     def __init__(self, service_name: str):
         instrumentation_scope_name = service_name.replace('-', '_')

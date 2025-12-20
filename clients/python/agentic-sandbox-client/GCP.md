@@ -89,3 +89,29 @@ After running your client script, traces will be sent to Google Cloud.
 - Go to the Google Cloud Trace Explorer.
 - You will see your traces appear in the list. You can click on a trace to see the full waterfall
   diagram, including the sandbox-client.lifecycle parent span and all its children.
+
+## Tracing Behavior with Multiple Clients
+
+It is generally expected that most clients within the same application process will share the same
+`trace_service_name`. The default for the `SandboxClient` is `sandbox-client`.
+
+The `SandboxClient` relies on a **process-wide singleton** `TracerProvider`. This means:
+
+1.  **Creation**: The provider is created only **once**, upon the first initialization of a
+    `SandboxClient` with tracing enabled.
+2.  **Persistence**: It persists for the entire lifetime of the Python process and is shared by all
+    subsequent clients.
+3.  **Shutdown**: It is strictly shut down only when the process exits (via `atexit`).
+
+Because the provider is global, the `service.name` resource attribute is **immutable** after the
+first initialization. When multiple clients with different service names are used in the same
+process, the **first client wins** the global service name configuration. However, each client
+maintains its own **instrumentation scope**, ensuring traces remain distinguishable.
+
+| Feature                   | Client A (Initialized First)   | Client B (Initialized Second)                     |
+| :------------------------ | :----------------------------- | :------------------------------------------------ |
+| **trace_service_name**    | `sandbox-client-a`             | `sandbox-client-b`                                |
+| **Global `service.name`** | `sandbox-client-a` (Wins)      | `sandbox-client-a` (Ignored w/ Warning)           |
+| **Instrumentation Scope** | `sandbox_client_a`             | `sandbox_client_b`                                |
+| **Span Name Format**      | `sandbox-client-a.<operation>` | `sandbox-client-b.<operation>`                    |
+| **Trace Backend View**    | Service: `sandbox-client-a`    | Service: `sandbox-client-a` (but separate scopes) |

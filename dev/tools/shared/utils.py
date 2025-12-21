@@ -32,7 +32,10 @@ def get_image_tag():
 
 def get_image_prefix(args):
     """Constructs the image prefix for a container image."""
+    if not args.image_prefix and "IMAGE_PREFIX" in os.environ:
+        return os.environ["IMAGE_PREFIX"]
     if args.image_prefix:
+        os.environ["IMAGE_PREFIX"] = args.image_prefix
         return args.image_prefix
     raise Exception(f"--image-prefix arg or IMAGE_PREFIX environment variable must be set")
 

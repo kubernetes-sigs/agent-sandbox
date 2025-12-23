@@ -3819,6 +3819,12 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
+              shutdownPolicy:
+                default: Retain
+                enum:
+                - Delete
+                - Retain
+                type: string
               shutdownTime:
                 format: date-time
                 type: string

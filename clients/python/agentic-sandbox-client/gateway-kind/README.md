@@ -6,7 +6,38 @@ This directory contains resources to enable Kubernetes Gateway API support withi
 
 This guide explains how to manually set up the Sandbox Router and Gateway API on a local KinD cluster.
 
-1.  **Setup Agentic Sandbox and Python SDK Client:** Follow the instructions in the [main client README](../README.md), which includes prerequisites, installing the SDK, and deploying the Sandbox Router.
+1.  **Setup Agentic Sandbox and Python SDK Client:**
+    a.  **Deploy Kind Cluster and Build Images:**
+        Run the following command from the root of the repository to set up the Kind cluster and build/load all necessary images (including the Sandbox Router). We also export the `IMAGE_TAG` for subsequent steps:
+        ```bash
+        make build
+        make deploy-kind EXTENSIONS=true 
+        export IMAGE_TAG=$(python3 -c "import sys; sys.path.append('dev/tools/shared'); from utils import get_image_tag; print(get_image_tag())")
+        ```
+
+    b.  **Deploy Sandbox Router:**
+        Deploy sandbox router image manually using the correct image tag. Run the following commands:
+        ```bash
+        # From the root of the repository
+        # Ensure IMAGE_TAG is set (see step 1.a)
+        cd clients/python/agentic-sandbox-client/sandbox-router
+        export SANDBOX_ROUTER_IMG=kind.local/sandbox-router:$IMAGE_TAG
+        sed "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml | kubectl apply -f -
+        cd -
+        ```
+
+    c.  **Deploy Python Sandbox Template:**
+        Deploy python runtime image manually using the correct image tag. Run the following commands:
+        ```bash
+        # From the root of the repository
+        # Ensure IMAGE_TAG is set (see step 1.a)
+        cd clients/python/agentic-sandbox-client/gateway-kind
+        export PYTHON_SANDBOX_IMG=kind.local/python-runtime-sandbox:$IMAGE_TAG
+        sed "s|IMAGE_PLACEHOLDER|${PYTHON_SANDBOX_IMG}|g" python-sandbox-template.yaml | kubectl apply -f -
+        cd -
+        ```
+    
+    d.  **Install SDK:** Follow the SDK installation instructions in the [main client README](../README.md).
 
 2.  **Install and Run cloud-provider-kind:**
     This component provides a load balancer implementation for KinD.
@@ -38,7 +69,7 @@ This guide explains how to manually set up the Sandbox Router and Gateway API on
     
     b.  **Run Test Client:** Use the `agentic-sandbox-client` in Gateway mode to test the end-to-end flow:
     ```bash  
-    python ../test_client.py --gateway_name="kind-gateway"
+    python ../test_client.py --gateway-name="kind-gateway"
     ```
 
 5. **Clean up:** To stop the cloud-provider-kind process, run:

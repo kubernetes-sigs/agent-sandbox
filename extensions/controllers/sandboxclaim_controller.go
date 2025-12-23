@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -188,17 +189,18 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		return nil, err
 	}
 
-	// Filter out pods that are being deleted or already have a different controller
-	filteredPods := make([]corev1.Pod, 0, len(podList.Items))
-	for _, pod := range podList.Items {
+	// Filter pods and create a slice of pointers for sorting
+	candidates := make([]*corev1.Pod, 0, len(podList.Items))
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+
 		// Skip pods that are being deleted
 		if !pod.DeletionTimestamp.IsZero() {
 			continue
 		}
 
 		// Skip pods that already have a different controller
-		controllerRef := metav1.GetControllerOf(&pod)
-		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+		if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 			log.Info("Ignoring pod with different controller, but this shouldn't happen because this pod shouldn't have template ref label",
 				"pod", pod.Name,
 				"controller", controllerRef.Name,
@@ -206,22 +208,19 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 			continue
 		}
 
-		filteredPods = append(filteredPods, pod)
+		candidates = append(candidates, pod)
 	}
-	podList.Items = filteredPods
 
-	if len(podList.Items) == 0 {
+	if len(candidates) == 0 {
 		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
 		return nil, nil
 	}
 
-	// Sort pods by creation timestamp (oldest first)
-	sort.Slice(podList.Items, func(i, j int) bool {
-		return podList.Items[i].CreationTimestamp.Before(&podList.Items[j].CreationTimestamp)
-	})
+	// Sort pods using podutils.ByLogging to select the best available pod.
+	sort.Sort(podutils.ByLogging(candidates))
 
 	// Get the first available pod
-	pod := &podList.Items[0]
+	pod := candidates[0]
 	log.Info("Adopting pod from warm pool", "pod", pod.Name)
 
 	// Remove the pool labels

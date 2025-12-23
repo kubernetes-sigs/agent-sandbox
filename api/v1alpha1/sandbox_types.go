@@ -105,10 +105,9 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Optional
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
 
-	// ShutdownTime - Absolute time when the sandbox is deleted.
-	// If a time in the past is provided, the sandbox will be deleted immediately.
-	// +kubebuilder:validation:Format="date-time"
-	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+	// Lifecycle defines when and how the sandbox should be shut down.
+	// +optional
+	Lifecycle `json:",inline"`
 
 	// Replicas is the number of desired replicas.
 	// The only allowed values are 0 and 1.
@@ -117,6 +116,32 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Maximum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+}
+
+// ShutdownPolicy describes the policy for deleting the Sandbox when it expires.
+// +kubebuilder:validation:Enum=Delete;Retain
+type ShutdownPolicy string
+
+const (
+	// ShutdownPolicyDelete deletes the Sandbox when expired.
+	ShutdownPolicyDelete ShutdownPolicy = "Delete"
+
+	// ShutdownPolicyRetain keeps the Sandbox when expired (Status will show Expired).
+	ShutdownPolicyRetain ShutdownPolicy = "Retain"
+)
+
+// Lifecycle defines the lifecycle management for the Sandbox.
+type Lifecycle struct {
+	// ShutdownTime is the absolute time when the sandbox expires.
+	// +kubebuilder:validation:Format="date-time"
+	// +optional
+	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+
+	// ShutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.
+	// Underlying resources(Pods, Services) are always deleted on expiry.
+	// +kubebuilder:default=Retain
+	// +optional
+	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.

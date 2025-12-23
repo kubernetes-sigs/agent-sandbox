@@ -54,7 +54,7 @@ previous step, and then apply the manifest.
 
 ```bash
 sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
-kubectl apply -f sandbox_router.yaml --namespace=default
+kubectl apply -f sandbox_router.yaml
 ```
 
 ### Deploy the Gateway

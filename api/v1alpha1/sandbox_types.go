@@ -27,6 +27,9 @@ func (c ConditionType) String() string { return string(c) }
 const (
 	// SandboxConditionReady indicates readiness for Sandbox
 	SandboxConditionReady ConditionType = "Ready"
+
+	// SandboxReasonExpired indicates expired state for Sandbox
+	SandboxReasonExpired = "SandboxExpired"
 )
 
 type PodMetadata struct {

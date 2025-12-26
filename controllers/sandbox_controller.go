@@ -90,14 +90,24 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	if sandbox.Spec.Replicas == nil {
-		replicas := int32(1)
-		sandbox.Spec.Replicas = &replicas
-	}
-
+	// If the sandbox is being deleted, do nothing
 	if !sandbox.ObjectMeta.DeletionTimestamp.IsZero() {
 		log.Info("Sandbox is being deleted")
 		return ctrl.Result{}, nil
+	}
+
+	// Check if already marked as expired to avoid repeated operations, including cleanups
+	if sandboxMarkedExpired(sandbox) {
+		log.Info("Sandbox is already marked as expired")
+		// Note: The sandbox won't be deleted if shutdown policy is changed to delete after expiration.
+		//       To delete an expired sandbox, the user should delete the sandbox instead of updating it.
+		//       This keeps the controller code simple.
+		return ctrl.Result{}, nil
+	}
+
+	if sandbox.Spec.Replicas == nil {
+		replicas := int32(1)
+		sandbox.Spec.Replicas = &replicas
 	}
 
 	oldStatus := sandbox.Status.DeepCopy()
@@ -499,16 +509,19 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	}
 
 	// If we reach here, sandbox is not deleted
-	// Clear all status fields explicitly
-	sandbox.Status = sandboxv1alpha1.SandboxStatus{}
-	// Update status to remove Ready condition
-	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionReady),
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: sandbox.Generation,
-		Reason:             "SandboxExpired",
-		Message:            "Sandbox has expired",
-	})
+	// Only update "expired" status if cleanup was successful
+	if allErrors == nil {
+		// Clear all status fields explicitly
+		sandbox.Status = sandboxv1alpha1.SandboxStatus{}
+		// Update status to mark as expired
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: sandbox.Generation,
+			Reason:             sandboxv1alpha1.SandboxReasonExpired,
+			Message:            "Sandbox has expired",
+		})
+	}
 
 	return false, allErrors
 }
@@ -535,6 +548,12 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) 
 	// Requeue at expiry time or in 2 seconds whichever is later
 	requeueAfter := max(remainingTime, 2*time.Second)
 	return false, requeueAfter
+}
+
+// sandboxMarkedExpired checks if the sandbox is already marked as expired
+func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
+	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	return cond != nil && cond.Reason == sandboxv1alpha1.SandboxReasonExpired
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -1,0 +1,13 @@
+title: KEP Template
+kep-number: 127
+authors:
+  - "@peterzhongyi"
+status: implementable
+creation-date: 2025-11-14
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"
+
+see-also:
+replaces:

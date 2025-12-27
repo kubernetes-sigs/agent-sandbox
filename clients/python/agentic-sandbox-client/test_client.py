@@ -19,7 +19,8 @@ from agentic_sandbox import SandboxClient
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
 
-async def main(template_name: str, gateway_name: str | None, api_url: str | None, namespace: str, server_port: int):
+async def main(template_name: str, gateway_name: str | None, api_url: str | None, namespace: str,
+               server_port: int, enable_tracing: bool):
     """
     Tests the Sandbox client by creating a sandbox, running a command,
     and then cleaning up.
@@ -41,7 +42,8 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
             namespace=namespace,
             gateway_name=gateway_name,
             api_url=api_url,
-            server_port=server_port
+            server_port=server_port,
+            enable_tracing=enable_tracing
         ) as sandbox:
 
             print("\n--- Testing Pod Name Discovery ---")
@@ -128,6 +130,10 @@ if __name__ == "__main__":
                         help="Namespace to create sandbox in")
     parser.add_argument("--server-port", type=int, default=8888,
                         help="Port the sandbox container listens on")
+    parser.add_argument("--enable-tracing",
+                        action="store_true",
+                        help="Enable OpenTelemetry tracing in the agentic-sandbox-client."
+                        )
 
     args = parser.parse_args()
 
@@ -136,5 +142,6 @@ if __name__ == "__main__":
         gateway_name=args.gateway_name,
         api_url=args.api_url,
         namespace=args.namespace,
-        server_port=args.server_port
+        server_port=args.server_port,
+        enable_tracing=args.enable_tracing
     ))

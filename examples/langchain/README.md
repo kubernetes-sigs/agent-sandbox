@@ -45,7 +45,7 @@ kubectl version --client # kubectl 1.25+
 
 ### 1. Deploy Agent-Sandbox to Kind
 
-You can find agent-sandbox setup instructions [here](../../README.md#installation).
+You can find agent-sandbox setup instructions [here](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/README.md#installation).
 
 ```bash
 # Verify installation

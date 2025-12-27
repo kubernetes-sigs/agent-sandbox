@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -135,7 +137,12 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 
 	readySandbox := controlledSandboxWithDefault.DeepCopy()
-	readySandbox.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}
+	readySandbox.Status.Conditions = []metav1.Condition{{
+		Type:    string(sandboxv1alpha1.SandboxConditionReady),
+		Status:  metav1.ConditionTrue,
+		Reason:  "SandboxReady",
+		Message: "Sandbox is ready",
+	}}
 
 	// Validation Functions
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *v1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
@@ -302,7 +309,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			allObjects := append(tc.existingObjects, claimToUse)
 			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
 
-			reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme}
+			reconciler := &SandboxClaimReconciler{
+				Client:   client,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(10),
+			}
 
 			req := reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: claimToUse.Name, Namespace: "default"},
@@ -360,6 +371,343 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSandboxSyncsLifecycle verifies that the controller propagates
+// the Lifecycle (Time and Policy) to the Sandbox, and preserves it when Claim is nil.
+func TestSandboxSyncsLifecycle(t *testing.T) {
+	futureTime := &metav1.Time{Time: time.Now().Add(10 * time.Hour).Truncate(time.Second)}
+	existingTime := &metav1.Time{Time: time.Now().Add(5 * time.Hour).Truncate(time.Second)}
+
+	policyDelete := extensionsv1alpha1.ShutdownPolicyDelete
+	policyRetain := sandboxv1alpha1.ShutdownPolicyRetain
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+	}
+
+	testCases := []struct {
+		name            string
+		claim           *extensionsv1alpha1.SandboxClaim
+		existingSandbox *sandboxv1alpha1.Sandbox // NEW: Allow injecting an existing state
+		expectTime      *metav1.Time
+		expectPolicy    *sandboxv1alpha1.ShutdownPolicy
+	}{
+		{
+			name: "Sandbox should inherit Lifecycle from Claim",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-lifecycle", Namespace: "default", UID: "uid-1"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					Lifecycle: &extensionsv1alpha1.Lifecycle{
+						ShutdownTime:   futureTime,
+						ShutdownPolicy: policyDelete,
+					},
+				},
+			},
+			expectTime:   futureTime,
+			expectPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyDelete),
+		},
+		{
+			name: "New Sandbox should default to Retain/NilTime if Lifecycle is nil",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-no-lifecycle", Namespace: "default", UID: "uid-2"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					Lifecycle:   nil,
+				},
+			},
+			expectTime:   nil,
+			expectPolicy: &policyRetain,
+		},
+		{
+			name: "Existing Sandbox should PRESERVE time if Claim Lifecycle is nil",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-preserve", Namespace: "default", UID: "uid-3"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					Lifecycle:   nil, // Unset
+				},
+			},
+			// Inject a sandbox that ALREADY has a time set
+			existingSandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "claim-preserve", Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "claim-preserve", UID: "uid-3", Controller: ptr.To(true),
+					}},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					PodTemplate: sandboxv1alpha1.PodTemplate{},
+					Lifecycle: sandboxv1alpha1.Lifecycle{
+						ShutdownTime:   existingTime,
+						ShutdownPolicy: &policyRetain,
+					},
+				},
+			},
+			expectTime:   existingTime, // Expect the existing time, NOT nil
+			expectPolicy: &policyRetain,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+
+			// Build initial objects
+			objs := []client.Object{template, tc.claim}
+			if tc.existingSandbox != nil {
+				objs = append(objs, tc.existingSandbox)
+			}
+
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(tc.claim).Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:   client,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: tc.claim.Namespace}}
+			if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("reconcile error: %v", err)
+			}
+
+			var sandbox sandboxv1alpha1.Sandbox
+			if err := client.Get(context.Background(), req.NamespacedName, &sandbox); err != nil {
+				t.Fatalf("failed to fetch sandbox: %v", err)
+			}
+
+			// 1. Verify Time Sync
+			if diff := cmp.Diff(sandbox.Spec.ShutdownTime, tc.expectTime); diff != "" {
+				t.Errorf("Unexpected ShutdownTime:\n%s", diff)
+			}
+
+			// 2. Verify Policy Sync
+			if diff := cmp.Diff(sandbox.Spec.ShutdownPolicy, tc.expectPolicy); diff != "" {
+				t.Errorf("Unexpected ShutdownPolicy:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestSandboxClaimCleanupPolicy verifies that the Claim deletes itself
+// based on its own timestamp, regardless of the underlying Sandbox status.
+func TestSandboxClaimCleanupPolicy(t *testing.T) {
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-template", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+	}
+
+	createClaim := func(name string, policy extensionsv1alpha1.ShutdownPolicy) *extensionsv1alpha1.SandboxClaim {
+		pastTime := metav1.Time{Time: time.Now().Add(-2 * time.Hour).Truncate(time.Second)}
+		return &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name)},
+			Spec: extensionsv1alpha1.SandboxClaimSpec{
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "cleanup-template"},
+				Lifecycle: &extensionsv1alpha1.Lifecycle{
+					ShutdownPolicy: policy,
+					ShutdownTime:   &pastTime,
+				},
+			},
+		}
+	}
+
+	// Helper to create a Sandbox.
+	// If isExpired is false, it simulates a Running sandbox (testing the race condition fix).
+	createSandbox := func(claimName string, isExpired bool) *sandboxv1alpha1.Sandbox {
+		reason := "SandboxReady"
+		status := metav1.ConditionTrue
+		if isExpired {
+			reason = "SandboxExpired"
+			status = metav1.ConditionFalse
+		}
+
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claimName,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{
+					{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: ptr.To(true)},
+				},
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(sandboxv1alpha1.SandboxConditionReady),
+						Status: status,
+						Reason: reason,
+					},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name               string
+		claim              *extensionsv1alpha1.SandboxClaim
+		sandboxIsExpired   bool // If false, Sandbox is still Running
+		expectClaimDeleted bool
+		expectStatus       string
+	}{
+		{
+			name:               "Policy=Retain -> Should Retain Claim even if time passed",
+			claim:              createClaim("retain-claim", extensionsv1alpha1.ShutdownPolicyRetain),
+			sandboxIsExpired:   true,
+			expectClaimDeleted: false,
+			expectStatus:       extensionsv1alpha1.ClaimExpiredReason,
+		},
+		{
+			name:               "Policy=Delete && Sandbox Expired -> Should Delete Claim",
+			claim:              createClaim("delete-claim-synced", extensionsv1alpha1.ShutdownPolicyDelete),
+			sandboxIsExpired:   true,
+			expectClaimDeleted: true,
+			expectStatus:       "",
+		},
+		{
+			name:               "Policy=Delete && Sandbox Running -> Should Delete Claim immediately (Fix Race Condition)",
+			claim:              createClaim("delete-claim-race", extensionsv1alpha1.ShutdownPolicyDelete),
+			sandboxIsExpired:   false, // Sandbox is still running!
+			expectClaimDeleted: true,  // But Claim should delete itself anyway
+			expectStatus:       "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			sandbox := createSandbox(tc.claim.Name, tc.sandboxIsExpired)
+			client := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(template, tc.claim, sandbox).
+				WithStatusSubresource(tc.claim).Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:   client,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: "default"}}
+			_, err := reconciler.Reconcile(context.Background(), req)
+			if err != nil {
+				t.Fatalf("reconcile failed: %v", err)
+			}
+
+			var fetchedClaim extensionsv1alpha1.SandboxClaim
+			err = client.Get(context.Background(), req.NamespacedName, &fetchedClaim)
+
+			if tc.expectClaimDeleted {
+				if !k8errors.IsNotFound(err) {
+					t.Errorf("Expected Claim to be deleted, but it still exists")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected Claim to exist, but got error: %v", err)
+				}
+				// Verify Status Message for Retained Claims
+				foundReason := false
+				for _, cond := range fetchedClaim.Status.Conditions {
+					if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Reason == tc.expectStatus {
+						foundReason = true
+					}
+				}
+				if !foundReason {
+					t.Errorf("Expected status reason %q, but not found", tc.expectStatus)
+				}
+			}
+		})
+	}
+}
+
+// TestSandboxRevivalAndEvents verifies:
+// 1. Sandbox creation emits "SandboxProvisioned"
+// 2. Updating Claim Lifecycle triggers a Sandbox Update (Sync)
+func TestSandboxRevivalAndEvents(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "revival-claim"
+
+	initialTime := metav1.Time{Time: time.Now().Add(1 * time.Hour).Truncate(time.Second)}
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			Lifecycle: &extensionsv1alpha1.Lifecycle{
+				ShutdownPolicy: extensionsv1alpha1.ShutdownPolicyRetain,
+				ShutdownTime:   &initialTime,
+			},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+	}
+
+	fakeRecorder := record.NewFakeRecorder(10)
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, template).
+		WithStatusSubresource(claim).Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   client,
+		Scheme:   scheme,
+		Recorder: fakeRecorder,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile 1 failed: %v", err)
+	}
+
+	// Verify 'SandboxProvisioned' Event
+	expectedMsg := fmt.Sprintf("Normal SandboxProvisioned Created Sandbox %q", claimName)
+	foundProvisionEvent := false
+	// Drain the channel
+Loop:
+	for {
+		select {
+		case event := <-fakeRecorder.Events:
+			if event == expectedMsg {
+				foundProvisionEvent = true
+				break Loop
+			}
+		default:
+			break Loop
+		}
+	}
+	if !foundProvisionEvent {
+		t.Errorf("Phase 1: Expected event %q not found", expectedMsg)
+	}
+
+	// Update Claim with new time
+	var currentClaim extensionsv1alpha1.SandboxClaim
+	if err := client.Get(context.Background(), req.NamespacedName, &currentClaim); err != nil {
+		t.Fatalf("Failed to fetch claim: %v", err)
+	}
+	extendedTime := metav1.Time{Time: time.Now().Add(5 * time.Hour).Truncate(time.Second)}
+	currentClaim.Spec.Lifecycle.ShutdownTime = &extendedTime
+	if err := client.Update(context.Background(), &currentClaim); err != nil {
+		t.Fatalf("Failed to update claim time: %v", err)
+	}
+
+	// Reconcile again (should trigger update/sync)
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile 2 failed: %v", err)
+	}
+
+	// Verify Sandbox was updated
+	var currentSandbox sandboxv1alpha1.Sandbox
+	if err := client.Get(context.Background(), req.NamespacedName, &currentSandbox); err != nil {
+		t.Fatalf("Failed to fetch sandbox: %v", err)
+	}
+
+	// Assert the Sandbox spec matches the new claim time
+	if diff := cmp.Diff(currentSandbox.Spec.ShutdownTime, &extendedTime); diff != "" {
+		t.Errorf("Phase 2: Sandbox ShutdownTime was not synced:\n%s", diff)
 	}
 }
 
@@ -571,8 +919,9 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				Build()
 
 			reconciler := &SandboxClaimReconciler{
-				Client: client,
-				Scheme: scheme,
+				Client:   client,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(10),
 			}
 
 			req := reconcile.Request{

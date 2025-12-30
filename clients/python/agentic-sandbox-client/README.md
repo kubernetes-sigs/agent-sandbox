@@ -81,7 +81,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     install with the optional tracing dependencies:
 
     ```
-    pip install -e .[tracing]
+    pip install -e ".[tracing]"
     ```
 
 ## Usage Examples

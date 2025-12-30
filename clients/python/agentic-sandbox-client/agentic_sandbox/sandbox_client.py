@@ -32,7 +32,9 @@ from urllib3.util.retry import Retry
 from kubernetes import client, config, watch
 
 # Import all tracing components from the trace_manager module
-from .trace_manager import initialize_tracer, TracerManager, trace_span, trace, propagate, OPENTELEMETRY_AVAILABLE
+from .trace_manager import (
+    initialize_tracer, TracerManager, trace_span, trace, OPENTELEMETRY_AVAILABLE
+)
 
 # Constants for API Groups and Resources
 GATEWAY_API_GROUP = "gateway.networking.k8s.io"
@@ -327,10 +329,7 @@ class SandboxClient:
         # https://github.com/open-telemetry/opentelemetry-python/issues/2787
         if self.tracing_manager:
             self.tracing_manager.start_lifecycle_span()
-            if propagate:
-                carrier = {}
-                propagate.inject(carrier)
-                trace_context_str = json.dumps(carrier)
+            trace_context_str = self.tracing_manager.get_trace_context_json()
 
         self._create_claim(trace_context_str)
         self._wait_for_sandbox_ready()

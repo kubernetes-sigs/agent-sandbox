@@ -18,20 +18,22 @@ span creation, and context propagation. If OpenTelemetry is not installed, it
 falls back to no-op mock objects.
 """
 
-import functools
-import logging
 import atexit
+import functools
+import json
+import logging
 import threading
 from contextlib import nullcontext
 
 # If optional dependency OpenTelemetry is not installed, define a complete set of mock objects
 # to prevent runtime errors.
 try:
-    from opentelemetry import trace, propagate, context
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry import trace, context
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
     OPENTELEMETRY_AVAILABLE = True
 except ImportError:
     OPENTELEMETRY_AVAILABLE = False
@@ -80,10 +82,10 @@ except ImportError:
         def set_span_in_context(span, context=None):
             """Mock set_span_in_context."""
 
-    class PropagateStub:
-        """Mock class for OpenTelemetry propagate module."""
-        @staticmethod
-        def inject(*args, **kwargs):
+    class TraceContextTextMapPropagator:
+        """Mock class for OpenTelemetry TraceContextTextMapPropagator."""
+
+        def inject(self, carrier, context=None, setter=None):
             """Mock inject."""
 
     class ContextStub:
@@ -98,7 +100,6 @@ except ImportError:
 
     # Assign mock stubs to match import names
     trace = TraceStub
-    propagate = PropagateStub
     context = ContextStub
 
 # --- Global state for the singleton TracerProvider ---
@@ -203,6 +204,7 @@ class TracerManager:
         self.lifecycle_span_name = f"{service_name}.lifecycle"
         self.parent_span = None
         self.context_token = None
+        self.propagator = TraceContextTextMapPropagator()
 
     def start_lifecycle_span(self):
         """Starts the main parent span for the client's lifecycle."""
@@ -219,3 +221,9 @@ class TracerManager:
             context.detach(self.context_token)
         if self.parent_span:
             self.parent_span.end()
+
+    def get_trace_context_json(self) -> str:
+        """Captures only traceparent and tracestate (excludes baggage)."""
+        carrier = {}
+        self.propagator.inject(carrier)
+        return json.dumps(carrier) if carrier else ""

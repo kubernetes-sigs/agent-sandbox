@@ -41,7 +41,6 @@ def main():
     if result.returncode != 0:
         return result.returncode
     result = subprocess.run([f"{repo_root}/dev/tools/test-e2e", "--image-prefix", "kind.local/"])
-    subprocess.run(["killall", "cloud-provider-kind"])
 
     # Always create junit file whether tests pass or fail
     artifact_dir = os.getenv("ARTIFACTS")

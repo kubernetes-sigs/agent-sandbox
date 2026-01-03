@@ -8,6 +8,7 @@ fix-go-generate:
 .PHONY: build
 build:
 	go build -o bin/manager cmd/agent-sandbox-controller/main.go
+	go build -o bin/router cmd/sandbox-router/main.go
 
 KIND_CLUSTER=agent-sandbox
 

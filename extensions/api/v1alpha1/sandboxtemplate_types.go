@@ -72,6 +72,7 @@ type SandboxTemplateSpec struct {
 type SandboxTemplateStatus struct {
 }
 
+// +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate

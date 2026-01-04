@@ -91,6 +91,7 @@ type SandboxStatus struct {
 	Name string `json:"Name,omitempty"`
 }
 
+// +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim

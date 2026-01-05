@@ -15,12 +15,14 @@ This document describes how to build a simple "Hello World" Docker image, push i
 
 Please replace the placeholder values below with your actual environment details:
 
-*   **USERNAME:** `someuser` (Example)
-*   **LOCATION:** `us-central1` (e.g., your Artifact Registry region)
-*   **PROJECT:** `someuser-project` (Your GCP Project ID)
-*   **REPOSITORY:** `someuser-repository` (Your Artifact Registry repository name)
-*   **IMAGE_NAME:** `hello-world`
-*   **IMAGE_TAG:** `latest`
+```bash
+export USERNAME=someuser # Replace with your username
+export LOCATION=us-central1 # Replace with your Artifact Registry region
+export PROJECT=someuser-project # Replace with your GCP Project ID
+export REPOSITORY=someuser-repository # Replace with your Artifact Registry repository name
+export IMAGE_NAME=hello-world # Replace with your Docker image name
+export IMAGE_TAG=latest # Replace with your Docker image tag
+```
 
 ## Files
 
@@ -34,83 +36,55 @@ Open a terminal in the directory containing the Dockerfile.
 
 ```bash
 # Build the image:
-# Example: 
-#docker build -t shrutinair-hello-world .
-docker build -t {USERNAME}-{IMAGE_NAME} .
+docker build -t ${USERNAME}-${IMAGE_NAME} .
 
 # Run the image:
-# Example:
-#docker run --rm shrutinair-hello-world
-docker run --rm {USERNAME}-{IMAGE_NAME}
+docker run --rm ${USERNAME}-${IMAGE_NAME}
 ```
 
 **2. Configure Docker Authentication for Artifact Registry**
 
 ```bash
-# Example:
-# gcloud auth configure-docker us-central1-docker.pkg.dev
-gcloud auth configure-docker {LOCATION}-docker.pkg.dev
+gcloud auth configure-docker ${LOCATION}-docker.pkg.dev
 ```
 
 **3. Tag and Push the Image to Artifact Registry**  
 
 ```bash
 # Tag the image with a version.
-# Example: 
-# docker tag shrutinair-hello-world us-central1-docker.pkg.dev/shruti-test-agent-sandbox/shrutinair-repository/hello-world:latest
-docker tag {USERNAME}-{IMAGE_NAME} {LOCATION}-docker.pkg.dev/{PROJECT}/{REPOSITORY}/{IMAGE_NAME}:{IMAGE_TAG}
+docker tag ${USERNAME}-${IMAGE_NAME} ${LOCATION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}
 
 # Push the image to Artifact Registry.
-# Example:
-# docker push us-central1-docker.pkg.dev/shruti-test-agent-sandbox/shrutinair-repository/hello-world:v1
-docker push {LOCATION}-docker.pkg.dev/{PROJECT}/{REPOSITORY}/{IMAGE_NAME}:{IMAGE_TAG}
-```
-**4. Update the image path in `hello-world.yaml` with your configuration**
-
-```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
-kind: Sandbox
-metadata:
-  name: shrutinair-hello-world # Replaced {USERNAME}
-spec:
-  podTemplate:
-    spec:
-      containers:
-      - name: my-container
-        # Replace placeholders with your Artifact Registry details
-        image: us-central1-docker.pkg.dev/shruti-test-agent-sandbox/shrutinair-repository/hello-world:latest
-      restartPolicy: Never
+docker push ${LOCATION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}
 ```
 
 **5. Deploy to Kubernetes**
 Ensure your kubectl context is pointing to the correct cluster. Apply the manifest:
 
 ```bash
-kubectl apply -f hello-world.yaml
+cat hello-world.yaml | envsubst | kubectl apply -f -
 ```
-This will create a Sandbox resource named `{USERNAME}-hello-world`. The Sandbox controller will then provision the underlying Pod.
+This will create a Sandbox resource named `hello-world`. The Sandbox controller will then provision the underlying Pod.
 
 **6. Check Sandbox status**
 
 ```bash
-# 
-kubectl get sandbox shrutinair-hello-world
+# Get Sandbox Status
+kubectl get sandbox hello-world
 
-# Find the Pod: The Sandbox controller likely creates a Pod. 
-# The naming convention depends on the controller's implementation. Look for pods related to your sandbox:
+# Find all the running pods
 kubectl get pods
 
-# Look for a pod name possibly prefixed with shrutinair-hello-world.
-# Check Pod Status: Once you identify the pod name (e.g., shrutinair-hello-world-xxxxx):
-kubectl describe pod <POD_NAME>
+# Look for the pod which was created
+kubectl describe pod hello-world
 
 ```
 
 **6. Verify Container Logs**
 
-```
+```bash
 # Get Logs: While the pod is running or after it has completed:
-kubectl logs <POD_NAME> -c my-container
+kubectl logs hello-world -c my-container
 ```
 
 You should see the output: `Hello, World from Kubernetes!`

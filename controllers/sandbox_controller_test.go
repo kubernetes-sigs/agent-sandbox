@@ -205,11 +205,13 @@ func TestReconcile(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"
 	testCases := []struct {
-		name        string
-		initialObjs []runtime.Object
-		sandboxSpec sandboxv1alpha1.SandboxSpec
-		wantStatus  sandboxv1alpha1.SandboxStatus
-		wantObjs    []client.Object
+		name                 string
+		initialObjs          []runtime.Object
+		sandboxSpec          sandboxv1alpha1.SandboxSpec
+		wantStatus           sandboxv1alpha1.SandboxStatus
+		wantObjs             []client.Object
+		wantDeletedObjs      []client.Object
+		expectSandboxDeleted bool
 	}{
 		{
 			name: "minimal sandbox spec with Pod and Service",
@@ -406,6 +408,91 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "sandbox expired with retain policy",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
+			wantDeletedObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "sandbox expired with delete policy",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyDelete),
+				},
+			},
+			wantDeletedObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+			expectSandboxDeleted: true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -427,14 +514,19 @@ func TestReconcile(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			// Validate Sandbox status
+			// Validate Sandbox status or deletion
 			liveSandbox := &sandboxv1alpha1.Sandbox{}
-			require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, liveSandbox))
-			opts := []cmp.Option{
-				cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
-			}
-			if diff := cmp.Diff(tc.wantStatus, liveSandbox.Status, opts...); diff != "" {
-				t.Fatalf("unexpected sandbox status (-want,+got):\n%s", diff)
+			err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, liveSandbox)
+			if tc.expectSandboxDeleted {
+				require.True(t, k8serrors.IsNotFound(err))
+			} else {
+				require.NoError(t, err)
+				opts := []cmp.Option{
+					cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
+				}
+				if diff := cmp.Diff(tc.wantStatus, liveSandbox.Status, opts...); diff != "" {
+					t.Fatalf("unexpected sandbox status (-want,+got):\n%s", diff)
+				}
 			}
 			// Validate the other objects from the "cluster" (fake client)
 			for _, obj := range tc.wantObjs {
@@ -442,6 +534,11 @@ func TestReconcile(t *testing.T) {
 				err = r.Get(t.Context(), types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, liveObj)
 				require.NoError(t, err)
 				require.Equal(t, obj, liveObj)
+			}
+			for _, obj := range tc.wantDeletedObjs {
+				liveObj := obj.DeepCopyObject().(client.Object)
+				err = r.Get(t.Context(), types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, liveObj)
+				require.True(t, k8serrors.IsNotFound(err))
 			}
 		})
 	}
@@ -808,10 +905,11 @@ func TestReconcilePod(t *testing.T) {
 
 func TestSandboxExpiry(t *testing.T) {
 	testCases := []struct {
-		name         string
-		shutdownTime *metav1.Time
-		wantExpired  bool
-		wantRequeue  bool
+		name           string
+		shutdownTime   *metav1.Time
+		deletionPolicy sandboxv1alpha1.ShutdownPolicy
+		wantExpired    bool
+		wantRequeue    bool
 	}{
 		{
 			name:         "nil shutdown time",
@@ -826,16 +924,27 @@ func TestSandboxExpiry(t *testing.T) {
 			wantRequeue:  true,
 		},
 		{
-			name:         "shutdown time in past",
-			shutdownTime: ptr.To(metav1.NewTime(time.Now().Add(-10 * time.Second))),
-			wantExpired:  true,
-			wantRequeue:  false,
+			name:           "shutdown time in past - retain",
+			shutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-10 * time.Second))),
+			deletionPolicy: sandboxv1alpha1.ShutdownPolicyRetain,
+			wantExpired:    true,
+			wantRequeue:    false,
+		},
+		{
+			name:           "shutdown time in past - delete",
+			shutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Minute))),
+			deletionPolicy: sandboxv1alpha1.ShutdownPolicyDelete,
+			wantExpired:    true,
+			wantRequeue:    false,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			sandbox := &sandboxv1alpha1.Sandbox{}
 			sandbox.Spec.ShutdownTime = tc.shutdownTime
+			if tc.deletionPolicy != "" {
+				sandbox.Spec.ShutdownPolicy = ptr.To(tc.deletionPolicy)
+			}
 			expired, requeueAfter := checkSandboxExpiry(sandbox)
 			require.Equal(t, tc.wantExpired, expired)
 			if tc.wantRequeue {

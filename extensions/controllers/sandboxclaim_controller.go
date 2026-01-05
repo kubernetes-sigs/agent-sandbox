@@ -22,11 +22,13 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -36,6 +38,11 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+)
+
+// TODO: These constants should be imported from the main controller package Issue #216
+const (
+	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -52,6 +59,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -76,6 +84,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Try getting template
 	if template, err = r.getTemplate(ctx, claim); err == nil || k8errors.IsNotFound(err) {
+		// This ensures the firewall is up before the pod starts.
+		if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile network policy: %w", npErr)
+		}
+
 		// Try getting sandbox even if template is not found
 		// It is possible that the template was deleted after the sandbox was created
 		sandbox, err = r.getOrCreateSandbox(ctx, claim, template)
@@ -131,7 +144,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 		return readyCondition
 	}
 
-	// Sanbox should be non-nil if err is nil
+	// Sandbox should be non-nil if err is nil
 	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == string(sandboxv1alpha1.SandboxConditionReady) {
 			if condition.Status == metav1.ConditionTrue {
@@ -176,17 +189,18 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		return nil, err
 	}
 
-	// Filter out pods that are being deleted or already have a different controller
-	filteredPods := make([]corev1.Pod, 0, len(podList.Items))
-	for _, pod := range podList.Items {
+	// Filter pods and create a slice of pointers for sorting
+	candidates := make([]*corev1.Pod, 0, len(podList.Items))
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+
 		// Skip pods that are being deleted
 		if !pod.DeletionTimestamp.IsZero() {
 			continue
 		}
 
 		// Skip pods that already have a different controller
-		controllerRef := metav1.GetControllerOf(&pod)
-		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+		if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 			log.Info("Ignoring pod with different controller, but this shouldn't happen because this pod shouldn't have template ref label",
 				"pod", pod.Name,
 				"controller", controllerRef.Name,
@@ -194,22 +208,19 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 			continue
 		}
 
-		filteredPods = append(filteredPods, pod)
+		candidates = append(candidates, pod)
 	}
-	podList.Items = filteredPods
 
-	if len(podList.Items) == 0 {
+	if len(candidates) == 0 {
 		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
 		return nil, nil
 	}
 
-	// Sort pods by creation timestamp (oldest first)
-	sort.Slice(podList.Items, func(i, j int) bool {
-		return podList.Items[i].CreationTimestamp.Before(&podList.Items[j].CreationTimestamp)
-	})
+	// Sort pods using podutils.ByLogging to select the best available pod.
+	sort.Sort(podutils.ByLogging(candidates))
 
 	// Get the first available pod
-	pod := &podList.Items[0]
+	pod := candidates[0]
 	log.Info("Adopting pod from warm pool", "pod", pod.Name)
 
 	// Remove the pool labels
@@ -218,6 +229,17 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	// Remove existing owner references (from SandboxWarmPool)
 	pod.OwnerReferences = nil
+
+	nameHash := sandboxcontrollers.NameHash(claim.Name)
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+
+	pod.Labels[sandboxLabel] = nameHash
+
+	// Label required by NetworkPolicy
+	// We add the new label with the Claim UID for unique targeting.
+	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
@@ -256,6 +278,10 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		automount := false
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
+	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
+		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+	}
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
@@ -340,4 +366,67 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&sandboxv1alpha1.Sandbox{}).
 		Complete(r)
+}
+
+// reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.
+func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
+	logger := log.FromContext(ctx)
+
+	// 1. Cleanup Check: If missing, delete existing policy
+	if template == nil || template.Spec.NetworkPolicy == nil {
+		existingNP := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claim.Name + "-network-policy",
+				Namespace: claim.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, existingNP); err != nil {
+			if !k8errors.IsNotFound(err) {
+				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
+				return err
+			}
+		} else {
+			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
+		}
+		return nil
+	}
+
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claim.Name + "-network-policy",
+			Namespace: claim.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		np.Spec.PodSelector = metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
+			},
+		}
+		np.Spec.PolicyTypes = []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeEgress,
+		}
+
+		templateNP := template.Spec.NetworkPolicy
+
+		if len(templateNP.Ingress) > 0 {
+			np.Spec.Ingress = templateNP.Ingress
+		}
+
+		if len(templateNP.Egress) > 0 {
+			np.Spec.Egress = templateNP.Egress
+		}
+
+		return controllerutil.SetControllerReference(claim, np, r.Scheme)
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
+		return err
+	}
+
+	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
+	return nil
 }

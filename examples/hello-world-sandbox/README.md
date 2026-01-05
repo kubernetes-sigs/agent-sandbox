@@ -4,9 +4,9 @@ This document describes how to build a simple "Hello World" Docker image, push i
 
 ## Prerequisites
 
-1.  **Docker:** Docker installed and running on your local machine. See `go/docker`.
-2.  **gcloud CLI:** Google Cloud SDK installed and configured. See `go/gcloud-cli`.
-3.  **kubectl:** Kubernetes command-line tool installed. See `go/kubectl`.
+1.  **Docker:** Docker installed and running on your local machine.
+2.  **gcloud CLI:** Google Cloud SDK installed and configured.
+3.  **kubectl:** Kubernetes command-line tool installed.
 4.  **Google Cloud Project:** A GCP project with Artifact Registry API enabled.
 5.  **Artifact Registry Repository:** A Docker repository created in Artifact Registry.
 6.  **Kubernetes Cluster:** Access to a Kubernetes cluster where you have permissions to deploy resources.
@@ -15,10 +15,10 @@ This document describes how to build a simple "Hello World" Docker image, push i
 
 Please replace the placeholder values below with your actual environment details:
 
-*   **USERNAME:** `shrutinair` (Example)
+*   **USERNAME:** `someuser` (Example)
 *   **LOCATION:** `us-central1` (e.g., your Artifact Registry region)
-*   **PROJECT:** `shruti-test-agent-sandbox` (Your GCP Project ID)
-*   **REPOSITORY:** `shrutinair-repository` (Your Artifact Registry repository name)
+*   **PROJECT:** `someuser-project` (Your GCP Project ID)
+*   **REPOSITORY:** `someuser-repository` (Your Artifact Registry repository name)
 *   **IMAGE_NAME:** `hello-world`
 *   **IMAGE_TAG:** `latest`
 

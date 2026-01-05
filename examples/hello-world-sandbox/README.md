@@ -58,15 +58,16 @@ docker tag ${USERNAME}-${IMAGE_NAME} ${LOCATION}-docker.pkg.dev/${PROJECT}/${REP
 docker push ${LOCATION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}
 ```
 
-**5. Deploy to Kubernetes**
+**4. Deploy to Kubernetes**
 Ensure your kubectl context is pointing to the correct cluster. Apply the manifest:
 
 ```bash
 cat hello-world.yaml | envsubst | kubectl apply -f -
 ```
+
 This will create a Sandbox resource named `hello-world`. The Sandbox controller will then provision the underlying Pod.
 
-**6. Check Sandbox status**
+**5. Check Sandbox status**
 
 ```bash
 # Get Sandbox Status
@@ -77,7 +78,6 @@ kubectl get pods
 
 # Look for the pod which was created
 kubectl describe pod hello-world
-
 ```
 
 **6. Verify Container Logs**

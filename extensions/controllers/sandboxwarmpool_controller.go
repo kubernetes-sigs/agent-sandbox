@@ -48,6 +48,7 @@ type SandboxWarmPoolReconciler struct {
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the reconciliation loop for SandboxWarmPool
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -211,7 +212,7 @@ func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *exte
 	return r.Update(ctx, pod)
 }
 
-// createPoolPod creates a new pod for the warm pool
+// createPoolPod creates a new pod for the warm pool, along with any required PVCs
 func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) error {
 	log := log.FromContext(ctx)
 
@@ -238,18 +239,72 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		podAnnotations[k] = v
 	}
 
+	// Generate a unique suffix for this pod instance
+	podSuffix := sandboxcontrollers.RandomSuffix(5)
+	podName := fmt.Sprintf("%s-%s", warmPool.Name, podSuffix)
+
+	// Create PVCs from volumeClaimTemplates
+	var pvcVolumes []corev1.Volume
+	for _, vctTemplate := range template.Spec.VolumeClaimTemplates {
+		pvcName := fmt.Sprintf("%s-%s", vctTemplate.Name, podName)
+
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        pvcName,
+				Namespace:   warmPool.Namespace,
+				Labels:      podLabels,
+				Annotations: vctTemplate.Annotations,
+			},
+			Spec: vctTemplate.Spec,
+		}
+
+		// Copy labels from template
+		if pvc.Labels == nil {
+			pvc.Labels = make(map[string]string)
+		}
+		for k, v := range vctTemplate.Labels {
+			pvc.Labels[k] = v
+		}
+
+		// Set controller reference so the PVC is owned by the SandboxWarmPool
+		if err := ctrl.SetControllerReference(warmPool, pvc, r.Client.Scheme()); err != nil {
+			return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+		}
+
+		// Create the PVC
+		if err := r.Create(ctx, pvc); err != nil {
+			if !k8serrors.IsAlreadyExists(err) {
+				log.Error(err, "Failed to create PVC", "pvc", pvcName)
+				return err
+			}
+		} else {
+			log.Info("Created PVC for warm pool pod", "pvc", pvcName)
+		}
+
+		// Add volume reference for pod spec
+		pvcVolumes = append(pvcVolumes, corev1.Volume{
+			Name: vctTemplate.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				},
+			},
+		})
+	}
+
 	// Create the pod
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: fmt.Sprintf("%s-", warmPool.Name),
-			Namespace:    warmPool.Namespace,
-			Labels:       podLabels,
-			Annotations:  podAnnotations,
+			Name:        podName,
+			Namespace:   warmPool.Namespace,
+			Labels:      podLabels,
+			Annotations: podAnnotations,
 		},
-		Spec: template.Spec.PodTemplate.Spec,
+		Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
 	}
 
-	// pod.Labels[podNameLabel] = sandboxcontrollers.NameHash(pod.Name)
+	// Add PVC volumes to pod spec
+	pod.Spec.Volumes = append(pod.Spec.Volumes, pvcVolumes...)
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {
@@ -306,5 +361,6 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxWarmPool{}).
 		Owns(&corev1.Pod{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Complete(r)
 }

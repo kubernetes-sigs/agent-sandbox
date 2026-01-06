@@ -280,6 +280,20 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", hashValue)
 }
 
+// RandomSuffix generates a random alphanumeric string of the given length.
+// Used for generating unique names for resources like PVCs.
+func RandomSuffix(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		// Use hash of current time + index for pseudo-randomness
+		h := fnv.New32a()
+		h.Write([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), i)))
+		b[i] = charset[h.Sum32()%uint32(len(charset))]
+	}
+	return string(b)
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	service := &corev1.Service{}

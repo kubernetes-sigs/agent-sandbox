@@ -167,7 +167,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	var allErrors error
 
-	// Reconcile PVCs
+	// Reconcile PVCs from volumeClaimTemplates
 	err := r.reconcilePVCs(ctx, sandbox)
 	allErrors = errors.Join(allErrors, err)
 
@@ -180,6 +180,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	} else {
 		sandbox.Status.Replicas = 1
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+
+		// Adopt any orphaned PVCs that the pod uses (e.g., from warm pool adoption).
+		// This ensures PVCs are owned by the sandbox and cleaned up on deletion.
+		err = r.adoptPodPVCs(ctx, sandbox, pod)
+		allErrors = errors.Join(allErrors, err)
 	}
 
 	// Reconcile Service
@@ -545,6 +550,57 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			return err
 		}
 	}
+	return nil
+}
+
+// adoptPodPVCs adopts orphaned PVCs that the pod uses.
+// This is needed when a pod is adopted from a warm pool - the PVCs were released
+// from the warm pool's ownership and need to be claimed by the sandbox so they
+// are properly cleaned up when the sandbox is deleted.
+func (r *SandboxReconciler) adoptPodPVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, pod *corev1.Pod) error {
+	log := log.FromContext(ctx)
+
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+
+		pvcName := volume.PersistentVolumeClaim.ClaimName
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc); err != nil {
+			if k8serrors.IsNotFound(err) {
+				// PVC doesn't exist - this is fine, reconcilePVCs will create it if needed
+				continue
+			}
+			return fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
+		}
+
+		// Check if PVC already has an owner
+		if controllerRef := metav1.GetControllerOf(pvc); controllerRef != nil {
+			// Already owned - check if it's us
+			if controllerRef.UID == sandbox.UID {
+				// Already owned by this sandbox
+				continue
+			}
+			// Owned by something else - skip
+			log.Info("PVC already owned by another controller, skipping adoption",
+				"pvc", pvcName,
+				"owner", controllerRef.Name,
+				"ownerKind", controllerRef.Kind)
+			continue
+		}
+
+		// PVC is orphaned - adopt it
+		log.Info("Adopting orphaned PVC", "pvc", pvcName, "sandbox", sandbox.Name)
+		if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+			return fmt.Errorf("failed to set controller reference for PVC %s: %w", pvcName, err)
+		}
+		if err := r.Update(ctx, pvc); err != nil {
+			return fmt.Errorf("failed to update PVC %s: %w", pvcName, err)
+		}
+		log.Info("Successfully adopted PVC", "pvc", pvcName, "sandbox", sandbox.Name)
+	}
+
 	return nil
 }
 

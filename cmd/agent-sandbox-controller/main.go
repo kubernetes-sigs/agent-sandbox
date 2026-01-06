@@ -32,6 +32,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"sigs.k8s.io/agent-sandbox/controllers"
+	asmetrics "sigs.k8s.io/agent-sandbox/metrics"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	//+kubebuilder:scaffold:imports
@@ -46,6 +47,7 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var extensions bool
+	var enableTracing bool
 	var enablePprof bool
 	var enablePprofDebug bool
 	var pprofBlockProfileRate int
@@ -56,6 +58,7 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&extensions, "extensions", false, "Enable extensions controllers.")
+	flag.BoolVar(&enableTracing, "enable-tracing", false, "Enable OpenTelemetry tracing via OTLP.")
 	flag.BoolVar(&enablePprof, "enable-pprof", false,
 		"Enable CPU profiling endpoint (/debug/pprof/profile) on the metrics server.")
 	flag.BoolVar(&enablePprofDebug, "enable-pprof-debug", false,
@@ -74,6 +77,21 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctx := ctrl.SetupSignalHandler()
+
+	// Initialize Tracing Provider
+	var instrumenter asmetrics.Instrumenter = asmetrics.NewNoOp()
+	if enableTracing {
+		var cleanup func()
+		var err error
+		// Reuse the captured ctx here
+		instrumenter, cleanup, err = asmetrics.SetupOTel(ctx, "agent-sandbox-controller")
+		if err != nil {
+			setupLog.Error(err, "unable to initialize tracing")
+			os.Exit(1)
+		}
+		defer cleanup()
+	}
 
 	// Importing net/http/pprof registers handlers on the global DefaultServeMux.
 	// Reset it to avoid accidentally exposing pprof via any server that uses the default mux.
@@ -135,6 +153,7 @@ func main() {
 	if err = (&controllers.SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Tracer: instrumenter,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
@@ -145,6 +164,7 @@ func main() {
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
+			Tracer: instrumenter,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
@@ -170,7 +190,7 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

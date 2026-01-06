@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/metrics"
 )
 
 const (
@@ -60,6 +61,7 @@ func init() {
 type SandboxReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	Tracer asmetrics.Instrumenter
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -89,6 +91,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	// Start Tracing Span
+	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox")
+	defer end()
+
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.ObjectMeta.DeletionTimestamp.IsZero() {
 		log.Info("Sandbox is being deleted")
@@ -101,6 +107,21 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// Note: The sandbox won't be deleted if shutdown policy is changed to delete after expiration.
 		//       To delete an expired sandbox, the user should delete the sandbox instead of updating it.
 		//       This keeps the controller code simple.
+		return ctrl.Result{}, nil
+	}
+
+	// Initialize trace ID for active resources missing an ID
+	if sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "" {
+		patch := client.MergeFrom(sandbox.DeepCopy())
+		if sandbox.Annotations == nil {
+			sandbox.Annotations = make(map[string]string)
+		}
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = r.Tracer.GetTraceContext(ctx)
+
+		if err := r.Patch(ctx, sandbox, patch); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Return to ensure the next loop uses the persisted ID
 		return ctrl.Result{}, nil
 	}
 
@@ -344,7 +365,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	// if replicas is 0, delete the pod if it exists
+	// 1. PATH: Logic for deleting Pod when replicas is 0
 	if *sandbox.Spec.Replicas == 0 {
 		if pod != nil {
 			if pod.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -372,6 +393,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, nil
 	}
 
+	// 2. PATH: Existing Pod found (e.g., adopted from Warm Pool or already exists)
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
@@ -379,6 +401,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			pod.Labels = make(map[string]string)
 		}
 		pod.Labels[sandboxLabel] = nameHash
+
+		// Copy trace context to existing Pod
+		if tc, ok := sandbox.Annotations[asmetrics.TraceContextAnnotation]; ok {
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			pod.Annotations[asmetrics.TraceContextAnnotation] = tc
+		}
 
 		// Set controller reference if the pod is not controlled by anything.
 		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
@@ -396,6 +426,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
+	// 3. PATH: Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
 		sandboxLabel: nameHash,
@@ -406,6 +437,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	annotations := map[string]string{}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 		annotations[k] = v
+	}
+
+	// Copy trace context to the new Pod annotations
+	if tc, ok := sandbox.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		annotations[asmetrics.TraceContextAnnotation] = tc
 	}
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()

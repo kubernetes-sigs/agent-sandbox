@@ -40,7 +40,7 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
-	asmetrics "sigs.k8s.io/agent-sandbox/metrics"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 // TODO: These constants should be imported from the main controller package Issue #216

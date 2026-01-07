@@ -32,9 +32,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"sigs.k8s.io/agent-sandbox/controllers"
-	asmetrics "sigs.k8s.io/agent-sandbox/metrics"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	//+kubebuilder:scaffold:imports
 )
 

@@ -38,7 +38,7 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
-	asmetrics "sigs.k8s.io/agent-sandbox/metrics"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func TestSandboxClaimReconcile(t *testing.T) {

@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	asmetrics "sigs.k8s.io/agent-sandbox/metrics"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {

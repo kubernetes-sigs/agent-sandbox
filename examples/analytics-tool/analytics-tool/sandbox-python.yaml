@@ -16,7 +16,7 @@ spec:
         fsGroup: 2000
       containers:
       - name: python-sandbox
-        image: us-docker.pkg.dev/<PROJECT_ID>/analytics/analytics-tool:1.0.0
+        image: us-docker.pkg.dev/$PROJECT_ID/analytics/analytics-tool:1.0.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888

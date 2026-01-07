@@ -9,7 +9,7 @@
 
 ## Deploy analytics tools
 
-In this section we will create our custom Docker image that defines analytics tool for an ADK agent. Then we will push it to our Artifact Registry repository and deploy from it. To do so, follow the steps below.
+This section describes how to build Docker image that defines analytics tool for an ADK agent, and push the Docker image to a Artifact Registry repository and deploy from it.
 
 Run the following commands:
 
@@ -17,7 +17,7 @@ Run the following commands:
 cd analytics-tool
 ```
 
-Run this command to create an Artifact Registry repository:
+Create a repository in Artifact Registry:
 
 ```bash
 gcloud artifacts repositories create analytics \
@@ -27,13 +27,13 @@ gcloud artifacts repositories create analytics \
     --description="Analytics Repo"
 ```
 
-And now we can create our analytics agent-sandbox tool:
+Create a repository in Artifact Registry.
 
 ```bash
 gcloud builds submit .
 ```
 
-After build is completed, we can change `<PROJECT_ID>` in `sandbox-python.yaml` and apply it:
+After build is completed, change `$PROJECT_ID` in `sandbox-python.yaml` and apply it:
 
 ```bash
 kubectl apply -f sandbox-python.yaml
@@ -42,23 +42,23 @@ kubectl apply -f analytics-svc.yaml
 
 ## Deploy jupyter lab
 
-Now we can deploy a jupyter lab to make some data analytics:
+Deploy a jupyter lab to make some data analytics:
 
 ```bash
 kubectl apply -f ../jupyterlab.yaml
 ```
 
-Once it's running, you can port-forward your jupyterlab and access on `http://127.0.0.1:8888` by running this command:
+Once it's running, port-forward the jupyterlab and access on `http://127.0.0.1:8888` by running this command:
 
 ```bash
 kubectl port-forward "pod/jupyterlab-sandbox" 8888:8888
 ```
 
-Now we can follow the `welcome.ipynb` notebook.
+Follow the `welcome.ipynb` notebook.
 
 ## Analytics example
 
-Open `welcome.ipynb` notebook. In the `Download the data` section you can review the dataset that will be used in our example. In the `Data analytics` you can see the actual data analytics. Here we define `analyze_movies` function with the `tool` decorator. Here in the docstring you can observe the instruction for the LLM how to use it. 
+In the `Download the data` is described the dataset that will be used in the example. In the `Data analytics` is described the actual data analytics. Function `analyze_movies` with the `tool` decorator is defined in this section. In the docstring is described the instruction for the LLM how to use it. 
 
 The example query looks like this:
 
@@ -66,7 +66,7 @@ The example query looks like this:
 Load /my-data/shopping_behavior_updated.csv. This data has 'Purchase Amount (USD)' column. Create a bar chart showing a sum of 'Purchase Amount (USD)' per column 'Location'.
 ```
 
-The agent will be able to generate code that will be executed in our agent-sandbox pod. For example, the code might look like this:
+The agent will be able to generate code that will be executed in the agent-sandbox pod. For example, the code might look like this:
 
 ```python
 import pandas as pd
@@ -97,7 +97,9 @@ img_str = base64.b64encode(buf.read()).decode('utf-8')
 print(f"<IMG>{img_str}</IMG>")
 ```
 
-As you can see, in the end the code prints an encoded image. Inside the tool definition we use the regex expression to extract this string, decode, and plot it.
+In the end the code prints an encoded image. Inside the tool definition the regex expression is used to extract this string, decode, and plot it.
+
+![](imgs/analytics-output.png)
 
 ## Cleanup
 

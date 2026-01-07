@@ -31,6 +31,9 @@ class ExecuteResponse(BaseModel):
     stderr: str
     exit_code: int
 
+
+ALLOWED_COMMANDS = {"ls", "echo", "cat", "grep", "pwd", "zip", "unzip", "mv", "curl", "python"}
+
 app = FastAPI(
     title="Agentic Sandbox Runtime",
     description="An API server for executing commands and managing files in a secure sandbox.",
@@ -49,27 +52,49 @@ async def execute_command(request: ExecuteRequest):
     Uses shlex.split for security to prevent shell injection.
     """
     try:
-        # Split the command string into a list to safely pass to subprocess
-        args = shlex.split(request.command)
-        
+        # Syntax Validation: shlex.split raises ValueError on malformed quotes
+        try:
+            args = shlex.split(request.command)
+        except ValueError as e:
+            return ExecuteResponse(
+                stdout="",
+                stderr=f"Malformed command syntax: {str(e)}",
+                exit_code=1
+            )
+        # Structural Validation: Ensure the command isn't empty
+        if not args:
+            return ExecuteResponse(
+                stdout="",
+                stderr="No command provided",
+                exit_code=1
+            )
+
+        # Security Validation: Check against an Allow-list
+        executable = args[0]
+        if executable not in ALLOWED_COMMANDS:
+            return ExecuteResponse(
+                stdout="",
+                stderr=f"Forbidden command: '{executable}'. Only {list(ALLOWED_COMMANDS)} are allowed.",
+                exit_code=1
+            )
+
         # Execute the command, always from the /app directory
         process = subprocess.run(
             args,
             capture_output=True,
             text=True,
-            cwd="/app" 
+            cwd="/app",
+            timeout=30,
         )
         return ExecuteResponse(
             stdout=process.stdout,
             stderr=process.stderr,
             exit_code=process.returncode
         )
+    except subprocess.TimeoutExpired:
+        return ExecuteResponse(stdout="", stderr="Command timed out", exit_code=124)
     except Exception as e:
-        return ExecuteResponse(
-            stdout="",
-            stderr=f"Failed to execute command: {str(e)}",
-            exit_code=1
-        )
+        return ExecuteResponse(stdout="", stderr=str(e), exit_code=1)
 
 @app.post("/upload", summary="Upload a file to the sandbox")
 async def upload_file(file: UploadFile = File(...)):
@@ -79,16 +104,16 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         logging.info(f"--- UPLOAD_FILE CALLED: Attempting to save '{file.filename}' ---")
         file_path = os.path.join("/app", file.filename)
-        
+
         with open(file_path, "wb") as f:
             f.write(await file.read())
-            
+
         return JSONResponse(
             status_code=200,
             content={"message": f"File '{file.filename}' uploaded successfully."}
         )
     except Exception as e:
-        logging.exception("An error occurred during file upload.") 
+        logging.exception("An error occurred during file upload.")
         return JSONResponse(
             status_code=500,
             content={"message": f"File upload failed: {str(e)}"}

@@ -49,9 +49,60 @@ kubectl apply -k overlays/gvisor
 Validate that the `Pod` with gVisor enabled is running:
 
 ```shell
-$ kubectl wait --for=condition=Ready sandbox sandbox-example
-$ kubectl get pods -o jsonpath=$'{range .items[*]}{.metadata.name}: {.spec.runtimeClassName}\n{end}'
+kubectl wait --for=condition=Ready sandbox sandbox-example
+kubectl get pods -o jsonpath=$'{range .items[*]}{.metadata.name}: {.spec.runtimeClassName}\n{end}'
 ```
+
+### Harden Agent Sandbox isolation using Kata Containers and Microsoft Hypervisor (MSHV) (Optional)
+
+Similarly to the gVisor scenario, there are scenarios where you may want to provide
+workload isolation for running untrusted workloads inside a sandbox.
+
+[AKS Sandbox](https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing)
+provides a hardware virtualization layer between the host operating system and the
+containerized workload via [CloudHypervisor](https://www.cloudhypervisor.org) and
+Microsoft Hypervisor (MSHV). There is no shared kernel between the host and the guest workload.
+
+This example demonstrates how to use `Sandbox` along with CloudHypervisor in order
+to utilize the lifecycle features of `Sandbox` alongside the hypervisor
+isolation features of CloudHypervisor + MSHV.
+
+#### Create a cluster with AKS Sandboxing enabled
+
+The scripts directory contains shell scripts for provisioning, applying, and
+cleaning up Azure Kubernetes cluster resources.
+
+From the [./scripts](./scripts/) directory, execute the following.
+
+```shell
+./az-provision.sh
+# either bake a new sandbox-router image or use the pre-baked ghcr.io/devigned/sandbox-router:latest
+./apply.sh --sandbox-router-image ghcr.io/devigned/sandbox-router:latest
+```
+
+The `./apply.sh` script applies resources needed for ease of use, but at the heart
+of it, it's simply the following:
+
+```shell
+kubectl apply -k ./overlays/kata-mshv
+```
+
+Which applies the overlay that includes the runtime class for Kata hypervisor
+isolation (MSHV).
+
+```yaml
+runtimeClassName: kata-vm-isolation
+```
+
+#### Delete the AKS Kubernetes cluster and kubeconfig
+
+Once you are done with your cluster, run the following command to deprovision
+all of the resources and delete the local kubeconfig file.
+
+```shell
+./az-cleanup.sh
+```
+
 ### Harden Agent Sandbox isolation using Kata Containers (Optional)
 
 #### Prerequisites

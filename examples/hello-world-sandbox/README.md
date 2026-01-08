@@ -20,8 +20,7 @@ export USERNAME=someuser # Replace with your username
 export LOCATION=us-central1 # Replace with your Artifact Registry region
 export PROJECT=someuser-project # Replace with your GCP Project ID
 export REPOSITORY=someuser-repository # Replace with your Artifact Registry repository name
-export IMAGE_NAME=hello-world # Replace with your Docker image name
-export IMAGE_TAG=latest # Replace with your Docker image tag
+export IMAGE=${LOCATION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/hello-world:latest # Replace with your Docker image name and tag
 ```
 
 ## Files
@@ -36,10 +35,10 @@ Open a terminal in the directory containing the Dockerfile.
 
 ```bash
 # Build the image:
-docker build -t ${USERNAME}-${IMAGE_NAME} .
+docker build -t ${IMAGE} .
 
 # Run the image:
-docker run --rm ${USERNAME}-${IMAGE_NAME}
+docker run --rm ${IMAGE}
 ```
 
 **2. Configure Docker Authentication for Artifact Registry**
@@ -51,11 +50,8 @@ gcloud auth configure-docker ${LOCATION}-docker.pkg.dev
 **3. Tag and Push the Image to Artifact Registry**  
 
 ```bash
-# Tag the image with a version.
-docker tag ${USERNAME}-${IMAGE_NAME} ${LOCATION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}
-
 # Push the image to Artifact Registry.
-docker push ${LOCATION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}
+docker push ${IMAGE}
 ```
 
 **4. Deploy to Kubernetes**
@@ -88,4 +84,3 @@ kubectl logs hello-world -c my-container
 ```
 
 You should see the output: `Hello, World from Kubernetes!`
-

@@ -7,5 +7,5 @@ spec:
     spec:
       containers:
       - name: my-container
-        image: ${LOCATION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}
+        image: ${IMAGE}
       restartPolicy: Never

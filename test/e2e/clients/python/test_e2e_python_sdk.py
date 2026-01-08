@@ -197,9 +197,9 @@ def test_python_sdk_gateway_mode_warmpool(
             gateway_name="kind-gateway",
             gateway_namespace=temp_namespace,
         ) as sandbox:
-            print("\n--- Running SDK tests without warmpool ---")
+            print("\n--- Running SDK tests with warmpool ---")
             run_sdk_tests(sandbox)
-            print("SDK test without warmpool passed!")
+            print("SDK test with warmpool passed!")
 
     except Exception as e:
-        pytest.fail(f"SDK test without warmpool failed: {e}")
+        pytest.fail(f"SDK test with warmpool failed: {e}")

@@ -158,7 +158,7 @@ class TestContext:
         min_ready: int = 1,
         timeout=DEFAULT_TIMEOUT_SECONDS,
     ):
-        """Waits for a Deployment to have required number of available replicas"""
+        """Waits for a Deployment to have at least min_ready available replicas"""
         if namespace is None:
             namespace = self.namespace
         if not namespace:
@@ -180,7 +180,7 @@ class TestContext:
         namespace: Optional[str] = None,
         timeout=DEFAULT_TIMEOUT_SECONDS,
     ):
-        """Waits for a SandboxWarmPool to have at least min_ready ready sandboxes"""
+        """Waits for a SandboxWarmPool to have all the required number ready sandboxes"""
         if namespace is None:
             namespace = self.namespace
         if not namespace:

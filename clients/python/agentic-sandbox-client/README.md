@@ -61,7 +61,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
     ```
 
-2.  **Option 2: Install from source in editable mode:**
+3.  **Option 2: Install from source in editable mode:**
 
     If you have not already done so, first clone this repository:
 
@@ -75,6 +75,13 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
 
     ```bash
     pip install -e .
+    ```
+
+    If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
+    install with the optional tracing dependencies:
+
+    ```
+    pip install -e ".[tracing]"
     ```
 
 ## Usage Examples

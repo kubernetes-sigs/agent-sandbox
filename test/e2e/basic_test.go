@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -64,9 +65,9 @@ func simpleSandbox(ns string) *sandboxv1alpha1.Sandbox {
 func TestSimpleSandbox(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
-	// Set up a namespace
+	// Set up a namespace with unique name to avoid conflicts
 	ns := &corev1.Namespace{}
-	ns.Name = "my-sandbox-ns"
+	ns.Name = fmt.Sprintf("sandbox-basic-test-%d", time.Now().UnixNano())
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 	// Create a Sandbox Object
 	sandboxObj := simpleSandbox(ns.Name)
@@ -77,7 +78,7 @@ func TestSimpleSandbox(t *testing.T) {
 	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "my-sandbox",
-			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
+			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
@@ -109,7 +110,7 @@ func TestSimpleSandbox(t *testing.T) {
 	}
 	pod := &corev1.Pod{}
 	pod.Name = "my-sandbox"
-	pod.Namespace = "my-sandbox-ns"
+	pod.Namespace = ns.Name
 	require.NoError(t, tc.ValidateObject(t.Context(), pod, p...))
 	// Assert Service object exists with expected fields
 	p = []predicates.ObjectPredicate{
@@ -126,6 +127,6 @@ func TestSimpleSandbox(t *testing.T) {
 	}
 	service := &corev1.Service{}
 	service.Name = "my-sandbox"
-	service.Namespace = "my-sandbox-ns"
+	service.Namespace = ns.Name
 	require.NoError(t, tc.ValidateObject(t.Context(), service, p...))
 }

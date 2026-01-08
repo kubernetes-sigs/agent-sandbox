@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -29,9 +30,9 @@ import (
 func TestSandboxShutdownTime(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
-	// Set up a namespace
+	// Set up a namespace with unique name to avoid conflicts
 	ns := &corev1.Namespace{}
-	ns.Name = "my-sandbox-ns"
+	ns.Name = fmt.Sprintf("sandbox-shutdown-test-%d", time.Now().UnixNano())
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 	// Create a Sandbox Object
 	sandboxObj := simpleSandbox(ns.Name)
@@ -42,7 +43,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "my-sandbox",
-			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
+			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
@@ -60,11 +61,11 @@ func TestSandboxShutdownTime(t *testing.T) {
 	// Assert Pod and Service objects exist
 	pod := &corev1.Pod{}
 	pod.Name = "my-sandbox"
-	pod.Namespace = "my-sandbox-ns"
+	pod.Namespace = ns.Name
 	require.NoError(t, tc.ValidateObject(t.Context(), pod))
 	service := &corev1.Service{}
 	service.Name = "my-sandbox"
-	service.Namespace = "my-sandbox-ns"
+	service.Namespace = ns.Name
 	require.NoError(t, tc.ValidateObject(t.Context(), service))
 
 	// Set a shutdown time that ends shortly

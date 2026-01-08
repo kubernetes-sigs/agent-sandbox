@@ -49,6 +49,11 @@ type SandboxClaimSpec struct {
 	// SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox
 	// +kubebuilder:validation:Required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+
+	// SkipWarmPool, when set to true, prevents the controller from attempting
+	// to adopt a pre-warmed pod from a SandboxWarmPool. Instead, a new pod will always be created fresh.
+	// +optional
+	SkipWarmPool *bool `json:"skipWarmPool,omitempty" protobuf:"varint,4,opt,name=skipWarmPool"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

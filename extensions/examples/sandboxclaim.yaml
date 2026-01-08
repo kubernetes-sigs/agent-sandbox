@@ -11,3 +11,7 @@ spec:
   sandboxTemplateRef:
     # This name must exactly match the 'metadata.name' of your SandboxTemplate.
     name: secure-datascience-template
+  # SkipWarmPool, when set to true, prevents the controller from attempting
+  # to adopt a pre-warmed pod from a SandboxWarmPool.
+  # Default value is false
+  skipWarmPool: false

@@ -29,6 +29,7 @@ ROUTER_YAML_PATH = (
 GATEWAY_YAML_PATH = (
     "clients/python/agentic-sandbox-client/gateway-kind/gateway-kind.yaml"
 )
+GATEWAY_NAME = "kind-gateway"
 
 
 @pytest.fixture(scope="module")
@@ -83,7 +84,7 @@ def deploy_gateway(tc, temp_namespace):
     print(f"Applying gateway manifest to namespace: {temp_namespace}")
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     print("Waiting for gateway to get an address...")
-    tc.wait_for_gateway_address("kind-gateway", namespace=temp_namespace)
+    tc.wait_for_gateway_address(GATEWAY_NAME, namespace=temp_namespace)
 
 
 @pytest.fixture(scope="function")
@@ -170,7 +171,7 @@ def test_python_sdk_gateway_mode(
         with SandboxClient(
             template_name=sandbox_template,
             namespace=temp_namespace,
-            gateway_name="kind-gateway",
+            gateway_name=GATEWAY_NAME,
             gateway_namespace=temp_namespace,
         ) as sandbox:
             print("\n--- Running SDK tests without warmpool ---")
@@ -194,7 +195,7 @@ def test_python_sdk_gateway_mode_warmpool(
         with SandboxClient(
             template_name=sandbox_template,
             namespace=temp_namespace,
-            gateway_name="kind-gateway",
+            gateway_name=GATEWAY_NAME,
             gateway_namespace=temp_namespace,
         ) as sandbox:
             print("\n--- Running SDK tests with warmpool ---")

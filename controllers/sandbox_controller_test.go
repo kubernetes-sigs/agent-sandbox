@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -492,6 +493,142 @@ func TestReconcile(t *testing.T) {
 				&sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
 			},
 			expectSandboxDeleted: true,
+		},
+		{
+			name: "sandbox spec with container ports creates service ports",
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "main",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "http",
+										ContainerPort: 8080,
+									},
+									{
+										Name:          "metrics",
+										ContainerPort: 9090,
+										Protocol:      corev1.ProtocolTCP,
+									},
+									{
+										Name:          "duplicate",
+										ContainerPort: 8080,
+									},
+								},
+							},
+							{
+								Name: "sidecar",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "admin",
+										ContainerPort: 9000,
+										Protocol:      corev1.ProtocolTCP,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Service:       sandboxName,
+				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
+				Replicas:      1,
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "DependenciesNotReady",
+						Message:            "Pod exists with phase: ; Service Exists",
+					},
+				},
+			},
+			wantObjs: []client.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "main",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "http",
+										ContainerPort: 8080,
+									},
+									{
+										Name:          "metrics",
+										ContainerPort: 9090,
+										Protocol:      corev1.ProtocolTCP,
+									},
+									{
+										Name:          "duplicate",
+										ContainerPort: 8080,
+									},
+								},
+							},
+							{
+								Name: "sidecar",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "admin",
+										ContainerPort: 9000,
+										Protocol:      corev1.ProtocolTCP,
+									},
+								},
+							},
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						Selector: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						ClusterIP: "None",
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "http",
+								Port:       8080,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(8080),
+							},
+							{
+								Name:       "metrics",
+								Port:       9090,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(9090),
+							},
+							{
+								Name:       "admin",
+								Port:       9000,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(9000),
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 

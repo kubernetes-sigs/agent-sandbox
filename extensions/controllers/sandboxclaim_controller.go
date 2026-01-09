@@ -56,7 +56,7 @@ type SandboxClaimReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
-	Tracer asmetrics.Instrumenter
+	Tracer   asmetrics.Instrumenter
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -80,7 +80,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Start Tracing Span
-	ctx, end := r.Tracer.StartSpan(ctx, claim, "ReconcileSandboxClaim")
+	ctx, end := r.Tracer.StartSpan(ctx, claim, "ReconcileSandboxClaim", nil)
 	defer end()
 
 	if !claim.DeletionTimestamp.IsZero() {
@@ -88,25 +88,13 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Initialize trace ID for active resources missing an ID
-	if claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "" {
+	tc := r.Tracer.GetTraceContext(ctx)
+	if tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "") {
 		patch := client.MergeFrom(claim.DeepCopy())
 		if claim.Annotations == nil {
 			claim.Annotations = make(map[string]string)
 		}
-		claim.Annotations[asmetrics.TraceContextAnnotation] = r.Tracer.GetTraceContext(ctx)
-		if err := r.Patch(ctx, claim, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Initialize trace ID for active resources missing an ID
-	if claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "" {
-		patch := client.MergeFrom(claim.DeepCopy())
-		if claim.Annotations == nil {
-			claim.Annotations = make(map[string]string)
-		}
-		claim.Annotations[asmetrics.TraceContextAnnotation] = r.Tracer.GetTraceContext(ctx)
+		claim.Annotations[asmetrics.TraceContextAnnotation] = tc
 		if err := r.Patch(ctx, claim, patch); err != nil {
 			return ctrl.Result{}, err
 		}

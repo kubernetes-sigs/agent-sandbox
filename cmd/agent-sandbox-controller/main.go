@@ -15,11 +15,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"net/http"
 	"net/http/pprof"
 	"os"
 	"runtime"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -84,8 +86,11 @@ func main() {
 	if enableTracing {
 		var cleanup func()
 		var err error
-		// Reuse the captured ctx here
-		instrumenter, cleanup, err = asmetrics.SetupOTel(ctx, "agent-sandbox-controller")
+		// Use a timeout context for initialization to prevent blocking
+		initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		instrumenter, cleanup, err = asmetrics.SetupOTel(initCtx, "agent-sandbox-controller")
 		if err != nil {
 			setupLog.Error(err, "unable to initialize tracing")
 			os.Exit(1)
@@ -164,7 +169,7 @@ func main() {
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
-			Tracer: instrumenter,
+			Tracer:   instrumenter,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)

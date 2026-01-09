@@ -92,7 +92,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Start Tracing Span
-	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox")
+	initialAttrs := map[string]string{
+		"sandbox.name":      sandbox.Name,
+		"sandbox.namespace": sandbox.Namespace,
+	}
+	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
 	defer end()
 
 	// If the sandbox is being deleted, do nothing
@@ -111,12 +115,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Initialize trace ID for active resources missing an ID
-	if sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "" {
+	tc := r.Tracer.GetTraceContext(ctx)
+	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = r.Tracer.GetTraceContext(ctx)
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
@@ -324,6 +329,10 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
+	// Start a child span of ReconcileSandbox
+	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
+	defer end()
+
 	// List all pods with the pool label matching the warm pool name hash
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
@@ -393,22 +402,21 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, nil
 	}
 
-	// 2. PATH: Existing Pod found (e.g., adopted from Warm Pool or already exists)
+	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+
+		if r.Tracer.IsRecording(ctx) {
+			r.Tracer.AddEvent(ctx, "ExistingPodStatusObserved", map[string]string{
+				"pod.Name":  pod.Name,
+				"pod.Phase": string(pod.Status.Phase),
+			})
+		}
 
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
 		pod.Labels[sandboxLabel] = nameHash
-
-		// Copy trace context to existing Pod
-		if tc, ok := sandbox.Annotations[asmetrics.TraceContextAnnotation]; ok {
-			if pod.Annotations == nil {
-				pod.Annotations = make(map[string]string)
-			}
-			pod.Annotations[asmetrics.TraceContextAnnotation] = tc
-		}
 
 		// Set controller reference if the pod is not controlled by anything.
 		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
@@ -437,11 +445,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	annotations := map[string]string{}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 		annotations[k] = v
-	}
-
-	// Copy trace context to the new Pod annotations
-	if tc, ok := sandbox.Annotations[asmetrics.TraceContextAnnotation]; ok {
-		annotations[asmetrics.TraceContextAnnotation] = tc
 	}
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
@@ -475,11 +478,23 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 
+	if r.Tracer.IsRecording(ctx) {
+		r.Tracer.AddEvent(ctx, "NewPodStatusObserved", map[string]string{
+			"pod.Name":  pod.Name,
+			"pod.Phase": string(pod.Status.Phase),
+		})
+	}
+
 	return pod, nil
 }
 
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
 	log := log.FromContext(ctx)
+
+	// Start a child span of ReconcileSandbox
+	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePVCs", nil)
+	defer end()
+
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name

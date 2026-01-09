@@ -333,7 +333,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
-			  Tracer: asmetrics.NewNoOp(),
+				Tracer:   asmetrics.NewNoOp(),
 			}
 
 			req := reconcile.Request{
@@ -496,6 +496,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
+				Tracer:   asmetrics.NewNoOp(),
 			}
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: "default"}}
@@ -573,6 +574,7 @@ func TestSandboxProvisionEvent(t *testing.T) {
 		Client:   client,
 		Scheme:   scheme,
 		Recorder: fakeRecorder,
+		Tracer:   asmetrics.NewNoOp(),
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
@@ -813,7 +815,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
-				Tracer: asmetrics.NewNoOp(),
+				Tracer:   asmetrics.NewNoOp(),
 			}
 
 			req := reconcile.Request{

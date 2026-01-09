@@ -857,43 +857,6 @@ func TestReconcilePod(t *testing.T) {
 			expectErr:              false,
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
 		},
-		{
-			name: "propagates trace context annotation to the created pod",
-			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxName,
-					Namespace: sandboxNs,
-					Annotations: map[string]string{
-						asmetrics.TraceContextAnnotation: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-					},
-				},
-				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
-					PodTemplate: sandboxv1alpha1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
-						},
-					},
-				},
-			},
-			wantPod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            sandboxName,
-					Namespace:       sandboxNs,
-					ResourceVersion: "1",
-					Labels: map[string]string{
-						sandboxLabel: nameHash,
-					},
-					Annotations: map[string]string{
-						asmetrics.TraceContextAnnotation: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-					},
-					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "test-container"}},
-				},
-			},
-		},
 	}
 
 	for _, tc := range testCases {

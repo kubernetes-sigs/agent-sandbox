@@ -84,7 +84,7 @@ The included `files/experiment.ipynb` shows a typical workflow:
 ## Getting Started
 
 ### Prerequisites
-- Agent-sandbox installed ([Installation Guide](../../README.md#Installation)
+- Agent-sandbox installed ([Installation Guide](../../README.md#Installation))
 - JupyterLab deployed ([Installation Guide](./README.md))
 
 ### Access JupyterLab

@@ -470,3 +470,109 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 		}
 	})
 }
+
+func TestReconcilePoolReadyReplicas(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(3)
+
+	// Create a SandboxTemplate
+	template := createTemplate(templateName, poolNamespace)
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	// Compute the pool name hash
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	createPodWithReadyCondition := func(suffix string, ready corev1.ConditionStatus) *corev1.Pod {
+		pod := createPoolPod(poolName, poolNamespace, poolNameHash, suffix)
+		pod.Status.Conditions = []corev1.PodCondition{
+			{
+				Type:   corev1.PodReady,
+				Status: ready,
+			},
+		}
+		return pod
+	}
+
+	testCases := []struct {
+		name                  string
+		initialPods           []runtime.Object
+		expectedReadyReplicas int32
+	}{
+		{
+			name: "no pods ready",
+			initialPods: []runtime.Object{
+				template,
+				createPodWithReadyCondition("abc123", corev1.ConditionFalse),
+				createPodWithReadyCondition("def456", corev1.ConditionUnknown),
+				createPodWithReadyCondition("ghi789", corev1.ConditionFalse),
+			},
+			expectedReadyReplicas: 0,
+		},
+		{
+			name: "some pods ready",
+			initialPods: []runtime.Object{
+				template,
+				createPodWithReadyCondition("abc123", corev1.ConditionTrue),
+				createPodWithReadyCondition("def456", corev1.ConditionFalse),
+				createPodWithReadyCondition("ghi789", corev1.ConditionTrue),
+			},
+			expectedReadyReplicas: 2,
+		},
+		{
+			name: "all pods ready",
+			initialPods: []runtime.Object{
+				template,
+				createPodWithReadyCondition("abc123", corev1.ConditionTrue),
+				createPodWithReadyCondition("def456", corev1.ConditionTrue),
+				createPodWithReadyCondition("ghi789", corev1.ConditionTrue),
+			},
+			expectedReadyReplicas: 3,
+		},
+		{
+			name: "pods with no ready condition",
+			initialPods: []runtime.Object{
+				template,
+				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, "def456"),
+				createPodWithReadyCondition("ghi789", corev1.ConditionTrue),
+			},
+			expectedReadyReplicas: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(newTestScheme()).
+					WithRuntimeObjects(tc.initialPods...).
+					Build(),
+			}
+
+			ctx := context.Background()
+
+			// Run reconcilePool twice to update status
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+			err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Verify the ReadyReplicas status
+			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
+		})
+	}
+}

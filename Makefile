@@ -17,9 +17,24 @@ deploy-kind:
 	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
 	./dev/tools/deploy-to-kube --image-prefix=kind.local/
 
+	@if [ "$(EXTENSIONS)" = "true" ]; then \
+		echo "🔧 Patching controller to enable extensions..."; \
+		kubectl patch statefulset agent-sandbox-controller \
+			-n agent-sandbox-system \
+			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
+	fi
+
+.PHONY: deploy-cloud-provider-kind
+deploy-cloud-provider-kind:
+	./dev/tools/deploy-cloud-provider
+
 .PHONY: delete-kind
 delete-kind:
 	kind delete cluster --name ${KIND_CLUSTER}
+
+.PHONY: kill-cloud-provider-kind
+kill-cloud-provider-kind:
+	killall cloud-provider-kind
 
 .PHONY: test-unit
 test-unit:

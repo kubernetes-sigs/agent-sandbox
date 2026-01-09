@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shared-sandbox-pdb
+  # NOTE: This must be applied to the SAME namespace where the SandboxClaim creates the pod.
+  namespace: default
+spec:
+# CRITICAL: We use maxUnavailable: 0 because multiple Sandboxes share this PDB.
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      # This MUST match what we put in the Template
+      sandbox-disruption-policy: "manual-protection"

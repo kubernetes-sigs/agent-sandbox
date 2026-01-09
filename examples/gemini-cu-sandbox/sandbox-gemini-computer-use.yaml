@@ -1,0 +1,25 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: sandbox-python-computeruse-template
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: sandbox
+        sandbox: sandbox-python-computeruse
+      annotations:
+        test: "yes"
+    spec:
+      containers:
+      - name: sandbox-python-computeruse
+        image: sandbox-gemini-runtime:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8888
+        env:
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gemini-api-key
+              key: key

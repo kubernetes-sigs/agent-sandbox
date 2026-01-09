@@ -17,18 +17,20 @@ package framework
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/agent-sandbox/controllers"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
 	// root directory of the agent-sandbox repository
-	repoRoot = filepath.FromSlash("../..")
+	repoRoot = getRepoRoot()
 	// The e2e tests use the context specified in the local KUBECONFIG file.
 	// A localized KUBECONFIG is used to create an explicit cluster contract with
 	// the tests.
@@ -37,6 +39,15 @@ var (
 
 func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(controllers.Scheme))
+	utilruntime.Must(extensionsv1alpha1.AddToScheme(controllers.Scheme))
+}
+
+func getRepoRoot() string {
+	// This file is at <repo>/test/e2e/framework/context.go, so 3 Dir() hops (framework -> e2e -> test -> repo)
+	// gives us the repository root regardless of the test package working directory.
+	_, filename, _, _ := runtime.Caller(0)
+	dir := filepath.Dir(filename)
+	return filepath.Dir(filepath.Dir(filepath.Dir(dir)))
 }
 
 // TestContext is a helper for managing e2e test scaffolding.
@@ -66,9 +77,8 @@ func NewTestContext(t *testing.T) *TestContext {
 		t.Fatal(err)
 	}
 	th.ClusterClient = ClusterClient{
-		T:          t,
-		client:     cl,
-		restConfig: restCfg,
+		T:      t,
+		client: cl,
 	}
 	t.Cleanup(func() {
 		t.Helper()

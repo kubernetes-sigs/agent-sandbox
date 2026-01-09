@@ -1,0 +1,11 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: hello-world
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: my-container
+        image: ${IMAGE}
+      restartPolicy: Never

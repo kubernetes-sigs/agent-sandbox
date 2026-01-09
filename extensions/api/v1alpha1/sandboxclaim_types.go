@@ -12,22 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/*
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package v1alpha1
 
 import (
@@ -36,6 +20,43 @@ import (
 
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 // Important: Run "make" to regenerate code after modifying this file
+
+const (
+	// ClaimExpiredReason is the reason used in conditions/events when a claim expires.
+	ClaimExpiredReason = "ClaimExpired"
+)
+
+// ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
+// +kubebuilder:validation:Enum=Delete;Retain
+type ShutdownPolicy string
+
+const (
+	// ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.
+	ShutdownPolicyDelete ShutdownPolicy = "Delete"
+
+	// ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).
+	// The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,
+	// but the SandboxClaim object itself remains.
+	ShutdownPolicyRetain ShutdownPolicy = "Retain"
+)
+
+// Lifecycle defines the lifecycle management for the SandboxClaim.
+type Lifecycle struct {
+	// ShutdownTime is the absolute time when the SandboxClaim expires.
+	// This time governs the lifecycle of the claim. It is not propagated to the
+	// underlying Sandbox. Instead, the SandboxClaim controller enforces this
+	// expiration by deleting the Sandbox resources when the time is reached.
+	// If this field is omitted or set to nil, the SandboxClaim itself won't expire.
+	// This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported.
+	// +kubebuilder:validation:Format="date-time"
+	// +optional
+	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+
+	// ShutdownPolicy determines the behavior when the SandboxClaim expires.
+	// +kubebuilder:default=Retain
+	// +optional
+	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
+}
 
 // SandboxTemmplateRef references a SandboxTemplate
 type SandboxTemplateRef struct {
@@ -49,6 +70,10 @@ type SandboxClaimSpec struct {
 	// SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox
 	// +kubebuilder:validation:Required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+
+	// Lifecycle defines when and how the SandboxClaim should be shut down.
+	// +optional
+	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

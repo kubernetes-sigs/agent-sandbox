@@ -1,0 +1,20 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  # This will be the name of your sandbox pod and its associated resources.
+  name: my-secure-sandbox
+  # This MUST be in the same namespace as the SandboxTemplate.
+  namespace: default
+spec:
+  # It points to the template.
+  sandboxTemplateRef:
+    # This name must exactly match the 'metadata.name' of your SandboxTemplate.
+    name: secure-datascience-template
+  lifecycle:
+    # Policy can be "Delete" (clean up everything) or "Retain" (stop resources but keep objects).
+    # Default is "Retain".
+    shutdownPolicy: Delete
+
+    # Absolute timestamp when the sandbox should expire (RFC3339 format).
+    # If omitted, the sandbox will run indefinitely.
+    shutdownTime: "2025-12-31T23:59:59Z"

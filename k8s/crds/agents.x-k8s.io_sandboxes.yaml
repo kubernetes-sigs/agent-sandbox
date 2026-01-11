@@ -3819,6 +3819,118 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
+              service:
+                properties:
+                  metadata:
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
+                  spec:
+                    properties:
+                      allocateLoadBalancerNodePorts:
+                        type: boolean
+                      clusterIP:
+                        type: string
+                      clusterIPs:
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      externalIPs:
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      externalName:
+                        type: string
+                      externalTrafficPolicy:
+                        type: string
+                      healthCheckNodePort:
+                        format: int32
+                        type: integer
+                      internalTrafficPolicy:
+                        type: string
+                      ipFamilies:
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      ipFamilyPolicy:
+                        type: string
+                      loadBalancerClass:
+                        type: string
+                      loadBalancerIP:
+                        type: string
+                      loadBalancerSourceRanges:
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      ports:
+                        items:
+                          properties:
+                            appProtocol:
+                              type: string
+                            name:
+                              type: string
+                            nodePort:
+                              format: int32
+                              type: integer
+                            port:
+                              format: int32
+                              type: integer
+                            protocol:
+                              default: TCP
+                              type: string
+                            targetPort:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                          required:
+                          - port
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - port
+                        - protocol
+                        x-kubernetes-list-type: map
+                      publishNotReadyAddresses:
+                        type: boolean
+                      selector:
+                        additionalProperties:
+                          type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      sessionAffinity:
+                        type: string
+                      sessionAffinityConfig:
+                        properties:
+                          clientIP:
+                            properties:
+                              timeoutSeconds:
+                                format: int32
+                                type: integer
+                            type: object
+                        type: object
+                      trafficDistribution:
+                        type: string
+                      type:
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: service.selector must not be set, it automatically
+                        managed by operator
+                      rule: self == null || !has(self.selector) || size(self.selector)
+                        == 0
+                type: object
               shutdownPolicy:
                 default: Retain
                 enum:

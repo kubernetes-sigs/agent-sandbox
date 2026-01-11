@@ -54,7 +54,7 @@ func simpleSandbox(ns string) *sandboxv1alpha1.Sandbox {
 				},
 			},
 		},
-		ObjectMeta: sandboxv1alpha1.PodMetadata{
+		ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
 			Annotations: map[string]string{"test-anno-key": "val-1"},
 			Labels:      map[string]string{"test-label-key": "val-2"},
 		},

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -266,6 +267,19 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		return service, nil
 	}
 
+	// Extract ports from pod template
+	var ports []corev1.ServicePort
+	for _, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		for _, port := range container.Ports {
+			ports = append(ports, corev1.ServicePort{
+				Name:       port.Name,
+				Port:       port.ContainerPort,
+				Protocol:   port.Protocol,
+				TargetPort: intstr.FromInt(int(port.ContainerPort)),
+			})
+		}
+	}
+
 	log.Info("Creating a new Headless Service", "Service.Namespace", sandbox.Namespace, "Service.Name", sandbox.Name)
 	service = &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -280,6 +294,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			Selector: map[string]string{
 				sandboxLabel: nameHash,
 			},
+			Ports: ports,
 		},
 	}
 	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))

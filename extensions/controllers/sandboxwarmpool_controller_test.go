@@ -20,6 +20,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -575,4 +576,182 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
 		})
 	}
+}
+
+func TestReconcilePoolWithVolumeClaimTemplates(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	// Create a SandboxTemplate with volumeClaimTemplates
+	templateWithPVC := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "data",
+									MountPath: "/data",
+								},
+							},
+						},
+					},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+						Name: "data",
+						Labels: map[string]string{
+							"pvc-label": "test-value",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: *mustParseQuantity("1Gi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	t.Run("creates PVCs from volumeClaimTemplates", func(t *testing.T) {
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// Run reconcilePool
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		// Verify pods were created
+		podList := &corev1.PodList{}
+		err = r.List(ctx, podList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, podList.Items, int(replicas))
+
+		// Verify PVCs were created
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, int(replicas), "expected one PVC per pod")
+
+		// Verify each PVC
+		for _, pvc := range pvcList.Items {
+			// Verify PVC is owned by the warm pool
+			controllerRef := metav1.GetControllerOf(&pvc)
+			require.NotNil(t, controllerRef)
+			require.Equal(t, warmPool.UID, controllerRef.UID)
+
+			// Verify PVC has correct labels (pool label + template labels)
+			require.Equal(t, sandboxcontrollers.NameHash(poolName), pvc.Labels[poolLabel])
+			require.Equal(t, "test-value", pvc.Labels["pvc-label"])
+
+			// Verify PVC spec
+			require.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, pvc.Spec.AccessModes)
+		}
+
+		// Verify each pod has PVC volume attached
+		for _, pod := range podList.Items {
+			var foundPVCVolume bool
+			for _, vol := range pod.Spec.Volumes {
+				if vol.PersistentVolumeClaim != nil {
+					foundPVCVolume = true
+					// Verify volume name matches template
+					require.Equal(t, "data", vol.Name)
+					break
+				}
+			}
+			require.True(t, foundPVCVolume, "pod should have PVC volume attached")
+		}
+	})
+
+	t.Run("PVC explosion prevention - skips creation when PVCs exceed pods", func(t *testing.T) {
+		poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+		// Create an orphaned PVC (simulating mid-creation state where PVC exists but pod doesn't yet)
+		orphanedPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-test-pool-abc12",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC, orphanedPVC).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// Run reconcilePool - should detect creation in progress
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		// Verify NO new pods were created (because ownedPVCs > currentPods)
+		podList := &corev1.PodList{}
+		err = r.List(ctx, podList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, podList.Items, 0, "should not create pods when creation is in progress")
+
+		// Verify no additional PVCs were created
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, 1, "should not create additional PVCs when creation is in progress")
+	})
+}
+
+func mustParseQuantity(s string) *resource.Quantity {
+	q := resource.MustParse(s)
+	return &q
 }

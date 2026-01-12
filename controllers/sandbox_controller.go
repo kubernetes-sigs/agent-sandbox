@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math/rand/v2"
 	"reflect"
 	"time"
 
@@ -291,10 +292,7 @@ func RandomSuffix(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, length)
 	for i := range b {
-		// Use hash of current time + index for pseudo-randomness
-		h := fnv.New32a()
-		h.Write([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), i)))
-		b[i] = charset[h.Sum32()%uint32(len(charset))]
+		b[i] = charset[rand.IntN(len(charset))]
 	}
 	return string(b)
 }

@@ -428,7 +428,7 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 // adoptPodPVCs finds and adopts the PVCs that a warm pool pod uses.
 // This transfers ownership from the SandboxWarmPool to the Sandbox,
 // preventing orphaned PVCs and avoiding duplicate PVC creation.
-func (r *SandboxClaimReconciler) adoptPodPVCs(ctx context.Context, pod *corev1.Pod, sandbox *v1alpha1.Sandbox) error {
+func (r *SandboxClaimReconciler) adoptPodPVCs(ctx context.Context, pod *corev1.Pod, _ *v1alpha1.Sandbox) error {
 	log := log.FromContext(ctx)
 
 	for _, volume := range pod.Spec.Volumes {

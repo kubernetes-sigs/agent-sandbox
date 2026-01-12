@@ -40,25 +40,7 @@ const (
 	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
-// SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
-//
-// The reconciler maintains a pool of pre-warmed pods with PVCs ready for
-// instant allocation. When the pool size is below the desired replicas,
-// it creates new pods with their associated PVCs from volumeClaimTemplates.
-//
-// IMPORTANT: PVC Explosion Prevention
-// -----------------------------------
-// This controller watches PVCs it owns (Owns(&corev1.PersistentVolumeClaim{})).
-// Without careful handling, this can cause a "PVC explosion" bug:
-//
-//  1. Reconcile runs, creates PVC (triggers watch event)
-//  2. PVC watch triggers new reconcile BEFORE pod is created
-//  3. New reconcile sees 0 pods, creates another PVC+pod
-//  4. Infinite loop creating thousands of PVCs
-//
-// The fix: Before creating new pods, count owned PVCs. If ownedPVCs > currentPods,
-// a creation is already in progress - skip creating more until the pod catches up.
-// See reconcilePool() for implementation.
+// SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
 type SandboxWarmPoolReconciler struct {
 	client.Client
 }
@@ -164,15 +146,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	desiredReplicas := warmPool.Spec.Replicas
 	currentReplicas := int32(len(activePods))
 
-	// PVC Explosion Prevention (see SandboxWarmPoolReconciler docs for full explanation)
-	//
-	// We must detect if a pod creation is already in progress. The sequence is:
-	//   createPoolPod() -> Create PVC -> Create Pod
-	//
-	// If PVC creation triggers a reconcile before Pod creation completes,
-	// we'd see ownedPVCs=1, currentPods=0, and incorrectly try to create another pod.
-	//
-	// Solution: If ownedPVCs > currentPods, creation is in progress - don't create more.
+	// Check if a pod creation is already in progress by comparing owned PVCs to pods.
+	// If ownedPVCs > currentPods, PVC was created but pod creation hasn't completed yet.
 	pvcList := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcList, &client.ListOptions{
 		LabelSelector: labelSelector,

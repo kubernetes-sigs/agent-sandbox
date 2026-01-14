@@ -527,25 +527,24 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		return nil, adoptErr
 	}
 
+	// Always copy volumeClaimTemplates for visibility and pod recreation support
+	if len(template.Spec.VolumeClaimTemplates) > 0 {
+		sandbox.Spec.VolumeClaimTemplates = make([]sandboxv1alpha1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
+		for i, vct := range template.Spec.VolumeClaimTemplates {
+			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
+		}
+	}
+
 	if adoptedPod != nil {
-		// Pod was adopted from warm pool - it already has PVCs attached.
-		// Don't copy volumeClaimTemplates so the Sandbox controller won't
-		// create duplicate PVCs. The adopted PVCs were already released from
-		// the warm pool's ownership in tryAdoptPodFromPool().
-		logger.Info("Adopted pod from warm pool for sandbox (skipping volumeClaimTemplates)", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
+		// Pod was adopted from warm pool - store the pod name so the Sandbox
+		// controller uses the correct PVC names (based on original pod name).
+		// The adopted PVCs were already released from the warm pool's ownership
+		// in tryAdoptPodFromPool().
+		logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
 		sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
-	} else {
-		// No warm pool pod available - copy volumeClaimTemplates so the
-		// Sandbox controller will create fresh PVCs.
-		if len(template.Spec.VolumeClaimTemplates) > 0 {
-			sandbox.Spec.VolumeClaimTemplates = make([]sandboxv1alpha1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
-			for i, vct := range template.Spec.VolumeClaimTemplates {
-				vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
-			}
-		}
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {

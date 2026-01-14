@@ -4107,6 +4107,9 @@ spec:
                   - spec
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - metadata.name
+                x-kubernetes-list-type: map
             required:
             - podTemplate
             type: object

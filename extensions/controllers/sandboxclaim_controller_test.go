@@ -307,10 +307,10 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			}
 
 			allObjects := append(tc.existingObjects, claimToUse)
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
 
 			reconciler := &SandboxClaimReconciler{
-				Client:   client,
+				Client:   fakeClient,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
 			}
@@ -327,7 +327,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			}
 
 			var sandbox v1alpha1.Sandbox
-			err = client.Get(context.Background(), req.NamespacedName, &sandbox)
+			err = fakeClient.Get(context.Background(), req.NamespacedName, &sandbox)
 			if tc.expectSandbox && err != nil {
 				t.Fatalf("get sandbox: (%v)", err)
 			}
@@ -342,7 +342,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			// Validate Network Policy
 			var np networkingv1.NetworkPolicy
 			npName := types.NamespacedName{Name: req.Name + "-network-policy", Namespace: req.Namespace}
-			err = client.Get(context.Background(), npName, &np)
+			err = fakeClient.Get(context.Background(), npName, &np)
 			if tc.expectNetworkPolicy && err != nil {
 				t.Fatalf("get network policy: (%v)", err)
 			}
@@ -354,7 +354,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			}
 
 			var updatedClaim extensionsv1alpha1.SandboxClaim
-			if err := client.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
+			if err := fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
 				t.Fatalf("get sandbox claim: (%v)", err)
 			}
 			if len(updatedClaim.Status.Conditions) != 1 {
@@ -467,12 +467,12 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
 			sandbox := createSandbox(tc.claim.Name, tc.sandboxIsExpired)
-			client := fake.NewClientBuilder().WithScheme(scheme).
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 				WithObjects(template, tc.claim, sandbox).
 				WithStatusSubresource(tc.claim).Build()
 
 			reconciler := &SandboxClaimReconciler{
-				Client:   client,
+				Client:   fakeClient,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
 			}
@@ -485,7 +485,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 
 			// 1. Verify Claim
 			var fetchedClaim extensionsv1alpha1.SandboxClaim
-			err = client.Get(context.Background(), req.NamespacedName, &fetchedClaim)
+			err = fakeClient.Get(context.Background(), req.NamespacedName, &fetchedClaim)
 
 			if tc.expectClaimDeleted {
 				if !k8errors.IsNotFound(err) {
@@ -509,7 +509,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 
 			// 2. Verify Sandbox
 			var fetchedSandbox sandboxv1alpha1.Sandbox
-			err = client.Get(context.Background(), req.NamespacedName, &fetchedSandbox)
+			err = fakeClient.Get(context.Background(), req.NamespacedName, &fetchedSandbox)
 
 			if tc.expectSandboxDeleted {
 				if !k8errors.IsNotFound(err) {
@@ -544,12 +544,12 @@ func TestSandboxProvisionEvent(t *testing.T) {
 	}
 
 	fakeRecorder := record.NewFakeRecorder(10)
-	client := fake.NewClientBuilder().WithScheme(scheme).
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(claim, template).
 		WithStatusSubresource(claim).Build()
 
 	reconciler := &SandboxClaimReconciler{
-		Client:   client,
+		Client:   fakeClient,
 		Scheme:   scheme,
 		Recorder: fakeRecorder,
 	}
@@ -789,17 +789,17 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 		existingObjects := []client.Object{
 			template,
 			claimWithSkipWarmPool,
-			createWarmPoolPod("pool-pod-1", metav1.Now()),
+			createWarmPoolPod("pool-pod-1", metav1.Now(), true),
 		}
 
-		client := fake.NewClientBuilder().
+		fakeClient := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(existingObjects...).
 			WithStatusSubresource(claimWithSkipWarmPool).
 			Build()
 
 		reconciler := &SandboxClaimReconciler{
-			Client: client,
+			Client: fakeClient,
 			Scheme: scheme,
 		}
 
@@ -818,22 +818,22 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 
 		// Verify sandbox was created
 		var sandbox v1alpha1.Sandbox
-		if err := client.Get(ctx, req.NamespacedName, &sandbox); err != nil {
+		if err := fakeClient.Get(ctx, req.NamespacedName, &sandbox); err != nil {
 			t.Fatalf("expected sandbox to be created but got error: %v", err)
 		}
 
 		// Verify the warm pool pod was NOT adopted (labels should still be present)
 		var poolPod corev1.Pod
-		if err := client.Get(ctx, types.NamespacedName{Name: "pool-pod-1", Namespace: "default"}, &poolPod); err != nil {
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-pod-1", Namespace: "default"}, &poolPod); err != nil {
 			t.Fatalf("failed to get pool pod: %v", err)
 		}
 
 		// Pool labels should still be present since the pod was not adopted
 		if _, exists := poolPod.Labels[poolLabel]; !exists {
-			t.Error("expected pool label to still be present on pod (not adopted)")
+			t.Errorf("expected pool label %q to still be present on pod (not adopted), but got labels: %v", poolLabel, poolPod.Labels)
 		}
 		if _, exists := poolPod.Labels[sandboxTemplateRefHash]; !exists {
-			t.Error("expected sandbox template ref label to still be present on pod (not adopted)")
+			t.Errorf("expected sandbox template ref label %q to still be present on pod (not adopted), but got labels: %v", sandboxTemplateRefHash, poolPod.Labels)
 		}
 
 		// Sandbox should not have the pod name annotation since no pod was adopted
@@ -847,14 +847,14 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
-			client := fake.NewClientBuilder().
+			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tc.existingObjects...).
 				WithStatusSubresource(claim).
 				Build()
 
 			reconciler := &SandboxClaimReconciler{
-				Client:   client,
+				Client:   fakeClient,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
 			}
@@ -874,7 +874,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 
 			// Verify sandbox was created
 			var sandbox v1alpha1.Sandbox
-			err = client.Get(ctx, req.NamespacedName, &sandbox)
+			err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 			if tc.expectSandboxCreate && err != nil {
 				t.Fatalf("expected sandbox to be created but got error: %v", err)
 			}
@@ -885,7 +885,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			if tc.expectPodAdoption {
 				// Verify the adopted pod has correct labels and owner reference
 				var adoptedPod corev1.Pod
-				err = client.Get(ctx, types.NamespacedName{
+				err = fakeClient.Get(ctx, types.NamespacedName{
 					Name:      tc.expectedAdoptedPod,
 					Namespace: "default",
 				}, &adoptedPod)
@@ -895,10 +895,10 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 
 				// 1. Verify pool labels were removed
 				if _, exists := adoptedPod.Labels[poolLabel]; exists {
-					t.Errorf("expected pool label to be removed from adopted pod")
+					t.Errorf("expected pool label %q to be removed from adopted pod, but got labels: %v", poolLabel, adoptedPod.Labels)
 				}
 				if _, exists := adoptedPod.Labels[sandboxTemplateRefHash]; exists {
-					t.Errorf("expected sandbox template ref label to be removed from adopted pod")
+					t.Errorf("expected sandbox template ref label %q to be removed from adopted pod, but got labels: %v", sandboxTemplateRefHash, adoptedPod.Labels)
 				}
 
 				// 2. Verify Security Label (UID) was added

@@ -147,8 +147,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	desiredReplicas := warmPool.Spec.Replicas
 	currentReplicas := int32(len(activePods))
 
-	// Check if a pod creation is already in progress by comparing owned PVCs to pods.
-	// If ownedPVCs > currentPods, PVC was created but pod creation hasn't completed yet.
+	// List PVCs for orphan detection and scale-down cleanup
 	pvcList := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcList, &client.ListOptions{
 		LabelSelector: labelSelector,
@@ -158,26 +157,51 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		return err
 	}
 
-	// Count PVCs owned by this warm pool
-	ownedPVCs := int32(0)
+	// Build a set of active pod names for orphan detection
+	activePodNames := make(map[string]bool, len(activePods))
+	for i := range activePods {
+		activePodNames[activePods[i].Name] = true
+	}
+
+	// Find orphaned PVCs (owned by warm pool but no matching pod exists)
+	var orphanedPVCs []corev1.PersistentVolumeClaim
+	var ownedPVCs int32
 	for _, pvc := range pvcList.Items {
 		if pvc.ObjectMeta.DeletionTimestamp.IsZero() {
 			controllerRef := metav1.GetControllerOf(&pvc)
 			if controllerRef != nil && controllerRef.UID == warmPool.UID {
 				ownedPVCs++
+				// Check if this PVC has a matching pod using the annotation
+				pvcPodName := pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation]
+				if !activePodNames[pvcPodName] {
+					orphanedPVCs = append(orphanedPVCs, pvc)
+				}
 			}
 		}
 	}
-
-	creationInProgress := ownedPVCs > currentReplicas
 
 	log.Info("Pool status",
 		"desired", desiredReplicas,
 		"current", currentReplicas,
 		"ownedPVCs", ownedPVCs,
-		"creationInProgress", creationInProgress,
+		"orphanedPVCs", len(orphanedPVCs),
 		"poolName", warmPool.Name,
 		"poolNameHash", poolNameHash)
+
+	// Clean up orphaned PVCs (best effort) before creating new pods
+	// This handles partial failures (PVC created but pod creation failed)
+	// and ensures orphaned resources don't accumulate across reconciles
+	for i := range orphanedPVCs {
+		pvc := &orphanedPVCs[i]
+		if err := r.Delete(ctx, pvc); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				log.Error(err, "Failed to delete orphaned PVC", "pvc", pvc.Name)
+			}
+			// Continue anyway - don't block pod creation due to cleanup failures
+		} else {
+			log.Info("Deleted orphaned PVC", "pvc", pvc.Name)
+		}
+	}
 
 	// Update status replicas
 	warmPool.Status.Replicas = currentReplicas
@@ -194,8 +218,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	warmPool.Status.ReadyReplicas = readyReplicas
 
-	// Create new pods if we need more AND no creation is in progress
-	if currentReplicas < desiredReplicas && !creationInProgress {
+	// Create new pods if we need more
+	if currentReplicas < desiredReplicas {
 		podsToCreate := desiredReplicas - currentReplicas
 		log.Info("Creating new pods", "count", podsToCreate)
 
@@ -220,6 +244,21 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		// Delete the first N active pods from the sorted list (newest first)
 		for i := int32(0); i < podsToDelete && i < int32(len(activePods)); i++ {
 			pod := &activePods[i]
+
+			// Delete associated PVCs (identified by pod name annotation)
+			for j := range pvcList.Items {
+				pvc := &pvcList.Items[j]
+				if pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation] == pod.Name {
+					if err := r.Delete(ctx, pvc); err != nil {
+						if !k8serrors.IsNotFound(err) {
+							log.Error(err, "Failed to delete PVC during scale-down", "pvc", pvc.Name)
+							allErrors = errors.Join(allErrors, err)
+						}
+					} else {
+						log.Info("Deleted PVC during scale-down", "pvc", pvc.Name, "pod", pod.Name)
+					}
+				}
+			}
 
 			if err := r.Delete(ctx, pod); err != nil {
 				log.Error(err, "Failed to delete pod", "pod", pod.Name)
@@ -294,10 +333,12 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		}
 
 		// Mark PVC as created by warm pool so sandbox controller knows it's safe to adopt
+		// Also store pod name for reliable orphan detection
 		if pvc.Annotations == nil {
 			pvc.Annotations = make(map[string]string)
 		}
 		pvc.Annotations[sandboxcontrollers.WarmPoolPVCAnnotation] = "true"
+		pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation] = podName
 
 		// Set controller reference so the PVC is owned by the SandboxWarmPool
 		if err := ctrl.SetControllerReference(warmPool, pvc, r.Client.Scheme()); err != nil {

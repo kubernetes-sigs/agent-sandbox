@@ -50,15 +50,17 @@ const (
 	// ControllerName is the name used for the event recorder
 	ControllerName = "sandbox-controller"
 
+	// WarmPoolPVCAnnotation marks PVCs created by the warm pool controller.
+	// Only PVCs with this annotation will be adopted by the sandbox controller.
+	WarmPoolPVCAnnotation = "agents.x-k8s.io/warm-pool-pvc"
+
 	// Event reasons
 	reasonPVCAdopted       = "PVCAdopted"
 	reasonAdoptedBySandbox = "AdoptedBySandbox"
 )
 
-var (
-	// Scheme for use by sandbox controllers. Registers required types for client.
-	Scheme = runtime.NewScheme()
-)
+// Scheme for use by sandbox controllers. Registers required types for client.
+var Scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
@@ -586,7 +588,14 @@ func (r *SandboxReconciler) adoptPodPVCs(ctx context.Context, sandbox *sandboxv1
 			continue
 		}
 
-		// PVC is orphaned - adopt it
+		// Only adopt PVCs that came from the warm pool to avoid stealing
+		// pre-existing shared PVCs that users may have created manually
+		if pvc.Annotations[WarmPoolPVCAnnotation] != "true" {
+			log.Info("PVC not from warm pool, skipping adoption", "pvc", pvcName)
+			continue
+		}
+
+		// PVC is orphaned and from warm pool - adopt it
 		log.Info("Adopting orphaned PVC", "pvc", pvcName, "sandbox", sandbox.Name)
 		if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 			return fmt.Errorf("failed to set controller reference for PVC %s: %w", pvcName, err)
@@ -670,7 +679,7 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) 
 	remainingTime := time.Until(expiryTime)
 
 	// TODO(barney-s): Do we need a inverse exponential backoff here ?
-	//requeueAfter := max(remainingTime/2, 2*time.Second)
+	// requeueAfter := max(remainingTime/2, 2*time.Second)
 
 	// Requeue at expiry time or in 2 seconds whichever is later
 	requeueAfter := max(remainingTime, 2*time.Second)

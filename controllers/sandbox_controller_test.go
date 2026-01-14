@@ -666,7 +666,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0))},
+					Replicas: ptr.To(int32(0)),
+				},
 			},
 			wantPod: nil,
 		},
@@ -1002,12 +1003,15 @@ func TestAdoptPodPVCs(t *testing.T) {
 		}
 	}
 
-	t.Run("adopts orphaned PVC", func(t *testing.T) {
+	t.Run("adopts orphaned PVC from warm pool", func(t *testing.T) {
 		pod := createPodWithPVC("test-pod", "test-pvc")
 		orphanedPVC := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-pvc",
 				Namespace: "default",
+				Annotations: map[string]string{
+					WarmPoolPVCAnnotation: "true",
+				},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -1156,5 +1160,35 @@ func TestAdoptPodPVCs(t *testing.T) {
 		ctx := t.Context()
 		err := r.adoptPodPVCs(ctx, sandbox, pod)
 		require.NoError(t, err)
+	})
+
+	t.Run("skips PVC without warm pool annotation", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "test-pvc")
+		// PVC without warm pool annotation (e.g., pre-existing shared PVC)
+		preExistingPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pvc",
+				Namespace: "default",
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod, preExistingPVC)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+
+		// Verify PVC was NOT adopted (no owner reference added)
+		var pvc corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-pvc", Namespace: "default"}, &pvc)
+		require.NoError(t, err)
+		require.Nil(t, metav1.GetControllerOf(&pvc), "PVC without warm pool annotation should not be adopted")
 	})
 }

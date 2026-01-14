@@ -293,6 +293,12 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 			pvc.Labels[k] = v
 		}
 
+		// Mark PVC as created by warm pool so sandbox controller knows it's safe to adopt
+		if pvc.Annotations == nil {
+			pvc.Annotations = make(map[string]string)
+		}
+		pvc.Annotations[sandboxcontrollers.WarmPoolPVCAnnotation] = "true"
+
 		// Set controller reference so the PVC is owned by the SandboxWarmPool
 		if err := ctrl.SetControllerReference(warmPool, pvc, r.Client.Scheme()); err != nil {
 			return fmt.Errorf("SetControllerReference for PVC failed: %w", err)

@@ -450,8 +450,14 @@ func (r *SandboxClaimReconciler) adoptPodPVCs(ctx context.Context, pod *corev1.P
 		delete(pvc.Labels, poolLabel)
 		delete(pvc.Labels, sandboxTemplateRefHash)
 
-		// Remove existing owner references (from SandboxWarmPool)
-		pvc.OwnerReferences = nil
+		// Release the PVC from the warm pool's ownership
+		var filteredOwnerRefs []metav1.OwnerReference
+		for _, ref := range pvc.OwnerReferences {
+			if ref.Kind != "SandboxWarmPool" {
+				filteredOwnerRefs = append(filteredOwnerRefs, ref)
+			}
+		}
+		pvc.OwnerReferences = filteredOwnerRefs
 
 		// Note: We don't set the Sandbox as owner here because the Sandbox
 		// object hasn't been created yet. The Sandbox controller will adopt

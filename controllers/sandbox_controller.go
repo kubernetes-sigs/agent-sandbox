@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,6 +46,13 @@ const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
+
+	// ControllerName is the name used for the event recorder
+	ControllerName = "sandbox-controller"
+
+	// Event reasons
+	reasonPVCAdopted       = "PVCAdopted"
+	reasonAdoptedBySandbox = "AdoptedBySandbox"
 )
 
 var (
@@ -60,8 +68,9 @@ func init() {
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Tracer asmetrics.Instrumenter
+	Scheme   *runtime.Scheme
+	Tracer   asmetrics.Instrumenter
+	Recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -70,6 +79,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -583,6 +593,10 @@ func (r *SandboxReconciler) adoptPodPVCs(ctx context.Context, sandbox *sandboxv1
 		}
 		if err := r.Update(ctx, pvc); err != nil {
 			return fmt.Errorf("failed to update PVC %s: %w", pvcName, err)
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(sandbox, corev1.EventTypeNormal, reasonPVCAdopted, "Adopted PVC %s", pvcName)
+			r.Recorder.Eventf(pvc, corev1.EventTypeNormal, reasonAdoptedBySandbox, "Ownership transferred to Sandbox %s", sandbox.Name)
 		}
 		log.Info("Successfully adopted PVC", "pvc", pvcName, "sandbox", sandbox.Name)
 	}

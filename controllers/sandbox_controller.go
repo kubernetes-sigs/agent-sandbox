@@ -54,6 +54,10 @@ const (
 	// Only PVCs with this annotation will be adopted by the sandbox controller.
 	WarmPoolPVCAnnotation = "agents.x-k8s.io/warm-pool-pvc"
 
+	// WarmPoolPodNameAnnotation stores the pod name a PVC was created for.
+	// Used for reliable orphan detection and PVC-pod association.
+	WarmPoolPodNameAnnotation = "agents.x-k8s.io/warm-pool-pod-name"
+
 	// Event reasons
 	reasonPVCAdopted       = "PVCAdopted"
 	reasonAdoptedBySandbox = "AdoptedBySandbox"

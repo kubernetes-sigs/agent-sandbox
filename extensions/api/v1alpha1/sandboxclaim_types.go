@@ -26,6 +26,30 @@ const (
 	ClaimExpiredReason = "ClaimExpired"
 )
 
+// WarmPoolPolicy describes the policy for using warm pools.
+// It can be one of the following:
+//   - "none": Do not use any warm pool, always create fresh pods
+//   - "default": Select from all available warm pools that match the template (default)
+//   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+type WarmPoolPolicy string
+
+const (
+	// WarmPoolPolicyNone indicates that no warm pool should be used.
+	// A fresh pod will always be created.
+	WarmPoolPolicyNone WarmPoolPolicy = "none"
+
+	// WarmPoolPolicyDefault indicates the default behavior: select from all
+	// available warm pools that match the template. This is the default behavior
+	// if warmpool is not specified.
+	WarmPoolPolicyDefault WarmPoolPolicy = "default"
+)
+
+// IsSpecificPool returns true if the policy specifies a specific warm pool name
+// (not "none" or "default").
+func (p WarmPoolPolicy) IsSpecificPool() bool {
+	return p != WarmPoolPolicyNone && p != WarmPoolPolicyDefault
+}
+
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
 // +kubebuilder:validation:Enum=Delete;Retain
 type ShutdownPolicy string
@@ -75,10 +99,13 @@ type SandboxClaimSpec struct {
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 
-	// SkipWarmPool, when set to true, prevents the controller from attempting
-	// to adopt a pre-warmed pod from a SandboxWarmPool. Instead, a new pod will always be created fresh.
+	// WarmPool specifies the warm pool policy.
+	// - "none": Do not use any warm pool, always create fresh pods
+	// - "default": Use default behavior, select from all matching warm pools (default)
+	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
 	// +optional
-	SkipWarmPool *bool `json:"skipWarmPool,omitempty" protobuf:"varint,4,opt,name=skipWarmPool"`
+	// +kubebuilder:default=default
+	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

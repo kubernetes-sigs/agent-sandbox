@@ -45,10 +45,22 @@ import (
 // TODO: These constants should be imported from the main controller package Issue #216
 const (
 	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	// poolLabel and sandboxTemplateRefHash are defined in sandboxwarmpool_controller.go
+	// They are used here for filtering pods by warm pool
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
+
+// getWarmPoolPolicy returns the effective warm pool policy for a claim.
+func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
+	if claim.Spec.WarmPool != nil {
+		return *claim.Spec.WarmPool
+	}
+
+	// Default behavior
+	return extensionsv1alpha1.WarmPoolPolicyDefault
+}
 
 // SandboxClaimReconciler reconciles a SandboxClaim object
 type SandboxClaimReconciler struct {
@@ -316,14 +328,21 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 }
 
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
-func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
+func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, policy extensionsv1alpha1.WarmPoolPolicy) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
-
-	// List all pods with the podTemplateHashLabel matching the hash
-	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
+	labelSet := labels.Set{
 		sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
-	})
+	}
+
+	// If a specific warm pool is specified, add the pool label to the selector
+	if policy.IsSpecificPool() {
+		poolNameHash := sandboxcontrollers.NameHash(string(policy))
+		labelSet[poolLabel] = poolNameHash
+		log.Info("Looking for pods in specific warm pool", "warmPool", string(policy), "poolHash", poolNameHash)
+	}
+
+	podList := &corev1.PodList{}
+	labelSelector := labels.SelectorFromSet(labelSet)
 
 	if err := r.List(ctx, podList, &client.ListOptions{
 		LabelSelector: labelSelector,
@@ -356,7 +375,11 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	}
 
 	if len(candidates) == 0 {
-		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
+		if policy.IsSpecificPool() {
+			log.Info("No available pods in specified warm pool", "warmPool", string(policy), "totalPodsFound", len(podList.Items))
+		} else {
+			log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)", "totalPodsFound", len(podList.Items))
+		}
 		return nil, nil
 	}
 
@@ -365,7 +388,11 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	// Get the first available pod
 	pod := candidates[0]
-	log.Info("Adopting pod from warm pool", "pod", pod.Name)
+	if policy.IsSpecificPool() {
+		log.Info("Adopting pod from specific warm pool", "pod", pod.Name, "warmPool", string(policy), "candidatesCount", len(candidates))
+	} else {
+		log.Info("Adopting pod from warm pool", "pod", pod.Name, "candidatesCount", len(candidates))
+	}
 
 	// Remove the pool labels
 	delete(pod.Labels, poolLabel)
@@ -434,23 +461,24 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	// Before creating the sandbox, try to adopt a pod from the warm pool
-	// unless skipWarmPool is set to true
-	if claim.Spec.SkipWarmPool == nil || !*claim.Spec.SkipWarmPool {
-		adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
+	// based on the warmpool policy
+	policy := getWarmPoolPolicy(claim)
+	if policy != extensionsv1alpha1.WarmPoolPolicyNone {
+		adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox, policy)
 		if adoptErr != nil {
 			logger.Error(adoptErr, "Failed to adopt pod from warm pool")
 			return nil, adoptErr
 		}
 
 		if adoptedPod != nil {
-			logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
+			logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name, "warmpool", policy)
 			if sandbox.Annotations == nil {
 				sandbox.Annotations = make(map[string]string)
 			}
 			sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
 		}
 	} else {
-		logger.Info("Skipping warm pool adoption as skipWarmPool is set to true", "claim", claim.Name)
+		logger.Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {

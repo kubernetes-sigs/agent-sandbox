@@ -126,9 +126,9 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 		*out = new(Lifecycle)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.SkipWarmPool != nil {
-		in, out := &in.SkipWarmPool, &out.SkipWarmPool
-		*out = new(bool)
+	if in.WarmPool != nil {
+		in, out := &in.WarmPool, &out.WarmPool
+		*out = new(WarmPoolPolicy)
 		**out = **in
 	}
 }

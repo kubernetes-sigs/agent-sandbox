@@ -62,6 +62,16 @@ const (
 	reasonAdoptedBySandbox = "AdoptedBySandbox"
 )
 
+// pvcNameSuffix returns the suffix to use for PVC names.
+// If the sandbox adopted a pod from a warm pool, use the original pod name
+// to match the existing PVC names. Otherwise use the sandbox name.
+func pvcNameSuffix(sandbox *sandboxv1alpha1.Sandbox) string {
+	if adoptedPodName, ok := sandbox.Annotations[SandboxPodNameAnnotation]; ok && adoptedPodName != "" {
+		return adoptedPodName
+	}
+	return sandbox.Name
+}
+
 // Scheme for use by sandbox controllers. Registers required types for client.
 var Scheme = runtime.NewScheme()
 
@@ -431,8 +441,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 
+	// Use the appropriate suffix for PVC names (adopted pod name or sandbox name)
+	pvcSuffix := pvcNameSuffix(sandbox)
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
-		pvcName := pvcTemplate.Name + "-" + sandbox.Name
+		pvcName := pvcTemplate.Name + "-" + pvcSuffix
 		mutatedSpec.Volumes = append(mutatedSpec.Volumes, corev1.Volume{
 			Name: pvcTemplate.Name,
 			VolumeSource: corev1.VolumeSource{
@@ -465,9 +477,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
 	log := log.FromContext(ctx)
+	// Use the appropriate suffix for PVC names (adopted pod name or sandbox name)
+	pvcSuffix := pvcNameSuffix(sandbox)
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
-		pvcName := pvcTemplate.Name + "-" + sandbox.Name
+		pvcName := pvcTemplate.Name + "-" + pvcSuffix
 		err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc)
 		if err == nil {
 			continue

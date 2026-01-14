@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"math/rand/v2"
 	"reflect"
 	"time"
 
@@ -284,17 +283,6 @@ func NameHash(objectName string) string {
 	// Convert the uint32 to a hexadecimal string.
 	// This results in an 8-character string (e.g., "a5b3c2d1").
 	return fmt.Sprintf("%08x", hashValue)
-}
-
-// RandomSuffix generates a random alphanumeric string of the given length.
-// Used for generating unique names for resources like PVCs.
-func RandomSuffix(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[rand.IntN(len(charset))]
-	}
-	return string(b)
 }
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {

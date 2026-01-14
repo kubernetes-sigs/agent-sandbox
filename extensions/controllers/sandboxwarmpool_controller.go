@@ -26,6 +26,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/rand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -266,7 +267,7 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 	}
 
 	// Generate a unique suffix for this pod instance
-	podSuffix := sandboxcontrollers.RandomSuffix(5)
+	podSuffix := rand.String(5)
 	podName := fmt.Sprintf("%s-%s", warmPool.Name, podSuffix)
 
 	// Create PVCs from volumeClaimTemplates

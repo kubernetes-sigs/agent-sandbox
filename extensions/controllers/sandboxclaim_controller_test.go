@@ -1074,14 +1074,19 @@ func TestSandboxClaimPVCAdoption(t *testing.T) {
 			t.Errorf("owner references should be cleared from adopted PVC, got %v", adoptedPVC.OwnerReferences)
 		}
 
-		// Verify sandbox was created WITHOUT volumeClaimTemplates (since pod was adopted)
+		// Verify sandbox was created WITH volumeClaimTemplates (for visibility and pod recreation)
 		var sandbox v1alpha1.Sandbox
 		err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 		if err != nil {
 			t.Fatalf("failed to get sandbox: %v", err)
 		}
-		if len(sandbox.Spec.VolumeClaimTemplates) != 0 {
-			t.Errorf("sandbox should not have volumeClaimTemplates when pod is adopted, got %d", len(sandbox.Spec.VolumeClaimTemplates))
+		if len(sandbox.Spec.VolumeClaimTemplates) != 1 {
+			t.Errorf("sandbox should have volumeClaimTemplates, got %d", len(sandbox.Spec.VolumeClaimTemplates))
+		}
+
+		// Verify the adopted pod name annotation is set (for correct PVC naming)
+		if sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "pool-pod-1" {
+			t.Errorf("sandbox should have pod name annotation set to adopted pod name, got %q", sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation])
 		}
 	})
 

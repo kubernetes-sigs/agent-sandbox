@@ -60,6 +60,8 @@ type SandboxTemplateSpec struct {
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
 	// +optional
 	// +kubebuilder:validation:Optional
+	// +listType=map
+	// +listMapKey=metadata.name
 	VolumeClaimTemplates []sandboxv1alpha1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
 
 	// NetworkPolicy defines the network policy to be applied to the sandboxes

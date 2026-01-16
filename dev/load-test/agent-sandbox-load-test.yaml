@@ -1,0 +1,37 @@
+name: agent-sandbox-load-test
+namespace:
+  number: 1
+tuningSets:
+- name: BurstCreate
+  qpsLoad:
+    qps: 10 # Adjust based on your cluster's capacity
+steps:
+- name: Start Startup Latency Measurement
+  measurements:
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency # We use Pod latency as Sandboxes wrap Pods
+    Params:
+      action: start
+      labelSelector: test = agent-load
+- name: Create Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 20 # Total sandboxes to spin up
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-env
+      objectTemplatePath: "sandbox-template.yaml"
+- name: Wait for Sandboxes to be Ready
+  measurements:
+  - Identifier: WaitForSandboxes
+    Method: WaitForRunningPods
+    Params:
+      action: start
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      desiredPodCount: 20
+- name: Gather Results
+  measurements:
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather

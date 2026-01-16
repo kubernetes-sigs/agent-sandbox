@@ -1,0 +1,13 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  # CL2 will automatically populate {{.Name}}
+  name: {{.Name}}
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: sample-sandbox
+        # Using the image from the sigs example
+        image: alpine
+        command: ["/bin/sh", "-c", "echo 'Hello from the Agent Sandbox!'; sleep 300"]

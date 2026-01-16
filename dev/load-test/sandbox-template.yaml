@@ -8,6 +8,5 @@ spec:
     spec:
       containers:
       - name: sample-sandbox
-        # Using the image from the sigs example
         image: alpine
         command: ["/bin/sh", "-c", "echo 'Hello from the Agent Sandbox!'; sleep 300"]

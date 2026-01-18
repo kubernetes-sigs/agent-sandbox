@@ -11,3 +11,9 @@ spec:
   sandboxTemplateRef:
     # This name must exactly match the 'metadata.name' of your SandboxTemplate.
     name: secure-datascience-template
+  # WarmPool specifies the warm pool policy.
+  # - "none": Do not use any warm pool, always create fresh pods
+  # - "default": Use default behavior, select from all matching warm pools (default)
+  # - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+  # If not specified, defaults to "default"
+  # warmpool: "default"

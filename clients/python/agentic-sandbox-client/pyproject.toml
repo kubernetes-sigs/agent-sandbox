@@ -28,7 +28,15 @@ dependencies = [
 packages = ["agentic_sandbox"]
 
 [project.optional-dependencies]
+langchain = [
+    "langchain",
+]
+adk = [
+    "google-adk",
+]
 test = [
+    "agentic_sandbox[langchain]",
+    "agentic_sandbox[adk]",
     "pytest",
     "pytest-xdist",
 ]

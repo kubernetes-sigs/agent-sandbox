@@ -903,7 +903,7 @@ func TestReconcilePod(t *testing.T) {
 	}
 }
 
-func TestSandboxExpiry(t *testing.T) {
+func TestCheckSandboxExpiry(t *testing.T) {
 	testCases := []struct {
 		name           string
 		shutdownTime   *metav1.Time
@@ -951,6 +951,76 @@ func TestSandboxExpiry(t *testing.T) {
 				require.Greater(t, requeueAfter, time.Duration(0))
 			} else {
 				require.Equal(t, time.Duration(0), requeueAfter)
+			}
+		})
+	}
+}
+
+func TestHandleSandboxExpiry(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	testCases := []struct {
+		name               string
+		childObjs          []runtime.Object
+		sandboxAnnotations map[string]string
+	}{
+		{
+			name: "delete child resources of expired sandbox",
+			childObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandboxAnnotations: nil,
+		},
+		{
+			name: "delete child resources of expired sandbox with the 'agents.x-k8s.io/pod-name' annotation",
+			childObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "adopted-pod-name",
+						Namespace: sandboxNs,
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandboxAnnotations: map[string]string{
+				SandboxPodNameAnnotation: "adopted-pod-name",
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1alpha1.Sandbox{}
+			sb.Name = sandboxName
+			sb.Namespace = sandboxNs
+			sb.Annotations = tc.sandboxAnnotations
+			r := SandboxReconciler{
+				Client: newFakeClient(append(tc.childObjs, sb)...),
+				Scheme: Scheme,
+			}
+
+			_, err := r.handleSandboxExpiry(t.Context(), sb)
+			require.NoError(t, err)
+
+			for _, obj := range tc.childObjs {
+				childObj := obj.DeepCopyObject().(client.Object)
+				err := r.Get(t.Context(), types.NamespacedName{Name: childObj.GetName(), Namespace: childObj.GetNamespace()}, childObj)
+				require.True(t, k8serrors.IsNotFound(err))
 			}
 		})
 	}

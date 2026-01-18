@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 const (
@@ -60,6 +61,7 @@ func init() {
 type SandboxReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	Tracer asmetrics.Instrumenter
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -89,6 +91,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	// Start Tracing Span
+	initialAttrs := map[string]string{
+		"sandbox.name":      sandbox.Name,
+		"sandbox.namespace": sandbox.Namespace,
+	}
+	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
+	defer end()
+
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.ObjectMeta.DeletionTimestamp.IsZero() {
 		log.Info("Sandbox is being deleted")
@@ -101,6 +111,22 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// Note: The sandbox won't be deleted if shutdown policy is changed to delete after expiration.
 		//       To delete an expired sandbox, the user should delete the sandbox instead of updating it.
 		//       This keeps the controller code simple.
+		return ctrl.Result{}, nil
+	}
+
+	// Initialize trace ID for active resources missing an ID
+	tc := r.Tracer.GetTraceContext(ctx)
+	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+		patch := client.MergeFrom(sandbox.DeepCopy())
+		if sandbox.Annotations == nil {
+			sandbox.Annotations = make(map[string]string)
+		}
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+
+		if err := r.Patch(ctx, sandbox, patch); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Return to ensure the next loop uses the persisted ID
 		return ctrl.Result{}, nil
 	}
 
@@ -303,6 +329,10 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
+	// Start a child span of ReconcileSandbox
+	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
+	defer end()
+
 	// List all pods with the pool label matching the warm pool name hash
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
@@ -344,7 +374,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	// if replicas is 0, delete the pod if it exists
+	// 1. PATH: Logic for deleting Pod when replicas is 0
 	if *sandbox.Spec.Replicas == 0 {
 		if pod != nil {
 			if pod.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -372,8 +402,16 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, nil
 	}
 
+	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+
+		if r.Tracer.IsRecording(ctx) {
+			r.Tracer.AddEvent(ctx, "ExistingPodStatusObserved", map[string]string{
+				"pod.Name":  pod.Name,
+				"pod.Phase": string(pod.Status.Phase),
+			})
+		}
 
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
@@ -396,6 +434,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
+	// 3. PATH: Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
 		sandboxLabel: nameHash,
@@ -439,11 +478,23 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 
+	if r.Tracer.IsRecording(ctx) {
+		r.Tracer.AddEvent(ctx, "NewPodStatusObserved", map[string]string{
+			"pod.Name":  pod.Name,
+			"pod.Phase": string(pod.Status.Phase),
+		})
+	}
+
 	return pod, nil
 }
 
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
 	log := log.FromContext(ctx)
+
+	// Start a child span of ReconcileSandbox
+	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePVCs", nil)
+	defer end()
+
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name

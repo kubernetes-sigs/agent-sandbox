@@ -2,9 +2,15 @@
 
 ## Prerequisites
 
+Clone the repository:
+```bash
+git clone https://github.com/kubernetes-sigs/agent-sandbox.git
+cd agent-sandbox/examples/jupyterlab
+```
+
 **You must have agent-sandbox already installed on your cluster.** Follow the installation guide:
 
-**[Agent-Sandbox Installation Guide](../../INSTALL.md)**
+**[Agent-Sandbox Installation Guide](../../README.md)**
 
 Make sure the agent-sandbox controller is running before proceeding:
 
@@ -18,11 +24,12 @@ kubectl get pods -n agent-sandbox-system
 ```
 .
 ├── README.md                    # This file
-├── ../../INSTALL.md             # Agent-sandbox installation guide
+├── ../../README.md              # Agent-sandbox installation guide
 ├── jupyterlab.yaml              # Modular deployment (Secret + Sandbox only)
 ├── jupyterlab-full.yaml         # All-in-one deployment (+ ConfigMap with file contents)
 └── files/
     ├── download_models.py       # Script to download HuggingFace models
+    ├── experiment.ipynb         # Notebook demonstrating complete ML workflow
     ├── requirements.txt         # Python dependencies
     └── welcome.ipynb            # Sample notebook
 ```

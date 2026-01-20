@@ -1,0 +1,155 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jupyter-hf-token
+  namespace: default
+type: Opaque
+stringData:
+  token: "HF_TOKEN"  # Replace with actual token or use --from-literal
+---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: jupyterlab-sandbox
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: jupyterlab
+        sandbox: jupyterlab
+    spec:
+      initContainers:
+        - name: setup-environment
+          image: jupyterhub/k8s-singleuser-sample:4.2.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              
+              if [ -f /home/jovyan/.initialized ]; then
+                echo "Already initialized, skipping..."
+                exit 0
+              fi
+              
+              mkdir -p /home/jovyan/.pip-cache
+              mkdir -p /home/jovyan/.tmp
+              mkdir -p /home/jovyan/work
+              mkdir -p /home/jovyan/.local
+              mkdir -p /home/jovyan/.cache/huggingface
+              
+              echo "Installing Python dependencies to persistent storage..."
+              pip install --no-cache-dir \
+                --target=/home/jovyan/.local/lib/python3.12/site-packages \
+                -r /config/requirements.txt
+              
+              python /config/download_models.py /home/jovyan/.cache/huggingface
+              
+              echo "Copying notebook files..."
+              cp /config/welcome.ipynb /home/jovyan/work/welcome.ipynb
+              
+              touch /home/jovyan/.initialized
+
+              chown -R jovyan:users /home/jovyan
+              
+              echo "Initialization complete!"
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: jupyter-hf-token
+                  key: token
+            - name: HF_HOME
+              value: /home/jovyan/.cache/huggingface
+            - name: PIP_CACHE_DIR
+              value: /home/jovyan/.pip-cache
+            - name: TMPDIR
+              value: /home/jovyan/.tmp
+            - name: TEMP
+              value: /home/jovyan/.tmp
+            - name: TMP
+              value: /home/jovyan/.tmp
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/jovyan
+            - name: init-files
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+              ephemeral-storage: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+              ephemeral-storage: "1Gi"
+          securityContext:
+            runAsUser: 0  # Need root for chown
+
+      securityContext:
+        fsGroup: 100  # users group - for volume permissions
+
+      containers:
+        - name: jupyterlab
+          image: jupyterhub/k8s-singleuser-sample:4.2.0
+          command:
+            - jupyter
+            - lab
+          args:
+            - --ip=0.0.0.0
+            - --port=8888
+            - --notebook-dir=/home/jovyan/work
+            - --ServerApp.token=''
+            - --ServerApp.password=''
+            - --ServerApp.allow_origin='*'
+            - --ServerApp.disable_check_xsrf=True
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: jupyter-hf-token
+                  key: token
+            - name: JUPYTER_ENABLE_LAB
+              value: "yes"
+            - name: HF_HOME
+              value: /home/jovyan/.cache/huggingface
+            - name: PYTHONPATH
+              value: /home/jovyan/.local/lib/python3.12/site-packages
+          ports:
+            - containerPort: 8888
+              name: notebook
+              protocol: TCP
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/jovyan
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+              ephemeral-storage: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+              ephemeral-storage: "2Gi"
+          securityContext:
+            runAsUser: 1000  # jovyan user
+            runAsGroup: 100  # users group
+            allowPrivilegeEscalation: false
+
+      volumes:
+        - name: init-files
+          configMap:
+            name: jupyter-init-files
+
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi

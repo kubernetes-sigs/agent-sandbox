@@ -1,6 +1,6 @@
 # Composing Sandbox with Network Policies
 
-The `Sandbox` API is a low-level primitive for creating secure sandboxes. In real-world scenarios, you often want to compose a `Sandbox` with other Kubernetes resources, such as `NetworkPolicy`, `Ingress` and `Service`, to create a more complete and secure "agentic sandbox" environment.
+The `Sandbox` API is a low-level primitive for creating secure sandboxes. In real-world scenarios, you often want to compose a `Sandbox` with other Kubernetes resources, such as `NetworkPolicy`, `Ingress` and `Service`, to create a more complete and secure "agent sandbox" environment.
 
 * `Ingress` can be used to expose the Sandbox to Users and Agents outside the cluster. 
 * `NetworkPolicy` can be used to control who can connect to the Sandbox and limit the Sandbox outgoing connections to other pods or the internet.  
@@ -34,11 +34,21 @@ KRO is a powerful tool for defining and managing composite resources in Kubernet
 
 ## Example: Using KRO to create an `AgenticSandbox`
 
+### Clone the repository
+First, clone the repository and navigate to the repository directory
+```
+# Clone the repository
+git clone https://github.com/kubernetes-sigs/agent-sandbox.git
+
+# Navigate to the repository directory
+cd agent-sandbox
+```
+
 ### Install KRO
 
-First, install KRO on your cluster:
+Install KRO on your cluster, by running the script:
 ```
-dev/tools/install-kro
+./dev/tools/install-kro
 ```
 
 ### Create RGD
@@ -46,6 +56,10 @@ dev/tools/install-kro
 Install the `ResourceGraphDefinition` (RGD) which defines our new `AgenticSandbox` CRD
 
 ```
+# Switch to the examples directory
+cd examples/composing-sandbox-nw-policies
+
+# Install the RGD
 kubectl apply -f rgd.yaml
 ```
 
@@ -89,8 +103,8 @@ kubectl apply -f instance.yaml
 Check the status of the created resources:
 
 ```
-kubectl get agenticsandboxes
-kubectl get agenticsandboxes demo -o yaml
+kubectl get AgenticSandboxes
+kubectl get AgenticSandboxes demo -o yaml
 ```
 
 The KRO reconciler reconciles `AgenticSandbox` instance and creates the following resources:
@@ -106,5 +120,5 @@ If needed the user can update `AgenticSandbox` instance and reapply.
 Once done using the Sandbox, the user can delete the `AgenticSandbox` instance, and KRO will clean up all the resources it created:
 
 ```
-kubectl delete agenticsandbox demo
+kubectl delete AgenticSandbox demo
 ```

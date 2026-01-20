@@ -179,5 +179,3 @@ _Appears in:_
 | --- | --- |
 | `Delete` | ShutdownPolicyDelete deletes the Sandbox when expired.<br /> |
 | `Retain` | ShutdownPolicyRetain keeps the Sandbox when expired (Status will show Expired).<br /> |
-
-

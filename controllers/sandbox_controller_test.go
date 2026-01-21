@@ -804,14 +804,14 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
-			name:        "error when annotated pod does not exist",
+			name:        "recovers when annotated pod does not exist by recreating pod with same name",
 			initialObjs: []runtime.Object{},
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "non-existent-pod",
+						SandboxPodNameAnnotation: "warm-pool-pod-name",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -827,8 +827,25 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantPod:   nil,
-			expectErr: true,
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "warm-pool-pod-name",
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+						},
+					},
+				},
+			},
+			expectErr: false,
 		},
 		{
 			name: "remove pod name annotation when replicas is 0",
@@ -874,19 +891,19 @@ func TestReconcilePod(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, tc.wantPod, pod)
 
 			// Validate the Pod from the "cluster" (fake client)
 			if tc.wantPod != nil {
+				require.NotNil(t, pod, "expected pod to be returned")
 				livePod := &corev1.Pod{}
 				err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
 				require.NoError(t, err)
 				require.Equal(t, tc.wantPod, livePod)
 			} else if !tc.expectErr {
 				// When wantPod is nil and no error expected, verify pod doesn't exist
+				require.Nil(t, pod, "expected no pod to be returned")
 				livePod := &corev1.Pod{}
 				podName := sandboxName
-				// Check if there's an annotation with a non-empty value
 				if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
 					podName = annotatedPod
 				}

@@ -20,7 +20,7 @@ steps:
     tuningSet: BurstCreate
     objectBundle:
     - basename: agent-env
-      objectTemplatePath: "sandbox-template.yaml"
+      objectTemplatePath: "cluster-loader-sandbox.yaml"
 - name: Wait for Sandboxes to be Ready
   measurements:
   - Identifier: WaitForSandboxes

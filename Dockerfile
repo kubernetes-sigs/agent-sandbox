@@ -18,6 +18,7 @@ COPY api/ ./api/
 COPY cmd/ ./cmd/
 COPY controllers/ ./controllers/
 COPY extensions/ ./extensions/
+COPY internal/ ./internal/
 
 # Build the binary with optimizations
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /agent-sandbox-controller ./cmd/agent-sandbox-controller

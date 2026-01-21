@@ -34,7 +34,7 @@ Follow the instructions to install [ClusterLoader2](https://github.com/kubernete
 
 The load test is defined in `agent-sandbox-load-test.yaml`. 
 
-It creates a specified number of Sandboxes using the template in `sandbox-template.yaml` and measures startup latency.
+It creates a specified number of Sandboxes using the template in `cluster-loader-sandbox.yaml` and measures startup latency.
 
 ### 1. Build the cluster loader
 
@@ -52,7 +52,19 @@ To run the test against your Kubernetes cluster, execute the command below:
 ./clusterloader2 
 --testconfig=../../agent-sandbox/dev/load-test/agent-sandbox-load-test.yaml 
 --kubeconfig=$HOME/.kube/config
---provider=gce
+--provider=gke
+```
+
+To run the test against against your local kind Kubernetes cluster, please follow
+the [kind installation](https://kind.sigs.k8s.io/docs/user/quick-start#installation) guide.
+
+Then execute the command below:
+
+```bash
+./clusterloader2 
+--testconfig=../../agent-sandbox/dev/load-test/agent-sandbox-load-test.yaml 
+--kubeconfig=$HOME/.kube/config
+--provider=kind
 ```
 
 **Note:** Ensure you are in the `clusterloader2/` directory when running this command, as the configuration references `agent-sandbox-load-test.yaml` via a relative path.

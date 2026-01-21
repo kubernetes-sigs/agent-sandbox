@@ -406,8 +406,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, fmt.Errorf("Pod Get Failed: %w", err)
 		}
 		if podNameAnnotationExists {
-			log.Error(err, "Pod not found")
-			return nil, fmt.Errorf("Pod in Annotation Get Failed: %w", err)
+			log.Info("Pod from annotation not found, will recreate with same name",
+				"podName", trackedPodName, "namespace", sandbox.Namespace, "sandbox", sandbox.Name)
 		}
 		pod = nil
 	}
@@ -473,7 +473,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	// 3. PATH: Create new Pod
-	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
+	// Use annotated name (for warm pool) or sandbox name
+	newPodName := sandbox.Name
+	if trackedPodName != "" {
+		newPodName = trackedPodName
+	}
+
+	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", newPodName)
 	labels := map[string]string{
 		sandboxLabel: nameHash,
 	}
@@ -502,7 +508,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        sandbox.Name,
+			Name:        newPodName,
 			Namespace:   sandbox.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
@@ -514,6 +520,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			log.Info("Pod already exists, fetching existing pod",
+				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			existingPod := &corev1.Pod{}
+			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
+				return nil, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
+			}
+			return existingPod, nil
+		}
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}

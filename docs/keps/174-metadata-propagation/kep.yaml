@@ -1,0 +1,10 @@
+title: Agent Sandbox Label and Annotation propagation
+kep-number: 174
+authors:
+  - "@peterzhongyi"
+status: implementable
+creation-date: 2026-01-24
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

@@ -74,7 +74,8 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	oldStatus := warmPool.Status.DeepCopy()
 
 	// Reconcile the pool (create or delete Pods as needed)
-	if err := r.reconcilePool(ctx, warmPool); err != nil {
+	requeue, err := r.reconcilePool(ctx, warmPool)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -84,11 +85,15 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	if requeue {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
 // reconcilePool ensures the correct number of pods exist in the pool
-func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) error {
+func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) (bool, error) {
 	log := log.FromContext(ctx)
 
 	// Compute hash of the warm pool name for the pool label
@@ -105,7 +110,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		Namespace:     warmPool.Namespace,
 	}); err != nil {
 		log.Error(err, "Failed to list pods")
-		return err
+		return false, err
 	}
 
 	// Filter pods by ownership and adopt orphans
@@ -167,8 +172,18 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	warmPool.Status.ReadyReplicas = readyReplicas
 
 	// Create new pods if we need more
+	shouldRequeue := false
 	if currentReplicas < desiredReplicas {
 		podsToCreate := desiredReplicas - currentReplicas
+		
+		// Rate limit: prevent creating too many pods in a single reconciliation
+		const maxCreatePerBatch = 20
+		if podsToCreate > maxCreatePerBatch {
+			log.Info("Capping pod creation batch", "requested", podsToCreate, "limit", maxCreatePerBatch)
+			podsToCreate = maxCreatePerBatch
+			shouldRequeue = true
+		}
+		
 		log.Info("Creating new pods", "count", podsToCreate)
 
 		for i := int32(0); i < podsToCreate; i++ {
@@ -200,7 +215,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 
-	return allErrors
+	return shouldRequeue, allErrors
 }
 
 // adoptPod sets this warmpool as the owner of an orphaned pod

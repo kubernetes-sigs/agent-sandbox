@@ -163,10 +163,10 @@ func TestReconcilePool(t *testing.T) {
 			ctx := context.Background()
 
 			// Run reconcilePool twice: first to create/delete, second to update status
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
-			err = r.reconcilePool(ctx, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			// Verify final state
@@ -326,11 +326,11 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 			ctx := context.Background()
 
 			// Run reconcilePool
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			// Run again to ensure idempotency
-			err = r.reconcilePool(ctx, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			// Verify final state
@@ -439,7 +439,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 		expectedPoolNameHash := sandboxcontrollers.NameHash(poolName)
 
 		// Reconcile
-		err := r.reconcilePool(ctx, warmPool)
+		_, err := r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
 
 		// List all pods
@@ -566,13 +566,78 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			ctx := context.Background()
 
 			// Run reconcilePool twice to update status
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
-			err = r.reconcilePool(ctx, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			// Verify the ReadyReplicas status
 			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
 		})
 	}
+}
+
+func TestReconcilePoolRateLimiting(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(50)
+
+	// Create a SandboxTemplate
+	template := createTemplate(templateName, poolNamespace)
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(newTestScheme()).
+			WithRuntimeObjects(template).
+			Build(),
+	}
+
+	ctx := context.Background()
+
+	// 1st Reconcile: Should create 20 pods and request requeue
+	requeue, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.True(t, requeue, "Should request requeue when rate limited")
+
+	// Verify 20 pods created
+	list := &corev1.PodList{}
+	err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 20, "Should create exactly 20 pods in first batch")
+
+	// 2nd Reconcile: Should create next 20 pods (total 40)
+	requeue, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.True(t, requeue, "Should request requeue when still rate limited")
+
+	// Verify 40 pods total
+	list = &corev1.PodList{}
+	err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 40, "Should have 40 pods after second batch")
+
+	// 3rd Reconcile: Should create remaining 10 pods (total 50)
+	requeue, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.False(t, requeue, "Should NOT request requeue when finished")
+
+	// Verify 50 pods total
+	list = &corev1.PodList{}
+	err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 50, "Should have reached desired replica count")
 }

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
@@ -884,6 +885,106 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 						t.Errorf("expected no pod name annotation but found one")
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestRecordLifecycleMetrics(t *testing.T) {
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	testCases := []struct {
+		name          string
+		claim         *extensionsv1alpha1.SandboxClaim
+		oldStatus     *extensionsv1alpha1.SandboxClaimStatus
+		sandbox       *sandboxv1alpha1.Sandbox
+		reconcileErr  error
+		claimExpired  bool
+		expectObserve int
+	}{
+		{
+			name: "records success transition",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "ok", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:     &extensionsv1alpha1.SandboxClaimStatus{},
+			expectObserve: 1,
+		},
+		{
+			name: "records reconciler error",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "err", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError"}},
+				},
+			},
+			oldStatus:     &extensionsv1alpha1.SandboxClaimStatus{},
+			reconcileErr:  fmt.Errorf("api failure"),
+			expectObserve: 1,
+		},
+		{
+			name: "records failure on expiration",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "expired", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ClaimExpired"}},
+				},
+			},
+			oldStatus:     &extensionsv1alpha1.SandboxClaimStatus{},
+			claimExpired:  true,
+			expectObserve: 1,
+		},
+		{
+			name: "does not record when template error persists from previous loop",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "persistent-fail", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{
+						Type:   string(sandboxv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionFalse,
+						Reason: "TemplateNotFound",
+					}},
+				},
+			},
+			oldStatus: &extensionsv1alpha1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: "TemplateNotFound",
+				}},
+			},
+			reconcileErr:  ErrTemplateNotFound,
+			expectObserve: 0,
+		},
+		{
+			name: "ignores in-progress state (no error)",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady"}},
+				},
+			},
+			oldStatus:     &extensionsv1alpha1.SandboxClaimStatus{},
+			reconcileErr:  nil,
+			expectObserve: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.ClaimStartupLatency.Reset()
+			r := &SandboxClaimReconciler{}
+			r.recordLifecycleMetrics(tc.claim, tc.oldStatus, tc.sandbox, tc.reconcileErr, tc.claimExpired)
+
+			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
+			if count != tc.expectObserve {
+				t.Errorf("expected %d observations, got %d", tc.expectObserve, count)
 			}
 		})
 	}

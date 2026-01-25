@@ -9,7 +9,41 @@
 {{- $sectionPath := replaceRE "/[^/]+/$" "/" $pagePath -}}
 
 {{/* Fix all relative README.md and INSTALL.md links */}}
-{{- $content = replaceRE `\]\((\./)?README\.md(#[^)]+)?\)` (printf "](%s$1)" (strings.TrimSuffix "/" $sectionPath)) $content -}}
-{{- $content = replaceRE `\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)` "](/docs/getting_started/$2)" $content -}}
+{{- $content = replaceRE `\]\(\./README\.md\)` "](/docs/examples/jupyterlab/)" $content -}}
+{{- $content = replaceRE `\]\(README\.md(#[^)]+)?\)` (printf "](%s$1)" (strings.TrimSuffix "/" $sectionPath)) $content -}}
+{{- $content = replaceRE `\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)` "](/docs/overview/$2)" $content -}}
+
+{{/* Fix link 1: Python SDK README - redirect to GitHub */}}
+{{- $content = replaceRE `\]\(clients/python/agentic-sandbox-client/README\.md(#[^)]+)?\)` "](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)" $content -}}
+
+{{/* Fix link 2: examples/ link - redirect to /docs/examples/ */}}
+{{- $content = replaceRE `\]\(examples/\)` "](/docs/examples/)" $content -}}
+
+{{/* Fix link 3: extensions/examples - redirect to GitHub */}}
+{{- $content = replaceRE `\]\(extensions/examples/\)` "](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/extensions/examples)" $content -}}
+
+{{/* Fix link 4: agentic-sandbox-client Python SDK (relative paths) - redirect to GitHub */}}
+{{- $content = replaceRE `\]\(\.\./\.\./clients/python/agentic-sandbox-client/\)` "](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/)" $content -}}
+
+{{/* Fix link 5: JupyterLab deployed (installation guide) - fix to /docs/examples/jupyterlab/ */}}
+{{- $content = replaceRE `\]\(\.\./\.\./INSTALL\.md\)` "](/docs/examples/jupyterlab/)" $content -}}
+
+{{/* Fix link 6: installation section from getting started - fix to /docs/overview/#installation */}}
+{{- $content = replaceRE `\]\(/README\.md/#installation\)` "](/docs/overview/#installation)" $content -}}
+
+{{/* Fix link 7: agent sandbox router - redirect to GitHub */}}
+{{- $content = replaceRE `\]\(/clients/python/agentic-sandbox-client/README\.md(#[^)]+)\)` "](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)" $content -}}
+
+{{/* Fix link 8: sandbox-router README - redirect to GitHub */}}
+{{- $content = replaceRE `\]\(sandbox-router/README\.md(#[^)]+)?\)` "](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)" $content -}}
+
+{{/* Fix link 9: test_client.py - redirect to GitHub */}}
+{{- $content = replaceRE `\]\(test_client\.py\)` "](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/test_client.py)" $content -}}
+
+{{/* Fix link 10: python-runtime-sandbox - redirect to /docs/runtime_templates/python/ */}}
+{{- $content = replaceRE `\]\(\.\./\.\./\.\./examples/python-runtime-sandbox/\)` "](/docs/runtime_templates/python/)" $content -}}
+
+{{/* Fix link 11: tracing with GCP - redirect to GitHub */}}
+{{- $content = replaceRE `\]\(GCP\.md(#[^)]+)\)` "](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/GCP.md$1)" $content -}}
 
 {{- $content | markdownify -}}

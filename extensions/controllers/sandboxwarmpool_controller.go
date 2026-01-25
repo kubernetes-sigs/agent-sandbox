@@ -191,15 +191,44 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// Clean up orphaned PVCs (best effort) before creating new pods
 	// This handles partial failures (PVC created but pod creation failed)
 	// and ensures orphaned resources don't accumulate across reconciles
-	for i := range orphanedPVCs {
-		pvc := &orphanedPVCs[i]
-		if err := r.Delete(ctx, pvc); err != nil {
-			if !k8serrors.IsNotFound(err) {
-				log.Error(err, "Failed to delete orphaned PVC", "pvc", pvc.Name)
+	//
+	// Skip orphan cleanup during scale-up to reduce risk of race conditions
+	// where the informer cache hasn't yet seen newly created pods.
+	if currentReplicas < desiredReplicas {
+		log.V(1).Info("Skipping orphan cleanup during scale-up")
+	} else {
+		for i := range orphanedPVCs {
+			pvc := &orphanedPVCs[i]
+			pvcPodName := pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation]
+
+			// Verify pod truly doesn't exist via direct API server call.
+			// The informer cache may be stale, causing us to incorrectly identify
+			// a PVC as orphaned when its pod was just created but not yet in cache.
+			pod := &corev1.Pod{}
+			err := r.Client.Get(ctx, client.ObjectKey{
+				Namespace: pvc.Namespace,
+				Name:      pvcPodName,
+			}, pod)
+			if err == nil {
+				// Pod exists - PVC is not actually orphaned, skip deletion
+				log.V(1).Info("PVC not orphaned, pod exists", "pvc", pvc.Name, "pod", pvcPodName)
+				continue
 			}
-			// Continue anyway - don't block pod creation due to cleanup failures
-		} else {
-			log.Info("Deleted orphaned PVC", "pvc", pvc.Name)
+			if !k8serrors.IsNotFound(err) {
+				// API error - skip deletion to be safe
+				log.Error(err, "Failed to verify pod existence, skipping PVC deletion", "pvc", pvc.Name, "pod", pvcPodName)
+				continue
+			}
+
+			// Pod confirmed not to exist via API server - safe to delete PVC
+			if err := r.Delete(ctx, pvc); err != nil {
+				if !k8serrors.IsNotFound(err) {
+					log.Error(err, "Failed to delete orphaned PVC", "pvc", pvc.Name)
+				}
+				// Continue anyway - don't block pod creation due to cleanup failures
+			} else {
+				log.Info("Deleted orphaned PVC", "pvc", pvc.Name)
+			}
 		}
 	}
 

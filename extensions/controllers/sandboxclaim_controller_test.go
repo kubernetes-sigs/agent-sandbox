@@ -1041,6 +1041,7 @@ func TestSandboxClaimPVCAdoption(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client: fakeClient,
 			Scheme: scheme,
+			Tracer: asmetrics.NewNoOp(),
 		}
 
 		ctx := context.Background()
@@ -1075,7 +1076,7 @@ func TestSandboxClaimPVCAdoption(t *testing.T) {
 		}
 
 		// Verify sandbox was created WITH volumeClaimTemplates (for visibility and pod recreation)
-		var sandbox v1alpha1.Sandbox
+		var sandbox sandboxv1alpha1.Sandbox
 		err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 		if err != nil {
 			t.Fatalf("failed to get sandbox: %v", err)
@@ -1114,6 +1115,7 @@ func TestSandboxClaimPVCAdoption(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client: fakeClient,
 			Scheme: scheme,
+			Tracer: asmetrics.NewNoOp(),
 		}
 
 		ctx := context.Background()
@@ -1127,7 +1129,7 @@ func TestSandboxClaimPVCAdoption(t *testing.T) {
 		}
 
 		// Verify sandbox was created WITH volumeClaimTemplates
-		var sandbox v1alpha1.Sandbox
+		var sandbox sandboxv1alpha1.Sandbox
 		err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 		if err != nil {
 			t.Fatalf("failed to get sandbox: %v", err)

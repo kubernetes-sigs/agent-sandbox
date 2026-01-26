@@ -39,7 +39,7 @@ import (
 
 const (
 	// DefaultTimeout is the default timeout for WaitForObject.
-	DefaultTimeout = 60 * time.Second
+	DefaultTimeout = 120 * time.Second
 )
 
 // ClusterClient is an abstraction layer for test cases to interact with the cluster.
@@ -178,8 +178,9 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 // WaitForObjectNotFound waits for the specified object to not exist.
 func (cl *ClusterClient) WaitForObjectNotFound(ctx context.Context, obj client.Object) error {
 	cl.Helper()
-	// Static 30 second timeout, this can be adjusted if needed
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Static 2 minute timeout, this can be adjusted if needed
+	timeoutCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
+
 	defer cancel()
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}

@@ -143,8 +143,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Record metrics for state transitions
-	r.recordLifecycleMetrics(claim, originalClaimStatus, sandbox, reconcileErr, claimExpired)
+	// Record metric for state transitions
+	r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox, reconcileErr, claimExpired)
 
 	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
 		return ctrl.Result{}, errors.Join(reconcileErr, updateErr)
@@ -611,20 +611,26 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 	return nil
 }
 
-// recordLifecycleMetrics detects and records transitions to Ready or terminal failure states.
-func (r *SandboxClaimReconciler) recordLifecycleMetrics(
+// recordCreationLatencyMetric detects and records transitions to Ready or terminal failure states.
+func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1alpha1.SandboxClaim,
 	oldStatus *extensionsv1alpha1.SandboxClaimStatus,
-	sandbox *v1alpha1.Sandbox,
+	sandbox *sandboxv1alpha1.Sandbox,
 	reconcileErr error,
 	isClaimExpired bool,
 ) {
-	newReady := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
-	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	// Only Once Guard: If the claim already has a Sandbox Name assigned in the PREVIOUS status,
+	// it means the creation was already successful in a past loop. We exit early to ignore
+	// all future transitions (like expiration).
+	if oldStatus.SandboxStatus.Name != "" {
+		return
+	}
 
+	newReady := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
 	if newReady == nil {
 		return
 	}
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
 
 	// Success: Transition from not-Ready to Ready=True
 	isSuccess := newReady.Status == metav1.ConditionTrue &&

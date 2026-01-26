@@ -3,6 +3,18 @@ name: Publish Python 🐍 distribution 📦 to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Log level'     
+        required: true
+        default: 'warning'
+      environment:
+        description: 'Environment to deploy to'
+        type: choice
+        options:
+        - testpypi
+        - pypi
 
 jobs:
   build:
@@ -69,6 +81,11 @@ jobs:
       url: https://pypi.org/p/k8s-agent-sandbox
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
+
+    # Run if it's a Release event OR if Manual trigger + 'pypi' selected
+    if: >-
+      github.event_name == 'release' || 
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi')
 
     steps:
     - name: Download all the dists

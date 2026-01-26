@@ -134,7 +134,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sandbox, reconcileErr = r.reconcileActive(ctx, claim)
 	}
 
-	// Update Status & Events
+	// Update Status, Metrics, & Events
 	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
 
 	if !hasExpiredCondition(originalClaimStatus.Conditions) && hasExpiredCondition(claim.Status.Conditions) {
@@ -142,6 +142,9 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Claim expired")
 		}
 	}
+
+	// Record metric for state transitions
+	r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox, reconcileErr, claimExpired)
 
 	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
 		return ctrl.Result{}, errors.Join(reconcileErr, updateErr)
@@ -606,6 +609,59 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 
 	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
 	return nil
+}
+
+// recordCreationLatencyMetric detects and records transitions to Ready or terminal failure states.
+func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
+	claim *extensionsv1alpha1.SandboxClaim,
+	oldStatus *extensionsv1alpha1.SandboxClaimStatus,
+	sandbox *sandboxv1alpha1.Sandbox,
+	reconcileErr error,
+	isClaimExpired bool,
+) {
+	// Only Once Guard: If the claim already has a Sandbox Name assigned in the PREVIOUS status,
+	// it means the creation was already successful in a past loop. We exit early to ignore
+	// all future transitions (like expiration).
+	if oldStatus.SandboxStatus.Name != "" {
+		return
+	}
+
+	newReady := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	if newReady == nil {
+		return
+	}
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+
+	// Success: Transition from not-Ready to Ready=True
+	isSuccess := newReady.Status == metav1.ConditionTrue &&
+		(oldReady == nil || oldReady.Status != metav1.ConditionTrue)
+
+	// Failure: Transition to Ready=False triggered by an actual error or expiration event.
+	// Check for reconcileErr to capture system failures.
+	// Check for isClaimExpired ONLY if the object was not already expired in the previous state.
+	isFailure := (reconcileErr != nil || isClaimExpired) &&
+		newReady.Status == metav1.ConditionFalse &&
+		(oldReady == nil || oldReady.Reason != newReady.Reason)
+
+	if isSuccess || isFailure {
+		status := asmetrics.StatusSuccess
+		if isFailure {
+			status = asmetrics.StatusFailure
+		}
+
+		launchType := asmetrics.LaunchTypeCold
+		// Check for pod adoption using the core controller's tracking annotation
+		if sandbox != nil && sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "" {
+			launchType = asmetrics.LaunchTypeWarm
+		}
+
+		latency := float64(time.Since(claim.CreationTimestamp.Time).Milliseconds())
+		asmetrics.ClaimStartupLatency.WithLabelValues(
+			launchType,
+			status,
+			claim.Spec.TemplateRef.Name,
+		).Observe(latency)
+	}
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller

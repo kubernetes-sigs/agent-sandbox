@@ -890,7 +890,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 	}
 }
 
-func TestRecordLifecycleMetrics(t *testing.T) {
+func TestRecordCreationLatencyMetric(t *testing.T) {
 	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
 
 	testCases := []struct {
@@ -903,16 +903,28 @@ func TestRecordLifecycleMetrics(t *testing.T) {
 		expectObserve int
 	}{
 		{
-			name: "records success transition",
+			name: "records success on first ready transition",
 			claim: &extensionsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{Name: "ok", CreationTimestamp: pastTime},
 				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
 				Status: extensionsv1alpha1.SandboxClaimStatus{
-					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+					Conditions:    []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+					SandboxStatus: extensionsv1alpha1.SandboxStatus{Name: "test-sandbox"},
 				},
 			},
 			oldStatus:     &extensionsv1alpha1.SandboxClaimStatus{},
 			expectObserve: 1,
+		},
+		{
+			name: "ignores success if sandbox has previously been created",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions:    []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+					SandboxStatus: extensionsv1alpha1.SandboxStatus{Name: "test-sandbox"},
+				},
+			},
+			oldStatus:     &extensionsv1alpha1.SandboxClaimStatus{SandboxStatus: extensionsv1alpha1.SandboxStatus{Name: "test-sandbox"}},
+			expectObserve: 0,
 		},
 		{
 			name: "records reconciler error",
@@ -980,7 +992,7 @@ func TestRecordLifecycleMetrics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			asmetrics.ClaimStartupLatency.Reset()
 			r := &SandboxClaimReconciler{}
-			r.recordLifecycleMetrics(tc.claim, tc.oldStatus, tc.sandbox, tc.reconcileErr, tc.claimExpired)
+			r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox, tc.reconcileErr, tc.claimExpired)
 
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
 			if count != tc.expectObserve {

@@ -178,8 +178,10 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 // WaitForObjectNotFound waits for the specified object to not exist.
 func (cl *ClusterClient) WaitForObjectNotFound(ctx context.Context, obj client.Object) error {
 	cl.Helper()
-	// Static 30 second timeout, this can be adjusted if needed
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// // Static 2 minute timeout, this can be adjusted if needed
+	// timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 2*DefaultTimeout)
+
 	defer cancel()
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}

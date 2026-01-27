@@ -5,16 +5,18 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      logLevel:
-        description: 'Log level'     
-        required: true
-        default: 'warning'
       environment:
         description: 'Environment to deploy to'
         type: choice
         options:
         - testpypi
         - pypi
+      version:
+        description: 'Manual Version (e.g., 0.1.5). Leave empty if using a Release Tag.'
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -30,11 +32,43 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: "3.x"
+        python-version: "3.12"
+    
+    - name: Create VERSION file
+      shell: bash
+      run: |
+        # Determine the version
+        if [[ "${{ inputs.version }}" != "" ]]; then
+          FINAL_VERSION="${{ inputs.version }}"
+          echo "Manual mode: Using $FINAL_VERSION"
+
+        elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          # Strip 'python-v' or 'v' prefix (e.g., python-v0.1.0 -> 0.1.0)
+          FINAL_VERSION=$(echo $TAG_NAME | sed 's/^python-v//' | sed 's/^v//')
+          echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
+
+        else
+          echo "::error::No valid version found! Workflow must be triggered by a Tag (e.g., python-v0.1.0) or Manual Input."
+          exit 1
+        fi
+
+        # Write to the file setuptools expects
+        echo "$FINAL_VERSION" > VERSION
         
+        # Verify
+        echo "Generated VERSION file content:"
+        cat VERSION
+        
+    - name: Install dependencies (including tests)
+      run: python3 -m pip install ".[test]" 
+
+    - name: Run Unit Tests
+      run: python3 -m pytest
+
     - name: Install pypa/build
       run: >-
-        python3 -m pip install build --user
+        python3 -m pip install build
         
     - name: Build a binary wheel and a source tarball
       run: python3 -m build
@@ -56,6 +90,7 @@ jobs:
       url: https://test.pypi.org/p/k8s-agent-sandbox
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
+      contents: read
 
     steps:
     - name: Download all the dists
@@ -68,7 +103,6 @@ jobs:
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
         repository-url: https://test.pypi.org/legacy/
-        skip-existing: true # to avoid failing since the first version is already published in TestPyPI
 
   publish-to-pypi:
     name: >-
@@ -81,6 +115,7 @@ jobs:
       url: https://pypi.org/p/k8s-agent-sandbox
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
+      contents: read
 
     # Run if it's a Release event OR if Manual trigger + 'pypi' selected
     if: >-

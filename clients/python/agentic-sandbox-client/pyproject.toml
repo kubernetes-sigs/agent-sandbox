@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "k8s-agent-sandbox"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A client library to interact with the Agentic Sandbox on Kubernetes."
 readme = "README.md"
 requires-python = ">=3.7"
@@ -26,6 +26,9 @@ dependencies = [
 # This line tells setuptools to only include the 'agentic_sandbox'
 # package and to ignore other directories like 'sandbox_router'.
 packages = ["agentic_sandbox"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [project.optional-dependencies]
 test = [

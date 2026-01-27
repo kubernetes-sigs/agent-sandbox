@@ -93,6 +93,21 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 }
 
+// PersistenceStrategy describes the strategy for persisting the Sandbox state.
+// +kubebuilder:validation:Enum=None;PVC;Snapshot
+type PersistenceStrategy string
+
+const (
+	// None indicates no persistence strategy is used.
+	None PersistenceStrategy = "None"
+
+	// PVC persists the state in a PersistentVolumeClaim.
+	PVC PersistenceStrategy = "PVC"
+
+	// Snapshot persists the state as a snapshot.
+	Snapshot PersistenceStrategy = "Snapshot"
+)
+
 // SandboxSpec defines the desired state of Sandbox
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
@@ -119,6 +134,16 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Maximum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// PersistenceStrategy defines the strategy for persisting the sandbox state when suspended.
+	// +kubebuilder:default=None
+	// +optional
+	PersistenceStrategy *PersistenceStrategy `json:"persistenceStrategy,omitempty"`
+
+	// Suspended indicates whether the sandbox is currently suspended.
+	// +kubebuilder:default=false
+	// +optional
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

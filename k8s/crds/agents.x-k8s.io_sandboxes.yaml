@@ -28,6 +28,13 @@ spec:
             type: object
           spec:
             properties:
+              persistenceStrategy:
+                default: None
+                enum:
+                - None
+                - PVC
+                - Snapshot
+                type: string
               podTemplate:
                 properties:
                   metadata:
@@ -3828,6 +3835,9 @@ spec:
               shutdownTime:
                 format: date-time
                 type: string
+              suspended:
+                default: false
+                type: boolean
               volumeClaimTemplates:
                 items:
                   properties:

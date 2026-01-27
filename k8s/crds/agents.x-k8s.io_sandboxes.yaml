@@ -28,6 +28,13 @@ spec:
             type: object
           spec:
             properties:
+              checkpointStrategy:
+                default: KeepPVC
+                enum:
+                - KeepPVC
+                - GKEPodSnapshot
+                - SoftPause
+                type: string
               podTemplate:
                 properties:
                   metadata:
@@ -3828,6 +3835,9 @@ spec:
               shutdownTime:
                 format: date-time
                 type: string
+              suspended:
+                default: false
+                type: boolean
               volumeClaimTemplates:
                 items:
                   properties:

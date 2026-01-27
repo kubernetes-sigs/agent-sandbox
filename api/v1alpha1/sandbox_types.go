@@ -93,6 +93,21 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 }
 
+// CheckpointStrategy describes the strategy for persisting the Sandbox state.
+// +kubebuilder:validation:Enum=KeepPVC;GKEPodSnapshot;SoftPause
+type CheckpointStrategy string
+
+const (
+	// KeepPVC persists the pvc of the sandbox while the pod is turned down.
+	KeepPVC CheckpointStrategy = "KeepPVC"
+
+	// GKEPodSnapshot uses a GKE proprietary Pod Snapshot feature to persist the sandbox memory and filesystem.
+	GKEPodSnapshot CheckpointStrategy = "GKEPodSnapshot"
+
+	// SoftPause minimizes compute resource consumption of the workload without terminating it.
+	SoftPause CheckpointStrategy = "SoftPause"
+)
+
 // SandboxSpec defines the desired state of Sandbox
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
@@ -119,6 +134,16 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Maximum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// CheckpointStrategy defines the strategy for persisting the sandbox state when suspended.
+	// +kubebuilder:default=KeepPVC
+	// +optional
+	CheckpointStrategy *CheckpointStrategy `json:"checkpointStrategy,omitempty"`
+
+	// Suspended indicates whether the sandbox is currently suspended.
+	// +kubebuilder:default=false
+	// +optional
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

@@ -440,9 +440,6 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	// TODO: this is a workaround, remove replica assignment related issue #202
-	replicas := int32(1)
-	sandbox.Spec.Replicas = &replicas
 	// Enforce a secure-by-default policy by disabling the automatic mounting
 	// of the service account token, adhering to security best practices for
 	// sandboxed environments.

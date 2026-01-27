@@ -20,7 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -35,7 +34,7 @@ func TestSandboxReplicas(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 	// Create a Sandbox Object
 	sandboxObj := simpleSandbox(ns.Name)
-	sandboxObj.Spec.Replicas = ptr.To(int32(1))
+	sandboxObj.Spec.Suspended = false
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
 	nameHash := NameHash(sandboxObj.Name)
@@ -68,8 +67,8 @@ func TestSandboxReplicas(t *testing.T) {
 	service.Namespace = "my-sandbox-ns"
 	require.NoError(t, tc.ValidateObject(t.Context(), service))
 
-	// Set replicas to zero
-	sandboxObj.Spec.Replicas = ptr.To(int32(0))
+	// Set suspended to true
+	sandboxObj.Spec.Suspended = true
 	require.NoError(t, tc.Update(t.Context(), sandboxObj))
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{
@@ -80,7 +79,7 @@ func TestSandboxReplicas(t *testing.T) {
 			LabelSelector: "",
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod does not exist, replicas is 0; Service Exists",
+					Message:            "Pod does not exist, suspended is true; Service Exists",
 					ObservedGeneration: 2,
 					Reason:             "DependenciesReady",
 					Status:             "True",

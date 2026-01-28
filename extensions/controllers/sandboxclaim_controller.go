@@ -40,6 +40,7 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 // TODO: These constants should be imported from the main controller package Issue #216
@@ -55,6 +56,7 @@ type SandboxClaimReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+	Tracer   asmetrics.Instrumenter
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -77,7 +79,25 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
 	}
 
+	// Start Tracing Span
+	ctx, end := r.Tracer.StartSpan(ctx, claim, "ReconcileSandboxClaim", nil)
+	defer end()
+
 	if !claim.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
+	// Initialize trace ID for active resources missing an ID
+	tc := r.Tracer.GetTraceContext(ctx)
+	if tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "") {
+		patch := client.MergeFrom(claim.DeepCopy())
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		claim.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if err := r.Patch(ctx, claim, patch); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -409,6 +429,14 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Namespace: claim.Namespace,
 			Name:      claim.Name,
 		},
+	}
+
+	// Propagate the trace context annotation to the Sandbox resource
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 	}
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)

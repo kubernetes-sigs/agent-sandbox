@@ -35,17 +35,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func TestSandboxClaimReconcile(t *testing.T) {
 	template := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: v1alpha1.PodTemplate{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
 				},
@@ -104,19 +104,19 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
 	}
 
-	uncontrolledSandbox := &v1alpha1.Sandbox{
+	uncontrolledSandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxSpec{PodTemplate: v1alpha1.PodTemplate{Spec: template.Spec.PodTemplate.Spec}},
+		Spec:       sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{Spec: template.Spec.PodTemplate.Spec}},
 	}
 
-	controlledSandbox := &v1alpha1.Sandbox{
+	controlledSandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-claim", Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
 			}},
 		},
-		Spec: v1alpha1.SandboxSpec{PodTemplate: v1alpha1.PodTemplate{Spec: template.Spec.PodTemplate.Spec}},
+		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{Spec: template.Spec.PodTemplate.Spec}},
 	}
 
 	controlledSandboxWithDefault := controlledSandbox.DeepCopy()
@@ -145,7 +145,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}}
 
 	// Validation Functions
-	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *v1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
+	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
 		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
 		expectedSpec.AutomountServiceAccountToken = ptr.To(false)
 		if diff := cmp.Diff(&sandbox.Spec.PodTemplate.Spec, expectedSpec); diff != "" {
@@ -153,7 +153,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		}
 	}
 
-	validateSandboxAutomountTrue := func(t *testing.T, sandbox *v1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+	validateSandboxAutomountTrue := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
 		if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil || !*sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken {
 			t.Error("expected AutomountServiceAccountToken to be true")
 		}
@@ -168,7 +168,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		expectedCondition     metav1.Condition
 		expectNetworkPolicy   bool
 		validateNetworkPolicy func(t *testing.T, np *networkingv1.NetworkPolicy)
-		validateSandbox       func(t *testing.T, sandbox *v1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
+		validateSandbox       func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
 	}{
 		{
 			name:             "sandbox is created when a claim is made",
@@ -294,6 +294,26 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 		},
+		{
+			name: "trace context is propagated from claim to sandbox",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "trace-claim", Namespace: "default", UID: "trace-uid",
+					Annotations: map[string]string{asmetrics.TraceContextAnnotation: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+				},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				if val, ok := sandbox.Annotations[asmetrics.TraceContextAnnotation]; !ok || val != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+					t.Errorf("expected trace context annotation to be propagated, got %q", val)
+				}
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -313,6 +333,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
+				Tracer:   asmetrics.NewNoOp(),
 			}
 
 			req := reconcile.Request{
@@ -326,7 +347,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				t.Fatalf("reconcile: (%v)", err)
 			}
 
-			var sandbox v1alpha1.Sandbox
+			var sandbox sandboxv1alpha1.Sandbox
 			err = client.Get(context.Background(), req.NamespacedName, &sandbox)
 			if tc.expectSandbox && err != nil {
 				t.Fatalf("get sandbox: (%v)", err)
@@ -475,6 +496,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
+				Tracer:   asmetrics.NewNoOp(),
 			}
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: "default"}}
@@ -552,6 +574,7 @@ func TestSandboxProvisionEvent(t *testing.T) {
 		Client:   client,
 		Scheme:   scheme,
 		Recorder: fakeRecorder,
+		Tracer:   asmetrics.NewNoOp(),
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
@@ -792,6 +815,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
+				Tracer:   asmetrics.NewNoOp(),
 			}
 
 			req := reconcile.Request{
@@ -808,7 +832,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			}
 
 			// Verify sandbox was created
-			var sandbox v1alpha1.Sandbox
+			var sandbox sandboxv1alpha1.Sandbox
 			err = client.Get(ctx, req.NamespacedName, &sandbox)
 			if tc.expectSandboxCreate && err != nil {
 				t.Fatalf("expected sandbox to be created but got error: %v", err)
@@ -867,7 +891,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 
 func newScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add to scheme: (%v)", err)
 	}
 	if err := extensionsv1alpha1.AddToScheme(scheme); err != nil {

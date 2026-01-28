@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import glob
+import os
+import subprocess
+import yaml
+import datetime
+
+def build_presubmit_job(id, command):
+  job = {
+    "name": id,
+    "cluster": "eks-prow-build-cluster",
+    "always_run": True,
+    "decorate": True,
+    "labels": {
+        "preset-service-account": "true"
+    },
+    "spec": {
+        "containers": [
+            {
+                "image": "gcr.io/k8s-staging-test-infra/kubekins-e2e:v20250904-c89b045f57-master",
+                "command": command,
+                "resources": {
+                "limits": {
+                    "cpu": 1,
+                    "memory": "4Gi"
+                },
+                "requests": {
+                    "cpu": 1,
+                    "memory": "4Gi"
+                }
+                }
+            }
+        ]
+    }
+  }
+
+  job["annotations"] = {
+    "testgrid-dashboards": "agent-sandbox",
+    "testgrid-tab-name": id,
+    "description": f"{id}",
+    "testgrid-num-columns-recent": '30'
+  }
+  return job
+
+def build_presubmits():
+  presubmits = []
+
+  for script in glob.glob("dev/ci/presubmits/*"):
+    script_name = os.path.basename(script)
+    presubmits.append(build_presubmit_job(f"presubmit-{script_name}", script))
+
+  prow_config = {
+    "presubmits": {
+        "kubernetes-sigs/agent-sandbox": presubmits
+    }
+  }
+  return prow_config
+
+
+def main():
+    """Runs the validation logic."""
+
+    repo_root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).strip().decode("utf-8")
+    os.chdir(repo_root)
+
+    presubmits = build_presubmits()
+    presubmits_yaml = yaml.dump(presubmits, sort_keys=False)
+
+    # clone the kubernetes/test-infra repo so we can send a PR
+    test_infra_dir = os.path.join(repo_root, "test-infra")
+    if not os.path.exists(test_infra_dir):
+        subprocess.check_call(["git", "clone", "https://github.com/kubernetes/test-infra.git", "--depth=1", test_infra_dir])
+    # Reset the test-infra repo to be clean and on master
+    subprocess.check_call(["git", "-C", test_infra_dir, "checkout", "master"])
+    subprocess.check_call(["git", "-C", test_infra_dir, "reset", "--hard", "origin/master"])
+
+    # Write presubmits_yaml to config/jobs/kubernetes-sigs/agent-sandbox/agent-sandbox-presubmits-main.yaml
+    presubmits_path = "config/jobs/kubernetes-sigs/agent-sandbox/agent-sandbox-presubmits-main.yaml"
+    with open(os.path.join(test_infra_dir, presubmits_path), "w") as f:
+        f.write(presubmits_yaml)
+
+    # If the git repo is dirty, send a PR
+    if subprocess.check_output(["git", "status", "--porcelain"]).strip():
+        print("Changes detected, sending PR")
+        os.chdir(test_infra_dir)
+        # Create a branch named update-presubmits-YYYYMMDDTHHMMSS
+        now = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        branch_name = f"update-presubmits-{now}"
+        subprocess.check_call(["git", "checkout", "-b", branch_name])
+        subprocess.check_call(["git", "add", presubmits_path])
+        subprocess.check_call(["git", "commit", "-m", "chore: Update prow configuration for agent-sandbox"])
+        # TODO: Actually send the PR
+
+if __name__ == "__main__":
+    main()

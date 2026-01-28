@@ -1,4 +1,4 @@
-name: high-volume-rampup-without-warmpool
+name: high-volume-test
 automanagedNamespaces: 0
 
 tuningSets:

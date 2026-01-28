@@ -1,4 +1,4 @@
-name: separated-warm-vs-cold-latency-test
+name: warmpool-burst-test
 automanagedNamespaces: 0
 
 tuningSets:

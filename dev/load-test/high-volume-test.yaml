@@ -1,0 +1,71 @@
+name: high-volume-rampup-without-warmpool
+automanagedNamespaces: 0
+
+tuningSets:
+- name: RampUp
+  qpsLoad:
+    qps: 10 # 10 sandbox creation per second
+- name: RampDown
+  qpsLoad:
+    qps: 50 # 50 sandbox deletions per second
+
+steps:
+# 1. Start Metric Measurement
+- name: Start Metric Measurement
+  measurements:
+  - identifier: SchedulingThroughput
+    method: SchedulingThroughput
+    params:
+      action: start
+  - identifier: SandboxStartupLatency
+    method: PodStartupLatency
+    params:
+      action: start
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+
+# 2. Increase the Load with Linear Ramp Up with a steady qps of 10 / sec.
+- name: Linear Ramp Up
+  phases:
+  # Ramp Up to total replicas at a linear rate of 10 / sec.
+  - name: Scale Up
+    namespaceRange: {min: 1, max: 1}
+    tuningSet: RampUp
+    replicasPerNamespace: 3000 # Total sandboxes to spin up
+    objectBundle:
+    - basename: agent-sandbox
+      identifier: "linear-rampup"
+      objectTemplatePath: cluster-loader-sandbox.yaml
+      templateFillMap:
+        Group: linear-rampup
+    waits:
+    - type: Running
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+
+- name: Wait for Prometheus Scrape
+  measurements:
+  - identifier: Wait
+    method: Sleep
+    params:
+      duration: 20s
+
+# 3. Gather Measurement
+- name: Gather Latency Measurement
+  measurements:
+  - identifier: SchedulingThroughput
+    method: SchedulingThroughput
+    params:
+      action: gather
+  - identifier: SandboxStartupLatency
+    method: PodStartupLatency
+    params:
+      action: gather
+
+# 4. Delete Sandboxes to keep the cluster clean
+- name: Cleanup Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 0
+    tuningSet: RampDown
+    objectBundle:
+    - basename: agent-sandbox
+      objectTemplatePath: cluster-loader-sandbox.yaml

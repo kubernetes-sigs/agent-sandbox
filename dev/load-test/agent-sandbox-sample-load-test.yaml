@@ -23,15 +23,7 @@ steps:
       objectTemplatePath: "cluster-loader-sandbox.yaml"
 - name: Wait for Sandboxes to be Ready
   measurements:
-  - Identifier: WaitForSandboxes
-    Method: WaitForRunningPods
-    Params:
-      action: start
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
-      desiredPodCount: 20
-- name: Gather Results
-  measurements:
-  - Identifier: SandboxStartupLatency
-    Method: PodStartupLatency
-    Params:
+  - identifier: PodStartupLatency
+    method: PodStartupLatency
+    params:
       action: gather

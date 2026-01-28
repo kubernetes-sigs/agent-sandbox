@@ -1,0 +1,127 @@
+name: separated-warm-vs-cold-latency-test
+automanagedNamespaces: 0
+
+tuningSets:
+- name: RampUp
+  qpsLoad:
+    qps: 100 
+- name: RampDown
+  qpsLoad:
+    qps: 50 
+
+steps:
+# --- 1. SETUP INFRASTRUCTURE ---
+- name: Create Sandbox Templates
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 1
+    tuningSet: RampUp
+    objectBundle:
+    - basename: perf-template-warm
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      templateFillMap:
+        LatencyType: warm
+    - basename: perf-template-cold
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      templateFillMap:
+        LatencyType: cold
+
+- name: Create Warmpools
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 1
+    tuningSet: RampUp
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: "cluster-loader-warmpool.yaml"
+      templateFillMap:
+        TemplateName: perf-template-warm-0
+        Replicas: 100
+    waits:
+    - type: Running
+      labelSelector: "agents.x-k8s.io/pool"
+
+# --- 2. DRAIN WARMPOOL (Excluded from Cold Measurement) ---
+- name: Acquire from Warmpool
+  phases:
+  - name: Drain Pool
+    namespaceRange: {min: 1, max: 1}
+    tuningSet: RampUp
+    replicasPerNamespace: 100 
+    objectBundle:
+    - basename: warmpool-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      templateFillMap:
+        TemplateName: perf-template-warm-0
+        LatencyType: warm # Labeled as warm to stay out of cold metrics
+    waits:
+    - type: Running
+      labelSelector: "latency-type=warm"
+
+# --- 3. MEASUREMENT: COLD START ---
+
+- name: Start Cold Latency Measurement
+  measurements:
+  - identifier: ColdAcquisitionLatency
+    method: PodStartupLatency
+    params:
+      action: start
+      labelSelector: "latency-type=cold" # Explicitly watch ONLY cold pods
+
+- name: Acquire Post-Exhaustion
+  phases:
+  - name: Cold Start 100
+    namespaceRange: {min: 1, max: 1}
+    tuningSet: RampUp
+    replicasPerNamespace: 100 # Requesting 100 specifically for the cold phase
+    objectBundle:
+    - basename: cold-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      templateFillMap:
+        TemplateName: perf-template-cold-0
+        LatencyType: cold # This matches the measurement selector
+    waits:
+    - type: Running
+      labelSelector: "latency-type=cold"
+
+- name: Gather Cold Latency Measurement
+  measurements:
+  - identifier: ColdAcquisitionLatency
+    method: PodStartupLatency
+    params:
+      action: gather
+
+# --- 4. CLEANUP ---
+- name: Wait before deletion
+  measurements:
+  - identifier: Wait
+    method: Sleep
+    params:
+      duration: 20s
+
+- name: Cleanup All Claims
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 0
+    tuningSet: RampDown
+    objectBundle:
+    - basename: warmpool-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+    - basename: cold-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+    waits:
+    - type: Deleted
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+
+- name: Delete Warmpools and Templates
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 0
+    tuningSet: RampDown
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: "cluster-loader-warmpool.yaml"
+    - basename: perf-template-warm
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+    - basename: perf-template-cold
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"

@@ -5,8 +5,13 @@ metadata:
   name: {{.Name}}
 spec:
   podTemplate:
+    metadata:
+      labels:
+        churn-group: {{.Group}}
     spec:
+      terminationGracePeriodSeconds: 1
+      restartPolicy: Never
       containers:
       - name: sample-sandbox
         image: alpine
-        command: ["/bin/sh", "-c", "echo 'Hello from the Agent Sandbox!'; sleep 300"]
+        command: ["/bin/sh", "-c", "echo 'Hello from the Agent Sandbox!'; sleep 3600"]

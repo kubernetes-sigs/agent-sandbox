@@ -1,0 +1,17 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: {{.Name}}
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        latency-type: {{.LatencyType}}
+    spec:
+      restartPolicy: Never 
+      runtimeClassName: gvisor
+      containers:
+        - name: python-agent
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args: ["echo 'Hello from the Sandbox!' && sleep 3600"]

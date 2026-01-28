@@ -1,0 +1,81 @@
+name: throughput-test
+namespace:
+  number: 1
+  prefix: throughput-test-ns
+  deleteAutomanagedNamespaces: true
+
+tuningSets:
+- name: ConstantRate
+  qpsLoad:
+    qps: 200 # Keep increasing this find the max. 
+
+steps:
+- name: Start Throughput Monitor
+  measurements:
+  - Identifier: SchedulingThroughput
+    Method: SchedulingThroughput
+    Params:
+      action: start
+  - Identifier: ReadyPerSecond
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      # Query: We sum the rate of pods entering 'Running' phase.
+      # We use a 5m window to smooth out scraping intervals.
+      query: sum(kube_pod_status_phase{phase="Running", namespace=~"throughput-test-ns-.*"})[5m])
+      metricName: "Throughput"
+      metricVersion: "v1"
+      unit: "pods/s"
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: start
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+
+
+- name: Create Workload
+  phases:
+  - namespaceRange:
+      min: 1
+      max: 1
+    replicasPerNamespace: 12000 # Create high enough number
+    tuningSet: ConstantRate
+    objectBundle:
+    - basename: agent-pod
+      objectTemplatePath: "cluster-loader-sandbox.yaml"
+      templateFillMap:
+        Group: throughput-test
+
+- name: Wait for all pods to be Running before gathering results
+  measurements:
+  - Identifier: WaitForRunning
+    Method: WaitForRunningPods
+    Params:
+      action: start
+      labelSelector: "churn-group=throughput-test"
+      desiredPodCount: 12000
+      timeout: 60m
+
+- name: Wait for Prometheus Scrape
+  measurements:
+  - Identifier: Wait
+    Method: Sleep
+    Params:
+      duration: 30s
+
+- name: Gather Throughput Results
+  measurements:
+  - Identifier: SchedulingThroughput
+    Method: SchedulingThroughput
+    Params:
+      action: gather
+  - Identifier: ReadyPerSecond
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      

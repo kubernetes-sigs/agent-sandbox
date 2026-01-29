@@ -10,7 +10,7 @@ Make sure the agent-sandbox controller is running before proceeding:
 
 ```bash
 kubectl get pods -n agent-sandbox-system
-# Should show agent-sandbox-controller-0 in Running state
+# Should show agent-sandbox-controller-* in Running state
 ```
 
 ## Project Structure

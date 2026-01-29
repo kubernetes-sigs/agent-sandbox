@@ -50,15 +50,22 @@ func getRepoRoot() string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(dir)))
 }
 
+// T extends testing.TB with the Context method available on T and B.
+// Both *testing.T and *testing.B satisfy this interface.
+type T interface {
+	testing.TB
+	Context() context.Context
+}
+
 // TestContext is a helper for managing e2e test scaffolding.
 type TestContext struct {
-	*testing.T
+	T
 	ClusterClient
 }
 
 // NewTestContext creates a new TestContext. This should be called at the beginning
 // of each e2e test to construct needed test scaffolding.
-func NewTestContext(t *testing.T) *TestContext {
+func NewTestContext(t T) *TestContext {
 	t.Helper()
 	th := &TestContext{
 		T: t,

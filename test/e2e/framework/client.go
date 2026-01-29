@@ -23,7 +23,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -44,7 +43,7 @@ const (
 
 // ClusterClient is an abstraction layer for test cases to interact with the cluster.
 type ClusterClient struct {
-	*testing.T
+	T
 	client client.Client
 }
 
@@ -111,6 +110,16 @@ func (cl *ClusterClient) CreateWithCleanup(ctx context.Context, obj client.Objec
 	return nil
 }
 
+// MustCreateWithCleanup is a wrapper around CreateWithCleanup that fails the test on error.
+func (cl *ClusterClient) MustCreateWithCleanup(obj client.Object) {
+	cl.Helper()
+	ctx := cl.Context()
+
+	if err := cl.CreateWithCleanup(ctx, obj); err != nil {
+		cl.Fatalf("MustCreateWithCleanup(%T) failed with: %v", obj, err)
+	}
+}
+
 // ValidateObject verifies the specified object exists and satisfies the provided
 // predicates.
 func (cl *ClusterClient) ValidateObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
@@ -172,6 +181,16 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 			// Simple sleep for fixed duration (basic MVP)
 			time.Sleep(time.Second)
 		}
+	}
+}
+
+// MustWaitForObject is a wrapper around WaitForObject that fails the test on error.
+func (cl *ClusterClient) MustWaitForObject(obj client.Object, p ...predicates.ObjectPredicate) {
+	cl.Helper()
+	ctx := cl.Context()
+
+	if err := cl.WaitForObject(ctx, obj, p...); err != nil {
+		cl.Fatalf("MustWaitForObject(%T) failed with: %v", obj, err)
 	}
 }
 

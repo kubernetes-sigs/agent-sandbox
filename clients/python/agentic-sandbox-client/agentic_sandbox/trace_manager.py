@@ -20,6 +20,7 @@ falls back to no-op mock objects.
 
 import atexit
 import functools
+import inspect
 import json
 import logging
 import threading
@@ -171,6 +172,22 @@ def trace_span(span_suffix):
     If `self.tracer` is None (tracing disabled), the method runs without decoration.
     """
     def decorator(func):
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(self, *args, **kwargs):
+                tracer = getattr(self, 'tracer', None)
+                if not tracer:
+                    return await func(self, *args, **kwargs)
+
+                # Determine the service name at runtime
+                service_name = getattr(
+                    self, 'trace_service_name', 'sandbox-client')
+                span_name = f"{service_name}.{span_suffix}"
+
+                with tracer.start_as_current_span(span_name):
+                    return await func(self, *args, **kwargs)
+            return async_wrapper
+
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             tracer = getattr(self, 'tracer', None)

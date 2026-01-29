@@ -122,19 +122,53 @@ func (cl *ClusterClient) MustCreateWithCleanup(obj client.Object) {
 
 // ValidateObject verifies the specified object exists and satisfies the provided
 // predicates.
-func (cl *ClusterClient) ValidateObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
+func (cl *ClusterClient) ValidateObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) (bool, error) {
 	cl.Helper()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 	cl.Logf("ValidateObject %T (%s)", obj, nn.String())
 	if err := cl.client.Get(ctx, nn, obj); err != nil {
-		return fmt.Errorf("ValidateObject %T (%s): %w", obj, nn.String(), err)
+		return false, fmt.Errorf("ValidateObject %T (%s): %w", obj, nn.String(), err)
 	}
 	for _, predicate := range p {
-		if err := predicate(obj); err != nil {
-			return fmt.Errorf("ValidateObject %T (%s): %w", obj, nn.String(), err)
+		predicateMatches, err := predicate(obj)
+		if err != nil {
+			return false, fmt.Errorf("ValidateObject %T (%s): %w", obj, nn.String(), err)
+		}
+		if !predicateMatches {
+			return false, nil
 		}
 	}
-	return nil
+	return true, nil
+}
+
+// MustSatisfyPredicates is a wrapper around ValidateObject that fails the test if the object
+// does not exist, if the predicates are not satisfied or if there is an error during evaluation.
+func (cl *ClusterClient) MustSatisfyPredicates(obj client.Object, p ...predicates.ObjectPredicate) {
+	cl.Helper()
+	ctx := cl.Context()
+
+	predicatesMatch, err := cl.ValidateObject(ctx, obj, p...)
+	if err != nil {
+		cl.Fatalf("MustSatisfyPredicates(%T) failed with: %v", obj, err)
+	}
+	if !predicatesMatch {
+		cl.Fatalf("MustSatisfyPredicates(%T) predicates not satisfied", obj)
+	}
+}
+
+// MustExist fails the test if the object does not exist.
+func (cl *ClusterClient) MustExist(obj client.Object) {
+	cl.Helper()
+	ctx := cl.Context()
+
+	// We call ValidateObject without any predicates to just check for existence
+	predicatesMatch, err := cl.ValidateObject(ctx, obj)
+	if err != nil {
+		cl.Fatalf("MustExist(%T) failed with: %v", obj, err)
+	}
+	if !predicatesMatch {
+		cl.Fatalf("MustExist(%T) object does not exist", obj)
+	}
 }
 
 // ValidateObjectNotFound verifies the specified object does not exist.
@@ -168,14 +202,17 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 		cl.Helper()
 		cl.Logf("WaitForObject %T (%s) took %s", obj, nn, time.Since(start))
 	}()
-	var validationErr error
 	for {
 		select {
 		case <-ctx.Done():
 			cl.Logf("Timed out waiting for object %s/%s", obj.GetNamespace(), obj.GetName())
-			return fmt.Errorf("timed out waiting for object: %w", validationErr)
+			return fmt.Errorf("timed out waiting for object %s/%s", obj.GetNamespace(), obj.GetName())
 		default:
-			if validationErr = cl.ValidateObject(ctx, obj, p...); validationErr == nil {
+			predicatesMatch, validationErr := cl.ValidateObject(ctx, obj, p...)
+			if validationErr != nil {
+				return validationErr
+			}
+			if predicatesMatch {
 				return nil
 			}
 			// Simple sleep for fixed duration (basic MVP)
@@ -223,7 +260,7 @@ func (cl *ClusterClient) WaitForObjectNotFound(ctx context.Context, obj client.O
 
 // validateAgentSandboxInstallation verifies agent-sandbox system components are
 // installed.
-func (cl *ClusterClient) validateAgentSandboxInstallation(ctx context.Context) error {
+func (cl *ClusterClient) validateAgentSandboxInstallation() error {
 	cl.Helper()
 	// verify CRDs exist
 	crds := []string{
@@ -235,16 +272,12 @@ func (cl *ClusterClient) validateAgentSandboxInstallation(ctx context.Context) e
 	for _, name := range crds {
 		crd := &apiextensionsv1.CustomResourceDefinition{}
 		crd.Name = name
-		if err := cl.ValidateObject(ctx, crd); err != nil {
-			return fmt.Errorf("expected %T (%s) to exist: %w", crd, name, err)
-		}
+		cl.MustExist(crd)
 	}
 	// verify agent-sandbox-system namespace exists
 	ns := &corev1.Namespace{}
 	ns.Name = "agent-sandbox-system"
-	if err := cl.ValidateObject(ctx, ns); err != nil {
-		return fmt.Errorf("expected %T (%s) to exist: %w", ns, ns.Name, err)
-	}
+	cl.MustExist(ns)
 	// verify agent-sandbox-controller exists
 	ctrlNN := types.NamespacedName{
 		Name:      "agent-sandbox-controller",
@@ -253,9 +286,7 @@ func (cl *ClusterClient) validateAgentSandboxInstallation(ctx context.Context) e
 	ctrl := &appsv1.StatefulSet{}
 	ctrl.Name = ctrlNN.Name
 	ctrl.Namespace = ctrlNN.Namespace
-	if err := cl.ValidateObject(ctx, ctrl); err != nil {
-		return fmt.Errorf("expected %T (%s) to exist: %w", ctrl, ctrlNN.String(), err)
-	}
+	cl.MustExist(ctrl)
 	return nil
 }
 

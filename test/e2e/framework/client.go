@@ -243,7 +243,6 @@ func (cl *ClusterClient) MustPollUntilObject(obj client.Object, p ...predicates.
 // the provided predicates. This provides more precise timing than polling.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
 	cl.Helper()
-
 	var cancel context.CancelFunc
 	if _, ok := ctx.Deadline(); !ok {
 		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)

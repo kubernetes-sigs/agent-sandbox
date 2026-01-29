@@ -23,8 +23,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -33,14 +35,18 @@ import (
 // ChromeSandboxMetrics holds timing measurements for the chrome sandbox startup.
 type ChromeSandboxMetrics struct {
 	SandboxReady time.Duration // Time for sandbox to become ready
+	PodCreated   time.Duration // Time for pod to be created
+	PodScheduled time.Duration // Time for pod to be scheduled
+	PodRunning   time.Duration // Time for pod to become running
 	PodReady     time.Duration // Time for pod to become ready
 	ChromeReady  time.Duration // Time for chrome to respond on debug port
 	Total        time.Duration // Total time from start to chrome ready
 }
 
-func chromeSandbox() *sandboxv1alpha1.Sandbox {
+func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
 	sandbox := &sandboxv1alpha1.Sandbox{}
 	sandbox.Name = "chrome-sandbox"
+	sandbox.Namespace = namespace
 	sandbox.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -71,6 +77,9 @@ func BenchmarkChromeSandboxStartup(b *testing.B) {
 		metrics := runChromeSandbox(framework.NewTestContext(b))
 		// Report custom metrics in addition to the default ns/op
 		b.ReportMetric(metrics.SandboxReady.Seconds(), "sandbox-ready-sec")
+		b.ReportMetric(metrics.PodCreated.Seconds(), "pod-created-sec")
+		b.ReportMetric(metrics.PodScheduled.Seconds(), "pod-scheduled-sec")
+		b.ReportMetric(metrics.PodRunning.Seconds(), "pod-running-sec")
 		b.ReportMetric(metrics.PodReady.Seconds(), "pod-ready-sec")
 		b.ReportMetric(metrics.ChromeReady.Seconds(), "chrome-ready-sec")
 	}
@@ -78,6 +87,7 @@ func BenchmarkChromeSandboxStartup(b *testing.B) {
 
 // runChromeSandbox runs the chrome sandbox test and returns timing metrics.
 func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
+
 	// Set up a namespace with unique name to avoid conflicts
 	ns := &corev1.Namespace{}
 	ns.Name = fmt.Sprintf("chrome-sandbox-test-%d", time.Now().UnixNano())
@@ -86,11 +96,63 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	metrics := &ChromeSandboxMetrics{}
 	startTime := time.Now()
 
-	sandboxObj := chromeSandbox()
-	sandboxObj.Namespace = ns.Name
-	t.MustCreateWithCleanup(sandboxObj)
-	t.MustWaitForObject(sandboxObj, predicates.ReadyConditionIsTrue)
+	go func() {
+		var lastValue *corev1.Pod
 
+		filter := &corev1.Pod{}
+		filter.Namespace = ns.Name
+
+		framework.MustWatchObject(t.ClusterClient, filter, func(event watch.Event, obj *corev1.Pod) (bool, error) {
+			t.Logf("Pod event %s %s/%s", event.Type, obj.Namespace, obj.Name)
+
+			if lastValue != nil {
+				diff := cmp.Diff(lastValue, obj)
+				t.Logf("Pod diff: %s", diff)
+			}
+			lastValue = obj.DeepCopy()
+
+			if metrics.PodCreated == 0 {
+				metrics.PodCreated = time.Since(startTime)
+			}
+
+			if metrics.PodRunning == 0 {
+				if obj.Status.Phase == corev1.PodRunning {
+					metrics.PodRunning = time.Since(startTime)
+				}
+			}
+
+			if metrics.PodScheduled == 0 {
+				if obj.Spec.NodeName != "" {
+					metrics.PodScheduled = time.Since(startTime)
+				}
+			}
+			return false, nil
+		})
+	}()
+
+	go func() {
+		var lastValue *sandboxv1alpha1.Sandbox
+
+		filter := &sandboxv1alpha1.Sandbox{}
+		filter.Namespace = ns.Name
+
+		framework.MustWatchObject(t.ClusterClient, filter, func(event watch.Event, obj *sandboxv1alpha1.Sandbox) (bool, error) {
+			t.Logf("Sandbox event %s %s/%s", event.Type, obj.Namespace, obj.Name)
+
+			if lastValue != nil {
+				diff := cmp.Diff(lastValue, obj)
+				t.Logf("Sandbox diff: %s", diff)
+			}
+			lastValue = obj.DeepCopy()
+
+			return false, nil
+		})
+	}()
+
+	sandboxObj := chromeSandbox(ns.Name)
+	t.MustCreateWithCleanup(sandboxObj)
+
+	t.MustWaitFor(sandboxObj, predicates.ReadyConditionIsTrue)
 	metrics.SandboxReady = time.Since(startTime)
 
 	podID := types.NamespacedName{
@@ -101,7 +163,7 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	podObj.Name = podID.Name
 	podObj.Namespace = podID.Namespace
 
-	t.MustWaitForObject(podObj, predicates.ReadyConditionIsTrue)
+	t.MustWaitFor(podObj, predicates.ReadyConditionIsTrue)
 	metrics.PodReady = time.Since(startTime)
 
 	if err := waitForChromeReady(t, podID); err != nil {

@@ -20,27 +20,63 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-// ChromeSandboxMetrics holds timing measurements for the chrome sandbox startup.
-type ChromeSandboxMetrics struct {
-	SandboxReady time.Duration // Time for sandbox to become ready
-	PodReady     time.Duration // Time for pod to become ready
-	ChromeReady  time.Duration // Time for chrome to respond on debug port
-	Total        time.Duration // Total time from start to chrome ready
+// AtomicTimeDuration is a wrapper around time.Duration that allows for concurrent updates and retrievals.
+type AtomicTimeDuration struct {
+	v uint64
 }
 
-func chromeSandbox() *sandboxv1alpha1.Sandbox {
+// Seconds returns the duration in seconds as a float64.
+func (s *AtomicTimeDuration) Seconds() float64 {
+	v := atomic.LoadUint64(&s.v)
+	d := time.Duration(v)
+	return d.Seconds()
+}
+
+// IsEmpty returns true if the duration is zero.
+func (s *AtomicTimeDuration) IsEmpty() bool {
+	return atomic.LoadUint64(&s.v) == 0
+}
+
+// Set sets the duration to the given value.
+func (s *AtomicTimeDuration) Set(d time.Duration) {
+	atomic.StoreUint64(&s.v, uint64(d))
+}
+
+// String returns the duration as a string.
+func (s *AtomicTimeDuration) String() string {
+	v := atomic.LoadUint64(&s.v)
+	d := time.Duration(v)
+	return d.String()
+}
+
+// ChromeSandboxMetrics holds timing measurements for the chrome sandbox startup.
+type ChromeSandboxMetrics struct {
+	SandboxReady AtomicTimeDuration // Time for sandbox to become ready
+	PodCreated   AtomicTimeDuration // Time for pod to be created
+	PodScheduled AtomicTimeDuration // Time for pod to be scheduled
+	PodRunning   AtomicTimeDuration // Time for pod to become running
+	PodReady     AtomicTimeDuration // Time for pod to become ready
+	ChromeReady  AtomicTimeDuration // Time for chrome to respond on debug port
+	Total        AtomicTimeDuration // Total time from start to chrome ready
+}
+
+func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
 	sandbox := &sandboxv1alpha1.Sandbox{}
 	sandbox.Name = "chrome-sandbox"
+	sandbox.Namespace = namespace
 	sandbox.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -73,6 +109,9 @@ func BenchmarkChromeSandboxStartup(b *testing.B) {
 		metrics := runChromeSandbox(framework.NewTestContext(b))
 		// Report custom metrics in addition to the default ns/op
 		b.ReportMetric(metrics.SandboxReady.Seconds(), "sandbox-ready-sec")
+		b.ReportMetric(metrics.PodCreated.Seconds(), "pod-created-sec")
+		b.ReportMetric(metrics.PodScheduled.Seconds(), "pod-scheduled-sec")
+		b.ReportMetric(metrics.PodRunning.Seconds(), "pod-running-sec")
 		b.ReportMetric(metrics.PodReady.Seconds(), "pod-ready-sec")
 		b.ReportMetric(metrics.ChromeReady.Seconds(), "chrome-ready-sec")
 	}
@@ -90,12 +129,68 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	metrics := &ChromeSandboxMetrics{}
 	startTime := time.Now()
 
-	sandboxObj := chromeSandbox()
-	sandboxObj.Namespace = ns.Name
-	t.MustCreateWithCleanup(sandboxObj)
-	t.MustWaitForObject(sandboxObj, predicates.ReadyConditionIsTrue)
+	go func() {
+		var lastValue *corev1.Pod
 
-	metrics.SandboxReady = time.Since(startTime)
+		gvr := corev1.SchemeGroupVersion.WithResource("pods")
+		watchFilter := framework.WatchFilter{
+			Namespace: ns.Name,
+		}
+
+		framework.MustWatch(t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *corev1.Pod) (bool, error) {
+			t.Logf("Pod event %s %s/%s", event.Type, obj.Namespace, obj.Name)
+
+			if lastValue != nil {
+				diff := cmp.Diff(lastValue, obj)
+				t.Logf("Pod diff: %s", diff)
+			}
+			lastValue = obj.DeepCopy()
+
+			if metrics.PodCreated.IsEmpty() {
+				metrics.PodCreated.Set(time.Since(startTime))
+			}
+
+			if metrics.PodRunning.IsEmpty() {
+				if obj.Status.Phase == corev1.PodRunning {
+					metrics.PodRunning.Set(time.Since(startTime))
+				}
+			}
+
+			if metrics.PodScheduled.IsEmpty() {
+				if obj.Spec.NodeName != "" {
+					metrics.PodScheduled.Set(time.Since(startTime))
+				}
+			}
+			return false, nil
+		})
+	}()
+
+	go func() {
+		var lastValue *sandboxv1alpha1.Sandbox
+
+		gvr := sandboxv1alpha1.GroupVersion.WithResource("sandboxes")
+		watchFilter := framework.WatchFilter{
+			Namespace: ns.Name,
+		}
+
+		framework.MustWatch(t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *sandboxv1alpha1.Sandbox) (bool, error) {
+			t.Logf("Sandbox event %s %s/%s", event.Type, obj.Namespace, obj.Name)
+
+			if lastValue != nil {
+				diff := cmp.Diff(lastValue, obj)
+				t.Logf("Sandbox diff: %s", diff)
+			}
+			lastValue = obj.DeepCopy()
+
+			return false, nil
+		})
+	}()
+
+	sandboxObj := chromeSandbox(ns.Name)
+	t.MustCreateWithCleanup(sandboxObj)
+
+	t.MustWaitForObject(sandboxObj, predicates.ReadyConditionIsTrue)
+	metrics.SandboxReady.Set(time.Since(startTime))
 
 	podID := types.NamespacedName{
 		Namespace: ns.Name,
@@ -106,13 +201,13 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	podObj.Namespace = podID.Namespace
 
 	t.MustWaitForObject(podObj, predicates.ReadyConditionIsTrue)
-	metrics.PodReady = time.Since(startTime)
+	metrics.PodReady.Set(time.Since(startTime))
 
 	if err := waitForChromeReady(t, podID); err != nil {
 		t.Fatalf("failed to wait for chrome ready: %v", err)
 	}
-	metrics.ChromeReady = time.Since(startTime)
-	metrics.Total = time.Since(startTime)
+	metrics.ChromeReady.Set(time.Since(startTime))
+	metrics.Total.Set(time.Since(startTime))
 
 	// Gather kubelet/containerd logs to understand timing between scheduling and running
 	logOptions := framework.NodeLogOptions{}

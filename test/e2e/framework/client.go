@@ -30,14 +30,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxextensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -53,6 +53,12 @@ type ClusterClient struct {
 	client        client.Client
 	dynamicClient dynamic.Interface
 	scheme        *runtime.Scheme
+	watchSet      *WatchSet
+}
+
+// WatchSet is a shared set of watches for the ClusterClient to use.
+func (cl *ClusterClient) WatchSet() *WatchSet {
+	return cl.watchSet
 }
 
 // List retrieves a list of objects matching the provided options.
@@ -229,10 +235,6 @@ func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicat
 	}
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
-	defer func() {
-		cl.Helper()
-		cl.Logf("PollUntilObjectMatches %T (%s) took %s", obj, nn, time.Since(start))
-	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -244,6 +246,7 @@ func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicat
 				return validationErr
 			}
 			if matchesPredicates {
+				cl.Logf("PollUntilObject %T (%s) took %s", obj, nn, time.Since(start))
 				return nil
 			}
 			// Simple sleep for fixed duration (basic MVP)
@@ -258,6 +261,7 @@ func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicat
 // it will return an error.
 // A timeout can be specified via the context, or it will default to 1 minute.
 // It uses a watch for more precise timing than polling.
+// It uses a shared WatchSet to avoid per-call watch setup latency.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
 	cl.Helper()
 
@@ -268,121 +272,159 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 	}
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
-	defer func() {
-		cl.Helper()
-		cl.Logf("WaitForObject %T (%s) took %s", obj, nn, time.Since(start))
-	}()
-
-	gvk, err := cl.gvkForObject(obj)
-	if err != nil {
-		return fmt.Errorf("failed to get GVK: %w", err)
-	}
-
-	gvr, err := cl.gvrForGVK(gvk)
-	if err != nil {
-		return fmt.Errorf("failed to get GVR for GVK %v: %w", gvk, err)
-	}
-
-	var resourceInterface dynamic.ResourceInterface
-	if nn.Namespace != "" {
-		resourceInterface = cl.dynamicClient.Resource(gvr).Namespace(nn.Namespace)
-	} else {
-		resourceInterface = cl.dynamicClient.Resource(gvr)
-	}
 
 	// First check if the object already satisfies the predicates
 	if valid, validationErr := cl.MatchesPredicates(ctx, obj, p...); validationErr == nil && valid {
 		return nil
 	}
 
-	// Set up the watch with field selector for the specific object
-	listOptions := metav1.ListOptions{
-		FieldSelector: fields.OneTermEqualSelector("metadata.name", nn.Name).String(),
-		Watch:         true,
+	gvk, err := gvkForObject(obj)
+	if err != nil {
+		cl.Fatalf("failed to get GVK: %v", err)
 	}
 
-	watcher, err := resourceInterface.Watch(ctx, listOptions)
+	gvr, err := gvrForGVK(gvk)
 	if err != nil {
-		return fmt.Errorf("failed to create watch: %w", err)
+		cl.Fatalf("failed to get GVR for GVK %v: %v", gvk, err)
 	}
-	defer watcher.Stop()
+
+	watchFilter := WatchFilter{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+
+	var lastNotMatching []predicates.ObjectPredicate
+	done, err := Watch(cl, gvr, watchFilter, func(event watch.Event, obj *unstructured.Unstructured) (bool, error) {
+		if event.Type == watch.Deleted {
+			return false, fmt.Errorf("object was deleted while waiting for predicates to be satisfied")
+		}
+
+		// Check if predicates are satisfied
+		var notMatching []predicates.ObjectPredicate
+		for _, predicate := range p {
+			if match, err := predicate.Matches(obj); err != nil {
+				return false, err
+			} else if !match {
+				notMatching = append(notMatching, predicate)
+			}
+		}
+
+		lastNotMatching = notMatching
+		return len(notMatching) == 0, nil
+	})
+	if err != nil {
+		return err
+	}
+	if !done {
+		// Predicates not satisfied within timeout
+		return fmt.Errorf("object did not satisfy predicates: %v", lastNotMatching)
+	}
+	cl.Logf("WaitForObject %T (%s) took %s", obj, nn, time.Since(start))
+	return nil
+}
+
+// Watch calls a callback whenever the specified object changes,
+// using a shared WatchSet to avoid per-call watch setup latency.
+// Callback is called for each event, and if the callback returns true or an error, the watch will stop and the value will be returned.
+func (cl *ClusterClient) Watch(gvr schema.GroupVersionResource, filter WatchFilter, callback func(event watch.Event) (bool, error)) (bool, error) {
+	ctx := cl.Context()
+
+	// Subscribe using the watchSet, ideally reusing an existing watch
+	sub := cl.watchSet.Subscribe(ctx, gvr, filter)
+	defer sub.Close()
 
 	for {
 		select {
 		case <-ctx.Done():
-			cl.Logf("Timed out waiting for object %s/%s", obj.GetNamespace(), obj.GetName())
-			return fmt.Errorf("timed out waiting for object")
-		case event, ok := <-watcher.ResultChan():
+			return false, fmt.Errorf("timed out watching object: %w", ctx.Err())
+
+		case event, ok := <-sub.Events:
 			if !ok {
-				// Watch channel closed, restart the watch
-				watcher, err = resourceInterface.Watch(ctx, listOptions)
-				if err != nil {
-					return fmt.Errorf("failed to restart watch: %w", err)
-				}
-				continue
+				return false, fmt.Errorf("subscription closed during watch of %v", gvr)
 			}
 
 			if event.Type == watch.Error {
-				return fmt.Errorf("received error event while watching object %s/%s: %v", nn.Namespace, nn.Name, event)
+				return false, fmt.Errorf("received error event during watch of %v", gvr)
 			}
 
-			if event.Type == watch.Deleted {
-				return fmt.Errorf("object %s/%s was deleted", nn.Namespace, nn.Name)
-			}
-
-			// Convert to client.Object and validate
-			u, ok := event.Object.(*unstructured.Unstructured)
-			if !ok {
-				return fmt.Errorf("unexpected type for event object: %T", event.Object)
-			}
-
-			// Copy the unstructured data to the provided object
-			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, obj); err != nil {
-				return fmt.Errorf("failed to convert unstructured to object: %w", err)
-			}
-
-			// Check if predicates are satisfied
-			allSatisfied := true
-			for _, predicate := range p {
-				predicateSatisfied, err := predicate.Matches(obj)
-				if err != nil {
-					return err
-				}
-				if !predicateSatisfied {
-					allSatisfied = false
-					break
-				}
-			}
-
-			if allSatisfied {
-				return nil
+			if done, err := callback(event); done || err != nil {
+				return done, err
 			}
 		}
 	}
 }
 
-// gvkForObject returns the GroupVersionKind for the given object.
-func (cl *ClusterClient) gvkForObject(obj client.Object) (schema.GroupVersionKind, error) {
+// Watch calls a callback whenever the specified object changes,
+// using a shared WatchSet to avoid per-call watch setup latency.
+// It is a wrapper around ClusterClient Watch that converts to a strongly-typed object in the callback.
+func Watch[T client.Object](cl *ClusterClient, gvr schema.GroupVersionResource, watchFilter WatchFilter, callback func(event watch.Event, obj T) (bool, error)) (bool, error) {
+	// Subscribe using the watchSet, ideally reusing an existing watch
+	return cl.Watch(gvr, watchFilter, func(event watch.Event) (bool, error) {
+		switch event.Type {
+		case watch.Added, watch.Modified, watch.Deleted:
+		// ok
+		case watch.Bookmark:
+			// Ignore
+			return false, nil
+		default:
+			return false, fmt.Errorf("unexpected watch event type: %v", event.Type)
+		}
+
+		u, ok := event.Object.(*unstructured.Unstructured)
+		if !ok {
+			return false, fmt.Errorf("unexpected type for event object: %T", event.Object)
+		}
+
+		var t T
+
+		switch any(t).(type) {
+		case *unstructured.Unstructured:
+			return callback(event, any(u).(T))
+		default:
+			// Copy the unstructured data to the provided object
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &t); err != nil {
+				return false, fmt.Errorf("failed to convert unstructured to object: %w", err)
+			}
+
+			return callback(event, t)
+		}
+	})
+}
+
+// MustWatch is a wrapper around WatchObject that fails the test on error.
+func MustWatch[T client.Object](cl *ClusterClient, gvr schema.GroupVersionResource, watchFilter WatchFilter, callback func(event watch.Event, obj T) (bool, error)) bool {
 	cl.Helper()
 
+	done, err := Watch(cl, gvr, watchFilter, callback)
+	if err != nil {
+		// Only fail the test if this isn't the normal "context cancelled" shutdown error.
+		if !errors.Is(err, context.Canceled) {
+			cl.Fatalf("Watch(%v, %+v) failed with: %v", gvr, watchFilter, err)
+		}
+	}
+	return done
+}
+
+// gvkForObject returns the GroupVersionKind for the given object.
+func gvkForObject(obj runtime.Object) (schema.GroupVersionKind, error) {
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	if gvk.Kind != "" {
 		return gvk, nil
 	}
 
-	// If GVK is not set on the object, try to get it from the scheme
-	gvks, _, err := cl.scheme.ObjectKinds(obj)
-	if err != nil {
-		return schema.GroupVersionKind{}, fmt.Errorf("failed to get GVK from scheme for object type %T: %w", obj, err)
+	switch o := obj.(type) {
+	case *corev1.Pod:
+		return schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}, nil
+	case *sandboxv1alpha1.Sandbox:
+		return sandboxGVK, nil
+	case *sandboxextensionsv1alpha1.SandboxWarmPool:
+		return sandboxWarmpoolGVK, nil
+	case *sandboxextensionsv1alpha1.SandboxClaim:
+		return sandboxClaimGVK, nil
+	default:
+		return schema.GroupVersionKind{}, fmt.Errorf("no GVK found for object type %T", o)
 	}
-	if len(gvks) == 0 {
-		return schema.GroupVersionKind{}, fmt.Errorf("no GVK found for object type %T", obj)
-	}
-	return gvks[0], nil
 }
 
 // gvrForGVK returns the GroupVersionResource for the given GroupVersionKind.
-func (cl *ClusterClient) gvrForGVK(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
+func gvrForGVK(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
 	// We use a hard-coded list rather than going through discovery for simplicity and speed.
 	gv := gvk.GroupVersion()
 	switch gvk.GroupKind() {
@@ -407,7 +449,7 @@ func (cl *ClusterClient) MustWaitForObject(obj client.Object, p ...predicates.Ob
 	ctx := cl.Context()
 
 	if err := cl.WaitForObject(ctx, obj, p...); err != nil {
-		cl.Fatalf("MustWaitForObject(%T) failed with: %v", obj, err)
+		cl.Fatalf("MustWaitForObject(%T, %v) failed with: %v", obj, p, err)
 	}
 }
 
@@ -536,6 +578,12 @@ var sandboxWarmpoolGVK = schema.GroupVersionKind{
 	Group:   "extensions.agents.x-k8s.io",
 	Version: "v1alpha1",
 	Kind:    "SandboxWarmPool",
+}
+
+var sandboxClaimGVK = schema.GroupVersionKind{
+	Group:   "extensions.agents.x-k8s.io",
+	Version: "v1alpha1",
+	Kind:    "SandboxClaim",
 }
 
 func (cl *ClusterClient) WaitForSandboxReady(ctx context.Context, sandboxID types.NamespacedName) error {

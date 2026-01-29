@@ -134,7 +134,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sandbox, reconcileErr = r.reconcileActive(ctx, claim)
 	}
 
-	// Update Status, Metrics, & Events
+	// Update Status & Events
 	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
 
 	if !hasExpiredCondition(originalClaimStatus.Conditions) && hasExpiredCondition(claim.Status.Conditions) {
@@ -143,11 +143,21 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Record metric for state transitions
-	r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox, reconcileErr, claimExpired)
-
 	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
 		return ctrl.Result{}, errors.Join(reconcileErr, updateErr)
+	}
+
+	// Record metric for creation latency, and add annotation to the claim to
+	// prevent this metric from being recorded more than once.
+	if r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox) {
+		patch := client.MergeFrom(claim.DeepCopy())
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		claim.Annotations[sandboxcontrollers.SandboxClaimMetricRecorded] = "true"
+		if err := r.Patch(ctx, claim, patch); err != nil {
+			return ctrl.Result{}, errors.Join(reconcileErr, err)
+		}
 	}
 
 	// Determine Result
@@ -611,57 +621,47 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 	return nil
 }
 
-// recordCreationLatencyMetric detects and records transitions to Ready or terminal failure states.
+// recordCreationLatencyMetric detects and records transitions to Ready state.
+// Annotation SandboxClaimMetricRecorded guards the metric against being recorded more than once.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1alpha1.SandboxClaim,
 	oldStatus *extensionsv1alpha1.SandboxClaimStatus,
 	sandbox *sandboxv1alpha1.Sandbox,
-	reconcileErr error,
-	isClaimExpired bool,
-) {
-	// Only Once Guard: If the claim already has a Sandbox Name assigned in the PREVIOUS status,
-	// it means the creation was already successful in a past loop. We exit early to ignore
-	// all future transitions (like expiration).
-	if oldStatus.SandboxStatus.Name != "" {
-		return
+) bool {
+
+	// Prevent multiple recordings (e.g., successful creation and then later expiration).
+	if claim.Annotations[sandboxcontrollers.SandboxClaimMetricRecorded] == "true" {
+		return false
 	}
 
-	newReady := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
-	if newReady == nil {
-		return
+	newStatus := &claim.Status
+	newReady := meta.FindStatusCondition(newStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	if newReady == nil || newReady.Status == metav1.ConditionFalse {
+		return false
 	}
+
+	// Account for the race condition where this is not the first time we have seen Ready status, but
+	// the annotation flag is not yet being read.
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
-
-	// Success: Transition from not-Ready to Ready=True
-	isSuccess := newReady.Status == metav1.ConditionTrue &&
-		(oldReady == nil || oldReady.Status != metav1.ConditionTrue)
-
-	// Failure: Transition to Ready=False triggered by an actual error or expiration event.
-	// Check for reconcileErr to capture system failures.
-	// Check for isClaimExpired ONLY if the object was not already expired in the previous state.
-	isFailure := (reconcileErr != nil || isClaimExpired) &&
-		newReady.Status == metav1.ConditionFalse &&
-		(oldReady == nil || oldReady.Reason != newReady.Reason)
-
-	if isSuccess || isFailure {
-		status := asmetrics.StatusSuccess
-		if isFailure {
-			status = asmetrics.StatusFailure
-		}
-
-		launchType := asmetrics.LaunchTypeCold
-		// Check for pod adoption using the core controller's tracking annotation
-		if sandbox != nil && sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "" {
-			launchType = asmetrics.LaunchTypeWarm
-		}
-
-		latency := float64(time.Since(claim.CreationTimestamp.Time).Milliseconds())
-		asmetrics.ClaimStartupLatency.WithLabelValues(
-			launchType,
-			status,
-			claim.Spec.TemplateRef.Name,
-		).Observe(latency)
+	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
+		return false
 	}
+
+	launchType := asmetrics.LaunchTypeCold
+	// This is unlikely to happen; here for completeness only.
+	if sandbox == nil {
+		launchType = asmetrics.LaunchTypeUnknown
+	} else if sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "" {
+		// Existence of the SandboxPodNameAnnotation implies the pod was adopted from a warm pool.
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	latency := float64(time.Since(claim.CreationTimestamp.Time).Milliseconds())
+	asmetrics.ClaimStartupLatency.WithLabelValues(
+		launchType,
+		claim.Spec.TemplateRef.Name,
+	).Observe(latency)
+	return true
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller

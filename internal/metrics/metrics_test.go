@@ -23,18 +23,17 @@ import (
 func TestClaimLatencyRecording(t *testing.T) {
 	testCases := []struct {
 		name       string
-		status     string
 		launchType string
 	}{
-		{"SuccessWarm", StatusSuccess, LaunchTypeWarm},
-		{"SuccessCold", StatusSuccess, LaunchTypeCold},
-		{"FailureCold", StatusFailure, LaunchTypeCold},
+		{"Warm", LaunchTypeWarm},
+		{"Cold", LaunchTypeCold},
+		{"Unknown", LaunchTypeUnknown},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ClaimStartupLatency.Reset()
-			ClaimStartupLatency.WithLabelValues(tc.launchType, tc.status, "test-tmpl").Observe(1000)
+			ClaimStartupLatency.WithLabelValues(tc.launchType, "test-tmpl").Observe(1000)
 
 			if testutil.CollectAndCount(ClaimStartupLatency) != 1 {
 				t.Errorf("Expected 1 observation")

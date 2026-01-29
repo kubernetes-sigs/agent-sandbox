@@ -22,17 +22,15 @@ import (
 )
 
 const (
-	LaunchTypeWarm = "warm" // Pod from a SandboxWarmPool
-	LaunchTypeCold = "cold" // Pod not from a SandboxWarmPool
-	StatusSuccess  = "success"
-	StatusFailure  = "failure"
+	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
+	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
+	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
 )
 
 var (
-	// ClaimStartupLatency measures the time from SandboxClaim creation to Pod Ready state.
+	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
 	// Labels:
-	// - launch_type: "warm" or "cold"
-	// - status: "success" or "failure"
+	// - launch_type: "warm", "cold", "unknown"
 	// - sandbox_template: the SandboxTemplateRef
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -41,7 +39,7 @@ var (
 			// Buckets for latency from 50ms to 4 minutes
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
-		[]string{"launch_type", "status", "sandbox_template"},
+		[]string{"launch_type", "sandbox_template"},
 	)
 )
 

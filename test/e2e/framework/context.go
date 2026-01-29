@@ -22,6 +22,8 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -70,22 +72,37 @@ func NewTestContext(t T) *TestContext {
 	th := &TestContext{
 		T: t,
 	}
-	restCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},
 		&clientcmd.ConfigOverrides{},
 	).ClientConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cl, err := client.New(restCfg, client.Options{
-		Scheme: controllers.Scheme,
+
+	httpClient, err := rest.HTTPClientFor(restConfig)
+	if err != nil {
+		t.Fatalf("building HTTP client for rest config: %v", err)
+	}
+
+	client, err := client.New(restConfig, client.Options{
+		Scheme:     controllers.Scheme,
+		HTTPClient: httpClient,
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("building controller-runtime client: %v", err)
 	}
+
+	dynamicClient, err := dynamic.NewForConfigAndClient(restConfig, httpClient)
+	if err != nil {
+		t.Fatalf("building dynamic client: %v", err)
+	}
+
 	th.ClusterClient = ClusterClient{
-		T:      t,
-		client: cl,
+		T:             t,
+		client:        client,
+		dynamicClient: dynamicClient,
+		scheme:        controllers.Scheme,
 	}
 	t.Cleanup(func() {
 		t.Helper()

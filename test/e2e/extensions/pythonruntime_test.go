@@ -228,7 +228,7 @@ func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	podObj.Namespace = sandboxID.Namespace
 
 	// Wait for the pod to be ready
-	require.NoError(testingT, testContext.WaitForObject(testingT.Context(), podObj, predicates.ReadyConditionIsTrue))
+	require.NoError(testingT, testContext.PollUntilObject(podObj, predicates.ReadyConditionIsTrue))
 
 	testingT.Logf("Sandbox is ready: sandboxName - %s", sandboxID.Name)
 

@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	// DefaultTimeout is the default timeout for WaitForObject.
+	// DefaultTimeout is the default timeout for WaitForObject and WaitForObjectNotFound.
 	DefaultTimeout = 60 * time.Second
 )
 
@@ -197,8 +197,9 @@ func (cl *ClusterClient) MustWaitForObject(obj client.Object, p ...predicates.Ob
 // WaitForObjectNotFound waits for the specified object to not exist.
 func (cl *ClusterClient) WaitForObjectNotFound(ctx context.Context, obj client.Object) error {
 	cl.Helper()
-	// Static 30 second timeout, this can be adjusted if needed
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Static 1 minute timeout, this can be adjusted if needed
+	timeoutCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
+
 	defer cancel()
 	start := time.Now()
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}

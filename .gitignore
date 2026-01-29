@@ -12,3 +12,4 @@ release_assets/
 # Temporary folders
 tmp/
 temp/
+.tmp/

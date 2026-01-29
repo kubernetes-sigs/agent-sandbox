@@ -22,10 +22,11 @@ import (
 )
 
 const (
-	LaunchTypeWarm = "warm" // Pod from a SandboxWarmPool
-	LaunchTypeCold = "cold" // Pod not from a SandboxWarmPool
-	StatusSuccess  = "success"
-	StatusFailure  = "failure"
+	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
+	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
+	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+	StatusSuccess     = "success"
+	StatusFailure     = "failure"
 )
 
 var (

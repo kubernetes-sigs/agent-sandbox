@@ -102,7 +102,7 @@ func NewTestContext(t T) *TestContext {
 // beforeEach runs before each test case is executed.
 func (th *TestContext) beforeEach() error {
 	th.Helper()
-	return th.validateAgentSandboxInstallation(context.Background())
+	return th.validateAgentSandboxInstallation()
 }
 
 // afterEach runs after each test case is executed.

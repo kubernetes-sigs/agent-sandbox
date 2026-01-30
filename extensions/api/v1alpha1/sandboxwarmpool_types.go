@@ -45,6 +45,7 @@ type SandboxWarmPoolStatus struct {
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 }
 
+// +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas

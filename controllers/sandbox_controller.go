@@ -477,6 +477,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[SandboxPodNameAnnotation] = pod.Name
 
 	if r.Tracer.IsRecording(ctx) {
 		r.Tracer.AddEvent(ctx, "NewPodStatusObserved", map[string]string{

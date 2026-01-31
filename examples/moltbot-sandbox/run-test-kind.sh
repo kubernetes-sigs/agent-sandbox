@@ -18,11 +18,11 @@ echo "Loading moltbot/moltbot:latest into kind cluster..."
 kind load docker-image moltbot/moltbot:latest --name "${KIND_CLUSTER_NAME}"
 
 echo "Generating secure token..."
-export CLAWDBOT_GATEWAY_TOKEN=$(openssl rand -hex 32)
-echo "Token: $CLAWDBOT_GATEWAY_TOKEN"
+export OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)
+echo "Token: $OPENCLAW_GATEWAY_TOKEN"
 
 echo "Applying sandbox resource with generated token..."
-sed "s/dummy-token-for-sandbox/$CLAWDBOT_GATEWAY_TOKEN/g" moltbot-sandbox.yaml | kubectl apply -f -
+sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" moltbot-sandbox.yaml | kubectl apply -f -
 
 # Cleanup function
 cleanup() {

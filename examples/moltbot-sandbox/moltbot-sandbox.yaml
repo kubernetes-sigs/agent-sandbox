@@ -25,10 +25,16 @@ spec:
               drop:
                 - ALL
           env:
-            - name: CLAWDBOT_GATEWAY_TOKEN
+            - name: OPENCLAW_GATEWAY_TOKEN
               value: "dummy-token-for-sandbox"
-            - name: OPENCLAW_GATEWAY_BIND
-              value: "0.0.0.0"
+          command:
+            - "node"
+            - "dist/index.mjs"
+            - "gateway"
+            - "--bind"
+            - "0.0.0.0"
+            - "--port"
+            - "18789"
           ports:
             - containerPort: 18789
             - containerPort: 18790

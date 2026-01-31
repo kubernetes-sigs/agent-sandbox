@@ -1,0 +1,51 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: moltbot-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: moltbot-sandbox
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: moltbot
+          image: moltbot/moltbot:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # Node apps often need to write to /tmp or home, keep false for now unless verified
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: CLAWDBOT_GATEWAY_TOKEN
+              value: "dummy-token-for-sandbox"
+            - name: OPENCLAW_GATEWAY_BIND
+              value: "0.0.0.0"
+          ports:
+            - containerPort: 18789
+            - containerPort: 18790
+          volumeMounts:
+            - mountPath: /home/node/clawd
+              name: workspaces-pvc
+            - mountPath: /home/node/.clawdbot
+              name: config-storage
+      volumes:
+        - name: config-storage
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: workspaces-pvc
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi

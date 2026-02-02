@@ -53,6 +53,53 @@ def test_execute(base_url):
         print(f"An error occurred during execute command: {e}")
         sys.exit(1)
 
+def test_list_files(base_url):
+    """
+    Tests the list files endpoint.
+    """
+    url = f"{base_url}/list/."
+    try:
+        print(f"\n--- Testing List Files endpoint ---")
+        print(f"Sending GET request to {url}")
+        response = requests.get(url)
+        response.raise_for_status()
+        
+        print("List files successful!")
+        print("Response JSON:", response.json())
+        assert isinstance(response.json(), list)
+        
+    except (requests.exceptions.RequestException, AssertionError) as e:
+        print(f"An error occurred during list files: {e}")
+        sys.exit(1)
+
+def test_exist(base_url):
+    """
+    Tests the exist endpoint.
+    """
+    url = f"{base_url}/exist/."
+    try:
+        print(f"\n--- Testing Exist endpoint ---")
+        print(f"Sending GET request to {url}")
+        response = requests.get(url)
+        response.raise_for_status()
+        
+        print("Exists check successful!")
+        print("Response JSON:", response.json())
+        assert response.json()["exist"] is True
+
+        url = f"{base_url}/exist/does_not_exist"
+        print(f"Sending GET request to {url}")
+        response = requests.get(url)
+        response.raise_for_status()
+        
+        print("Exists check (negative) successful!")
+        print("Response JSON:", response.json())
+        assert response.json()["exist"] is False
+        
+    except (requests.exceptions.RequestException, AssertionError) as e:
+        print(f"An error occurred during exists check: {e}")
+        sys.exit(1)
+
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("Usage: python tester.py <server_ip> <server_port>")
@@ -64,3 +111,5 @@ if __name__ == "__main__":
     
     test_health_check(base_url)
     test_execute(base_url)
+    test_list_files(base_url)
+    test_exist(base_url)

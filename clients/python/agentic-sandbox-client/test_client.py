@@ -88,7 +88,29 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
 
             print(f"Read content: '{read_content}'")
             assert read_content == file_content
-            print("--- File Operations Test Passed! ---")
+            
+             print("--- File Operations Test Passed! ---")
+
+            # Test list and exists
+            print("\n--- Testing List and Exists ---")
+            print(f"Checking if '{file_path}' exists...")
+            exists = sandbox.exist(file_path)
+            assert exists is True, f"Expected '{file_path}' to exist"
+
+            print("Checking if 'non_existent_file.txt' exists...")
+            not_exists = sandbox.exist("non_existent_file.txt")
+            assert not_exists is False, "Expected 'non_existent_file.txt' to not exist"
+
+            print("Listing files in '.' ...")
+            files = sandbox.list(".")
+            print(f"Files found: {[f.name for f in files]}")
+
+            found = any(f.name == file_path for f in files)
+            assert found is True, f"Expected '{file_path}' to be in the file list"
+
+            file_entry = next(f for f in files if f.name == file_path)
+            assert file_entry.size == len(file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
+            print("--- List and Exists Test Passed! ---")
 
             # Test introspection commands
             print("\n--- Testing Pod Introspection ---")

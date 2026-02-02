@@ -1,19 +1,9 @@
 name: Publish Python 🐍 distribution 📦 to PyPI
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to deploy to'
-        type: choice
-        options:
-        - testpypi
-        - pypi
-      version:
-        description: 'Manual Version (e.g., 0.1.5). Leave empty if using a Release Tag.'
-        required: false
+  push:
+    tags:
+      - 'k8s-agent-sandbox/v*'
 
 permissions:
   contents: read
@@ -32,24 +22,24 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: "3.12"
+        python-version: "3.13"
     
     - name: Create VERSION file
       shell: bash
       run: |
         # Determine the version
-        if [[ "${{ inputs.version }}" != "" ]]; then
-          FINAL_VERSION="${{ inputs.version }}"
-          echo "Manual mode: Using $FINAL_VERSION"
-
-        elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          # Strip 'python-v' or 'v' prefix (e.g., python-v0.1.0 -> 0.1.0)
-          FINAL_VERSION=$(echo $TAG_NAME | sed 's/^python-v//' | sed 's/^v//')
-          echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
 
+          # Strip 'k8s-agent-sandbox/v' prefix
+          CLEAN_TAG=$(echo $TAG_NAME | sed 's|^k8s-agent-sandbox/||')
+          FINAL_VERSION=$(echo $CLEAN_TAG | sed 's/^v//')
+          echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
+          
+          # Write to the file setuptools expects
+          echo "$FINAL_VERSION" > VERSION
         else
-          echo "::error::No valid version found! Workflow must be triggered by a Tag (e.g., python-v0.1.0) or Manual Input."
+          echo "::error::No valid tag found. This workflow expects a tag trigger."
           exit 1
         fi
 
@@ -117,9 +107,9 @@ jobs:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
       contents: read
 
-    # Run if it's a Release event OR if Manual trigger + 'pypi' selected
+    # Run if it's a Release event OR if Manual trigger + 'pypi' selected and Block "rc" tags from running in PyPI
     if: >-
-      github.event_name == 'release' || 
+      (github.event_name == 'push' && !contains(github.ref, 'rc')) || 
       (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi')
 
     steps:

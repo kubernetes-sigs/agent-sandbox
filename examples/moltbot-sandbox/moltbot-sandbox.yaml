@@ -15,7 +15,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: moltbot
-          image: moltbot/moltbot:latest
+          image: ghcr.io/openclaw/openclaw:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -28,23 +28,30 @@ spec:
             - name: OPENCLAW_GATEWAY_TOKEN
               value: "dummy-token-for-sandbox"
           command:
-            - "node"
-            - "dist/index.mjs"
-            - "gateway"
-            - "--bind"
-            - "0.0.0.0"
-            - "--port"
+            - node
+            - dist/index.js
+            - gateway
+            - --bind=lan
+            - --port
             - "18789"
+            - --allow-unconfigured
+            - --verbose
           ports:
             - containerPort: 18789
             - containerPort: 18790
           volumeMounts:
-            - mountPath: /home/node/clawd
+            - mountPath: /home/node/.openclaw/workspace
               name: workspaces-pvc
-            - mountPath: /home/node/.clawdbot
-              name: config-storage
+            - mountPath: /home/node/.openclaw
+              name: config-volume
+          # The following securityContext block from the instruction appears to be a misplaced volumes definition.
+          # Assuming the intent was to modify the volumes section, not add a securityContext here.
+          # If a securityContext was intended for the container, it should be merged with the existing one.
+          # If it was for the pod, it should be merged with the pod's securityContext.
+          # Given the content `- name: config-storage emptyDir: {}`, it strongly suggests a volume definition.
+          # I will interpret this as a modification to the `volumes` section below.
       volumes:
-        - name: config-storage
+        - name: config-volume
           emptyDir: {}
   volumeClaimTemplates:
     - metadata:

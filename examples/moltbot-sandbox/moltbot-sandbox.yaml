@@ -14,7 +14,7 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       containers:
-        - name: moltbot
+        - name: openclaw
           image: ghcr.io/openclaw/openclaw:latest
           imagePullPolicy: IfNotPresent
           securityContext:

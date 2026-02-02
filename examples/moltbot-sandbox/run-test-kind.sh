@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -e
 
 export KIND_CLUSTER_NAME="agent-sandbox"
@@ -11,11 +25,11 @@ cd ../../
 # make deploy-kind
 cd examples/moltbot-sandbox
 
-echo "Pulling moltbot/moltbot:latest..."
-docker pull moltbot/moltbot:latest
+echo "Pulling ghcr.io/openclaw/openclaw:latest..."
+docker pull ghcr.io/openclaw/openclaw:latest
 
-echo "Loading moltbot/moltbot:latest into kind cluster..."
-kind load docker-image moltbot/moltbot:latest --name "${KIND_CLUSTER_NAME}"
+echo "Loading ghcr.io/openclaw/openclaw:latest into kind cluster..."
+kind load docker-image ghcr.io/openclaw/openclaw:latest --name "${KIND_CLUSTER_NAME}"
 
 echo "Generating secure token..."
 export OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)

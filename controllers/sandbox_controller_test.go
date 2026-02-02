@@ -827,7 +827,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 			},
 			wantPod:   nil,
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			name: "remove pod name annotation when replicas is 0",
@@ -856,6 +856,33 @@ func TestReconcilePod(t *testing.T) {
 			wantPod:                nil,
 			expectErr:              false,
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
+		},
+		{
+			name: "adopted pod not found in cluster",
+			initialObjs: []runtime.Object{},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						SandboxPodNameAnnotation: "adopted-pod-not-found",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "test-container",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantPod:   nil,
+			expectErr: false,
 		},
 	}
 

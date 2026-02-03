@@ -371,11 +371,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			log.Info("Adopted Pod from annotation not found, likely deleted", "PodName", podName)
 			// Intentionally do not create a new pod, as this was an adopted pod.
 			return nil, nil
-		} else {
-			// Pod not found and it wasn't an adopted one, fall through to create.
-			pod = nil
-			err = nil // Clear the error to allow creation flow
 		}
+		// Pod not found and it wasn't an adopted one, fall through to create.
+		pod = nil
+		err = nil // Clear the error to allow creation flow
 	}
 
 	// 1. PATH: Logic for deleting Pod when replicas is 0

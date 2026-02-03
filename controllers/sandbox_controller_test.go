@@ -858,7 +858,7 @@ func TestReconcilePod(t *testing.T) {
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
 		},
 		{
-			name: "adopted pod not found in cluster",
+			name:        "adopted pod not found in cluster",
 			initialObjs: []runtime.Object{},
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{

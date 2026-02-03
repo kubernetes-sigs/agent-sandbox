@@ -57,23 +57,31 @@ release:
 	$(MAKE) release-python-sdk VERSION=${TAG}
 
 # Example usage:
-# make release-python-sdk VERSION=v0.1.0
-# make release-python-sdk VERSION=v0.1.1-rc1
+# make release-python-sdk VERSION=v0.1.0 (to release on TestPyPI and PyPI)
+# make release-python-sdk VERSION=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
+# make release-python-sdk VERSION=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
 .PHONY: release-python-sdk
 release-python-sdk:
-ifndef VERSION
-	$(error VERSION is undefined. Usage: make release-python-sdk VERSION=v0.1.1 to release on PyPI or make release VERSION=v0.1.1-rc1 to release only on TestPyPI)
-endif
-	@echo "🔍 Checking for uncommitted changes..."
-	@if [ -n "$$(git status --porcelain)" ]; then \
-		echo "❌ Error: Working directory is not clean. Commit your changes first."; \
-		exit 1; \
-	fi
-	@echo "🚀 Tagging release: k8s-agent-sandbox/$(VERSION)"
-	git tag -a k8s-agent-sandbox/$(VERSION) -m "Release Python Client $(VERSION)"
-	@echo "⬆️  Pushing tag to origin..."
-	git push origin main
-	@echo "✅ Done! The 'pypi-publish' GitHub Action should now be running."
+	ifndef VERSION
+		$(info ❌ ERROR: VERSION is undefined.)
+		$(info )
+		$(info Usage Examples:)
+		$(info    • Release: 					make release-python-sdk VERSION=v0.1.1)
+		$(info    • Patch Release:        		make release-python-sdk VERSION=v0.1.1.post1)
+		$(info    • Release to TestPyPI only:	make release-python-sdk VERSION=v0.1.1rc1)
+		$(info )
+		$(error 🛑 Aborting release)
+	endif
+		@echo "🔍 Checking for uncommitted changes..."
+		@if [ -n "$$(git status --porcelain)" ]; then \
+			echo "❌ Error: Working directory is not clean. Commit your changes first."; \
+			exit 1; \
+		fi
+		@echo "🚀 Tagging release: k8s-agent-sandbox/$(VERSION)"
+		git tag -s k8s-agent-sandbox/$(VERSION) -m "Release k8s-agent-sandbox/$(VERSION)"
+		@echo "⬆️  Pushing tag to origin..."
+		git push origin k8s-agent-sandbox/$(VERSION)
+		@echo "✅ Done! The 'pypi-publish' GitHub Action should now be running."
 
 .PHONY: toc-update
 toc-update:

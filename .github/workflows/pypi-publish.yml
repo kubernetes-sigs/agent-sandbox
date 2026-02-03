@@ -36,14 +36,11 @@ jobs:
           FINAL_VERSION=$(echo $CLEAN_TAG | sed 's/^v//')
           echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
           
-          # Write to the file setuptools expects
-          echo "$FINAL_VERSION" > VERSION
         else
           echo "::error::No valid tag found. This workflow expects a tag trigger."
           exit 1
         fi
 
-        # Write to the file setuptools expects
         echo "$FINAL_VERSION" > VERSION
         
         # Verify
@@ -107,10 +104,9 @@ jobs:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
       contents: read
 
-    # Run if it's a Release event OR if Manual trigger + 'pypi' selected and Block "rc" tags from running in PyPI
+    # Run if it is a push event AND NOT a release candidate
     if: >-
-      (github.event_name == 'push' && !contains(github.ref, 'rc')) || 
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi')
+      (github.event_name == 'push' && !contains(github.ref, 'rc'))
 
     steps:
     - name: Download all the dists

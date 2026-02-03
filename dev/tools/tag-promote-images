@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import sys
+import argparse
+import subprocess
+import time
+import re
+
+# The local clone of k8s.io repo relative to where this script is executed (i.e. make release-promote)
+DEFAULT_K8S_IO_DIR = "../../kubernetes/k8s.io"
+STAGING_REPO_BASE = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox"
+# Path within the k8s.io repository
+IMAGES_YAML_PATH = "registry.k8s.io/images/k8s-staging-agent-sandbox/images.yaml"
+
+# List of images to promote
+IMAGES_TO_PROMOTE = [
+    "agent-sandbox-controller",
+    "chrome-sandbox",
+    "python-runtime-sandbox"
+]
+
+# Git Remotes (Adjust if your remote names differ)
+REMOTE_UPSTREAM = "upstream"
+REMOTE_FORK = "origin"
+
+def run_command(cmd, cwd=None, capture_output=False):
+    """Helper to run shell commands."""
+    try:
+        result = subprocess.run(
+            cmd, 
+            cwd=cwd, 
+            check=True, 
+            text=True, 
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None
+        )
+        return result.stdout.strip() if capture_output else None
+    except subprocess.CalledProcessError as e:
+        # ALWAYS print stderr on failure, even if capture_output was requested
+        print(f"❌ Error running command: {' '.join(cmd)}")
+        if e.stderr:
+            print(f"🛑 Stderr:\n{e.stderr}")
+        elif e.stdout:
+             print(f"🛑 Stdout:\n{e.stdout}")
+        sys.exit(1)
+
+def get_gh_username():
+    """Fetches the authenticated GitHub username."""
+    print("👤 Fetching GitHub username...")
+    return run_command(["gh", "api", "user", "--jq", ".login"], capture_output=True)
+
+def get_latest_digest(image_name, tag):
+    """Polls the staging registry for the latest digest matching the tag."""
+    image_path = f"{STAGING_REPO_BASE}/{image_name}"
+    # Enforce image tag format: vYYYYMMDD-<git tag>-main
+    filter_arg = f"tags~v[0-9]{{8}}-{tag}-main"
+    
+    print(f"   Searching {image_path} for tag pattern: {filter_arg}")
+    
+    # Wait up to 45 minutes (45 * 60s)
+    for i in range(45): 
+        try:
+            out = run_command(
+                [
+                    "gcloud", "container", "images", "list-tags", 
+                    image_path, 
+                    f"--filter={filter_arg}", 
+                    "--format=get(digest)",
+                    "--sort-by=~timestamp", # Get the latest build first
+                    "--limit=1"
+                ], 
+                capture_output=True
+            )
+            if out:
+                return out
+        except subprocess.CalledProcessError:
+            pass 
+        
+        time.sleep(60)
+        print(f"   [Wait: {i+1}m] Still waiting...", flush=True)
+    
+    return None
+
+def check_local_repo_state():
+    """Ensures the local agent-sandbox repo is clean and up-to-date."""
+    print(f"🛡️  Verifying local repository state...")
+    
+    # 1. Check for uncommitted changes
+    if run_command(["git", "status", "--porcelain"], capture_output=True):
+        print("❌ You have uncommitted changes in agent-sandbox. Please commit or stash them.")
+        sys.exit(1)
+
+    # 2. Fetch upstream
+    print(f"⬇️  Fetching {REMOTE_UPSTREAM}...")
+    try:
+        run_command(["git", "fetch", REMOTE_UPSTREAM])
+    except subprocess.CalledProcessError:
+        print(f"❌ Failed to fetch from '{REMOTE_UPSTREAM}'. Please check your git remotes.")
+        sys.exit(1)
+
+    # 3. Check synchronization
+    current_branch = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True)
+    local_sha = run_command(["git", "rev-parse", "HEAD"], capture_output=True)
+    
+    if current_branch == 'main':
+        upstream_sha = run_command(["git", "rev-parse", f"{REMOTE_UPSTREAM}/main"], capture_output=True)
+        if local_sha != upstream_sha:
+            print(f"❌ Local 'main' is not synced with {REMOTE_UPSTREAM}/main.")
+            print(f"   Local:    {local_sha}")
+            print(f"   Upstream: {upstream_sha}")
+            print("   Please run: git pull upstream main")
+            sys.exit(1)
+        print("✅ Local 'main' is up-to-date with upstream.")
+    else:
+        print(f"⚠️  You are releasing from branch '{current_branch}' (not 'main').")
+        print("   Assuming this is a test release. Continuing...")
+
+def main():
+    parser = argparse.ArgumentParser(description='Stage 1: Tag and Promote Agent Sandbox Release')
+    parser.add_argument('--tag', required=True, help='The git tag for the release (e.g., v0.1.0)')
+    parser.add_argument('--k8s-io-dir', default=DEFAULT_K8S_IO_DIR, help='Path to local k8s.io repository')
+    args = parser.parse_args()
+
+    tag = args.tag
+    k8s_io_dir = os.path.abspath(args.k8s_io_dir)
+
+    gh_user = get_gh_username()
+    print(f"✅ Authenticated as: {gh_user}")
+
+    print(f"🚀 Starting promotion process for {tag}")
+
+    # --- Pre-flight Check ---
+    check_local_repo_state()
+
+    # --- Step 1: Create and Push Tag ---
+    print(f"--- Step 1: Handling Git Tag {tag} ---")
+    # 1. Ensure Tag Exists Locally
+    try:
+        run_command(["git", "rev-parse", tag], capture_output=True)
+        print(f"✅ Tag {tag} already exists locally.")
+    except subprocess.CalledProcessError:
+        print(f"➕ Creating tag {tag}...")
+        run_command(["git", "tag", tag])
+
+    # 2. Always Push to Upstream
+    print(f"⬆️  Ensuring tag {tag} is pushed to {REMOTE_UPSTREAM}...")
+    # This will succeed (exit 0) even if the tag is already there ("Everything up-to-date")
+    run_command(["git", "push", REMOTE_UPSTREAM, tag])
+    print("✅ Tag confirmed on upstream.")
+
+    # --- Step 2: Wait for Staging Images ---
+    # CI job: https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images
+    print(f"--- Step 2: Waiting for Staging Images ---")
+    print("⏳ Polling registry (timeout: 45 mins)...")
+    
+    collected_digests = {}
+
+    for image in IMAGES_TO_PROMOTE:
+        digest = get_latest_digest(image, tag)
+        print("") # Newline after dots
+        if not digest:
+            print(f"❌ Timeout waiting for {image}. Please check Cloud Build logs.")
+            sys.exit(1)
+        print(f"✅ Found {image}: {digest}")
+        collected_digests[image] = digest
+
+    # --- Step 3: Create Promotion PR ---
+    print(f"--- Step 3: Creating Promotion PR in {k8s_io_dir} ---")
+    
+    if not os.path.isdir(k8s_io_dir):
+        print(f"❌ Directory {k8s_io_dir} not found. Please clone kubernetes/k8s.io.")
+        sys.exit(1)
+
+    print("🛡️  Checking for uncommitted changes...")
+    status = run_command(["git", "status", "--porcelain"], cwd=k8s_io_dir, capture_output=True)
+    if status:
+        print(f"❌ Your k8s.io repo at {k8s_io_dir} has uncommitted changes.")
+        print("   Please stash or commit them before running the release script.")
+        sys.exit(1)
+
+    # Sync k8s.io repo from UPSTREAM
+    print(f"🔄 Syncing k8s.io main branch from {REMOTE_UPSTREAM}...")
+    run_command(["git", "fetch", REMOTE_UPSTREAM], cwd=k8s_io_dir)
+    run_command(["git", "checkout", "main"], cwd=k8s_io_dir)
+    run_command(["git", "reset", "--hard", f"{REMOTE_UPSTREAM}/main"], cwd=k8s_io_dir)
+    
+    branch_name = f"promote-agent-sandbox-{tag}"
+    # Cleanup old branch if already exists
+    try:
+        run_command(["git", "branch", "-D", branch_name], cwd=k8s_io_dir, capture_output=True)
+    except subprocess.CalledProcessError:
+        pass
+        
+    run_command(["git", "checkout", "-b", branch_name], cwd=k8s_io_dir)
+
+    # Update images.yaml
+    yaml_path = os.path.join(k8s_io_dir, IMAGES_YAML_PATH)
+    if not os.path.exists(yaml_path):
+        print(f"❌ {IMAGES_YAML_PATH} does not exist in k8s.io repo.")
+        sys.exit(1)
+
+    print(f"📝 Updating {IMAGES_YAML_PATH}...")
+    with open(yaml_path, 'r') as f:
+        lines = f.readlines()
+
+    new_lines = []
+    current_image_block = None
+    
+    # Iterate and inject digests
+    for line in lines:
+        new_lines.append(line)
+        
+        # Detect which image block we are inside
+        if "- name:" in line:
+            for img in IMAGES_TO_PROMOTE:
+                if f"- name: {img}" in line:
+                    current_image_block = img
+                    break
+            else:
+                current_image_block = None
+        
+        # If inside a target block, look for 'dmap:' and append
+        if current_image_block and "dmap:" in line:
+             digest = collected_digests[current_image_block]
+             indent = line.find("dmap:") + 2 
+             new_entry = f'{" " * indent}"{digest}": ["{tag}"]\n'
+             new_lines.append(new_entry)
+             print(f"   Updated {current_image_block}")
+             current_image_block = None # Reset to avoid double insertion
+
+    with open(yaml_path, 'w') as f:
+        f.writelines(new_lines)
+
+    run_command(["git", "add", IMAGES_YAML_PATH], cwd=k8s_io_dir)
+    run_command(["git", "commit", "-m", f"Promote agent-sandbox {tag}"], cwd=k8s_io_dir)
+    
+    # Force push to ORIGIN (fork) to open PR (we force push to retry failed attempts)
+    print(f"⬆️  Pushing branch to {REMOTE_FORK}...")
+    run_command(["git", "push", "--force", "-u", REMOTE_FORK, branch_name], cwd=k8s_io_dir)
+
+    print("🚀 Creating PR...")
+    head_branch_ref = f"{gh_user}:{branch_name}"
+
+    pr_url = run_command([
+        "gh", "pr", "create",
+        "--title", f"Promote agent-sandbox {tag}",
+        "--body", f"Promoting agent-sandbox images for release {tag}",
+        "--head", head_branch_ref, 
+        "--base", "main",
+        "--repo", "kubernetes/k8s.io" 
+    ], cwd=k8s_io_dir, capture_output=True)
+
+    print(f"✅ Promotion PR created: {pr_url}")
+    print("👉 Action Required: Merge the PR and wait for the images to be promoted to registry.k8s.io")
+
+if __name__ == '__main__':
+    main()

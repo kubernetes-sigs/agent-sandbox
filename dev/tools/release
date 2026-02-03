@@ -71,6 +71,30 @@ def main():
         file.write(filedata)
     print('INFO: Successfully created release_assets/extensions.yaml')
 
+    # --- Publish Draft Release ---
+    if args.publish:
+        print(f"INFO: Publishing draft release {tag} to GitHub...")
+        manifest_path = "release_assets/manifest.yaml"
+        extensions_path = "release_assets/extensions.yaml"
+        
+        if not os.path.exists(manifest_path) or not os.path.exists(extensions_path):
+             print("❌ Release assets missing. Cannot publish.")
+             sys.exit(1)
+             
+        # Check if release exists, if so, we might want to fail or edit. 
+        # Here we assume creating a new one.
+        cmd = [
+            "gh", "release", "create", tag,
+            manifest_path,
+            extensions_path,
+            "--generate-notes",
+            "--title", tag,
+            "--verify-tag",
+            "--draft"
+        ]
+        run_command(cmd)
+        print(f"🎉 Draft release {tag} published successfully!")
+        print(f"👉 Go to https://github.com/kubernetes-sigs/agent-sandbox/releases to review and publish.")
 
 if __name__ == '__main__':
     main()

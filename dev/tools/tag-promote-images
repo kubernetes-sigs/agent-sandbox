@@ -148,15 +148,16 @@ def main():
 
     # --- Step 1: Create and Push Tag ---
     print(f"--- Step 1: Handling Git Tag {tag} ---")
-    # 1. Ensure Tag Exists Locally
-    try:
-        run_command(["git", "rev-parse", tag], capture_output=True)
+
+    # Ensure tag exists locally, create if not
+    existing_tag = run_command(["git", "tag", "--list", tag], capture_output=True)    
+    if existing_tag.strip() == tag:
         print(f"✅ Tag {tag} already exists locally.")
-    except subprocess.CalledProcessError:
+    else:
         print(f"➕ Creating tag {tag}...")
         run_command(["git", "tag", tag])
 
-    # 2. Always Push to Upstream
+    # Push tag to upstream
     print(f"⬆️  Ensuring tag {tag} is pushed to {REMOTE_UPSTREAM}...")
     # This will succeed (exit 0) even if the tag is already there ("Everything up-to-date")
     run_command(["git", "push", REMOTE_UPSTREAM, tag])

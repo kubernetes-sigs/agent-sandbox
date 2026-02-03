@@ -127,6 +127,6 @@ kubectl apply -f "${RUNTIME_CLASS_FILE}"
 echo "--- RuntimeClass '${RUNTIME_CLASS_NAME}' created ---"
 
 echo "### Setup Complete! ###"
-echo "You can now deploy pods using the '${RUNTIME_CLASS_NAME}' RuntimeClass."
-echo "To validate, follow the 'Validation' steps in the guide."
+echo "You can now deploy an Agent Sandbox using the '${RUNTIME_CLASS_NAME}' RuntimeClass."
+echo "Follow 'Step 2' in the guide to deploy the sandbox and 'Step 3' to verify the isolation."
 

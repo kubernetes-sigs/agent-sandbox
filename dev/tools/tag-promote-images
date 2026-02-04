@@ -37,7 +37,7 @@ IMAGES_TO_PROMOTE = [
 REMOTE_UPSTREAM = "upstream"
 REMOTE_FORK = "origin"
 
-def run_command(cmd, cwd=None, capture_output=False):
+def run_command(cmd, cwd=None, capture_output=False, allow_error=False):
     """Helper to run shell commands."""
     try:
         result = subprocess.run(
@@ -50,6 +50,8 @@ def run_command(cmd, cwd=None, capture_output=False):
         )
         return result.stdout.strip() if capture_output else None
     except subprocess.CalledProcessError as e:
+        if allow_error:
+            return None
         # ALWAYS print stderr on failure, even if capture_output was requested
         print(f"❌ Error running command: {' '.join(cmd)}")
         if e.stderr:
@@ -200,12 +202,8 @@ def main():
     run_command(["git", "reset", "--hard", f"{REMOTE_UPSTREAM}/main"], cwd=k8s_io_dir)
     
     branch_name = f"promote-agent-sandbox-{tag}"
-    # Cleanup old branch if already exists
-    try:
-        run_command(["git", "branch", "-D", branch_name], cwd=k8s_io_dir, capture_output=True)
-    except subprocess.CalledProcessError:
-        pass
-        
+    # Cleanup old promotion branch if already exists, and create the new promotion branch
+    run_command(["git", "branch", "-D", branch_name], cwd=k8s_io_dir, capture_output=True, allow_error=True)
     run_command(["git", "checkout", "-b", branch_name], cwd=k8s_io_dir)
 
     # Update images.yaml

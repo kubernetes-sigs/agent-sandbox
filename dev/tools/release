@@ -17,11 +17,23 @@ import os
 import glob
 import re
 import argparse
+import subprocess
+import sys
+
+def run_command(cmd):
+    """Helper to run shell commands."""
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError:
+        print(f"Error running command: {' '.join(cmd)}")
+        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description='Generate release manifests.')
     parser.add_argument('--tag', required=True, help='The git tag for the release.')
+    parser.add_argument('--publish', action='store_true', help='Publish the release to GitHub.')
     args = parser.parse_args()
+    tag = args.tag
 
     # Create the release_assets directory if it doesn't exist
     if not os.path.exists('release_assets'):
@@ -90,7 +102,8 @@ def main():
             "--generate-notes",
             "--title", tag,
             "--verify-tag",
-            "--draft"
+            "--draft",
+            "--repo", "kubernetes-sigs/agent-sandbox"
         ]
         run_command(cmd)
         print(f"🎉 Draft release {tag} published successfully!")

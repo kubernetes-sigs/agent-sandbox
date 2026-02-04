@@ -51,6 +51,9 @@ lint-go:
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
+# Default remote (can be overriden: make release-publish REMOTE=upstream ...)
+REMOTE ?= origin
+
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
 .PHONY: release-promote
@@ -66,6 +69,7 @@ release-publish:
 	go mod tidy
 	go generate ./...
 	./dev/tools/release --tag=${TAG} --publish
+	$(MAKE) release-python-sdk VERSION=${TAG} REMOTE=${REMOTE}
 
 # Generate release manifests only
 # Usage: make release-manifests TAG=vX.Y.Z
@@ -74,8 +78,7 @@ release-manifests:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-manifests TAG=vX.Y.Z)"; exit 1; fi
 	go mod tidy
 	go generate ./...
-	./dev/tools/release --tag=${TAG}
-	$(MAKE) release-python-sdk VERSION=${TAG}
+	./dev/tools/release --tag=${TAG} 
 
 # Example usage:
 # make release-python-sdk VERSION=v0.1.0 (to release on TestPyPI and PyPI)
@@ -100,8 +103,8 @@ release-python-sdk:
 		fi
 		@echo "🚀 Tagging release: k8s-agent-sandbox/$(VERSION)"
 		git tag -s k8s-agent-sandbox/$(VERSION) -m "Release k8s-agent-sandbox/$(VERSION)"
-		@echo "⬆️  Pushing tag to origin..."
-		git push origin k8s-agent-sandbox/$(VERSION)
+		@echo "⬆️  Pushing tag to ${REMOTE}..."
+		git push ${REMOTE} k8s-agent-sandbox/$(VERSION)
 		@echo "✅ Done! The 'pypi-publish' GitHub Action should now be running."
 
 .PHONY: toc-update

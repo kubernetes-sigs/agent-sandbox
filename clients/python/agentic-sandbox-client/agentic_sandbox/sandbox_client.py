@@ -19,6 +19,7 @@ file I/O) with the sandbox environment, including optional OpenTelemetry tracing
 
 import os
 import time
+import socket
 import subprocess
 import logging
 

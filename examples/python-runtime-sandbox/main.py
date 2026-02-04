@@ -128,13 +128,13 @@ async def list_files(file_path: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"List files failed": str(e)})
 
-@app.get("/exist/{file_path:path}", summary="Check if the relative path exists")
-async def exist(file_path: str):
+@app.get("/exists/{file_path:path}", summary="Check if the relative path exists")
+async def exists(file_path: str):
     """
     Checks if a specified file or directory exists under the /app directory in the sandbox.
     """
     full_path = os.path.join("/app", file_path)
     return JSONResponse(status_code=200, content={
         "path": full_path,
-        "exist": os.path.exists(full_path)
+        "exists": os.path.exists(full_path)
     })

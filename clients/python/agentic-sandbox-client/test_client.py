@@ -89,16 +89,16 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
             print(f"Read content: '{read_content}'")
             assert read_content == file_content
             
-             print("--- File Operations Test Passed! ---")
+            print("--- File Operations Test Passed! ---")
 
             # Test list and exists
             print("\n--- Testing List and Exists ---")
             print(f"Checking if '{file_path}' exists...")
-            exists = sandbox.exist(file_path)
+            exists = sandbox.exists(file_path)
             assert exists is True, f"Expected '{file_path}' to exist"
 
             print("Checking if 'non_existent_file.txt' exists...")
-            not_exists = sandbox.exist("non_existent_file.txt")
+            not_exists = sandbox.exists("non_existent_file.txt")
             assert not_exists is False, "Expected 'non_existent_file.txt' to not exist"
 
             print("Listing files in '.' ...")

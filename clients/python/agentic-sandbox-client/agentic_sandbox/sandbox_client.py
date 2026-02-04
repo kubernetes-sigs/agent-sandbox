@@ -514,17 +514,17 @@ class SandboxClient:
             span.set_attribute("sandbox.file.count", len(file_entries))
         return file_entries
 
-    @trace_span("exist")
-    def exist(self, path: str, timeout: int = 60) -> bool:
+    @trace_span("exists")
+    def exists(self, path: str, timeout: int = 60) -> bool:
         """
         Checks if a file or directory exists at the given path.
         """
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-        response = self._request("GET", f"exist/{path}", timeout=timeout)
-        exist = response.json().get("exist", False)
+        response = self._request("GET", f"exists/{path}", timeout=timeout)
+        exists = response.json().get("exists", False)
         if span.is_recording():
-            span.set_attribute("sandbox.file.exist", exist)
-        return exist
+            span.set_attribute("sandbox.file.exists", exists)
+        return exists
     

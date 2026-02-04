@@ -33,7 +33,7 @@ For working with a remote cluster you can build and push the image to a containe
 
 ### Regenerate CRD and RBAC
 
-When ever any changes are made to the `api/` folder or the `controllers/` folder (kubebuilder tags), you may have to regenerate the CRDs and the RBAC manifests. 
+Whenever any changes are made to the `api/` folder or the `controllers/` folder (kubebuilder tags), you may have to regenerate the CRDs and the RBAC manifests. 
 
 ```sh
 make all 

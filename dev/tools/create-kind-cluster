@@ -17,12 +17,108 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
+import textwrap
+
+
+def create_kind_config(kubelet_verbosity):
+    """Create a kind config with kubelet verbosity settings."""
+    config = textwrap.dedent(f"""\
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        nodes:
+        - role: control-plane
+          kubeadmConfigPatches:
+          - |
+            kind: KubeletConfiguration
+            logging:
+              verbosity: {kubelet_verbosity}
+        """)
+    return config
+
+
+def configure_containerd_loglevel(cluster_name, loglevel):
+    """Configure containerd log level and restart it."""
+    node_name = f"{cluster_name}-control-plane"
+    print(f"Configuring containerd log level '{loglevel}' on node '{node_name}'...")
+
+    try:
+        # Read the current config
+        result = subprocess.run(
+            ["docker", "exec", node_name, "cat", "/etc/containerd/config.toml"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        config_content = result.stdout
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Failed to read containerd config: {e.stderr}")
+        return False
+
+    lines = config_content.splitlines()
+    new_lines = []
+    in_debug = False
+    level_set = False
+
+    for line in lines:
+        stripped = line.strip()
+        # Check if we are entering a new section
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_debug and not level_set:
+                new_lines.append(f'  level = "{loglevel}"')
+                level_set = True
+            in_debug = (stripped == "[debug]")
+
+        if in_debug and stripped.startswith("level ="):
+            new_lines.append(f'  level = "{loglevel}"')
+            level_set = True
+        else:
+            new_lines.append(line)
+
+    if in_debug and not level_set:
+        new_lines.append(f'  level = "{loglevel}"')
+        level_set = True
+
+    if not any(line.strip() == "[debug]" for line in lines):
+        if new_lines and new_lines[-1].strip() != "":
+            new_lines.append("")
+        new_lines.append("[debug]")
+        new_lines.append(f'  level = "{loglevel}"')
+
+    new_config = "\n".join(new_lines) + "\n"
+
+    try:
+        # Write back the config
+        subprocess.run(
+            ["docker", "exec", "-i", node_name, "bash", "-c", "cat > /etc/containerd/config.toml"],
+            input=new_config,
+            text=True,
+            check=True
+        )
+
+        # Restart containerd
+        subprocess.run(
+            ["docker", "exec", node_name, "systemctl", "restart", "containerd"],
+            check=True,
+            capture_output=True
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Failed to update or restart containerd: {e.stderr}")
+        return False
+
+    print(f"Containerd configured with log level '{loglevel}' and restarted")
+    return True
+
 
 def main():
     parser = argparse.ArgumentParser(description="Create a kind cluster.")
     parser.add_argument("name", help="The name of the cluster.")
     parser.add_argument("--recreate", action="store_true", help="Delete the cluster if it already exists.")
     parser.add_argument("--kubeconfig", help="Path to export the kubeconfig to.")
+    parser.add_argument("--containerd-loglevel", default="debug",
+                        help="Containerd log level (default: debug). Set to empty string to skip.")
+    parser.add_argument("--kubelet-verbosity", type=int, default=8,
+                        help="Kubelet verbosity level (requires cluster creation, not applied to existing clusters).")
     args = parser.parse_args()
 
     clusters = subprocess.run(["kind", "get", "clusters"], capture_output=True, text=True).stdout.splitlines()
@@ -38,7 +134,32 @@ def main():
 
     if not cluster_exists:
         print(f"Creating cluster '{args.name}'.")
-        subprocess.run(["kind", "create", "cluster", "--name", args.name], check=True)
+
+        create_cmd = ["kind", "create", "cluster", "--name", args.name]
+
+        # Create a temporary config file with kubelet verbosity settings
+        config_content = create_kind_config(args.kubelet_verbosity)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write(config_content)
+            config_path = f.name
+
+        print(f"Using kind config with kubelet verbosity: {args.kubelet_verbosity}")
+        create_cmd.extend(["--config", config_path])
+
+        try:
+            subprocess.run(create_cmd, check=True)
+        finally:
+            os.unlink(config_path)
+
+        # Configure containerd log level after cluster creation
+        if args.containerd_loglevel:
+            configure_containerd_loglevel(args.name, args.containerd_loglevel)
+    else:
+        # Cluster exists - can still apply containerd settings
+        if args.containerd_loglevel:
+            configure_containerd_loglevel(args.name, args.containerd_loglevel)
+        if args.kubelet_verbosity is not None:
+            print(f"Note: --kubelet-verbosity requires cluster recreation (use --recreate).")
 
     if args.kubeconfig:
         kubeconfig_dir = os.path.dirname(args.kubeconfig)

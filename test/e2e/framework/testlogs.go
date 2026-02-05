@@ -35,7 +35,8 @@ func newLogCapturingT(t T, artifactsDir string) *logCapturingT {
 	logFile := filepath.Join(artifactsDir, "test.log")
 	f, err := os.Create(logFile)
 	if err != nil {
-		t.Fatalf("warning: failed to create test log file %s: %v", logFile, err)
+		t.Logf("warning: failed to create test log file %s: %v", logFile, err)
+		return &logCapturingT{T: t, startTime: time.Now()}
 	}
 
 	t.Cleanup(func() {

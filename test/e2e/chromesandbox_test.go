@@ -67,6 +67,8 @@ func TestRunChromeSandbox(t *testing.T) {
 // Run with: go test -bench=BenchmarkChromeSandboxStartup -benchtime=1x ./test/e2e/...
 // Compare results with: benchstat old.txt new.txt
 func BenchmarkChromeSandboxStartup(b *testing.B) {
+	time.Sleep(2 * time.Second) // Give cluster a moment to settle, and to help us split the logs by time
+
 	for b.Loop() {
 		metrics := runChromeSandbox(framework.NewTestContext(b))
 		// Report custom metrics in addition to the default ns/op
@@ -78,6 +80,8 @@ func BenchmarkChromeSandboxStartup(b *testing.B) {
 
 // runChromeSandbox runs the chrome sandbox test and returns timing metrics.
 func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
+	ctx := t.Context()
+
 	// Set up a namespace with unique name to avoid conflicts
 	ns := &corev1.Namespace{}
 	ns.Name = fmt.Sprintf("chrome-sandbox-test-%d", time.Now().UnixNano())
@@ -109,6 +113,22 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	}
 	metrics.ChromeReady = time.Since(startTime)
 	metrics.Total = time.Since(startTime)
+
+	// Gather kubelet/containerd logs to understand timing between scheduling and running
+	logOptions := framework.NodeLogOptions{}
+	logOptions.ArtifactsDir = t.ArtifactsDir()
+	logOptions.Since = startTime
+
+	// Get latest pod object to get node name
+	var latestPod corev1.Pod
+	if err := t.ClusterClient.Get(ctx, types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}, &latestPod); err != nil {
+		t.Fatalf("failed to get latest pod object: %v", err)
+	}
+	nodeName := latestPod.Spec.NodeName
+	if nodeName == "" {
+		t.Fatalf("pod not scheduled to a node, cannot get node logs")
+	}
+	t.MustGetNodeLogs(nodeName, logOptions)
 
 	return metrics
 }

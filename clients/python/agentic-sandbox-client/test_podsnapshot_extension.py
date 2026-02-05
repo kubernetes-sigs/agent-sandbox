@@ -15,9 +15,10 @@
 import argparse
 import asyncio
 import time
+import sys
 from kubernetes import client, config
 import re
-from agentic_sandbox.extensions import PodSnapshotSandboxClient
+from agentic_sandbox.gke_extensions import PodSnapshotSandboxClient
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
@@ -38,8 +39,8 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
         config.load_kube_config()
 
     wait_time = 10
-    first_snapshot_name = "test-snapshot-10"
-    second_snapshot_name = "test-snapshot-20"
+    first_checkpoint_name = "test-snapshot-10"
+    second_checkpoint_name = "test-snapshot-20"
     v1 = client.CoreV1Api()
 
     try:
@@ -55,9 +56,9 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
             assert sandbox.controller_ready == True, "Sandbox controller is not ready."
 
             time.sleep(wait_time)
-            print(f"Creating first pod snapshot '{first_snapshot_name}' after {wait_time} seconds...")
-            snapshot_result = sandbox.checkpoint(first_snapshot_name)
-            print(f"Trigger Snapshot Command Stdout: {snapshot_result.stdout.strip()}")
+            print(f"Creating first pod snapshot '{first_checkpoint_name}' after {wait_time} seconds...")
+            snapshot_result, trigger_name = sandbox.checkpoint(first_checkpoint_name)
+            print(f"Trigger Command Stdout: {snapshot_result.stdout.strip()}")
             print(f"Trigger Command Stderr: {snapshot_result.stderr.strip()}")
             print(f"Trigger Command Exit Code: {snapshot_result.exit_code}")
 
@@ -65,9 +66,9 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
 
             time.sleep(wait_time)
 
-            print(f"\nCreating second pod snapshot '{second_snapshot_name}' after {wait_time} seconds...")
-            snapshot_result = sandbox.checkpoint(second_snapshot_name)
-            print(f"Trigger Snapshot Command Stdout: {snapshot_result.stdout.strip()}")
+            print(f"\nCreating second pod snapshot '{second_checkpoint_name}' after {wait_time} seconds...")
+            snapshot_result, trigger_name = sandbox.checkpoint(second_checkpoint_name)
+            print(f"Trigger Command Stdout: {snapshot_result.stdout.strip()}")
             print(f"Trigger Command Stderr: {snapshot_result.stderr.strip()}")
             print(f"Trigger Command Exit Code: {snapshot_result.exit_code}")
 

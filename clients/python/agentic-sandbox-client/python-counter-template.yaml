@@ -1,0 +1,29 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: python-counter-template
+  namespace: default
+  labels:
+    language: python
+spec:
+  #enableDisruptionControl: true
+  #shutdownTime: "2025-12-31T23:59:59Z"
+  podTemplate:
+    metadata:
+      labels:
+        app: agent-sandbox-workload
+    spec:
+      serviceAccountName: default
+      runtimeClassName: gvisor
+      containers:
+      - name: my-container1
+        image: python:3.10-slim
+        command: ["python3", "-c"]
+        args:
+          - |
+            import time
+            i = 0
+            while True:
+              print(f"Count: {i}", flush=True)
+              i += 1
+              time.sleep(1)

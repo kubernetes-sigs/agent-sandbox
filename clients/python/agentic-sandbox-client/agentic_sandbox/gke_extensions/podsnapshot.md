@@ -2,27 +2,37 @@
 
 This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger checkpoints (snapshots) of a running sandbox and restore a new sandbox from the recently created snapshot.
 
-## `podsnapshot.py`
+## `podsnapshot_client.py`
 
-This file defines the `PodSnapshotSandboxClient` class, which extends the base `SandboxClient` to provide snapshot capabilities.
+This file defines the `SnapshotPersistenceManager` and `PodSnapshotSandboxClient` class, which extend the base `SandboxClient` to provide snapshot capabilities.
+
+### `SnapshotPersistenceManager`
+
+A utility class for managing local persistence of snapshot metadata in a secure directory. Stores metadata as a dictionary keyed by `trigger_name`.
+
+### `PodSnapshotSandboxClient`
+
+A specialized Sandbox client for interacting with the gke pod snapshot controller.
 
 ### Key Features:
 
-*   **`PodSnapshotSandboxClient(template_name: str, ...)`**:
-    *   Initializes the client.
+*   **`PodSnapshotSandboxClient(template_name: str, podsnapshot_timeout: int = 180, server_port: int = 8080, ...)`**:
+    *   Initializes the client with optional podsnapshot timeout and server port.
     *   If snapshot exists, the pod snapshot controller restores from the most recent snapshot matching the label of the `SandboxTemplate`, otherwise creates a new `Sandbox`.
 *   **`snapshot_controller_ready(self) -> bool`**:
     *   Checks if the snapshot agent (both self-installed and GKE managed) is running and ready.
-*   **`checkpoint(self, trigger_name: str) -> ExecutionResult`**:
+*   **`checkpoint(self, trigger_name: str) -> tuple[ExecutionResult, str]`**:
     *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
+    *   The trigger_name is suffixed with the current datetime.
     *   Waits for the snapshot to be processed.
     *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
-*   **`list_snapshots(self, policy_name: str, ready_only: bool) -> list`**:
+    *   Returns a tuple of ExecutionResult and the final trigger name.
+*   **`list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None`**:
     *   TBD
-*   **`delete_snapshots(self, **filters) -> int`**:
-    *   TBD
+*   **`delete_snapshots(self, trigger_name: str) -> int`**:
+    *  TBD
 *   **Automatic Cleanup**:
-    *   The `__exit__` method attempts to clean up triggers `PodSnapshotManualTrigger` created during the session, keeping the `PodSnapshot` resources alive after session exit.
+    *   The `__exit__` method cleans up the `SandboxClaim` resources.
 
 ## `test_podsnapshot_extension.py`
 

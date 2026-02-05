@@ -56,6 +56,9 @@ type SandboxTemplateSpec struct {
 
 	// NetworkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template.
+	// If this field is omitted (nil), the controller applies a SECURE DEFAULT policy:
+	// - Ingress: Deny All (No traffic allowed from other pods).
+	// - Egress: Allow DNS Only (UDP/TCP Port 53). All other traffic (including Internet) is blocked.
 	// NOTE: This is a restricted subset of the standard Kubernetes NetworkPolicySpec.
 	// Fields like 'PodSelector' and 'PolicyTypes' are intentionally excluded because
 	// they are managed by the controller to ensure strict isolation and default-deny posture.

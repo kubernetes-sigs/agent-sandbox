@@ -29,8 +29,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubectl/pkg/util/podutils"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -549,25 +551,6 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
 	logger := log.FromContext(ctx)
 
-	// 1. Cleanup Check: If missing, delete existing policy
-	if template == nil || template.Spec.NetworkPolicy == nil {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-network-policy",
-				Namespace: claim.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, existingNP); err != nil {
-			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
-				return err
-			}
-		} else {
-			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
-		}
-		return nil
-	}
-
 	np := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claim.Name + "-network-policy",
@@ -586,13 +569,34 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 			networkingv1.PolicyTypeEgress,
 		}
 
-		templateNP := template.Spec.NetworkPolicy
+		if template == nil || template.Spec.NetworkPolicy == nil {
+			// No Policy Provided -> Apply Secure Default
+			// Logic: Deny All Ingress (empty list), Allow DNS Egress only.
 
-		if len(templateNP.Ingress) > 0 {
+			// Empty list = Deny All traffic
+			np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{}
+
+			// Allow basic infrastructure traffic (DNS)
+			np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{
+				{
+					// Allow CoreDNS (UDP 53)
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: ptr.To(corev1.ProtocolUDP),
+							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+						},
+						// Allow CoreDNS (TCP 53) - vital for large responses
+						{
+							Protocol: ptr.To(corev1.ProtocolTCP),
+							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+						},
+					},
+				},
+			}
+		} else {
+			// User Policy Provided -> Pass-through
+			templateNP := template.Spec.NetworkPolicy
 			np.Spec.Ingress = templateNP.Ingress
-		}
-
-		if len(templateNP.Egress) > 0 {
 			np.Spec.Egress = templateNP.Egress
 		}
 

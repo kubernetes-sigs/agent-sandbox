@@ -23,12 +23,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	controllererror "sigs.k8s.io/agent-sandbox/controllers/controllererror"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -156,8 +159,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			err = errors.Join(err, statusUpdateErr)
 		}
 	}
-	// return errors seen
-	return ctrl.Result{RequeueAfter: requeueAfter}, err
+	// Terminal errors (such as immutable fields being modified) only record the status and do not require retry triggers.
+	retryableErr := controllererror.FilterTerminalErrors(err)
+	return ctrl.Result{RequeueAfter: requeueAfter}, retryableErr
 }
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
@@ -181,7 +185,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
 	}
 
-	// Reconcile Service
+	// Reconcile Service, Create default headless Service or user-specified Service.
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
@@ -281,49 +285,210 @@ func NameHash(objectName string) string {
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
-	service := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
-		if !k8serrors.IsNotFound(err) {
-			log.Error(err, "Failed to get Service")
-			return nil, fmt.Errorf("Service Get Failed: %w", err)
-		}
-	} else {
-		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
-		return service, nil
-	}
+	serviceName := sandbox.Name
+	key := types.NamespacedName{Name: serviceName, Namespace: sandbox.Namespace}
 
-	log.Info("Creating a new Headless Service", "Service.Namespace", sandbox.Namespace, "Service.Name", sandbox.Name)
-	service = &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-			Labels: map[string]string{
-				sandboxLabel: nameHash,
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			ClusterIP: "None",
-			Selector: map[string]string{
-				sandboxLabel: nameHash,
-			},
-		},
-	}
-	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
-	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
-		log.Error(err, "Failed to set controller reference")
-		return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
-	}
-
-	err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner))
-	if err != nil {
-		log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+	// Check if Service exists
+	currentService := &corev1.Service{}
+	err := r.Get(ctx, key, currentService)
+	if err != nil && !k8serrors.IsNotFound(err) {
+		log.Error(err, "Failed to get Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
 		return nil, err
 	}
 
+	// Get the desired Service specification
+	desiredSpec := r.getDesiredServiceSpec(sandbox, nameHash)
+	desiredLabels, desiredAnnotations := buildServiceMetadata(sandbox, nameHash)
+	// Handle Service exists
+	if err == nil {
+		return r.handleServiceExists(ctx, currentService, desiredSpec, desiredLabels, desiredAnnotations)
+	}
+
+	// Service doesn't exist, create it
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        serviceName,
+			Namespace:   sandbox.Namespace,
+			Labels:      desiredLabels,
+			Annotations: desiredAnnotations,
+		},
+		Spec: *desiredSpec,
+	}
+
+	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
+	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
+		return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
+	}
+	if err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		log.Error(err, "Failed to create Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
+		return nil, err
+	}
+	log.Info("Created Service", "Service.Namespace", key.Namespace, "Service.Name", key.Name)
 	// TODO(barney-s) : hardcoded to svc.cluster.local which is the default. Need a way to change it.
 	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
 	sandbox.Status.Service = service.Name
 	return service, nil
+}
+
+func (r *SandboxReconciler) getDesiredServiceSpec(sandbox *sandboxv1alpha1.Sandbox, nameHash string) *corev1.ServiceSpec {
+	// Use user-specified Service configuration if provided
+	if sandbox.Spec.Service != nil && sandbox.Spec.Service.Spec != nil {
+		spec := sandbox.Spec.Service.Spec.DeepCopy()
+		// Ensure selector is correctly set
+		if spec.Selector == nil {
+			spec.Selector = make(map[string]string)
+		}
+		spec.Selector[sandboxLabel] = nameHash
+
+		return spec
+	}
+
+	// Default configuration: headless Service
+	return &corev1.ServiceSpec{
+		ClusterIP: corev1.ClusterIPNone,
+		Selector: map[string]string{
+			sandboxLabel: nameHash,
+		},
+	}
+}
+
+func (r *SandboxReconciler) handleServiceExists(ctx context.Context, currentService *corev1.Service, desiredSpec *corev1.ServiceSpec, desiredLabels map[string]string, desiredAnnotations map[string]string) (*corev1.Service, error) {
+	log := log.FromContext(ctx)
+	if err := validateServiceImmutability(currentService, desiredSpec); err != nil {
+		return nil, err
+	}
+	desiredWithSystemFields := desiredSpec.DeepCopy()
+	mergeSystemManagedServiceFields(&currentService.Spec, desiredWithSystemFields)
+
+	updatedService := currentService.DeepCopy()
+	updatedService.Spec = *desiredWithSystemFields
+	updatedService.Labels = desiredLabels
+	updatedService.Annotations = desiredAnnotations
+
+	if apiequality.Semantic.DeepEqual(currentService.Spec, updatedService.Spec) &&
+		apiequality.Semantic.DeepEqual(currentService.Labels, updatedService.Labels) &&
+		apiequality.Semantic.DeepEqual(currentService.Annotations, updatedService.Annotations) {
+		return currentService, nil
+	}
+
+	if err := r.Update(ctx, updatedService, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		log.Error(err, "Failed to apply Service", "Service.Namespace", updatedService.Namespace, "Service.Name", updatedService.Name)
+		return nil, err
+	}
+	log.Info("Updated Service", "Service.Namespace", updatedService.Namespace, "Service.Name", updatedService.Name)
+	return updatedService, nil
+}
+
+// buildServiceMetadata returns desired labels and annotations for the Service
+// by merging the controller-managed label with user-provided template metadata.
+func buildServiceMetadata(sandbox *sandboxv1alpha1.Sandbox, nameHash string) (map[string]string, map[string]string) {
+	labels := map[string]string{
+		sandboxLabel: nameHash,
+	}
+	annotations := map[string]string{}
+	if sandbox.Spec.Service != nil {
+		for k, v := range sandbox.Spec.Service.ObjectMeta.Labels {
+			labels[k] = v
+		}
+		for k, v := range sandbox.Spec.Service.ObjectMeta.Annotations {
+			annotations[k] = v
+		}
+	}
+	return labels, annotations
+}
+
+func validateServiceImmutability(current *corev1.Service, desiredSpec *corev1.ServiceSpec) error {
+	var allErrors error
+	if current.Spec.ClusterIP == corev1.ClusterIPNone && (desiredSpec.Type == corev1.ServiceTypeLoadBalancer ||
+		desiredSpec.Type == corev1.ServiceTypeNodePort) {
+		allErrors = errors.Join(allErrors, controllererror.NewTerminalError("cannot change Service from headless to non-headless"))
+	}
+	// forbid headless -> normal ClusterIP
+	if current.Spec.ClusterIP == corev1.ClusterIPNone && desiredSpec.ClusterIP != corev1.ClusterIPNone {
+		allErrors = errors.Join(allErrors, controllererror.NewTerminalError("cannot change Service from headless (ClusterIPs=[None]) to normal ClusterIP"))
+	}
+	if desiredSpec.ClusterIP != "" && desiredSpec.ClusterIP != current.Spec.ClusterIP {
+		allErrors = errors.Join(allErrors, errImmutable("spec.ClusterIP"))
+	}
+	if len(desiredSpec.ClusterIPs) > 0 && !apiequality.Semantic.DeepEqual(current.Spec.ClusterIPs, desiredSpec.ClusterIPs) {
+		allErrors = errors.Join(allErrors, errImmutable("spec.clusterIPs"))
+	}
+	if len(desiredSpec.IPFamilies) > 0 && !apiequality.Semantic.DeepEqual(current.Spec.IPFamilies, desiredSpec.IPFamilies) {
+		allErrors = errors.Join(allErrors, errImmutable("spec.ipFamilies"))
+	}
+	if desiredSpec.LoadBalancerClass != nil && current.Spec.Type == corev1.ServiceTypeLoadBalancer &&
+		!apiequality.Semantic.DeepEqual(current.Spec.LoadBalancerClass, desiredSpec.LoadBalancerClass) {
+		allErrors = errors.Join(allErrors, errImmutable("spec.loadBalancerClass"))
+	}
+	return allErrors
+}
+
+func errImmutable(field string) error {
+	return controllererror.NewTerminalError("cannot change Service %s", field)
+}
+
+// mergeSystemManagedServiceFields preserves system-assigned or default values, when the desired spec leaves them empty.
+func mergeSystemManagedServiceFields(current, desired *corev1.ServiceSpec) {
+	if desired.ClusterIP == "" && current.ClusterIP != "" {
+		desired.ClusterIP = current.ClusterIP
+	}
+	if len(desired.ClusterIPs) == 0 && len(current.ClusterIPs) > 0 {
+		desired.ClusterIPs = append([]string(nil), current.ClusterIPs...)
+	}
+	if len(desired.IPFamilies) == 0 && len(current.IPFamilies) > 0 {
+		desired.IPFamilies = append([]corev1.IPFamily(nil), current.IPFamilies...)
+	}
+	if desired.IPFamilyPolicy == nil && current.IPFamilyPolicy != nil {
+		desired.IPFamilyPolicy = current.IPFamilyPolicy
+	}
+	if desired.Type == "" {
+		desired.Type = current.Type
+	}
+	if desired.InternalTrafficPolicy == nil {
+		desired.InternalTrafficPolicy = current.InternalTrafficPolicy
+	}
+	if desired.SessionAffinity == "" {
+		desired.SessionAffinity = current.SessionAffinity
+	}
+	if desired.HealthCheckNodePort == 0 && current.HealthCheckNodePort != 0 {
+		desired.HealthCheckNodePort = current.HealthCheckNodePort
+	}
+
+	// Preserve allocated NodePorts when desired ports do not specify one.
+	if len(desired.Ports) > 0 && len(current.Ports) > 0 {
+		currentByName := make(map[string]corev1.ServicePort, len(current.Ports))
+		// secondary index for unnamed ports by (Port, Protocol, TargetPort) signature
+		type portKey struct {
+			port       int32
+			protocol   corev1.Protocol
+			targetPort intstr.IntOrString
+		}
+		currentBySig := make(map[portKey]corev1.ServicePort, len(current.Ports))
+
+		for _, p := range current.Ports {
+			if p.Name != "" {
+				currentByName[p.Name] = p
+			}
+			currentBySig[portKey{port: p.Port, protocol: p.Protocol, targetPort: p.TargetPort}] = p
+		}
+
+		for i := range desired.Ports {
+			dp := &desired.Ports[i]
+			if dp.NodePort != 0 {
+				continue
+			}
+			if dp.Name != "" {
+				if match, ok := currentByName[dp.Name]; ok && match.NodePort != 0 {
+					dp.NodePort = match.NodePort
+					continue
+				}
+			}
+			// Fallback for unnamed ports: match on Port+Protocol+TargetPort signature.
+			if match, ok := currentBySig[portKey{port: dp.Port, protocol: dp.Protocol, targetPort: dp.TargetPort}]; ok && match.NodePort != 0 {
+				dp.NodePort = match.NodePort
+			}
+		}
+	}
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {

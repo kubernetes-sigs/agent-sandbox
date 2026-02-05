@@ -157,7 +157,7 @@ def main():
         print(f"✅ Tag {tag} already exists locally.")
     else:
         print(f"➕ Creating tag {tag}...")
-        run_command(["git", "tag", tag])
+        run_command(["git", "tag", "-m", f"Release {tag}", tag])
 
     # Push tag to upstream
     print(f"⬆️  Ensuring tag {tag} is pushed to {REMOTE_UPSTREAM}...")

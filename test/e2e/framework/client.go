@@ -601,3 +601,27 @@ func (cl *ClusterClient) GetSandbox(ctx context.Context, sandboxID types.Namespa
 	}
 	return sandbox, nil
 }
+
+// KindClusterName is the name of the kind cluster used for e2e tests.
+const KindClusterName = "agent-sandbox"
+
+// ExecuteOnKindNode executes a command on a kind node via docker exec.
+// nodeName should be the Kubernetes node name (e.g., "agent-sandbox-control-plane").
+func (cl *ClusterClient) ExecuteOnKindNode(ctx context.Context, nodeName string, command []string) (string, string, error) {
+	cl.Helper()
+
+	args := append([]string{"exec", nodeName}, command...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cl.Logf("executing on kind node: docker %s", strings.Join(args, " "))
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return stdout.String(), stderr.String(), fmt.Errorf("docker exec failed: %w (stderr: %s)", err, stderr.String())
+	}
+
+	return stdout.String(), stderr.String(), nil
+}

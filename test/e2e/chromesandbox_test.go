@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -72,6 +74,8 @@ func TestRunChromeSandbox(t *testing.T) {
 // Run with: go test -bench=BenchmarkChromeSandboxStartup -benchtime=1x ./test/e2e/...
 // Compare results with: benchstat old.txt new.txt
 func BenchmarkChromeSandboxStartup(b *testing.B) {
+	time.Sleep(2 * time.Second) // Give cluster a moment to settle, and to help us split the logs by time
+
 	for b.Loop() {
 		metrics := runChromeSandbox(framework.NewTestContext(b))
 		// Report custom metrics in addition to the default ns/op
@@ -173,6 +177,11 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	metrics.ChromeReady = time.Since(startTime)
 	metrics.Total = time.Since(startTime)
 
+	// Gather kubelet/containerd logs to understand timing between scheduling and running
+	logOptions := framework.NewNodeLogOptions(t)
+	logOptions.Since = startTime
+	gatherNodeLogs(t, podObj, logOptions)
+
 	return metrics
 }
 
@@ -241,4 +250,27 @@ func getChromeInfo(ctx context.Context, u string) (string, error) {
 	}
 
 	return string(b), nil
+}
+
+// gatherNodeLogs retrieves kubelet and containerd logs from the kind node
+// to understand timing between pod scheduling and container startup.
+func gatherNodeLogs(t *framework.TestContext, pod *corev1.Pod, opt framework.NodeLogOptions) {
+	t.Helper()
+	ctx := t.Context()
+
+	// Get the latest pod state to find the node name
+	if err := t.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, pod); err != nil {
+		t.Fatalf("failed to get pod for node logs: %v", err)
+	}
+
+	nodeName := pod.Spec.NodeName
+	if nodeName == "" {
+		t.Fatalf("pod not scheduled to a node, cannot get node logs")
+	}
+
+	t.Logf("Gathering logs from node %s for pod %s/%s", nodeName, pod.Namespace, pod.Name)
+
+	t.MustGetKubeletLogs(ctx, nodeName, opt)
+
+	t.MustGetContainerdLogs(ctx, nodeName, opt)
 }

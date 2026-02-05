@@ -44,7 +44,7 @@ def pod_ready():
 
 def warmpool_ready():
     """
-    Predicate to check if a SandboxWarmPool (CR) has at least min_ready ready sandboxes.
+    Predicate to check if a SandboxWarmPool (CR) has all the required number of ready sandboxes.
     """
 
     def check(obj: Dict[str, Any]) -> bool:
@@ -57,5 +57,19 @@ def warmpool_ready():
         replicas = obj.get("spec", {}).get("replicas", 0)
 
         return ready_replicas == replicas
+
+    return check
+
+
+def gateway_address_ready():
+    """Predicate to check if a Gateway has an address."""
+
+    def check(obj: Dict[str, Any]) -> bool:
+        if not isinstance(obj, dict):
+            return False
+
+        status = obj.get("status") or {}
+        addresses = status.get("addresses") or []
+        return len(addresses) > 0
 
     return check

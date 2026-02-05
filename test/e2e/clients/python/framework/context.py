@@ -19,6 +19,7 @@ from typing import Optional
 from test.e2e.clients.python.framework.predicates import (
     deployment_ready,
     warmpool_ready,
+    gateway_address_ready,
 )
 import subprocess
 from urllib3.exceptions import ReadTimeoutError
@@ -179,7 +180,7 @@ class TestContext:
         namespace: Optional[str] = None,
         timeout=DEFAULT_TIMEOUT_SECONDS,
     ):
-        """Waits for a SandboxWarmPool to have at least min_ready ready sandboxes"""
+        """Waits for a SandboxWarmPool to have all the required number ready sandboxes"""
         if namespace is None:
             namespace = self.namespace
         if not namespace:
@@ -197,6 +198,33 @@ class TestContext:
             name,
             namespace,
             warmpool_ready(),
+            timeout,
+        )
+
+    def wait_for_gateway_address(
+        self,
+        name: str,
+        namespace: Optional[str] = None,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+    ):
+        """Waits for a Gateway to have an address in its status"""
+        if namespace is None:
+            namespace = self.namespace
+        if not namespace:
+            raise ValueError("Namespace must be provided.")
+
+        custom_objects_api = self.get_custom_objects_api()
+
+        return self.wait_for_object(
+            functools.partial(
+                custom_objects_api.list_namespaced_custom_object,
+                group="gateway.networking.k8s.io",
+                version="v1",
+                plural="gateways",
+            ),
+            name,
+            namespace,
+            gateway_address_ready(),
             timeout,
         )
 

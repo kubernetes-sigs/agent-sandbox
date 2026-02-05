@@ -99,6 +99,30 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	templateWithNPDisabled.Name = "test-template-np-disabled"
 	templateWithNPDisabled.Spec.NetworkPolicy = nil
 
+	// Template with no runtime class (should default to gvisor)
+	templateNoRuntime := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-no-runtime", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}},
+			},
+		},
+	}
+
+	// Template with explicit runtime class (should be preserved)
+	kata := "kata"
+	templateKataRuntime := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-kata", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					RuntimeClassName: &kata,
+					Containers:       []corev1.Container{{Name: "c", Image: "i"}},
+				},
+			},
+		},
+	}
+
 	claim := &extensionsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
@@ -118,6 +142,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{Spec: template.Spec.PodTemplate.Spec}},
 	}
+
+	gvisor := "gvisor"
+	controlledSandbox.Spec.PodTemplate.Spec.RuntimeClassName = &gvisor
 
 	controlledSandboxWithDefault := controlledSandbox.DeepCopy()
 	controlledSandboxWithDefault.Spec.PodTemplate.Spec.AutomountServiceAccountToken = ptr.To(false)
@@ -148,6 +175,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
 		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
 		expectedSpec.AutomountServiceAccountToken = ptr.To(false)
+		// NOTE: The reconcile logic modifies runtimeClassName in place, so we must account for that in diff
+		if expectedSpec.RuntimeClassName == nil || *expectedSpec.RuntimeClassName == "" {
+			defaultRuntime := "gvisor"
+			expectedSpec.RuntimeClassName = &defaultRuntime
+		}
 		if diff := cmp.Diff(&sandbox.Spec.PodTemplate.Spec, expectedSpec); diff != "" {
 			t.Errorf("unexpected sandbox spec:\n%s", diff)
 		}
@@ -156,6 +188,21 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	validateSandboxAutomountTrue := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
 		if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil || !*sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken {
 			t.Error("expected AutomountServiceAccountToken to be true")
+		}
+	}
+
+	validateSandboxHasGVisorRuntime := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+		if sandbox.Spec.PodTemplate.Spec.RuntimeClassName == nil || *sandbox.Spec.PodTemplate.Spec.RuntimeClassName != "gvisor" {
+			t.Errorf("expected RuntimeClassName to be 'gvisor', got %v", sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
+		}
+	}
+
+	validateSandboxHasCustomRuntime := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+		// We hardcode the expected value "kata" here because the test loop passes the generic 'template'
+		// variable, which doesn't match the specific 'templateKataRuntime' used in this test case.
+		expected := "kata"
+		if sandbox.Spec.PodTemplate.Spec.RuntimeClassName == nil || *sandbox.Spec.PodTemplate.Spec.RuntimeClassName != expected {
+			t.Errorf("expected RuntimeClassName to be '%s', got %v", expected, sandbox.Spec.PodTemplate.Spec.RuntimeClassName)
 		}
 	}
 
@@ -179,6 +226,32 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
+		},
+		{
+			name: "sandbox defaults runtimeClassName to gvisor when unspecified",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-default-runtime", Namespace: "default", UID: "uid-1"},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "template-no-runtime"}},
+			},
+			existingObjects: []client.Object{templateNoRuntime},
+			expectSandbox:   true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: validateSandboxHasGVisorRuntime,
+		},
+		{
+			name: "sandbox respects existing runtimeClassName (e.g. kata)",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-kata-runtime", Namespace: "default", UID: "uid-2"},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "template-kata"}},
+			},
+			existingObjects: []client.Object{templateKataRuntime},
+			expectSandbox:   true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: validateSandboxHasCustomRuntime,
 		},
 		{
 			name:             "sandbox is created with automount token enabled",

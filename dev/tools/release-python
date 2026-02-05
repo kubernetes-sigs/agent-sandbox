@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import sys
+import argparse
+import re
+
+from shared.git_ops import check_local_repo_state, create_and_push_tag
+
+
+def validate_version(version):
+    """Strictly validates the version against PEP 440."""
+    pattern = r"^v?\d+\.\d+\.\d+(?:(?:a|b|rc|post|dev)\d+)?$"
+    if "-" in version:
+        print(
+            f"❌ Error: Version '{version}' is invalid for Python (No hyphens allowed)."
+        )
+        sys.exit(1)
+    if not re.match(pattern, version):
+        print(f"❌ Error: Version '{version}' does not match PEP 440 patterns.")
+        sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Release Python Client.")
+    parser.add_argument(
+        "--version", required=True, help="The version to tag (e.g. v0.1.0)."
+    )
+    parser.add_argument(
+        "--remote",
+        required=True,
+        help="The remote to push the tag to. Values can be upstream or origin.",
+    )
+
+    args = parser.parse_args()
+
+    remote = args.remote
+    version = args.version
+    tag_name = f"k8s-agent-sandbox/{version}"
+
+    # Validate Version
+    validate_version(version)
+
+    # Pre-flight Check
+    check_local_repo_state(remote)
+
+    # Idempotency: Check if tag already exists locally and push tag
+    create_and_push_tag(tag_name, remote=remote)
+
+    print("✅ Done! The 'pypi-publish' GitHub Action should now be running.")
+
+
+if __name__ == "__main__":
+    main()

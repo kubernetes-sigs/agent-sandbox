@@ -52,7 +52,7 @@ lint-go:
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
 # Default remote (can be overriden: make release-publish REMOTE=upstream ...)
-REMOTE ?= origin
+REMOTE_UPSTREAM ?= upstream
 
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
@@ -69,7 +69,7 @@ release-publish:
 	go mod tidy
 	go generate ./...
 	./dev/tools/release --tag=${TAG} --publish
-	$(MAKE) release-python-sdk VERSION=${TAG} REMOTE=${REMOTE}
+	$(MAKE) release-python-sdk VERSION=${TAG} REMOTE=${REMOTE_UPSTREAM}
 
 # Generate release manifests only
 # Usage: make release-manifests TAG=vX.Y.Z
@@ -96,16 +96,7 @@ release-python-sdk:
 		$(info )
 		$(error 🛑 Aborting release)
 	endif
-		@echo "🔍 Checking for uncommitted changes..."
-		@if [ -n "$$(git status --porcelain)" ]; then \
-			echo "❌ Error: Working directory is not clean. Commit your changes first."; \
-			exit 1; \
-		fi
-		@echo "🚀 Tagging release: k8s-agent-sandbox/$(VERSION)"
-		git tag -s k8s-agent-sandbox/$(VERSION) -m "Release k8s-agent-sandbox/$(VERSION)"
-		@echo "⬆️  Pushing tag to ${REMOTE}..."
-		git push ${REMOTE} k8s-agent-sandbox/$(VERSION)
-		@echo "✅ Done! The 'pypi-publish' GitHub Action should now be running."
+		./dev/tools/release-python --version=${VERSION} --remote=${REMOTE_UPSTREAM}
 
 .PHONY: toc-update
 toc-update:

@@ -18,17 +18,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,8 +46,9 @@ import (
 
 // TODO: These constants should be imported from the main controller package Issue #216
 const (
-	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
-	poolNameNone = "none"
+	sandboxLabel         = "agents.x-k8s.io/sandbox-name-hash"
+	poolNameNone         = "none"
+	sandboxTemplateLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -249,7 +251,7 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 		return claim.Status.Conditions[i].Type < claim.Status.Conditions[j].Type
 	})
 
-	if reflect.DeepEqual(oldStatus, &claim.Status) {
+	if equality.Semantic.DeepEqual(oldStatus, &claim.Status) {
 		return nil
 	}
 
@@ -399,7 +401,6 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	// Remove the pool labels
 	delete(pod.Labels, poolLabel)
-	delete(pod.Labels, sandboxTemplateRefHash)
 
 	// Remove existing owner references (from SandboxWarmPool)
 	pod.OwnerReferences = nil
@@ -414,6 +415,8 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Label required by NetworkPolicy
 	// We add the new label with the Claim UID for unique targeting.
 	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// Adopted pods must have the template hash label to ensure they are selected by the correct NetworkPolicy.
+	pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
@@ -441,6 +444,11 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 
+	// Determine if we are in "Secure By Default" mode
+	management := template.Spec.NetworkPolicyManagement
+	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
+	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
+
 	// Propagate the trace context annotation to the Sandbox resource
 	if sandbox.Annotations == nil {
 		sandbox.Annotations = make(map[string]string)
@@ -460,10 +468,23 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		automount := false
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
+	// To prevent internal DNS enumeration while still allowing public domain resolution,
+	// we explicitly override the Pod's DNS config to use external public resolvers.
+	// We only inject this if using the strict "Secure by Default" policy. If the user
+	// provides custom rules or is Unmanaged, we leave DNS alone for air-gapped/proxy compatibility.
+	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
+		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
+		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
+			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
+		}
+	}
+
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// This handles the scenario where the Warm Pool is empty (or disabled), and you have to create a brand new Pod from scratch.
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(template.Name)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
@@ -582,62 +603,115 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
 	logger := log.FromContext(ctx)
 
-	// 1. Cleanup Check: If missing, delete existing policy
-	if template == nil || template.Spec.NetworkPolicy == nil {
+	if template == nil {
+		return fmt.Errorf("cannot reconcile network policy without a template")
+	}
+
+	npName := template.Name + "-network-policy"
+	npNamespace := claim.Namespace
+
+	// 1. Check the new string enum API field
+	management := template.Spec.NetworkPolicyManagement
+	if management == "" {
+		management = extensionsv1alpha1.NetworkPolicyManagementManaged // Default to Managed
+	}
+
+	// 2. Opt-Out: If they explicitly set it to Unmanaged, we do not manage any policy.
+	if management == extensionsv1alpha1.NetworkPolicyManagementUnmanaged {
 		existingNP := &networkingv1.NetworkPolicy{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-network-policy",
-				Namespace: claim.Namespace,
+				Name:      npName,
+				Namespace: npNamespace,
 			},
 		}
+		// Clean up any lingering policy if they just switched this template to Unmanaged
 		if err := r.Delete(ctx, existingNP); err != nil {
 			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
+				logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
 				return err
 			}
 		} else {
-			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
+			logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
 		}
 		return nil
 	}
 
-	np := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      claim.Name + "-network-policy",
-			Namespace: claim.Namespace,
-		},
+	// 3. Construct the desired NetworkPolicy Spec
+	var desiredSpec networkingv1.NetworkPolicySpec
+	if template.Spec.NetworkPolicy == nil {
+		desiredSpec = buildDefaultNetworkPolicySpec(template.Name)
+	} else {
+		desiredSpec = networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					sandboxTemplateLabel: sandboxcontrollers.NameHash(template.Name),
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			},
+			Ingress: template.Spec.NetworkPolicy.Ingress,
+			Egress:  template.Spec.NetworkPolicy.Egress,
+		}
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
-		np.Spec.PodSelector = metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
-			},
-		}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress,
-			networkingv1.PolicyTypeEgress,
-		}
+	// 4. Check informer cache first
+	existingNP := &networkingv1.NetworkPolicy{}
+	err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
 
-		templateNP := template.Spec.NetworkPolicy
-
-		if len(templateNP.Ingress) > 0 {
-			np.Spec.Ingress = templateNP.Ingress
+	if err == nil {
+		// Policy exists: Check if it matches our desired state to handle template updates.
+		if equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {
+			// It matches perfectly. Skip updating to prevent 409 conflicts across thousands of claims.
+			return nil
 		}
 
-		if len(templateNP.Egress) > 0 {
-			np.Spec.Egress = templateNP.Egress
+		existingNP.Spec = desiredSpec
+		if err := r.Update(ctx, existingNP); err != nil {
+			if k8errors.IsConflict(err) {
+				logger.Info("NetworkPolicy update conflict (likely another claim updating it simultaneously), will retry", "name", npName)
+				return err
+			}
+			logger.Error(err, "Failed to update NetworkPolicy")
+			return err
 		}
+		logger.Info("Successfully updated NetworkPolicy for template",
+			"NetworkPolicy.Name", npName,
+			"Template.Name", template.Name,
+		)
+		return nil
+	}
 
-		return controllerutil.SetControllerReference(claim, np, r.Scheme)
-	})
+	if !k8errors.IsNotFound(err) {
+		return fmt.Errorf("failed to get NetworkPolicy: %w", err)
+	}
 
-	if err != nil {
-		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
+	// 5. Policy doesn't exist: Create it.
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      npName,
+			Namespace: npNamespace,
+		},
+		Spec: desiredSpec,
+	}
+
+	if err := controllerutil.SetControllerReference(template, np, r.Scheme); err != nil {
 		return err
 	}
 
-	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
+	// Attempt creation. Ignore AlreadyExists if another claim beat us to it.
+	if err := r.Create(ctx, np); err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			logger.Info("NetworkPolicy already created by another claim, skipping")
+			return nil
+		}
+		logger.Error(err, "Failed to create NetworkPolicy for template")
+		return err
+	}
+
+	logger.Info("Successfully created NetworkPolicy for template", "NetworkPolicy.Name", npName,
+		"Template.Name", template.Name)
 	return nil
 }
 
@@ -672,6 +746,65 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
 	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
+}
+
+// buildDefaultNetworkPolicySpec generates the "Secure by Default" network policy.
+func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPolicySpec {
+	return networkingv1.NetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				sandboxTemplateLabel: sandboxcontrollers.NameHash(templateName),
+			},
+		},
+		PolicyTypes: []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeEgress,
+		},
+		// 1. INGRESS: Allow traffic only from the Sandbox Router
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"app": "sandbox-router",
+							},
+						},
+					},
+				},
+			},
+		},
+		// 2. EGRESS: Secure Default Configuration
+		Egress: []networkingv1.NetworkPolicyEgressRule{
+			// Public Internet Access (Strict Isolation)
+			// This rule allows all ports to PUBLIC IPs, but explicitly blocks private LAN ranges.
+			// NOTE: This intentionally blocks internal cluster DNS (CoreDNS) by default to prevent
+			// agents from probing for service discovery and leaking internal service names.
+			{
+				To: []networkingv1.NetworkPolicyPeer{
+					{
+						IPBlock: &networkingv1.IPBlock{
+							CIDR: "0.0.0.0/0",
+							Except: []string{
+								"10.0.0.0/8",     // Block Private Class A (Cluster/VPC Network)
+								"172.16.0.0/12",  // Block Private Class B
+								"192.168.0.0/16", // Block Private Class C
+								"169.254.0.0/16", // Block Link-Local (Metadata Server)
+							},
+						},
+					},
+					{
+						IPBlock: &networkingv1.IPBlock{
+							CIDR: "::/0", // IPv6 Catch-all
+							Except: []string{
+								"fc00::/7", // Block IPv6 Unique Local Addresses (Internal)
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller

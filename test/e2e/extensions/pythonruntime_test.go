@@ -169,7 +169,7 @@ func TestRunPythonRuntimeSandbox(testingT *testing.T) {
 	require.NoError(testingT, err)
 	sandboxObj.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxObj))
-	testContext.MustWaitForObject(sandboxObj, predicates.ReadyConditionIsTrue)
+	testContext.MustWaitFor(sandboxObj, predicates.ReadyConditionIsTrue)
 
 	// Pod and sandboxID have the same name
 	sandboxID := types.NamespacedName{
@@ -182,7 +182,7 @@ func TestRunPythonRuntimeSandbox(testingT *testing.T) {
 	podObj.Namespace = sandboxID.Namespace
 
 	// Wait for the pod to be ready
-	testContext.MustWaitForObject(podObj, predicates.ReadyConditionIsTrue)
+	testContext.MustWaitFor(podObj, predicates.ReadyConditionIsTrue)
 
 	testingT.Logf("Pod is ready: podID - %s", sandboxID.Name)
 	// Run the tests on the pod
@@ -218,7 +218,7 @@ func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	require.NoError(testingT, err)
 	sandboxClaim.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxClaim))
-	testContext.MustWaitForObject(sandboxClaim, predicates.ReadyConditionIsTrue)
+	testContext.MustWaitFor(sandboxClaim, predicates.ReadyConditionIsTrue)
 
 	sandboxID := types.NamespacedName{
 		Namespace: ns.Name,
@@ -233,7 +233,7 @@ func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	podObj.Namespace = sandboxID.Namespace
 
 	// Wait for the pod to be ready
-	testContext.MustWaitForObject(podObj, predicates.ReadyConditionIsTrue)
+	testContext.MustWaitFor(podObj, predicates.ReadyConditionIsTrue)
 
 	testingT.Logf("Sandbox is ready: sandboxName - %s", sandboxID.Name)
 
@@ -284,7 +284,7 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	sandboxClaim.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxClaim))
 
-	testContext.MustWaitForObject(sandboxClaim, predicates.ReadyConditionIsTrue)
+	testContext.MustWaitFor(sandboxClaim, predicates.ReadyConditionIsTrue)
 
 	sandboxID := types.NamespacedName{
 		Namespace: ns.Name,

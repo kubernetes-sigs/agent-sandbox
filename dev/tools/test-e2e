@@ -24,17 +24,30 @@ from shared import utils
 def run_go_e2e_tests(repo_root, artifact_dir, env):
     """Runs the Go e2e tests"""
     print("========= Running Go E2E tests... =========")
+    log_file = os.path.join(artifact_dir, "test-e2e.log")
     go_test_cmd = utils.go_tool_args(
         "gotestsum",
         f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
         f"--jsonfile={artifact_dir}/test-e2e.json",
+        "--format=standard-verbose",
         "--",
         "./test/e2e/...",
         "--parallel=1",
         "-v",
     )
     print(f"Running command: {' '.join(go_test_cmd)}")
-    return subprocess.run(go_test_cmd, env=env, cwd=repo_root).returncode
+    print(f"Test output will be saved to: {log_file}")
+
+    with open(log_file, "w") as f:
+        process = subprocess.Popen(go_test_cmd, env=env, cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+        for line in process.stdout:
+            sys.stdout.write(line)  # Print to terminal as it happens
+            f.write(line)           # Save to file also
+
+        process.wait()
+
+    return process.returncode
 
 
 def run_go_e2e_benchmarks(repo_root, artifact_dir, env):

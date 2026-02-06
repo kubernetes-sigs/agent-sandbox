@@ -75,7 +75,7 @@ type SandboxTemplateStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
-// SandboxTemplate is the Schema for the sandboxe template API
+// SandboxTemplate is the Schema for the sandbox template API
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
 

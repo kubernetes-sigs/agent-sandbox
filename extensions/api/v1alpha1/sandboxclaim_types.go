@@ -58,7 +58,7 @@ type Lifecycle struct {
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
-// SandboxTemmplateRef references a SandboxTemplate
+// SandboxTemplateRef references a SandboxTemplate
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
 	// +kubebuilder:validation:Required

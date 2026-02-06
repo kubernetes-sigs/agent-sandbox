@@ -147,6 +147,13 @@ def main():
 
     # --- Pre-flight Check ---
     check_local_repo_state()
+    # Check if tag already exists on upstream to prevent overwriting existing releases
+    print(f"🔍 Checking if tag {tag} already exists on {REMOTE_UPSTREAM}...")
+    remote_tags = run_command(["git", "ls-remote", "--tags", REMOTE_UPSTREAM, f"refs/tags/{tag}"], capture_output=True)
+    if remote_tags:
+        print(f"❌ Tag {tag} already exists on {REMOTE_UPSTREAM}. Aborting to prevent accidental overwrite.")
+        print("   If you are resuming a failed run, please manually remove the tag from upstream and retry.")
+        sys.exit(1)
 
     # --- Step 1: Create and Push Tag ---
     print(f"--- Step 1: Handling Git Tag {tag} ---")

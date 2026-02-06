@@ -69,7 +69,6 @@ release-publish:
 	go mod tidy
 	go generate ./...
 	./dev/tools/release --tag=${TAG} --publish
-	$(MAKE) release-python-sdk VERSION=${TAG} REMOTE=${REMOTE_UPSTREAM}
 
 # Generate release manifests only
 # Usage: make release-manifests TAG=vX.Y.Z

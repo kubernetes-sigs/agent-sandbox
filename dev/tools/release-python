@@ -22,14 +22,15 @@ from shared.git_ops import check_local_repo_state, create_and_push_tag
 
 def validate_version(version):
     """Strictly validates the version against PEP 440."""
-    pattern = r"^v?\d+\.\d+\.\d+(?:(?:a|b|rc|post|dev)\d+)?$"
+    pattern = r"^v?\d+\.\d+\.\d+(?:\.?(?:a|b|rc|post|dev)\d+)?$"
+    
     if "-" in version:
-        print(
-            f"❌ Error: Version '{version}' is invalid for Python (No hyphens allowed)."
-        )
+        print(f"❌ Error: Version '{version}' contains a hyphen.")
         sys.exit(1)
+    
     if not re.match(pattern, version):
-        print(f"❌ Error: Version '{version}' does not match PEP 440 patterns.")
+        print(f"❌ Error: Version '{version}' is invalid.")
+        print("   Allowed examples: v0.1.0, v0.1.0rc1, v0.1.0.post1")
         sys.exit(1)
 
 

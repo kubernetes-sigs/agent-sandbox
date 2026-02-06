@@ -3,7 +3,7 @@ name: Publish Python 🐍 distribution 📦 to PyPI
 on:
   push:
     tags:
-      - 'k8s-agent-sandbox/v*'
+      - 'v*'
 
 permissions:
   contents: read
@@ -12,6 +12,9 @@ jobs:
   build:
     name: Build distribution 📦
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
     defaults:
       run:
         working-directory: clients/python/agentic-sandbox-client
@@ -22,7 +25,10 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: "3.13"
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Display Python version
+      run: python -c "import sys; print(sys.version)"
     
     - name: Create VERSION file
       shell: bash

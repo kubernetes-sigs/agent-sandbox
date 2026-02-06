@@ -7,7 +7,7 @@ name = "k8s-agent-sandbox"
 dynamic = ["version"]
 description = "A client library to interact with the Agentic Sandbox on Kubernetes."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",

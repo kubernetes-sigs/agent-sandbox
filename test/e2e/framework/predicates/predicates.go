@@ -16,4 +16,7 @@ package predicates
 
 import "sigs.k8s.io/controller-runtime/pkg/client"
 
-type ObjectPredicate func(obj client.Object) error
+// ObjectPredicate is a function that evaluates a predicate against a client.Object.
+// When the predicate matches, it returns true.
+// If there is an error during evaluation, it returns an error.
+type ObjectPredicate func(obj client.Object) (bool, error)

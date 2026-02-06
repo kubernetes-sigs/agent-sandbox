@@ -51,6 +51,9 @@ lint-go:
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
+# Default remote (can be overriden: make release-publish REMOTE=upstream ...)
+REMOTE_UPSTREAM ?= upstream
+
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
 .PHONY: release-promote
@@ -74,7 +77,25 @@ release-manifests:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-manifests TAG=vX.Y.Z)"; exit 1; fi
 	go mod tidy
 	go generate ./...
-	./dev/tools/release --tag=${TAG}
+	./dev/tools/release --tag=${TAG} 
+
+# Example usage:
+# make release-python-sdk VERSION=v0.1.0 (to release on TestPyPI and PyPI)
+# make release-python-sdk VERSION=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
+# make release-python-sdk VERSION=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
+.PHONY: release-python-sdk
+release-python-sdk:
+	ifndef VERSION
+		$(info ❌ ERROR: VERSION is undefined.)
+		$(info )
+		$(info Usage Examples:)
+		$(info    • Release: 					make release-python-sdk VERSION=v0.1.1)
+		$(info    • Patch Release:        		make release-python-sdk VERSION=v0.1.1.post1)
+		$(info    • Release to TestPyPI only:	make release-python-sdk VERSION=v0.1.1rc1)
+		$(info )
+		$(error 🛑 Aborting release)
+	endif
+		./dev/tools/release-python --version=${VERSION} --remote=${REMOTE_UPSTREAM}
 
 .PHONY: toc-update
 toc-update:

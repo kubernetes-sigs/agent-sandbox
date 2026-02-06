@@ -18,7 +18,8 @@ import sys
 import argparse
 import subprocess
 import time
-import re
+
+from shared.git_ops import run_command, check_local_repo_state, create_and_push_tag
 
 # The local clone of k8s.io repo relative to where this script is executed (i.e. make release-promote)
 DEFAULT_K8S_IO_DIR = "../../kubernetes/k8s.io"
@@ -37,28 +38,6 @@ IMAGES_TO_PROMOTE = [
 REMOTE_UPSTREAM = "upstream"
 REMOTE_FORK = "origin"
 
-def run_command(cmd, cwd=None, capture_output=False, allow_error=False):
-    """Helper to run shell commands."""
-    try:
-        result = subprocess.run(
-            cmd, 
-            cwd=cwd, 
-            check=True, 
-            text=True, 
-            stdout=subprocess.PIPE if capture_output else None,
-            stderr=subprocess.PIPE if capture_output else None
-        )
-        return result.stdout.strip() if capture_output else None
-    except subprocess.CalledProcessError as e:
-        if allow_error:
-            return None
-        # ALWAYS print stderr on failure, even if capture_output was requested
-        print(f"❌ Error running command: {' '.join(cmd)}")
-        if e.stderr:
-            print(f"🛑 Stderr:\n{e.stderr}")
-        elif e.stdout:
-             print(f"🛑 Stdout:\n{e.stdout}")
-        sys.exit(1)
 
 def get_gh_username():
     """Fetches the authenticated GitHub username."""
@@ -97,39 +76,6 @@ def get_latest_digest(image_name, tag):
     
     return None
 
-def check_local_repo_state():
-    """Ensures the local agent-sandbox repo is clean and up-to-date."""
-    print(f"🛡️  Verifying local repository state...")
-    
-    # 1. Check for uncommitted changes
-    if run_command(["git", "status", "--porcelain"], capture_output=True):
-        print("❌ You have uncommitted changes in agent-sandbox. Please commit or stash them.")
-        sys.exit(1)
-
-    # 2. Fetch upstream
-    print(f"⬇️  Fetching {REMOTE_UPSTREAM}...")
-    try:
-        run_command(["git", "fetch", REMOTE_UPSTREAM])
-    except subprocess.CalledProcessError:
-        print(f"❌ Failed to fetch from '{REMOTE_UPSTREAM}'. Please check your git remotes.")
-        sys.exit(1)
-
-    # 3. Check synchronization
-    current_branch = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True)
-    local_sha = run_command(["git", "rev-parse", "HEAD"], capture_output=True)
-    
-    if current_branch == 'main':
-        upstream_sha = run_command(["git", "rev-parse", f"{REMOTE_UPSTREAM}/main"], capture_output=True)
-        if local_sha != upstream_sha:
-            print(f"❌ Local 'main' is not synced with {REMOTE_UPSTREAM}/main.")
-            print(f"   Local:    {local_sha}")
-            print(f"   Upstream: {upstream_sha}")
-            print("   Please run: git pull upstream main")
-            sys.exit(1)
-        print("✅ Local 'main' is up-to-date with upstream.")
-    else:
-        print(f"⚠️  You are releasing from branch '{current_branch}' (not 'main').")
-        print("   Assuming this is a test release. Continuing...")
 
 def main():
     parser = argparse.ArgumentParser(description='Stage 1: Tag and Promote Agent Sandbox Release')
@@ -146,24 +92,11 @@ def main():
     print(f"🚀 Starting promotion process for {tag}")
 
     # --- Pre-flight Check ---
-    check_local_repo_state()
+    check_local_repo_state(REMOTE_UPSTREAM)
 
     # --- Step 1: Create and Push Tag ---
     print(f"--- Step 1: Handling Git Tag {tag} ---")
-
-    # Ensure tag exists locally, create if not
-    existing_tag = run_command(["git", "tag", "--list", tag], capture_output=True)    
-    if existing_tag.strip() == tag:
-        print(f"✅ Tag {tag} already exists locally.")
-    else:
-        print(f"➕ Creating tag {tag}...")
-        run_command(["git", "tag", "-m", f"Release {tag}", tag])
-
-    # Push tag to upstream
-    print(f"⬆️  Ensuring tag {tag} is pushed to {REMOTE_UPSTREAM}...")
-    # This will succeed (exit 0) even if the tag is already there ("Everything up-to-date")
-    run_command(["git", "push", REMOTE_UPSTREAM, tag])
-    print("✅ Tag confirmed on upstream.")
+    create_and_push_tag(tag, remote=REMOTE_UPSTREAM)
 
     # --- Step 2: Wait for Staging Images ---
     # CI job: https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images

@@ -1,6 +1,6 @@
 ---
-title: "Getting Started"
-linkTitle: "Getting Started"
+title: "Overview"
+linkTitle: "Overview"
 weight: 1
 description: >
   How to get started with Agent Sandbox

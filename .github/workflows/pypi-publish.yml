@@ -3,7 +3,7 @@ name: Publish Python 🐍 distribution 📦 to PyPI
 on:
   push:
     tags:
-      - 'v*'
+      - 'k8s-agent-sandbox/v*'
 
 permissions:
   contents: read

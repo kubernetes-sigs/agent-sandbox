@@ -62,9 +62,9 @@ def test_execute(base_url):
         print(f"An error occurred during execute command: {e}")
         sys.exit(1)
 
-def test_execute_stateful(base_url):
+def test_execute_command_stateful(base_url):
     """
-    Tests the execute_stateful endpoint.
+    Tests the execute_command_stateful endpoint.
     """
     url = f"{base_url}/execute_command_stateful"
     
@@ -91,9 +91,9 @@ def test_execute_stateful(base_url):
         print(f"An error occurred during execute stateful: {e}")
         sys.exit(1)
 
-def test_execute_stateful_long_running(base_url):
+def test_execute_command_stateful_long_running(base_url):
     """
-    Tests that we can run code longer than the default timeout by specifying a custom timeout.
+    Tests the execute_command_stateful endpoint with a long-running command.
     """
     url = f"{base_url}/execute_command_stateful"
     
@@ -115,9 +115,9 @@ def test_execute_stateful_long_running(base_url):
         print(f"An error occurred during execute stateful long running: {e}")
         sys.exit(1)
 
-def test_execute_stateful_timeout(base_url):
+def test_execute_command_stateful_timeout(base_url):
     """
-    Tests the execute_stateful endpoint with a long-running command.
+    Tests that a command that exceeds the specified timeout is properly interrupted and returns an error.
     """
     url = f"{base_url}/execute_command_stateful"
     
@@ -143,7 +143,7 @@ def test_execute_stateful_timeout(base_url):
         print(f"An error occurred during execute stateful timeout: {e}")
         sys.exit(1)
 
-def test_execute_stateful_concurrent(base_url):
+def test_execute_command_stateful_concurrent(base_url):
     """
     Tests concurrent execution requests to ensure the server handles them safely (serialized).
     """
@@ -175,7 +175,7 @@ def test_execute_stateful_concurrent(base_url):
         print(f"An error occurred during concurrent execution test: {e}")
         sys.exit(1)
 
-def test_execute_stateful_interruption(base_url):
+def test_execute_command_stateful_interruption(base_url):
     """
     Tests that a timed-out command actually stops the kernel (interrupts it),
     allowing subsequent commands to run immediately.
@@ -249,9 +249,9 @@ if __name__ == "__main__":
     
     test_health_check(base_url)
     test_execute(base_url)
-    test_execute_stateful(base_url)
-    test_execute_stateful_long_running(base_url)
-    test_execute_stateful_concurrent(base_url)
-    test_execute_stateful_interruption(base_url)
-    test_execute_stateful_timeout(base_url)
+    test_execute_command_stateful(base_url)
+    test_execute_command_stateful_long_running(base_url)
+    test_execute_command_stateful_concurrent(base_url)
+    test_execute_command_stateful_interruption(base_url)
+    test_execute_command_stateful_timeout(base_url)
     test_upload_download(base_url)

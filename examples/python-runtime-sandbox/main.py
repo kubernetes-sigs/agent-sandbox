@@ -152,7 +152,7 @@ async def execute_command_stateful(request: ExecuteStatefulRequest):
                     break
                     
             except asyncio.TimeoutError:
-                # Stop if we haven't heard from the kernel in 10 seconds
+                # Stop if we haven't heard from the kernel within the specified timeout.
                 stderr.append(f"Execution timed out after {request.timeout} seconds due to Kernel inactivity.")
                 await kernel_manager.interrupt_kernel()
                 break

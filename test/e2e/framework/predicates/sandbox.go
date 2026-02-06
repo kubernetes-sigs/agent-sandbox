@@ -37,17 +37,17 @@ func validateSandbox(obj client.Object) (*sandboxv1alpha1.Sandbox, error) {
 
 // SandboxHasStatus verifies that the Sandbox object has the specified status
 func SandboxHasStatus(status sandboxv1alpha1.SandboxStatus) ObjectPredicate {
-	return func(obj client.Object) error {
+	return func(obj client.Object) (bool, error) {
 		sandbox, err := validateSandbox(obj)
 		if err != nil {
-			return err
+			return false, err
 		}
 		opts := []cmp.Option{
 			cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
 		}
 		if diff := cmp.Diff(status, sandbox.Status, opts...); diff != "" {
-			return fmt.Errorf("unexpected sandbox status (-want,+got):\n%s", diff)
+			return false, nil
 		}
-		return nil
+		return true, nil
 	}
 }

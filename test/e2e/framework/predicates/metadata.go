@@ -25,60 +25,60 @@ import (
 
 // HasAnnotation verifies the object has the specified annotation
 func HasAnnotation(key, wantVal string) ObjectPredicate {
-	return func(obj client.Object) error {
+	return func(obj client.Object) (bool, error) {
 		if obj == nil {
-			return fmt.Errorf("object is nil")
+			return false, fmt.Errorf("object is nil")
 		}
 		if got, ok := obj.GetAnnotations()[key]; !ok {
-			return fmt.Errorf("annotation %s missing", key)
+			return false, fmt.Errorf("annotation %s missing", key)
 		} else if wantVal != got {
-			return fmt.Errorf("want annotation %s=%s, got %s", key, wantVal, got)
+			return false, nil
 		}
-		return nil
+		return true, nil
 	}
 }
 
 // HasLabel verifies the object has the specified label
 func HasLabel(key, wantVal string) ObjectPredicate {
-	return func(obj client.Object) error {
+	return func(obj client.Object) (bool, error) {
 		if obj == nil {
-			return fmt.Errorf("object is nil")
+			return false, fmt.Errorf("object is nil")
 		}
 		if got, ok := obj.GetLabels()[key]; !ok {
-			return fmt.Errorf("label %s missing", key)
+			return false, fmt.Errorf("label %s missing", key)
 		} else if wantVal != got {
-			return fmt.Errorf("want label %s=%s, got %s", key, wantVal, got)
+			return false, nil
 		}
-		return nil
+		return true, nil
 	}
 }
 
 // HasOwnerReferences verifies the object has the specified owner references
 func HasOwnerReferences(want []metav1.OwnerReference) ObjectPredicate {
-	return func(obj client.Object) error {
+	return func(obj client.Object) (bool, error) {
 		if obj == nil {
-			return fmt.Errorf("object is nil")
+			return false, fmt.Errorf("object is nil")
 		}
 		opts := []cmp.Option{
 			cmpopts.SortSlices(func(a, b metav1.OwnerReference) bool { return a.UID < b.UID }),
 		}
 		if diff := cmp.Diff(want, obj.GetOwnerReferences(), opts...); diff != "" {
-			return fmt.Errorf("unexpected ownerReferences (-want,+got):\n%s", diff)
+			return false, nil
 		}
-		return nil
+		return true, nil
 	}
 }
 
 // NotDeleted verifies the object has no deletion timestamp
 func NotDeleted() ObjectPredicate {
-	return func(obj client.Object) error {
+	return func(obj client.Object) (bool, error) {
 		if obj == nil {
-			return fmt.Errorf("object is nil")
+			return false, fmt.Errorf("object is nil")
 		}
 		deletionTimestamp := obj.GetDeletionTimestamp()
 		if deletionTimestamp != nil {
-			return fmt.Errorf("unexpected deletionTimestamp: %s", deletionTimestamp)
+			return false, nil
 		}
-		return nil
+		return true, nil
 	}
 }

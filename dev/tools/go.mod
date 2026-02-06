@@ -1,6 +1,6 @@
 module sigs.k8s.io/agent-sandbox/dev/tools
 
-go 1.24.4
+go 1.25.7
 
 tool (
 	github.com/golangci/golangci-lint/cmd/golangci-lint

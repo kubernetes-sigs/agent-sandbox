@@ -28,13 +28,20 @@ class ExecuteRequest(BaseModel):
     command: str
 
 class ExecuteStatefulRequest(BaseModel):
-    """Request model for the /execute_stateful endpoint."""
+    """Request model for the /execute_command_stateful endpoint."""
     code: str
     language: str = "python"
     timeout: int = 10  # Default timeout in seconds
+    
 
 class ExecuteResponse(BaseModel):
     """Response model for the /execute endpoint."""
+    stdout: str
+    stderr: str
+    exit_code: int
+    
+class ExecuteStatefulResponse(BaseModel): 
+    """Response model for the /execute_command_stateful endpoint."""
     stdout: str
     stderr: str
     exit_code: int
@@ -103,17 +110,17 @@ async def execute_command(request: ExecuteRequest):
             exit_code=1
         )
 
-@app.post("/execute_command_stateful", summary="Execute code in a stateful way.", response_model=ExecuteResponse)
+@app.post("/execute_command_stateful", summary="Execute code in a stateful way.", response_model=ExecuteStatefulResponse)
 async def execute_command_stateful(request: ExecuteStatefulRequest):
     if not kernel_client:
-        return ExecuteResponse(
+        return ExecuteStatefulResponse(
             stdout="",
             stderr="IPython kernel is not initialized.",
             exit_code=1
         )
 
     # Ensure that only one execution happens at a time
-    async with kernel_lock:
+    async with kernel_lock: 
         # 1. Send code to the kernel
         msg_id = kernel_client.execute(request.code)
         

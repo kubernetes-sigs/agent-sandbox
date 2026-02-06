@@ -477,3 +477,22 @@ class SandboxClient:
             span.set_attribute("sandbox.file.size", len(content))
 
         return content
+
+    @trace_span("run_stateful")
+    def run_stateful(self, code: str, language: str = "python") -> ExecutionResult:
+        """
+        Executes code in a stateful environment inside the sandbox.
+        Subsequent calls to run_stateful will share state (e.g. variables, files) within the same sandbox.
+        """
+        payload = {"code": code, "language": language}
+        
+        # We target the persistent 'exec' endpoint
+        response = self._request(
+            "POST", "execute_command_stateful", json=payload, timeout=120)
+        response_data = response.json()
+
+        return ExecutionResult(
+            stdout=response_data.get("stdout", ""),
+            stderr=response_data.get("stderr", ""),
+            exit_code=response_data.get("exit_code", 0)
+        )

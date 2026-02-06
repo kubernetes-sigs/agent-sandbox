@@ -90,7 +90,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 			},
 		}),
 	}
-	require.NoError(t, tc.WaitForObject(t.Context(), sandboxObj, p...))
+	require.NoError(t, tc.PollUntilObjectMatches(sandboxObj, p...))
 	// Verify that the sandbox was shut down at or after the specified shutdownTime
 	require.True(t, !time.Now().Before(shutdown.Time))
 	// Verify Pod and Service are deleted

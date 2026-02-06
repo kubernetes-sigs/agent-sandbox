@@ -16,14 +16,22 @@ import subprocess
 import os
 import shlex
 import logging
+import asyncio
 
 from fastapi import FastAPI, UploadFile, File
+from jupyter_client import AsyncKernelManager
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 class ExecuteRequest(BaseModel):
     """Request model for the /execute endpoint."""
     command: str
+
+class ExecuteStatefulRequest(BaseModel):
+    """Request model for the /execute_stateful endpoint."""
+    code: str
+    language: str = "python"
+    timeout: int = 10  # Default timeout in seconds
 
 class ExecuteResponse(BaseModel):
     """Response model for the /execute endpoint."""
@@ -37,11 +45,35 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Global state to manage the IPython kernel
+kernel_manager = AsyncKernelManager(kernel_name='python3')
+kernel_client = None
+kernel_lock = asyncio.Lock()
+
 @app.get("/", summary="Health Check")
 async def health_check():
     """A simple health check endpoint to confirm the server is running."""
     return {"status": "ok", "message": "Sandbox Runtime is active."}
 
+@app.on_event("startup")
+async def start_kernel():
+    """Starts the IPython kernel when the sandbox starts."""
+    global kernel_client
+    await kernel_manager.start_kernel()
+    kernel_client = kernel_manager.client()
+    kernel_client.start_channels()
+    
+    # Change the working directory to /app to ensure all code execution happens in the correct context
+    kernel_client.execute("import os, pickle; os.chdir('/app')")
+
+@app.on_event("shutdown")
+async def shutdown_kernel():
+    """Cleans up the IPython kernel when the sandbox stops."""
+    if kernel_client:
+        kernel_client.stop_channels()
+    if kernel_manager:
+        await kernel_manager.shutdown_kernel()
+    
 @app.post("/execute", summary="Execute a shell command", response_model=ExecuteResponse)
 async def execute_command(request: ExecuteRequest):
     """
@@ -71,6 +103,66 @@ async def execute_command(request: ExecuteRequest):
             exit_code=1
         )
 
+@app.post("/execute_command_stateful", summary="Execute code in a stateful way.", response_model=ExecuteResponse)
+async def execute_command_stateful(request: ExecuteStatefulRequest):
+    if not kernel_client:
+        return ExecuteResponse(
+            stdout="",
+            stderr="IPython kernel is not initialized.",
+            exit_code=1
+        )
+
+    # Ensure that only one execution happens at a time
+    async with kernel_lock:
+        # 1. Send code to the kernel
+        msg_id = kernel_client.execute(request.code)
+        
+        stdout = []
+        stderr = []
+        
+        # 2. Listen for output on the IOPub channel
+        while True:
+            try:
+                # Poll for messages with the request-specific timeout
+                msg = await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=request.timeout)
+                
+                # Ignore messages from previous timed-out executions
+                if msg['parent_header'].get('msg_id') != msg_id:
+                    continue
+
+                msg_type = msg['header']['msg_type']
+                content = msg['content']
+
+                if msg_type == 'stream':
+                    if content['name'] == 'stdout':
+                        stdout.append(content['text'])
+                    else:
+                        stderr.append(content['text'])
+                
+                elif msg_type == 'execute_result':
+                    # Captures the value of the last line of code (e.g. "x + 5")
+                    stdout.append(content['data'].get('text/plain', ''))
+
+                elif msg_type == 'error':
+                    # Captures Python Tracebacks if the code fails
+                    stderr.append("\n".join(content['traceback']))
+
+                # 'idle' status indicates the kernel has finished execution
+                if msg_type == 'status' and content['execution_state'] == 'idle':
+                    break
+                    
+            except asyncio.TimeoutError:
+                # Stop if we haven't heard from the kernel in 10 seconds
+                stderr.append(f"Execution timed out after {request.timeout} seconds due to Kernel inactivity.")
+                await kernel_manager.interrupt_kernel()
+                break
+
+    return {
+        "stdout": "".join(stdout),
+        "stderr": "".join(stderr),
+        "exit_code": 0 if not stderr else 1
+    }
+    
 @app.post("/upload", summary="Upload a file to the sandbox")
 async def upload_file(file: UploadFile = File(...)):
     """

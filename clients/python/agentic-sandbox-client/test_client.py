@@ -14,6 +14,7 @@
 
 import argparse
 import asyncio
+import time
 from agentic_sandbox import SandboxClient
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
@@ -60,12 +61,18 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
                 assert sandbox.pod_name == sandbox.sandbox_name, f"Expected pod_name to be '{sandbox.sandbox_name}', but got '{sandbox.pod_name}'"
                 print("--- Pod Name Discovery Test Passed (Fallback) ---")
 
+            print("\n--- Testing Sandbox Status ---")
+            
+            status = sandbox.status()
+            print(f"Sandbox status: {status.value}")
+            assert status.value == "Running", f"Expected sandbox status to be 'Running', but got '{status}'"
+            print("--- Sandbox Status Test Passed ---")
+
             print("\n--- Testing Command Execution ---")
             command_to_run = "echo 'Hello from the sandbox!'"
             print(f"Executing command: '{command_to_run}'")
 
             result = sandbox.run(command_to_run)
-
             print(f"Stdout: {result.stdout.strip()}")
             print(f"Stderr: {result.stderr.strip()}")
             print(f"Exit Code: {result.exit_code}")

@@ -3814,11 +3814,6 @@ spec:
                 required:
                 - spec
                 type: object
-              replicas:
-                format: int32
-                maximum: 1
-                minimum: 0
-                type: integer
               shutdownPolicy:
                 default: Retain
                 enum:
@@ -3828,6 +3823,9 @@ spec:
               shutdownTime:
                 format: date-time
                 type: string
+              suspended:
+                default: false
+                type: boolean
               volumeClaimTemplates:
                 items:
                   properties:

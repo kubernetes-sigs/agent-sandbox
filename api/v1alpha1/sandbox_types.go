@@ -112,13 +112,10 @@ type SandboxSpec struct {
 	// +optional
 	Lifecycle `json:",inline"`
 
-	// Replicas is the number of desired replicas.
-	// The only allowed values are 0 and 1.
-	// Defaults to 1.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1
+	// Suspended indicates whether the sandbox is currently suspended.
+	// +kubebuilder:default=false
 	// +optional
-	Replicas *int32 `json:"replicas,omitempty"`
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

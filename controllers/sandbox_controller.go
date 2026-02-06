@@ -44,7 +44,12 @@ import (
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
+	SnapshotRequestedAnnotation = "agents.x-k8s.io/pod-snapshot-requested"
+	SnapshotRequestedTimestamp  = "agents.x-k8s.io/pod-snapshot-requested-timestamp"
+	podSnapshotValuePending     = "Pending"
+	podSnapshotValueDone        = "Done"
 	sandboxControllerFieldOwner = "sandbox-controller"
+	SnapshotTimeout             = 2 * time.Minute
 )
 
 var (
@@ -128,11 +133,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		// Return to ensure the next loop uses the persisted ID
 		return ctrl.Result{}, nil
-	}
-
-	if sandbox.Spec.Replicas == nil {
-		replicas := int32(1)
-		sandbox.Spec.Replicas = &replicas
 	}
 
 	oldStatus := sandbox.Status.DeepCopy()
@@ -225,8 +225,8 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 			}
 		}
 	} else {
-		if sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0 {
-			message = "Pod does not exist, replicas is 0"
+		if sandbox.Spec.Suspended {
+			message = "Pod does not exist, suspended is true"
 			// This is intended behaviour. So marking it ready.
 			podReady = true
 		} else {
@@ -374,11 +374,53 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	// 1. PATH: Logic for deleting Pod when replicas is 0
-	if *sandbox.Spec.Replicas == 0 {
+	// 1. PATH: Logic for deleting Pod when suspended is true
+	if sandbox.Spec.Suspended {
 		if pod != nil {
+			// Check if PodSnapshotProvider annotation exists on the Sandbox
+			if _, hasProvider := sandbox.Annotations["PodSnapshotProvider"]; hasProvider {
+				// Check if snapshot has already been requested
+				if _, requested := sandbox.Annotations[SnapshotRequestedAnnotation]; !requested {
+					log.Info("Requesting Pod Snapshot before deletion", "Sandbox.Name", sandbox.Name, "Pod.Name", pod.Name)
+					patch := client.MergeFrom(sandbox.DeepCopy())
+					if sandbox.Annotations == nil {
+						sandbox.Annotations = make(map[string]string)
+					}
+					sandbox.Annotations[SnapshotRequestedAnnotation] = podSnapshotValuePending
+					sandbox.Annotations[SnapshotRequestedTimestamp] = time.Now().Format(time.RFC3339)
+					if err := r.Patch(ctx, sandbox, patch); err != nil {
+						return nil, fmt.Errorf("failed to request pod snapshot: %w", err)
+					}
+					// Wait for snapshot completion
+					return pod, nil
+				}
+
+				// Check if snapshot is complete (annotation exists and is "Done")
+				if val, ok := sandbox.Annotations[SnapshotRequestedAnnotation]; ok && val == podSnapshotValueDone {
+					log.Info("Pod Snapshot complete, proceeding with deletion", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+				} else {
+					var snapshotRequestedTimestamp time.Time
+					tsStr, ok := sandbox.Annotations[SnapshotRequestedTimestamp]
+					if !ok {
+						log.Info("SnapshotRequestedTimestamp missing, assuming it just started")
+						snapshotRequestedTimestamp = time.Now()
+					} else {
+						if snapshotRequestedTimestamp, err = time.Parse(time.RFC3339, tsStr); err != nil {
+							log.Error(err, "Failed to parse SnapshotRequestedTimestamp")
+							snapshotRequestedTimestamp = time.Now()
+						}
+					}
+
+					if time.Since(snapshotRequestedTimestamp) < SnapshotTimeout {
+						log.Info("Waiting for Pod Snapshot to complete", "Sandbox.Name", sandbox.Name, "Pod.Name", pod.Name)
+						return pod, nil
+					}
+					log.Info("Pod Snapshot timed out, proceeding with deletion", "Sandbox.Name", sandbox.Name, "Pod.Name", pod.Name)
+				}
+			}
+
 			if pod.ObjectMeta.DeletionTimestamp.IsZero() {
-				log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+				log.Info("Deleting Pod because .Spec.Suspended is true", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				if err := r.Delete(ctx, pod); err != nil {
 					return nil, fmt.Errorf("failed to delete pod: %w", err)
 				}
@@ -387,15 +429,23 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			}
 		}
 
-		// Remove the pod name annotation from the sandbox if it exists
-		if _, exists := sandbox.Annotations[SandboxPodNameAnnotation]; exists {
-			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-			// Create a patch to update only the annotations
-			patch := client.MergeFrom(sandbox.DeepCopy())
-			delete(sandbox.Annotations, SandboxPodNameAnnotation)
+		// Remove annotations from the sandbox if they exist
+		checkAnnotations := []string{SandboxPodNameAnnotation, SnapshotRequestedAnnotation, SnapshotRequestedTimestamp}
+		shouldPatch := false
+		sandboxCopy := sandbox.DeepCopy()
 
-			if err := r.Patch(ctx, sandbox, patch); err != nil {
-				return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
+		for _, key := range checkAnnotations {
+			if _, exists := sandbox.Annotations[key]; exists {
+				delete(sandboxCopy.Annotations, key)
+				shouldPatch = true
+				log.Info("Removing annotation from sandbox", "Sandbox.Name", sandbox.Name, "Annotation", key)
+			}
+		}
+
+		if shouldPatch {
+			patch := client.MergeFrom(sandbox)
+			if err := r.Patch(ctx, sandboxCopy, patch); err != nil {
+				return nil, fmt.Errorf("failed to remove annotations from sandbox: %w", err)
 			}
 		}
 

@@ -1,0 +1,25 @@
+# This .dockerignore file only applies when the Docker build context is the root directory.
+
+.git
+.gitignore
+
+# Build artifacts and dependencies
+bin/
+**/.venv
+**/__pycache__/
+dist/
+release_assets/
+tmp/
+temp/
+.netlify
+
+# Large source directories not used in controller build
+clients/
+docs/
+site/
+examples/
+test/
+dev/
+
+# Documentation
+**/*.md

@@ -7,7 +7,7 @@ name = "agentic_sandbox"
 version = "0.1.0"
 description = "A client library to interact with the Agentic Sandbox on Kubernetes."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
@@ -31,6 +31,10 @@ packages = ["agentic_sandbox"]
 test = [
     "pytest",
     "pytest-xdist",
+]
+async = [
+    "httpx",
+    "kubernetes_asyncio",
 ]
 tracing = [
     "opentelemetry-api~=1.39.0",

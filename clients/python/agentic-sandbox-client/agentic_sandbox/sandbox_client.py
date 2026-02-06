@@ -486,7 +486,6 @@ class SandboxClient:
         """
         payload = {"code": code, "language": language}
         
-        # We target the persistent 'exec' endpoint
         response = self._request(
             "POST", "execute_command_stateful", json=payload, timeout=120)
         response_data = response.json()

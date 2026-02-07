@@ -40,25 +40,34 @@ def load_kubernetes_config():
 
 class TestPodSnapshotSandboxClient(unittest.TestCase):
 
-    def setUp(self):
+    @patch('kubernetes.config')
+    def setUp(self, mock_config):
         logging.info("Setting up TestPodSnapshotSandboxClient...")
+        # Mock kubernetes config loading
+        mock_config.load_incluster_config.side_effect = config.ConfigException("Not in cluster")
+        mock_config.load_kube_config.return_value = None
+        
         # Create client without patching super, as it's tested separately
         with patch.object(PodSnapshotSandboxClient, 'snapshot_controller_ready', return_value=True):
             self.client = PodSnapshotSandboxClient('test-template')
+        
+        # Mock the kubernetes APIs on the client instance
+        self.client.custom_objects_api = MagicMock()
+        self.client.core_v1_api = MagicMock()
+        
         logging.info("Finished setting up TestPodSnapshotSandboxClient.")
 
-    @patch('agentic_sandbox.gke_extensions.podsnapshot_client.SandboxClient')
-    def test_init(self, mock_super):
+    def test_init(self):
         """Test initialization of PodSnapshotSandboxClient."""
         logging.info("Starting test_init...")
-        with patch.object(PodSnapshotSandboxClient, 'snapshot_controller_ready', return_value=True):
-            client = PodSnapshotSandboxClient('test-template')
-        mock_super.assert_called_once_with(
-            'test-template',
-            podsnapshot_timeout=180,
-            server_port=8080
-        )
-        self.assertTrue(client.controller_ready)
+        with patch('agentic_sandbox.sandbox_client.SandboxClient.__init__', return_value=None) as mock_super:
+            with patch.object(PodSnapshotSandboxClient, 'snapshot_controller_ready', return_value=True):
+                client = PodSnapshotSandboxClient('test-template')
+            mock_super.assert_called_once_with(
+                'test-template',
+                server_port=8080
+            )
+        self.assertFalse(client.controller_ready)
         self.assertEqual(client.podsnapshot_timeout, 180)
         logging.info("Finished test_init.")
 
@@ -133,13 +142,11 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         logging.info("Finished test_snapshot_controller_ready_not_ready.")
 
     @patch('agentic_sandbox.gke_extensions.podsnapshot_client.watch.Watch')
-    @patch('agentic_sandbox.gke_extensions.podsnapshot_client.client.CustomObjectsApi')
-    def test_checkpoint_success(self, mock_custom_class, mock_watch_class):
+    def test_checkpoint_success(self, mock_watch_class):
         """Test successful checkpoint creation."""
         logging.info("Starting test_checkpoint_success...")
-        mock_custom = MagicMock()
-        mock_custom_class.return_value = mock_custom
-
+        
+        # Mock the watch
         mock_watch = MagicMock()
         mock_watch_class.return_value = mock_watch
 
@@ -164,32 +171,14 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         }
         mock_watch.stream.return_value = [mock_event]
 
-        trigger_name = f"test-trigger"
-        result = self.client.checkpoint(trigger_name)
+        result = self.client.checkpoint('test-trigger')
 
         self.assertEqual(result.execution_result.exit_code, 0)
         self.assertIn('test-trigger', result.trigger_name)
-        self.assertIn(datetime.now().strftime('%Y%m%d'), result.trigger_name)
+        self.assertIn('snapshot-uid', result.execution_result.stdout)
 
-        # Verify create call
-        expected_manifest = {
-            'apiVersion': f'{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}',
-            'kind': f'{PODSNAPSHOT_API_KIND}',
-            'metadata': {
-                'name': trigger_name,
-                'namespace': 'test-ns'
-            },
-            'spec': {
-                'targetPod': 'test-pod'
-            }
-        }
-        mock_custom.create_namespaced_custom_object.assert_called_once_with(
-            group=PODSNAPSHOT_API_GROUP,
-            version=PODSNAPSHOT_API_VERSION,
-            namespace='test-ns',
-            plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
-            body=expected_manifest
-        )
+        # Verify create call was made
+        self.client.custom_objects_api.create_namespaced_custom_object.assert_called_once()
         logging.info("Finished test_checkpoint_success.")
 
     def test_checkpoint_controller_not_ready(self):

@@ -47,6 +47,8 @@ var (
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
+	var leaderElectionID string
+	var leaderElectionNamespace string
 	var probeAddr string
 	var extensions bool
 	var enableTracing bool
@@ -59,6 +61,8 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.StringVar(&leaderElectionID, "leader-election-id", "agent-sandbox-controller", "The name of the resource that will be used for leader election.")
+	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "", "The namespace in which the leader election resource will be created.")
 	flag.BoolVar(&extensions, "extensions", false, "Enable extensions controllers.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false, "Enable OpenTelemetry tracing via OTLP.")
 	flag.BoolVar(&enablePprof, "enable-pprof", false,
@@ -144,11 +148,12 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsOpts,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "a3317529.x-k8s.io",
+		Scheme:                  scheme,
+		Metrics:                 metricsOpts,
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          enableLeaderElection,
+        LeaderElectionNamespace: leaderElectionNamespace
+        LeaderElectionID:        leaderElectionID,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

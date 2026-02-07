@@ -136,11 +136,51 @@ def test_execute_command_stateful_timeout(base_url):
         
         # Verify that we didn't get the output because of the timeout
         assert "Should not see this" not in response.json()["stdout"]
-        assert response.json()["stderr"] == "Execution timed out after 10 seconds due to Kernel inactivity."
-        assert response.json()["exit_code"] == 1
+        assert response.json()["stderr"] == "Execution timed out after 10 seconds."
+        assert response.json()["exit_code"] == 130
         
     except (requests.exceptions.RequestException, AssertionError) as e:
         print(f"An error occurred during execute stateful timeout: {e}")
+        sys.exit(1)
+
+def test_execute_command_stateful_infinite_loop_with_output(base_url):
+    """
+    Tests that an infinite loop producing output is correctly timed out.
+    This verifies that the timeout is a deadline, not just an inactivity timeout.
+    """
+    url = f"{base_url}/execute_command_stateful"
+    
+    try:
+        print(f"\n--- Testing Execute stateful Infinite Loop with Output ---")
+        
+        # Infinite loop printing output. 
+        payload = {
+            "code": "import time\nwhile True:\n    print('spam')\n    time.sleep(0.1)", 
+            "timeout": 3
+        }
+        print(f"Sending POST request to {url} with payload: {payload}")
+        
+        start_time = time.time()
+        response = requests.post(url, json=payload)
+        duration = time.time() - start_time
+        
+        response.raise_for_status()
+        
+        print("Execute stateful infinite loop command returned!")
+        print(f"Duration: {duration}s")
+        
+        json_response = response.json()
+        
+        # Verify timeout message
+        assert json_response["stderr"] == "Execution timed out after 3 seconds."
+        assert json_response["exit_code"] == 130
+        assert "spam" in json_response["stdout"]
+        
+        # Verify it didn't run forever (e.g. > 10s)
+        assert duration < 10, f"Test took too long: {duration}s"
+        
+    except (requests.exceptions.RequestException, AssertionError) as e:
+        print(f"An error occurred during execute stateful infinite loop: {e}")
         sys.exit(1)
 
 def test_execute_command_stateful_concurrent(base_url):
@@ -254,4 +294,5 @@ if __name__ == "__main__":
     test_execute_command_stateful_concurrent(base_url)
     test_execute_command_stateful_interruption(base_url)
     test_execute_command_stateful_timeout(base_url)
+    test_execute_command_stateful_infinite_loop_with_output(base_url)
     test_upload_download(base_url)

@@ -62,16 +62,22 @@ async def health_check():
     """A simple health check endpoint to confirm the server is running."""
     return {"status": "ok", "message": "Sandbox Runtime is active."}
 
-@app.on_event("startup")
-async def start_kernel():
-    """Starts the IPython kernel when the sandbox starts."""
+async def _start_kernel_internal():
+    """Helper to start or restart the kernel."""
     global kernel_client
+    if kernel_manager.has_kernel:
+        await kernel_manager.shutdown_kernel(now=True)
+        
     await kernel_manager.start_kernel()
     kernel_client = kernel_manager.client()
     kernel_client.start_channels()
-    
     # Change the working directory to /app to ensure all code execution happens in the correct context
     kernel_client.execute("import os, pickle; os.chdir('/app')")
+
+@app.on_event("startup")
+async def start_kernel():
+    """Starts the IPython kernel when the sandbox starts."""
+    await _start_kernel_internal()
 
 @app.on_event("shutdown")
 async def shutdown_kernel():
@@ -81,6 +87,22 @@ async def shutdown_kernel():
     if kernel_manager:
         await kernel_manager.shutdown_kernel()
     
+async def interrupt_and_drain():
+    """Interrupts the kernel and drains the IOPub channel until idle."""
+    if not kernel_manager or not kernel_client:
+        return
+    
+    try:
+        await kernel_manager.interrupt_kernel()
+        while True:
+            # Use a short timeout to avoid hanging forever if the kernel is dead
+            msg = await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=2.0)
+            if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
+                break
+    except (asyncio.TimeoutError, Exception):
+        logging.warning("Kernel interruption or drain failed. Forcing kernel restart.")
+        await _start_kernel_internal()
+
 @app.post("/execute", summary="Execute a shell command", response_model=ExecuteResponse)
 async def execute_command(request: ExecuteRequest):
     """
@@ -119,21 +141,36 @@ async def execute_command_stateful(request: ExecuteStatefulRequest):
             exit_code=1
         )
 
-    # Ensure that only one execution happens at a time
-    async with kernel_lock: 
-        # 1. Send code to the kernel
+    async with kernel_lock:
+        # Check if the kernel is alive before executing
+        is_alive = False
+        if kernel_manager.has_kernel:
+            try:
+                check = kernel_manager.is_alive()
+                if asyncio.iscoroutine(check):
+                    is_alive = await check
+                else:
+                    is_alive = check
+            except Exception:
+                pass
+        
+        if not is_alive:
+            logging.warning("Kernel is not alive. Restarting...")
+            await _start_kernel_internal()
+            
+        # 1. Send the code to the kernel for execution. This returns a msg_id that we can use to track related messages.
         msg_id = kernel_client.execute(request.code)
         
         stdout = []
         stderr = []
         
-        # 2. Listen for output on the IOPub channel
-        while True:
-            try:
-                # Poll for messages with the request-specific timeout
-                msg = await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=request.timeout)
+        # 2. Listen for messages in the IOPub channel related to our execution. We will break out of this loop either when 
+        # we see the 'idle' status or if we hit a timeout.
+        async def read_message_from_iopub_channel():
+            while True:
+                msg = await kernel_client.get_iopub_msg()
                 
-                # Ignore messages from previous timed-out executions
+                # Double-check: Even with a purge, we filter by msg_id for safety
                 if msg['parent_header'].get('msg_id') != msg_id:
                     continue
 
@@ -141,14 +178,15 @@ async def execute_command_stateful(request: ExecuteStatefulRequest):
                 content = msg['content']
 
                 if msg_type == 'stream':
+                    text = content['text']
                     if content['name'] == 'stdout':
-                        stdout.append(content['text'])
+                        stdout.append(text)
                     else:
-                        stderr.append(content['text'])
+                        stderr.append(text)
                 
                 elif msg_type == 'execute_result':
-                    # Captures the value of the last line of code (e.g. "x + 5")
-                    stdout.append(content['data'].get('text/plain', ''))
+                    data = content['data'].get('text/plain', '')
+                    stdout.append(data)
 
                 elif msg_type == 'error':
                     # Captures Python Tracebacks if the code fails
@@ -157,12 +195,27 @@ async def execute_command_stateful(request: ExecuteStatefulRequest):
                 # 'idle' status indicates the kernel has finished execution
                 if msg_type == 'status' and content['execution_state'] == 'idle':
                     break
-                    
-            except asyncio.TimeoutError:
-                # Stop if we haven't heard from the kernel within the specified timeout.
-                stderr.append(f"Execution timed out after {request.timeout} seconds due to Kernel inactivity.")
-                await kernel_manager.interrupt_kernel()
-                break
+
+        try:
+            # 4. Execute with the user-defined timeout
+            await asyncio.wait_for(read_message_from_iopub_channel(), timeout=request.timeout)
+            
+            return ExecuteStatefulResponse(
+                stdout="".join(stdout),
+                stderr="".join(stderr),
+                exit_code=0 if not stderr else 1
+            )
+
+        except asyncio.TimeoutError:
+            # 5. Handle Timeout: Interrupt but don't wait for the drain
+            stderr.append(f"Execution timed out after {request.timeout} seconds.")
+            await interrupt_and_drain()
+            
+            return ExecuteStatefulResponse(
+                stdout="".join(stdout),
+                stderr="".join(stderr),
+                exit_code=130
+            )
 
     return {
         "stdout": "".join(stdout),

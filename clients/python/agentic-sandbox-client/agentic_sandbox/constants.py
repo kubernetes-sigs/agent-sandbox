@@ -31,6 +31,7 @@ PODSNAPSHOT_API_GROUP = "podsnapshot.gke.io"
 PODSNAPSHOT_API_VERSION = "v1alpha1"
 PODSNAPSHOT_PLURAL = "podsnapshots"
 PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
+PODSNAPSHOT_API_KIND = "PodSnapshotManualTrigger"
 
 SNAPSHOT_NAMESPACE_SELF_INSTALLED = "gps-system"
 SNAPSHOT_NAMESPACE_MANAGED = "gke-managed-pod-snapshots"

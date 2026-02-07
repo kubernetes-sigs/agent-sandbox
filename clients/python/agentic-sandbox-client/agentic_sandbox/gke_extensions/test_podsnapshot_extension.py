@@ -1,4 +1,4 @@
-# Copyright 2025 The Kubernetes Authors.
+# Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,21 @@ from agentic_sandbox.gke_extensions import PodSnapshotSandboxClient
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
+def test_checkpoint_respone(checkpoint_response, checkpoint_name):
+    assert hasattr(checkpoint_response, "execution_result"), "Checkpoint response missing 'execution_result' attribute"
+    assert hasattr(checkpoint_response, "trigger_name"), "Checkpoint response missing 'trigger_name' attribute"
+
+    execution_result = checkpoint_response.execution_result
+    trigger_name = checkpoint_response.trigger_name
+
+    print(f"Trigger Command Stdout: {execution_result.stdout.strip()}")
+    print(f"Trigger Command Stderr: {execution_result.stderr.strip()}")
+    print(f"Trigger Command Exit Code: {execution_result.exit_code}")
+
+    assert trigger_name.startswith(checkpoint_name), f"Expected trigger name prefix '{checkpoint_name}', but got '{trigger_name}'"
+    assert execution_result.stderr == "", f"Expected no error when creating checkpoint '{checkpoint_name}', but got: {execution_result.stderr.strip()}"
+    assert execution_result.exit_code == 0
+    
 
 async def main(template_name: str, api_url: str | None, namespace: str, server_port: int, labels: dict[str, str]):
     """
@@ -41,7 +56,7 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
     wait_time = 10
     first_checkpoint_name = "test-snapshot-10"
     second_checkpoint_name = "test-snapshot-20"
-    v1 = client.CoreV1Api()
+    core_v1_api = client.CoreV1Api()
 
     try:
         print("\n***** Phase 1: Starting Counter *****")
@@ -57,22 +72,15 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
 
             time.sleep(wait_time)
             print(f"Creating first pod snapshot '{first_checkpoint_name}' after {wait_time} seconds...")
-            snapshot_result, trigger_name = sandbox.checkpoint(first_checkpoint_name)
-            print(f"Trigger Command Stdout: {snapshot_result.stdout.strip()}")
-            print(f"Trigger Command Stderr: {snapshot_result.stderr.strip()}")
-            print(f"Trigger Command Exit Code: {snapshot_result.exit_code}")
-
-            assert snapshot_result.exit_code == 0
+            checkpoint_response = sandbox.checkpoint(first_checkpoint_name)
+            test_checkpoint_respone(checkpoint_response, first_checkpoint_name)
+            
 
             time.sleep(wait_time)
 
             print(f"\nCreating second pod snapshot '{second_checkpoint_name}' after {wait_time} seconds...")
-            snapshot_result, trigger_name = sandbox.checkpoint(second_checkpoint_name)
-            print(f"Trigger Command Stdout: {snapshot_result.stdout.strip()}")
-            print(f"Trigger Command Stderr: {snapshot_result.stderr.strip()}")
-            print(f"Trigger Command Exit Code: {snapshot_result.exit_code}")
-
-            assert snapshot_result.exit_code == 0
+            checkpoint_response = sandbox.checkpoint(second_checkpoint_name)
+            test_checkpoint_respone(checkpoint_response, second_checkpoint_name)
 
 
         print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
@@ -81,28 +89,29 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
             namespace=namespace,
             api_url=api_url,
             server_port=server_port
-        ) as sandbox_restored: # restores from second_snapshot_name by default
+        ) as sandbox_restored: # restores from second_checkpoint_name by default
 
             print("\nWaiting 5 seconds for restored pod to resume printing...")
             time.sleep(5)
 
             # Fetch logs using the Kubernetes API 
-            logs = v1.read_namespaced_pod_log(
+            logs = core_v1_api.read_namespaced_pod_log(
                 name=sandbox_restored.pod_name, 
                 namespace=sandbox_restored.namespace
             )
 
-            # logs must not be empty     
+            # Extract the sequence of 'Count:' values from the pod logs
             counts = [int(n) for n in re.findall(r"Count: (\d+)", logs)]
             assert len(counts) > 0, "Failed to retrieve any 'Count:' logs from restored pod."
 
-            # The first number printed by the restored pod must be >= 20.
-            # If it restarted, it would be 0 or 1.
-            first_count = counts[0]
-            print("this is the first_count:", first_count)
-            assert first_count >= wait_time * 2, (
-                f"State Mismatch! Expected counter to start >= {wait_time*2}, "
-                f"but got {first_count}. The pod likely restarted from scratch."
+            # Verify the counter resumed from the correct checkpoint state.
+            # The second snapshot was taken after two wait intervals (totaling 20s if wait_time=10).
+            min_expected_count_at_restore = wait_time * 2 
+            first_count_after_restore = counts[0]
+
+            assert first_count_after_restore >= min_expected_count_at_restore, (
+                f"State Mismatch! Expected counter to start >= {min_expected_count_at_restore}, "
+                f"but got {first_count_after_restore}. The pod likely restarted from scratch."
             )
 
         print("--- Pod Snapshot Test Passed! ---")

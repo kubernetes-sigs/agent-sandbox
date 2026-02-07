@@ -14,8 +14,9 @@
 
 import logging
 import sys
-from datetime import datetime
+import os
 from typing import Any
+from dataclasses import dataclass
 from kubernetes import client, watch
 from kubernetes.client import ApiException
 from ..sandbox_client import SandboxClient, ExecutionResult
@@ -27,6 +28,18 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
+
+@dataclass
+class SnapshotResult:
+    """Result of a snapshot processing operation."""
+    snapshot_uid: str
+    snapshot_timestamp: str
+
+@dataclass
+class CheckpointResponse:
+    """Structured response for checkpoint operations."""
+    execution_result: ExecutionResult
+    trigger_name: str
 
 class SnapshotPersistenceManager:
     """
@@ -73,12 +86,15 @@ class PodSnapshotSandboxClient(SandboxClient):
 
         self.controller_ready = False
         self.podsnapshot_timeout = podsnapshot_timeout
+
+    def __enter__(self) -> 'PodSnapshotSandboxClient':
         self.controller_ready = self.snapshot_controller_ready()
+        super().__enter__()
+        return self
 
-
-    def _wait_for_snapshot_processed(self, trigger_name: str) -> tuple[str, str]:
+    def _wait_for_snapshot_processed(self, trigger_name: str) -> SnapshotResult:
         """
-        Waits for the PodSnapshotManualTrigger to be processed and returns (snapshot_uid, timestamp).
+        Waits for the PodSnapshotManualTrigger to be processed and returns SnapshotResult.
         """
         w = watch.Watch()
         logging.info(f"Waiting for snapshot manual trigger '{trigger_name}' to be processed...")
@@ -104,11 +120,11 @@ class PodSnapshotSandboxClient(SandboxClient):
                             and condition.get("status") == "True"
                             and condition.get("reason") == "Complete"
                         ):
-                            uid = status.get('snapshotCreated', {}).get('name')
-                            timestamp = condition.get('lastTransitionTime')
-                            logging.info(f"Snapshot manual trigger '{trigger_name}' processed successfully. Created Snapshot UID: {uid}")
+                            snapshot_uid = status.get('snapshotCreated', {}).get('name')
+                            snapshot_timestamp = condition.get('lastTransitionTime')
+                            logging.info(f"Snapshot manual trigger '{trigger_name}' processed successfully. Created Snapshot UID: {snapshot_uid}")
                             w.stop()
-                            return uid, timestamp
+                            return SnapshotResult(snapshot_uid=snapshot_uid, snapshot_timestamp=snapshot_timestamp)
         except Exception as e:
             logging.error(f"Error watching snapshot: {e}")
             raise
@@ -125,11 +141,11 @@ class PodSnapshotSandboxClient(SandboxClient):
         if self.controller_ready:
             return True
 
-        v1 = client.CoreV1Api()
+        core_v1_api = client.CoreV1Api()
 
         def check_namespace(namespace: str, required_components: list[str]) -> bool:
             try:
-                pods = v1.list_namespaced_pod(namespace)
+                pods = core_v1_api.list_namespaced_pod(namespace)
                 found_components = {component: False for component in required_components}
 
                 for pod in pods.items:
@@ -157,14 +173,14 @@ class PodSnapshotSandboxClient(SandboxClient):
         return self.controller_ready
 
 
-    def checkpoint(self, trigger_name: str) -> tuple[ExecutionResult, str]:
+    def checkpoint(self, trigger_name: str) -> CheckpointResponse:
         """
         Triggers a snapshot of the specified pod by creating a PodSnapshotManualTrigger resource.
         The trigger_name will be suffixed with the current datetime.
         Returns:
             tuple[ExecutionResult, str]: The result of the operation and the final trigger name (with suffix).
         """
-        trigger_name = f"{trigger_name}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        trigger_name = f"{trigger_name}-{os.urandom(4).hex()}"
 
         if not self.controller_ready:
             return ExecutionResult(
@@ -181,7 +197,7 @@ class PodSnapshotSandboxClient(SandboxClient):
 
         manifest = {
             "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
-            "kind": "PodSnapshotManualTrigger",
+            "kind": f"{PODSNAPSHOT_API_KIND}",
             "metadata": {
                 "name": trigger_name,
                 "namespace": self.namespace
@@ -199,28 +215,38 @@ class PodSnapshotSandboxClient(SandboxClient):
                 plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
                 body=manifest
             )
-            snapshot_uid, timestamp = self._wait_for_snapshot_processed(trigger_name)
+            snapshot_result = self._wait_for_snapshot_processed(trigger_name)
             
             # TODO: Add snapshot metadata persistence logic here using SnapshotPersistenceManager
 
-            return ExecutionResult(
-                stdout=f"PodSnapshotManualTrigger '{trigger_name}' created successfully.",
-                stderr="",
-                exit_code=0
-            ), trigger_name
+            return CheckpointResponse(
+                execution_result=ExecutionResult(
+                    stdout=f"PodSnapshotManualTrigger '{trigger_name}' created successfully. Snapshot UID: {snapshot_result.snapshot_uid}",
+                    stderr="",
+                    exit_code=0
+                ),
+                trigger_name=trigger_name
+            )
         except ApiException as e:
-            return ExecutionResult(
-                stdout="",
-                stderr=f"Failed to create PodSnapshotManualTrigger: {e}",
-                exit_code=1
-            ), trigger_name
+            logging.exception(f"Failed to create PodSnapshotManualTrigger '{trigger_name}': {e}")
+            return CheckpointResponse(
+                execution_result=ExecutionResult(
+                    stdout="",
+                    stderr=f"Failed to create PodSnapshotManualTrigger: {e}",
+                    exit_code=1
+                ),
+                trigger_name=trigger_name
+            )
         except TimeoutError as e:
-             return ExecutionResult(
-                stdout="",
-                stderr=f"Snapshot creation timed out: {e}",
-                exit_code=1
-            ), trigger_name
-
+            logging.exception(f"Snapshot creation timed out for trigger '{trigger_name}': {e}")
+            return CheckpointResponse(
+                execution_result=ExecutionResult(
+                    stdout="",
+                    stderr=f"Snapshot creation timed out: {e}",
+                    exit_code=1
+                ),
+                trigger_name=trigger_name
+            )
   
     def list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None:
         """

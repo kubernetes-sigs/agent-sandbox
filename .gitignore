@@ -9,6 +9,9 @@ bin/
 dist/
 release_assets/
 
+# Node.js
+node_modules/
+
 # Temporary folders
 tmp/
 temp/

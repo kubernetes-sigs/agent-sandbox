@@ -1,0 +1,49 @@
+{
+  "name": "agentic-sandbox-client",
+  "version": "0.1.0",
+  "description": "A client library to interact with the Agentic Sandbox on Kubernetes.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./extensions": {
+      "types": "./dist/extensions/index.d.ts",
+      "import": "./dist/extensions/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
+  },
+  "homepage": "https://agent-sandbox.sigs.k8s.io",
+  "bugs": {
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox.git"
+  },
+  "license": "Apache-2.0"
+}

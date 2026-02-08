@@ -36,9 +36,8 @@ def main():
         kro_version = get_latest_kro_version()
         print(f"Installing kro version: {kro_version}")
 
-        # TODO(barney-s): change OCI registry to k8s-sigs
         helm_install_command = [
-            "helm", "install", "kro", "oci://ghcr.io/kro-run/kro/kro",
+            "helm", "install", "kro", "oci://registry.k8s.io/kro/charts/kro",
             "--namespace", "kro",
             "--create-namespace",
             f"--version={kro_version}"

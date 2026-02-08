@@ -63,16 +63,11 @@ async function loadOtel(): Promise<OtelApi | null> {
   if (otelLoaded) return otelApi;
   otelLoaded = true;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const api: Record<string, unknown> = await (
-      Function('return import("@opentelemetry/api")')() as Promise<
-        Record<string, unknown>
-      >
-    );
+    const api = await import("@opentelemetry/api");
     otelApi = {
-      trace: api.trace as OtelApi["trace"],
-      context: api.context as OtelApi["context"],
-      propagation: api.propagation as OtelApi["propagation"],
+      trace: api.trace as unknown as OtelApi["trace"],
+      context: api.context as unknown as OtelApi["context"],
+      propagation: api.propagation as unknown as OtelApi["propagation"],
     };
     return otelApi;
   } catch {
@@ -134,8 +129,8 @@ export async function initializeTracer(serviceName: string): Promise<void> {
     const BatchSpanProcessor = sdkTraceBase.BatchSpanProcessor as new (
       exporter: unknown,
     ) => unknown;
-    const OTLPTraceExporter =
-      exporterOtlpGrpc.OTLPTraceExporter as new () => unknown;
+    const OTLPTraceExporter = exporterOtlpGrpc.OTLPTraceExporter as new () =>
+    unknown;
 
     const resource = new Resource({ "service.name": serviceName });
     const provider = new NodeTracerProvider({ resource });

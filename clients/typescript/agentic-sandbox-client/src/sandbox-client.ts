@@ -58,6 +58,11 @@ async function fetchWithRetry(
         retryStatusCodes.includes(response.status)
       ) {
         const delay = backoffFactor * Math.pow(2, attempt) * 1000;
+        console.debug(
+          `Request to ${url} returned ${response.status}, retrying in ${delay}ms (attempt ${
+            attempt + 1
+          }/${maxRetries})...`,
+        );
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
@@ -66,6 +71,11 @@ async function fetchWithRetry(
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt < maxRetries) {
         const delay = backoffFactor * Math.pow(2, attempt) * 1000;
+        console.debug(
+          `Request to ${url} failed: ${lastError.message}, retrying in ${delay}ms (attempt ${
+            attempt + 1
+          }/${maxRetries})...`,
+        );
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }

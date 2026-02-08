@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { SandboxClient } from "../sandbox-client.js";
-import type { SandboxOptions, ExecutionResult } from "../types.js";
+import type { ExecutionResult, SandboxOptions } from "../types.js";
 
 export class ComputerUseSandbox extends SandboxClient {
   constructor(
@@ -43,9 +43,9 @@ export class ComputerUseSandbox extends SandboxClient {
 
     const data = (await response.json()) as Record<string, unknown>;
     return {
-      stdout: data.stdout as string,
-      stderr: data.stderr as string,
-      exitCode: data.exit_code as number,
+      stdout: (data.stdout as string) ?? "",
+      stderr: (data.stderr as string) ?? "",
+      exitCode: (data.exit_code as number) ?? -1,
     };
   }
 }

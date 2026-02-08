@@ -197,9 +197,11 @@ def main(args):
 
     if python_test_result != 0:
         print("Python SDK E2E tests failed.")
+        exit_code = 1
 
     if typescript_test_result != 0:
         print("TypeScript SDK E2E tests failed.")
+        exit_code = 1
 
     if go_test_result != 0 or python_test_result != 0 or go_benchmark_result != 0 or typescript_test_result != 0:
         print("One or more E2E tests failed.")

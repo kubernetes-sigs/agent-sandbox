@@ -93,6 +93,50 @@ def setup_python_sdk(repo_root, env):
     return True
 
 
+def setup_typescript_sdk(repo_root, env):
+    """Installs the TypeScript SDK dependencies and builds it"""
+    print("========= Ensuring TypeScript SDK is built... =========")
+    sdk_path = os.path.join(repo_root, "clients", "typescript", "agentic-sandbox-client")
+
+    print(f"Installing TypeScript SDK dependencies at {sdk_path}")
+    result = subprocess.run(["npm", "install"], cwd=sdk_path, env=env, check=False)
+    if result.returncode != 0:
+        print("Failed to install TypeScript SDK dependencies.")
+        return False
+
+    print("Building TypeScript SDK...")
+    result = subprocess.run(["npm", "run", "build"], cwd=sdk_path, env=env, check=False)
+    if result.returncode != 0:
+        print("Failed to build TypeScript SDK.")
+        return False
+
+    print("TypeScript SDK built successfully.")
+    return True
+
+
+def run_typescript_e2e_tests(repo_root, artifact_dir, env):
+    """Runs the TypeScript SDK E2E tests"""
+    print("========= Running TypeScript SDK E2E tests... =========")
+    e2e_dir = os.path.join(repo_root, "test", "e2e", "clients", "typescript")
+
+    print(f"Installing test dependencies at {e2e_dir}")
+    result = subprocess.run(["npm", "install"], cwd=e2e_dir, env=env, check=False)
+    if result.returncode != 0:
+        print("Failed to install TypeScript E2E test dependencies.")
+        return result.returncode
+
+    junit_report_path = os.path.join(repo_root, "bin", "e2e-ts-sdk-junit.xml")
+    vitest_cmd = [
+        "npx", "vitest", "run",
+        "--reporter=junit",
+        f"--outputFile={junit_report_path}",
+    ]
+
+    print(f"Running command: {' '.join(vitest_cmd)}")
+    result = subprocess.run(vitest_cmd, cwd=e2e_dir, env=env)
+    return result.returncode
+
+
 def run_python_e2e_tests(repo_root, artifact_dir, env):
     """Runs the Python e2e tests and generates a junit report"""
     print("========= Running Python SDK E2E tests... =========")
@@ -135,11 +179,15 @@ def main(args):
     if not setup_python_sdk(repo_root, env):
         return 1
 
+    if not setup_typescript_sdk(repo_root, env):
+        return 1
+
     exit_code = 0
 
     go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
     go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
     python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
+    typescript_test_result = run_typescript_e2e_tests(repo_root, artifact_dir, env)
 
     if go_test_result != 0:
         print("Go E2E tests failed.")
@@ -149,9 +197,11 @@ def main(args):
 
     if python_test_result != 0:
         print("Python SDK E2E tests failed.")
-        exit_code = 1
 
-    if go_test_result != 0 or python_test_result != 0 or go_benchmark_result != 0:
+    if typescript_test_result != 0:
+        print("TypeScript SDK E2E tests failed.")
+
+    if go_test_result != 0 or python_test_result != 0 or go_benchmark_result != 0 or typescript_test_result != 0:
         print("One or more E2E tests failed.")
         exit_code = 1
 

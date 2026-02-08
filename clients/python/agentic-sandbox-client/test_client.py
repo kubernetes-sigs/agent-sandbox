@@ -14,6 +14,7 @@
 
 import argparse
 import asyncio
+import time
 from agentic_sandbox import SandboxClient
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
@@ -102,6 +103,64 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
             print(env_result.stdout)
 
             print("--- Introspection Tests Finished ---")
+
+            # Test pause and resume
+            print("\n--- Testing Pause/Resume ---")
+
+            print("Pausing sandbox...")
+            sandbox.pause()
+            print("Sandbox paused successfully.")
+
+            print("Resuming sandbox (with wait_for_ready)...")
+            sandbox.resume()  # wait=True by default, blocks until pod is ready
+            print("Sandbox resumed and ready.")
+
+            print("Running command after resume...")
+            resume_result = sandbox.run("echo 'Back after resume!'")
+            print(f"Stdout: {resume_result.stdout.strip()}")
+            print(f"Exit Code: {resume_result.exit_code}")
+            assert resume_result.exit_code == 0
+            assert resume_result.stdout.strip() == "Back after resume!"
+            print("--- Pause/Resume Test Passed! ---")
+
+            # Test data persistence across pause/resume
+            # Without PVCs, ephemeral storage is lost when the pod is deleted.
+            # The Sandbox spec supports volumeClaimTemplates for persistence,
+            # but this is not exposed through SandboxTemplate/SandboxClaim.
+            # TODO Add support for PVC-backed storage in SandboxTemplate/SandboxClaim
+            print("\n--- Testing Ephemeral Storage Across Pause/Resume ---")
+
+            persist_path = "persist_test.txt"
+            persist_content = "data before pause"
+            print(f"Writing '{persist_content}' to '{persist_path}'...")
+            sandbox.write(persist_path, persist_content)
+
+            # Verify the file exists before pause
+            read_back = sandbox.read(persist_path).decode("utf-8")
+            assert read_back == persist_content, f"Pre-pause read failed: '{read_back}'"
+            print("File confirmed written before pause.")
+
+            print("Pausing sandbox...")
+            sandbox.pause()
+            # Wait for the old pod to be fully terminated before resuming,
+            # otherwise the router may still route to the dying pod.
+            time.sleep(3)
+
+            print("Resuming sandbox...")
+            sandbox.resume()
+
+            print(f"Checking if '{persist_path}' survived pause/resume...")
+            check_result = sandbox.run(f"cat /app/{persist_path}")
+            print(f"cat exit_code: {check_result.exit_code}")
+            print(f"cat stdout: '{check_result.stdout.strip()}'")
+            print(f"cat stderr: '{check_result.stderr.strip()}'")
+
+            assert check_result.exit_code != 0, (
+                f"Expected ephemeral file to be lost after pause/resume, "
+                f"but it still exists with content: '{check_result.stdout.strip()}'"
+            )
+            print("Confirmed: ephemeral storage is NOT persisted across pause/resume.")
+            print("--- Ephemeral Storage Test Passed! ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")

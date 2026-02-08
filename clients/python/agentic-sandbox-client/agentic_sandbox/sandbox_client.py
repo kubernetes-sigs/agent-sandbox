@@ -426,6 +426,102 @@ class SandboxClient:
             raise RuntimeError(
                 f"Failed to communicate with the sandbox via the gateway at {url}.") from e
 
+    @trace_span("pause")
+    def pause(self):
+        """Pauses the sandbox by scaling replicas to 0.
+
+        This deletes the sandbox pod while keeping the Sandbox CR and Service
+        intact. The sandbox can be resumed later with resume().
+        """
+        if not self.sandbox_name:
+            raise RuntimeError("Cannot pause; no sandbox has been created.")
+
+        logging.info(f"Pausing sandbox '{self.sandbox_name}'...")
+        self.custom_objects_api.patch_namespaced_custom_object(
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            namespace=self.namespace,
+            plural=SANDBOX_PLURAL_NAME,
+            name=self.sandbox_name,
+            body={"spec": {"replicas": 0}},
+        )
+        logging.info(f"Sandbox '{self.sandbox_name}' paused.")
+
+    @trace_span("resume")
+    def resume(self, wait: bool = True):
+        """Resumes a paused sandbox by scaling replicas to 1.
+
+        This triggers the controller to create a new pod.
+
+        Args:
+            wait: If True (default), blocks until the sandbox pod is ready.
+                  If False, returns immediately after patching replicas.
+        """
+        if not self.sandbox_name:
+            raise RuntimeError("Cannot resume; no sandbox has been created.")
+
+        logging.info(f"Resuming sandbox '{self.sandbox_name}'...")
+        self.custom_objects_api.patch_namespaced_custom_object(
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            namespace=self.namespace,
+            plural=SANDBOX_PLURAL_NAME,
+            name=self.sandbox_name,
+            body={"spec": {"replicas": 1}},
+        )
+        logging.info(f"Sandbox '{self.sandbox_name}' resume requested.")
+
+        if wait:
+            self.wait_for_ready()
+
+    @trace_span("wait_for_ready")
+    def wait_for_ready(self, timeout: int | None = None):
+        """Waits for the sandbox to become ready.
+
+        Watches the Sandbox CR for the Ready condition to become True while
+        replicas is 1. This correctly handles the case where a paused sandbox
+        reports Ready=True (with replicas=0) by ignoring that stale state.
+
+        Args:
+            timeout: Maximum seconds to wait. Defaults to sandbox_ready_timeout.
+        """
+        if not self.sandbox_name:
+            raise RuntimeError("Cannot wait; no sandbox has been created.")
+
+        timeout = timeout or self.sandbox_ready_timeout
+
+        w = watch.Watch()
+        logging.info(
+            f"Waiting for sandbox '{self.sandbox_name}' to become ready...")
+        for event in w.stream(
+            func=self.custom_objects_api.list_namespaced_custom_object,
+            namespace=self.namespace,
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            plural=SANDBOX_PLURAL_NAME,
+            field_selector=f"metadata.name={self.sandbox_name}",
+            timeout_seconds=timeout,
+        ):
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                obj = event["object"]
+                spec = obj.get("spec", {})
+                replicas = spec.get("replicas", 1)
+                conditions = obj.get("status", {}).get("conditions", [])
+
+                # Only consider ready when replicas=1 (not paused)
+                if replicas == 1:
+                    for cond in conditions:
+                        if cond.get("type") == "Ready" and cond.get("status") == "True":
+                            logging.info(
+                                f"Sandbox '{self.sandbox_name}' is ready.")
+                            w.stop()
+                            return
+
+        raise TimeoutError(
+            f"Sandbox '{self.sandbox_name}' did not become ready "
+            f"within {timeout} seconds."
+        )
+
     @trace_span("run")
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
         span = trace.get_current_span()

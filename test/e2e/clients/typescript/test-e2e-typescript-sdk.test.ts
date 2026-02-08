@@ -26,8 +26,12 @@ import {
 } from "vitest";
 import { SandboxClient } from "agentic-sandbox-client";
 import { TestContext } from "./framework/context.js";
+import { fileURLToPath } from "node:url";
 
-const TEST_MANIFESTS_DIR = "test/e2e/clients/typescript/test-manifests";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const TEST_MANIFESTS_DIR = path.join(__dirname, "test-manifests");
 const TEMPLATE_YAML_PATH = path.join(
   TEST_MANIFESTS_DIR,
   "sandbox-template.yaml",
@@ -37,10 +41,16 @@ const WARMPOOL_YAML_PATH = path.join(
   "sandbox-warmpool.yaml",
 );
 
-const ROUTER_YAML_PATH =
-  "clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml";
-const GATEWAY_YAML_PATH =
-  "clients/python/agentic-sandbox-client/gateway-kind/gateway-kind.yaml";
+// Project root is 4 levels up from test/e2e/clients/typescript/
+const PROJECT_ROOT = path.resolve(__dirname, "../../../..");
+const ROUTER_YAML_PATH = path.join(
+  PROJECT_ROOT,
+  "clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml",
+);
+const GATEWAY_YAML_PATH = path.join(
+  PROJECT_ROOT,
+  "clients/python/agentic-sandbox-client/gateway-kind/gateway-kind.yaml",
+);
 
 const GATEWAY_NAME = "kind-gateway";
 

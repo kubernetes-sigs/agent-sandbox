@@ -15,15 +15,21 @@ limitations under the License.
 */
 
 import * as crypto from "node:crypto";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
 import {
   deploymentReady,
-  warmPoolReady,
   gatewayAddressReady,
+  warmPoolReady,
 } from "./predicates.js";
 
-const DEFAULT_KUBECONFIG_PATH = "bin/KUBECONFIG";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// Project root is 5 levels up from test/e2e/clients/typescript/framework/
+const PROJECT_ROOT = path.resolve(__dirname, "../../../../..");
+const DEFAULT_KUBECONFIG_PATH = path.join(PROJECT_ROOT, "bin/KUBECONFIG");
 const DEFAULT_TIMEOUT_SECONDS = 120;
 
 /**
@@ -37,8 +43,8 @@ export class TestContext {
   namespace: string | null = null;
 
   constructor(kubeconfigPath?: string) {
-    this.kubeconfigPath =
-      kubeconfigPath ?? process.env["KUBECONFIG"] ?? DEFAULT_KUBECONFIG_PATH;
+    this.kubeconfigPath = kubeconfigPath ?? process.env["KUBECONFIG"] ??
+      DEFAULT_KUBECONFIG_PATH;
   }
 
   get kubeConfig(): k8s.KubeConfig {
@@ -149,6 +155,8 @@ export class TestContext {
     const timeoutMs = timeout * 1000;
 
     return new Promise<boolean>((resolve, reject) => {
+      let resolved = false;
+
       const timer = setTimeout(() => {
         reject(
           new Error(
@@ -179,16 +187,22 @@ export class TestContext {
               console.log(
                 `Object ${name} satisfied predicate on event type ${type}.`,
               );
+              resolved = true;
               cleanup();
               resolve(true);
             }
           },
           (err?: unknown) => {
             cleanup();
-            if (err) {
+            // Only reject if we haven't already resolved successfully.
+            // When we abort the watch after success, the doneCallback
+            // receives an abort error which we should ignore.
+            if (err && !resolved) {
               reject(
                 new Error(
-                  `Watch error for ${name}: ${err instanceof Error ? err.message : String(err)}`,
+                  `Watch error for ${name}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
                 ),
               );
             }

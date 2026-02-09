@@ -13,15 +13,11 @@ KIND_CLUSTER=agent-sandbox
 
 .PHONY: deploy-kind
 # `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
+# `CONTROLLER_ARGS="--enable-pprof-debug --zap-log-level=debug" make deploy-kind` to deploy with custom controller flags.
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
-	@if [ "$(EXTENSIONS)" = "true" ]; then \
-		echo "🔧 Patching controller to enable extensions..."; \
-		kubectl patch deployment agent-sandbox-controller \
-			-n agent-sandbox-system \
-			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
-	fi
+	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} --controller-only
+	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
 
 .PHONY: deploy-cloud-provider-kind
 deploy-cloud-provider-kind:
@@ -101,7 +97,6 @@ toc-update:
 .PHONY: toc-verify
 toc-verify:
 	./dev/tools/verify-toc
-
 
 .PHONY: clean
 clean:

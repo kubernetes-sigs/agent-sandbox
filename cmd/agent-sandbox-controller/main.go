@@ -152,8 +152,8 @@ func main() {
 		Metrics:                 metricsOpts,
 		HealthProbeBindAddress:  probeAddr,
 		LeaderElection:          enableLeaderElection,
-        LeaderElectionNamespace: leaderElectionNamespace
-        LeaderElectionID:        leaderElectionID,
+		LeaderElectionNamespace: leaderElectionNamespace,
+		LeaderElectionID:        leaderElectionID,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

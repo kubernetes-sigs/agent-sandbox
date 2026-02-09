@@ -159,8 +159,14 @@ def process_manifests(all_docs, args):
         if is_extension_file and not args.extensions:
             continue
 
-        # When extensions is enabled, we use a the extensions controller manifest instead.
-        if args.extensions and filename == "controller.yaml" and kind == "StatefulSet":
+        # When extensions is enabled, we skip the core controller manifest because
+        # it will be replaced by the one in the extensions directory.
+        is_core_controller = (
+            doc.get("metadata", {}).get("name") == "agent-sandbox-controller" and
+            kind in ["StatefulSet", "Deployment"] and
+            not is_extension_file
+        )
+        if args.extensions and is_core_controller:
             continue
 
         find_and_replace_images(doc, image_prefix, image_tag)

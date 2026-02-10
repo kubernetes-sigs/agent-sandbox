@@ -87,6 +87,24 @@ func (cl *ClusterClient) Update(ctx context.Context, obj client.Object) error {
 	return nil
 }
 
+func MustUpdateObject[T client.Object](cl *ClusterClient, obj T, updateFunc func(obj T)) {
+	cl.Helper()
+
+	ctx := cl.Context()
+
+	id := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	latest := reflect.New(reflect.TypeOf(obj).Elem()).Interface().(T)
+	if err := cl.Get(ctx, id, latest); err != nil {
+		cl.Fatalf("MustUpdateObject: failed to get latest %T (%s): %v", obj, id.String(), err)
+	}
+
+	updateFunc(latest)
+
+	if err := cl.Update(ctx, latest); err != nil {
+		cl.Fatalf("MustUpdateObject: failed to update %T (%s): %v", obj, id.String(), err)
+	}
+}
+
 // CreateWithCleanup creates the specified object and cleans up the object after
 // the test completes.
 func (cl *ClusterClient) CreateWithCleanup(ctx context.Context, obj client.Object) error {

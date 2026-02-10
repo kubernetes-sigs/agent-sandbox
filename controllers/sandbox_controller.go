@@ -105,13 +105,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Check if already marked as expired to avoid repeated operations, including cleanups
-	if sandboxMarkedExpired(sandbox) {
-		log.Info("Sandbox is already marked as expired")
-		// Note: The sandbox won't be deleted if shutdown policy is changed to delete after expiration.
-		//       To delete an expired sandbox, the user should delete the sandbox instead of updating it.
-		//       This keeps the controller code simple.
-		return ctrl.Result{}, nil
+	// This stops reconciliation for resources that have already hit a deadline or expired.
+	// TODO: Use sandbox phase "Failed" check instead of these helper functions PR#121
+	if sandboxMarkedExpired(sandbox) || sandboxStalled(sandbox) {
+		log.Info("Sandbox is in a terminal state (Expired or Stalled). Stopping reconciliation.")
+		return ctrl.Result{}, nil // stop trying to reconcile the resource
 	}
 
 	// Initialize trace ID for active resources missing an ID
@@ -139,24 +137,44 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var err error
 	sandboxDeleted := false
 
-	expired, requeueAfter := checkSandboxExpiry(sandbox)
+	// Calculate lifecycle and timeout states
+	expired, expiryRequeue := checkSandboxExpiry(sandbox)
 
-	// Check if sandbox has expired
+	deadlineHit := false
+	var deadlineRequeue time.Duration
+	// We only check the deadline if the sandbox is not yet in a "Ready" state and hasn't expired.
+	// TODO: Only check if the Sandbox is in a "Pending" status PR#121
+	if !expired && !isSandboxReady(sandbox) {
+		deadlineHit, deadlineRequeue = checkProgressDeadline(sandbox)
+	}
+
+	// Handle state transitions
+	// Expiry takes precedence as it triggers a cleanup/deletion event.
 	if expired {
 		log.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
 		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
+	} else if deadlineHit {
+		log.Info("Sandbox progress deadline exceeded. Marking as stalled.")
+		return ctrl.Result{}, r.handleProgressDeadline(ctx, oldStatus, sandbox) // stop trying to reconcile the resource
 	} else {
+		// Standard reconciliation for active, non-stalled resources.
 		err = r.reconcileChildResources(ctx, sandbox)
 	}
 
+	// Final Status update for non-deleted resources
 	if !sandboxDeleted {
-		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
-			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
 		}
 	}
-	// return errors seen
+
+	// Select the earliest requeue time to ensure the controller wakes up for the next event.
+	requeueAfter := deadlineRequeue
+	if expiryRequeue > 0 && (requeueAfter == 0 || expiryRequeue < requeueAfter) {
+		requeueAfter = expiryRequeue
+	}
+
+	// Return with the calculated minimum requeue duration
 	return ctrl.Result{RequeueAfter: requeueAfter}, err
 }
 
@@ -550,7 +568,8 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
 	}
 
-	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {
+	if sandbox.Spec.Lifecycle != nil && sandbox.Spec.Lifecycle.ShutdownPolicy != nil &&
+		*sandbox.Spec.Lifecycle.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {
 		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
 		} else {
@@ -576,15 +595,42 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	return false, allErrors
 }
 
+// handleProgressDeadline updates the Sandbox status on ProgressDeadlineExceeded
+func (r *SandboxReconciler) handleProgressDeadline(ctx context.Context,
+	oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) error {
+
+	if r.Tracer.IsRecording(ctx) {
+		r.Tracer.AddEvent(ctx, "SandboxProgressDeadlineExceeded", map[string]string{
+			"sandbox.Name": sandbox.Name,
+		})
+	}
+
+	// TODO: update Sandbox phase to "Failed" PR#121
+
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1alpha1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: sandbox.Generation,
+		Reason:             sandboxv1alpha1.SandboxReasonDeadlineExceeded,
+		Message:            "Sandbox failed to reach Ready state within the allocated deadline.",
+	})
+
+	if updateErr := r.updateStatus(ctx, oldStatus, sandbox); updateErr != nil {
+		return updateErr
+	}
+	return nil
+}
+
 // checks if the sandbox has expired
 // returns true if expired, false otherwise
 // if not expired, also returns the duration to requeue after
 func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
-	if sandbox.Spec.ShutdownTime == nil {
+	// If Lifecycle is not set, the sandbox never expires.
+	if sandbox.Spec.Lifecycle == nil || sandbox.Spec.Lifecycle.ShutdownTime == nil {
 		return false, 0
 	}
 
-	expiryTime := sandbox.Spec.ShutdownTime.Time
+	expiryTime := sandbox.Spec.Lifecycle.ShutdownTime.Time
 	if time.Now().After(expiryTime) {
 		return true, 0
 	}
@@ -625,4 +671,36 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		Complete(r)
+}
+
+// checkProgressDeadline calculates if the sandbox has timed out.
+func checkProgressDeadline(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
+
+	deadline := sandboxv1alpha1.DefaultProgressDeadlineSeconds
+	if sandbox.Spec.Lifecycle != nil && sandbox.Spec.Lifecycle.ProgressDeadlineSeconds != nil {
+		deadline = *sandbox.Spec.Lifecycle.ProgressDeadlineSeconds
+	}
+
+	// TODO: This logic will need to be updated when Sandbox pause / resume is implemented.
+	elapsed := time.Since(sandbox.CreationTimestamp.Time)
+	deadlineDuration := time.Duration(deadline) * time.Second
+
+	if elapsed >= deadlineDuration {
+		return true, 0
+	}
+
+	// Schedule the next reconciliation to trigger precisely when the deadline expires.
+	return false, deadlineDuration - elapsed
+}
+
+// sandboxStalled checks if the sandbox is already marked with a deadline failure.
+func sandboxStalled(sandbox *sandboxv1alpha1.Sandbox) bool {
+	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	return cond != nil && cond.Reason == sandboxv1alpha1.SandboxReasonDeadlineExceeded
+}
+
+// isSandboxReady returns true if the Ready condition is currently True.
+func isSandboxReady(sandbox *sandboxv1alpha1.Sandbox) bool {
+	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	return cond != nil && cond.Status == metav1.ConditionTrue
 }

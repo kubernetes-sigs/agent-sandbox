@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build distribution 📦
+  test:
+    name: Run Unit Tests 🧪
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -37,7 +37,7 @@ jobs:
         if [[ "$GITHUB_REF" == refs/tags/* ]]; then
           TAG_NAME=${GITHUB_REF#refs/tags/}
 
-          # Just strip the 'v' from 'v0.1.0' or 'v0.1.0.post1'
+          # Strip the 'v' from 'v0.1.0' or 'v0.1.0.post1'
           FINAL_VERSION=$(echo $TAG_NAME | sed 's/^v//')
           echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
           
@@ -57,6 +57,45 @@ jobs:
 
     - name: Run Unit Tests
       run: python3 -m pytest
+
+  build:
+    name: Build distribution 📦
+    needs: test
+
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/python/agentic-sandbox-client
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    
+    - name: Create VERSION file
+      shell: bash
+      run: |
+        # Determine the version
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+
+          # Strip the 'v' from 'v0.1.0' or 'v0.1.0.post1'
+          FINAL_VERSION=$(echo $TAG_NAME | sed 's/^v//')
+          echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
+          
+        else
+          echo "::error::No valid tag found. This workflow expects a tag trigger."
+          exit 1
+        fi
+
+        echo "$FINAL_VERSION" > VERSION
+        
+        # Verify
+        echo "Generated VERSION file content:"
+        cat VERSION
 
     - name: Install pypa/build
       run: >-
@@ -78,7 +117,7 @@ jobs:
     - build
     runs-on: ubuntu-latest
     environment:
-      name: testpypi #TODO: create and then update environment name 
+      name: testpypi 
       url: https://test.pypi.org/p/k8s-agent-sandbox
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
@@ -103,7 +142,7 @@ jobs:
     - publish-to-testpypi
     runs-on: ubuntu-latest
     environment:
-      name: pypi #TODO: create and then update environment name
+      name: pypi
       url: https://pypi.org/p/k8s-agent-sandbox
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing

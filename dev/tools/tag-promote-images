@@ -19,7 +19,7 @@ import argparse
 import subprocess
 import time
 
-from shared.git_ops import run_command, validate_tag, check_local_repo_state, create_and_push_tag
+from shared.git_ops import run_command, validate_tag, check_tag_exists, check_local_repo_state, create_and_push_tag
 
 # The local clone of k8s.io repo relative to where this script is executed (i.e. make release-promote)
 DEFAULT_K8S_IO_DIR = "../../kubernetes/k8s.io"
@@ -95,13 +95,7 @@ def main():
 
     # --- Pre-flight Check ---
     check_local_repo_state(REMOTE_UPSTREAM)
-    # Check if tag already exists on upstream to prevent overwriting existing releases
-    print(f"🔍 Checking if tag {tag} already exists on {REMOTE_UPSTREAM}...")
-    remote_tags = run_command(["git", "ls-remote", "--tags", REMOTE_UPSTREAM, f"refs/tags/{tag}"], capture_output=True)
-    if remote_tags:
-        print(f"❌ Tag {tag} already exists on {REMOTE_UPSTREAM}. Aborting to prevent accidental overwrite.")
-        print("   If you are resuming a failed run, please manually remove the tag from upstream and retry.")
-        sys.exit(1)
+    check_tag_exists(tag, remote=REMOTE_UPSTREAM)
 
     # --- Step 1: Create and Push Tag ---
     print(f"--- Step 1: Handling Git Tag {tag} and Publish to PyPI---")

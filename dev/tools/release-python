@@ -15,7 +15,7 @@
 
 import argparse
 
-from shared.git_ops import validate_tag, check_local_repo_state, create_and_push_tag
+from shared.git_ops import validate_tag, check_tag_exists, check_local_repo_state, create_and_push_tag
 
 
 def main():
@@ -39,6 +39,7 @@ def main():
 
     # Pre-flight Check
     check_local_repo_state(remote)
+    check_tag_exists(tag, remote)
 
     # Idempotency: Check if tag already exists locally and push tag
     create_and_push_tag(tag, remote=remote)

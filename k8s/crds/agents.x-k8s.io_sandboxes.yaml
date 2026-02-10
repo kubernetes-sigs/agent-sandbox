@@ -28,6 +28,22 @@ spec:
             type: object
           spec:
             properties:
+              lifecycle:
+                properties:
+                  progressDeadlineSeconds:
+                    default: 600
+                    format: int32
+                    type: integer
+                  shutdownPolicy:
+                    default: Retain
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                  shutdownTime:
+                    format: date-time
+                    type: string
+                type: object
               podTemplate:
                 properties:
                   metadata:
@@ -3819,15 +3835,6 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
-              shutdownPolicy:
-                default: Retain
-                enum:
-                - Delete
-                - Retain
-                type: string
-              shutdownTime:
-                format: date-time
-                type: string
               volumeClaimTemplates:
                 items:
                   properties:

@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,7 @@ import (
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // Create a test scheme with extensions types registered
@@ -697,6 +699,43 @@ func TestReconcilePoolWithVolumeClaimTemplates(t *testing.T) {
 			}
 			require.True(t, foundPVCVolume, "pod should have PVC volume attached")
 		}
+	})
+
+	t.Run("rolls back PVCs and stops after first pod creation failure", func(t *testing.T) {
+		podCreateAttempts := 0
+		failingWarmPool := warmPool.DeepCopy()
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, baseClient client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if _, ok := obj.(*corev1.Pod); ok {
+							podCreateAttempts++
+							return fmt.Errorf("injected pod create failure")
+						}
+						return baseClient.Create(ctx, obj, opts...)
+					},
+				}).
+				Build(),
+		}
+
+		ctx := context.Background()
+		err := r.reconcilePool(ctx, failingWarmPool)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "injected pod create failure")
+		require.Equal(t, 1, podCreateAttempts, "should stop after first pod creation error")
+
+		podList := &corev1.PodList{}
+		err = r.List(ctx, podList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, podList.Items, 0, "no pods should be created")
+
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, 0, "PVCs created before pod failure should be rolled back")
 	})
 
 	t.Run("cleans up orphaned PVCs after reaching desired replicas", func(t *testing.T) {

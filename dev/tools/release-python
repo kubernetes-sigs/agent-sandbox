@@ -13,31 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
 import argparse
-import re
 
-from shared.git_ops import check_local_repo_state, create_and_push_tag
-
-
-def validate_version(version):
-    """Strictly validates the version against PEP 440."""
-    pattern = r"^v?\d+\.\d+\.\d+(?:\.?(?:a|b|rc|post|dev)\d+)?$"
-    
-    if "-" in version:
-        print(f"❌ Error: Version '{version}' contains a hyphen.")
-        sys.exit(1)
-    
-    if not re.match(pattern, version):
-        print(f"❌ Error: Version '{version}' is invalid.")
-        print("   Allowed examples: v0.1.0, v0.1.0rc1, v0.1.0.post1")
-        sys.exit(1)
+from shared.git_ops import validate_tag, check_local_repo_state, create_and_push_tag
 
 
 def main():
     parser = argparse.ArgumentParser(description="Release Python Client.")
     parser.add_argument(
-        "--version", required=True, help="The version to tag (e.g. v0.1.0)."
+        "--tag", required=True, help="The version to tag (e.g. v0.1.0)."
     )
     parser.add_argument(
         "--remote",
@@ -48,17 +32,16 @@ def main():
     args = parser.parse_args()
 
     remote = args.remote
-    version = args.version
-    tag_name = f"k8s-agent-sandbox/{version}"
+    tag = args.tag
 
-    # Validate Version
-    validate_version(version)
+    # Validate Version tag
+    validate_tag(tag)
 
     # Pre-flight Check
     check_local_repo_state(remote)
 
     # Idempotency: Check if tag already exists locally and push tag
-    create_and_push_tag(tag_name, remote=remote)
+    create_and_push_tag(tag, remote=remote)
 
     print("✅ Done! The 'pypi-publish' GitHub Action should now be running.")
 

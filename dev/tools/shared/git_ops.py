@@ -15,6 +15,7 @@
 
 import subprocess
 import sys
+import re
 
 
 def run_command(cmd, cwd=None, capture_output=False, allow_error=False):
@@ -98,3 +99,13 @@ def create_and_push_tag(tag, remote):
     # This will succeed (exit 0) even if the tag is already there ("Everything up-to-date")
     run_command(["git", "push", remote, tag])
     print("✅ Tag confirmed on upstream.")
+
+
+def validate_tag(tag):
+    """Strictly validates the version against PEP 440."""
+    pattern = r"^v?\d+\.\d+\.\d+(?:\.?(?:a|b|rc|post|dev)\d+)?$"
+
+    if not re.match(pattern, tag):
+        print(f"❌ Error: Tag '{tag}' is invalid.")
+        print("   Allowed examples: v0.1.0, v0.1.0rc1, v0.1.0.post1")
+        sys.exit(1)

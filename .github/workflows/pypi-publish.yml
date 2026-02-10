@@ -3,7 +3,7 @@ name: Publish Python 🐍 distribution 📦 to PyPI
 on:
   push:
     tags:
-      - 'k8s-agent-sandbox/v*'
+      - 'v*'
 
 permissions:
   contents: read
@@ -37,9 +37,8 @@ jobs:
         if [[ "$GITHUB_REF" == refs/tags/* ]]; then
           TAG_NAME=${GITHUB_REF#refs/tags/}
 
-          # Strip 'k8s-agent-sandbox/v' prefix
-          CLEAN_TAG=$(echo $TAG_NAME | sed 's|^k8s-agent-sandbox/||')
-          FINAL_VERSION=$(echo $CLEAN_TAG | sed 's/^v//')
+          # Just strip the 'v' from 'v0.1.0' or 'v0.1.0.post1'
+          FINAL_VERSION=$(echo $TAG_NAME | sed 's/^v//')
           echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
           
         else

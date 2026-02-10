@@ -19,7 +19,7 @@ import argparse
 import subprocess
 import time
 
-from shared.git_ops import run_command, check_local_repo_state, create_and_push_tag
+from shared.git_ops import run_command, validate_tag, check_local_repo_state, create_and_push_tag
 
 # The local clone of k8s.io repo relative to where this script is executed (i.e. make release-promote)
 DEFAULT_K8S_IO_DIR = "../../kubernetes/k8s.io"
@@ -84,6 +84,8 @@ def main():
     args = parser.parse_args()
 
     tag = args.tag
+    validate_tag(tag)
+    
     k8s_io_dir = os.path.abspath(args.k8s_io_dir)
 
     gh_user = get_gh_username()
@@ -95,8 +97,10 @@ def main():
     check_local_repo_state(REMOTE_UPSTREAM)
 
     # --- Step 1: Create and Push Tag ---
-    print(f"--- Step 1: Handling Git Tag {tag} ---")
+    print(f"--- Step 1: Handling Git Tag {tag} and Publish to PyPI---")
     create_and_push_tag(tag, remote=REMOTE_UPSTREAM)
+
+    print("✅ Done! The 'pypi-publish' GitHub Action should now be running.")
 
     # --- Step 2: Wait for Staging Images ---
     # CI job: https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images

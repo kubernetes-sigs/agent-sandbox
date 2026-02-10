@@ -63,7 +63,7 @@ type T interface {
 // TestContext is a helper for managing e2e test scaffolding.
 type TestContext struct {
 	T
-	ClusterClient
+	*ClusterClient
 	artifactsDir string
 }
 
@@ -120,7 +120,7 @@ func NewTestContext(t T) *TestContext {
 		t.Fatalf("building dynamic client: %v", err)
 	}
 
-	th.ClusterClient = ClusterClient{
+	th.ClusterClient = &ClusterClient{
 		T:             t,
 		client:        client,
 		dynamicClient: dynamicClient,

@@ -24,6 +24,7 @@ import time
 import socket
 import subprocess
 import logging
+import urllib.parse
 from dataclasses import dataclass
 from typing import List
 
@@ -66,6 +67,7 @@ class ExecutionResult:
     
 @dataclass
 class FileEntry:
+    """Represents a file or directory entry in the sandbox."""
     name: str
     size: int
     type: str  # 'file' or 'directory'
@@ -477,8 +479,9 @@ class SandboxClient:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
 
+        encoded_path = urllib.parse.quote(path, safe='')
         response = self._request(
-            "GET", f"download/{path}", timeout=timeout)
+            "GET", f"download/{encoded_path}", timeout=timeout)
         content = response.content
 
         if span.is_recording():
@@ -495,7 +498,8 @@ class SandboxClient:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-        response = self._request("GET", f"list/{path}", timeout=timeout)
+        encoded_path = urllib.parse.quote(path, safe='')
+        response = self._request("GET", f"list/{encoded_path}", timeout=timeout)
         
         entries = response.json()
         if not entries:
@@ -522,7 +526,8 @@ class SandboxClient:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-        response = self._request("GET", f"exists/{path}", timeout=timeout)
+        encoded_path = urllib.parse.quote(path, safe='')
+        response = self._request("GET", f"exists/{encoded_path}", timeout=timeout)
         exists = response.json().get("exists", False)
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)

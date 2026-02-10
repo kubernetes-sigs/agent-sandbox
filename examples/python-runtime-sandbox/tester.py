@@ -14,6 +14,7 @@
 
 import requests
 import sys
+import urllib.parse
 
 def test_health_check(base_url):
     """
@@ -100,6 +101,60 @@ def test_exists(base_url):
         print(f"An error occurred during exists check: {e}")
         sys.exit(1)
 
+def test_path_traversal(base_url):
+    """
+    Tests that relative path traversal attempts are blocked.
+    """
+    # Try to access /etc/passwd via relative path traversal
+    unsafe_path = "../../etc/passwd"
+    # We must encode slashes so the web server passes them to the application
+    # instead of resolving them itself.
+    encoded_path = urllib.parse.quote(unsafe_path, safe='')
+    url = f"{base_url}/exists/{encoded_path}"
+    
+    try:
+        print(f"\n--- Testing Path Traversal ---")
+        print(f"Sending GET request to {url}")
+        response = requests.get(url)
+        
+        print(f"Response status code: {response.status_code}")
+        print("Response JSON:", response.json())
+        
+        assert response.status_code == 403
+        assert response.json()["message"] == "Access denied"
+        print("Path traversal blocked successfully!")
+        
+    except (requests.exceptions.RequestException, AssertionError) as e:
+        print(f"An error occurred during path traversal check: {e}")
+        sys.exit(1)
+
+def test_absolute_path_traversal(base_url):
+    """
+    Tests that absolute path traversal attempts are blocked.
+    """
+    # Try to access /etc/passwd via absolute path traversal.
+    # Note: The server strips leading slashes, effectively re-rooting absolute paths to /app.
+    # To test the 'outside /app' check, we must use '..' to traverse up from /app.
+    unsafe_path = "/../etc/passwd"
+    encoded_path = urllib.parse.quote(unsafe_path, safe='')
+    url = f"{base_url}/exists/{encoded_path}"
+    
+    try:
+        print(f"\n--- Testing Absolute Path Traversal ---")
+        print(f"Sending GET request to {url}")
+        response = requests.get(url)
+        
+        print(f"Response status code: {response.status_code}")
+        print("Response JSON:", response.json())
+        
+        assert response.status_code == 403
+        assert response.json()["message"] == "Access denied"
+        print("Absolute path traversal blocked successfully!")
+        
+    except (requests.exceptions.RequestException, AssertionError) as e:
+        print(f"An error occurred during absolute path traversal check: {e}")
+        sys.exit(1)
+
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("Usage: python tester.py <server_ip> <server_port>")
@@ -113,3 +168,5 @@ if __name__ == "__main__":
     test_execute(base_url)
     test_list_files(base_url)
     test_exists(base_url)
+    test_path_traversal(base_url)
+    test_absolute_path_traversal(base_url)

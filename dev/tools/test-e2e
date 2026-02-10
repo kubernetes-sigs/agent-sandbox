@@ -15,8 +15,12 @@
 
 import os
 import argparse
+import platform
+import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.request
 
 from shared import utils
 
@@ -93,9 +97,107 @@ def setup_python_sdk(repo_root, env):
     return True
 
 
+def install_node(install_dir):
+    """Downloads and installs Node.js to the specified directory."""
+    print(f"Installing Node.js to {install_dir}...")
+    if os.path.exists(install_dir):
+        shutil.rmtree(install_dir)
+    os.makedirs(install_dir)
+
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    if system == "linux":
+        os_name = "linux"
+    elif system == "darwin":
+        os_name = "darwin"
+    else:
+        print(f"Warning: Unsupported OS for auto-install: {system}")
+        return None
+
+    if machine in ["x86_64", "amd64"]:
+        arch = "x64"
+    elif machine in ["aarch64", "arm64"]:
+        arch = "arm64"
+    else:
+        print(f"Warning: Unsupported architecture for auto-install: {machine}")
+        return None
+
+    version = "v22.22.0"
+    filename = f"node-{version}-{os_name}-{arch}.tar.gz"
+    url = f"https://nodejs.org/dist/{version}/{filename}"
+
+    print(f"Downloading {url}...")
+    tar_path = os.path.join(install_dir, filename)
+    try:
+        urllib.request.urlretrieve(url, tar_path)
+    except Exception as e:
+        print(f"Failed to download Node.js: {e}")
+        return None
+
+    print(f"Extracting {tar_path}...")
+    try:
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(path=install_dir)
+    except Exception as e:
+        print(f"Failed to extract Node.js: {e}")
+        return None
+
+    # The tarball creates a subdirectory, e.g., node-v22.13.0-linux-x64
+    extracted_dir = os.path.join(install_dir, filename.replace(".tar.gz", ""))
+    bin_dir = os.path.join(extracted_dir, "bin")
+
+    if not os.path.exists(bin_dir):
+        print(f"Error: expected bin directory not found at {bin_dir}")
+        return None
+
+    return bin_dir
+
+
 def setup_typescript_sdk(repo_root, env):
     """Installs the TypeScript SDK dependencies and builds it"""
     print("========= Ensuring TypeScript SDK is built... =========")
+
+    # Check if npm is available in PATH
+    npm_path = shutil.which("npm")
+
+    if npm_path:
+        print(f"Using system npm: {npm_path}")
+    else:
+        print("npm not found in PATH.")
+        # Check if we already have it installed locally
+        node_install_dir = os.path.join(repo_root, ".node")
+
+        # Let's try to locate the bin directory inside .node if it exists
+        found_bin = None
+        if os.path.exists(node_install_dir):
+            for item in os.listdir(node_install_dir):
+                 candidate = os.path.join(node_install_dir, item, "bin")
+                 if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "node")):
+                     found_bin = candidate
+                     break
+
+        if found_bin:
+             print(f"Using locally installed Node.js at {found_bin}")
+             env["PATH"] = f"{found_bin}:{env.get('PATH', '')}"
+        else:
+             print("Installing Node.js locally...")
+             bin_dir = install_node(node_install_dir)
+             if not bin_dir:
+                 print("Failed to install Node.js locally.")
+                 return False
+             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+
+    # Verify installation
+    try:
+        node_version = subprocess.run(["node", "--version"], env=env, capture_output=True, text=True, check=True)
+        npm_version = subprocess.run(["npm", "--version"], env=env, capture_output=True, text=True, check=True)
+        print(f"Verified Node.js: {node_version.stdout.strip()}")
+        print(f"Verified npm: {npm_version.stdout.strip()}")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Failed to verify Node.js/npm: {e}")
+        return False
+
     sdk_path = os.path.join(repo_root, "clients", "typescript", "agentic-sandbox-client")
 
     print(f"Installing TypeScript SDK dependencies at {sdk_path}")

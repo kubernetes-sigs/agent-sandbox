@@ -214,6 +214,7 @@ func TestReconcile(t *testing.T) {
 		wantObjs             []client.Object
 		wantDeletedObjs      []client.Object
 		expectSandboxDeleted bool
+		creationTime         *time.Time
 	}{
 		{
 			name: "minimal sandbox spec with Pod and Service",
@@ -436,7 +437,7 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				Lifecycle: sandboxv1alpha1.Lifecycle{
+				Lifecycle: &sandboxv1alpha1.Lifecycle{
 					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
@@ -483,7 +484,7 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				Lifecycle: sandboxv1alpha1.Lifecycle{
+				Lifecycle: &sandboxv1alpha1.Lifecycle{
 					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyDelete),
 				},
@@ -495,17 +496,147 @@ func TestReconcile(t *testing.T) {
 			},
 			expectSandboxDeleted: true,
 		},
+		{
+			name: "sandbox progress deadline hit surfaces failure",
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test"}},
+					},
+				},
+			},
+			// Creation happened 15 mins ago, exceeding the 10 min default
+			creationTime: ptr.To(time.Now().Add(-15 * time.Minute)),
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "ProgressDeadlineExceeded",
+						Message:            "Sandbox failed to reach Ready state within the allocated deadline.",
+					},
+				},
+				// Confirms logic stopped reconciling child resources
+				Replicas:      0,
+				LabelSelector: "",
+			},
+		},
+		{
+			name: "already stalled sandbox stops reconciliation early",
+			initialObjs: []runtime.Object{
+				// Object already has the failure condition
+				&sandboxv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs},
+					Status: sandboxv1alpha1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   "Ready",
+								Status: "False",
+								Reason: "ProgressDeadlineExceeded",
+							},
+						},
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test"}},
+					},
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   "Ready",
+						Status: "False",
+						Reason: "ProgressDeadlineExceeded",
+					},
+				},
+			},
+			// DO NOT create the Pod if stalled
+			wantDeletedObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "sandbox expired with retain policy",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+				Lifecycle: &sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
+			wantDeletedObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			sb := &sandboxv1alpha1.Sandbox{}
-			sb.Name = sandboxName
-			sb.Namespace = sandboxNs
-			sb.Generation = 1
+			// Use sandbox if found in initialObjs or create default sandbox
+			var sb *sandboxv1alpha1.Sandbox
+			for _, obj := range tc.initialObjs {
+				if s, ok := obj.(*sandboxv1alpha1.Sandbox); ok && s.Name == sandboxName {
+					sb = s
+					break
+				}
+			}
+
+			if sb == nil {
+				sb = &sandboxv1alpha1.Sandbox{}
+				sb.Name = sandboxName
+				sb.Namespace = sandboxNs
+				sb.Generation = 1
+				tc.initialObjs = append(tc.initialObjs, sb)
+			}
+
+			// Test sandboxes do not have a creation timestamp, create a default
+			if tc.creationTime != nil {
+				sb.CreationTimestamp = metav1.NewTime(*tc.creationTime)
+			} else if sb.CreationTimestamp.IsZero() {
+				sb.CreationTimestamp = metav1.Now()
+			}
 			sb.Spec = tc.sandboxSpec
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sb)...),
+				Client: newFakeClient(tc.initialObjs...),
 				Scheme: Scheme,
 				Tracer: asmetrics.NewNoOp(),
 			}
@@ -944,14 +1075,81 @@ func TestSandboxExpiry(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			sandbox := &sandboxv1alpha1.Sandbox{}
-			sandbox.Spec.ShutdownTime = tc.shutdownTime
+			sandbox := &sandboxv1alpha1.Sandbox{
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Lifecycle: &sandboxv1alpha1.Lifecycle{},
+				},
+			}
+			sandbox.Spec.Lifecycle.ShutdownTime = tc.shutdownTime
 			if tc.deletionPolicy != "" {
-				sandbox.Spec.ShutdownPolicy = ptr.To(tc.deletionPolicy)
+				sandbox.Spec.Lifecycle.ShutdownPolicy = ptr.To(tc.deletionPolicy)
 			}
 			expired, requeueAfter := checkSandboxExpiry(sandbox)
 			require.Equal(t, tc.wantExpired, expired)
 			if tc.wantRequeue {
+				require.Greater(t, requeueAfter, time.Duration(0))
+			} else {
+				require.Equal(t, time.Duration(0), requeueAfter)
+			}
+		})
+	}
+}
+
+func TestCheckProgressDeadline(t *testing.T) {
+	now := time.Now()
+	testCases := []struct {
+		name         string
+		creationTime time.Time
+		deadline     *int32
+		wantHit      bool
+		wantRequeue  bool
+	}{
+		{
+			name:         "under deadline - default",
+			creationTime: now.Add(-5 * time.Minute),
+			deadline:     nil,
+			wantHit:      false,
+			wantRequeue:  true,
+		},
+		{
+			name:         "over deadline - default",
+			creationTime: now.Add(-11 * time.Minute),
+			deadline:     nil,
+			wantHit:      true,
+			wantRequeue:  false,
+		},
+		{
+			name:         "under deadline - custom",
+			creationTime: now.Add(-1 * time.Minute),
+			deadline:     ptr.To(int32(120)), // 2 minutes
+			wantHit:      false,
+			wantRequeue:  true,
+		},
+		{
+			name:         "over deadline - custom",
+			creationTime: now.Add(-3 * time.Minute),
+			deadline:     ptr.To(int32(120)),
+			wantHit:      true,
+			wantRequeue:  false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					CreationTimestamp: metav1.NewTime(tc.creationTime),
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Lifecycle: &sandboxv1alpha1.Lifecycle{
+						ProgressDeadlineSeconds: tc.deadline,
+					},
+				},
+			}
+			hit, requeueAfter := checkProgressDeadline(sandbox)
+			require.Equal(t, tc.wantHit, hit)
+			if tc.wantRequeue {
+				// Verify we schedule reconciliation exactly when the timer expires
 				require.Greater(t, requeueAfter, time.Duration(0))
 			} else {
 				require.Equal(t, time.Duration(0), requeueAfter)

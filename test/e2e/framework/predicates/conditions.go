@@ -35,7 +35,17 @@ type objectWithStatus struct {
 }
 
 // ReadyConditionIsTrue checks if the given object has a Ready condition set to True.
-func ReadyConditionIsTrue(obj client.Object) (bool, error) {
+var ReadyConditionIsTrue = &StatusPredicate{
+	MatchType:   "Ready",
+	MatchStatus: metav1.ConditionTrue,
+}
+
+type StatusPredicate struct {
+	MatchType   string
+	MatchStatus metav1.ConditionStatus
+}
+
+func (s *StatusPredicate) Matches(obj client.Object) (bool, error) {
 	u, err := asUnstructured(obj)
 	if err != nil {
 		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
@@ -47,11 +57,15 @@ func ReadyConditionIsTrue(obj client.Object) (bool, error) {
 	}
 
 	for _, cond := range status.Status.Conditions {
-		if cond.Type == "Ready" && cond.Status == metav1.ConditionTrue {
+		if cond.Type == s.MatchType && cond.Status == s.MatchStatus {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func (s *StatusPredicate) String() string {
+	return fmt.Sprintf("StatusPredicate(Type=%s,Status=%s)", s.MatchType, s.MatchStatus)
 }
 
 // asUnstructured converts a client.Object to an *unstructured.Unstructured.
@@ -68,7 +82,15 @@ func asUnstructured(obj client.Object) (*unstructured.Unstructured, error) {
 }
 
 // ReadyReplicasConditionIsTrue checks if the given object has more than 0 replicas.
-func ReadyReplicasConditionIsTrue(obj client.Object) (bool, error) {
+var ReadyReplicasConditionIsTrue = &ReadyReplicasPredicate{}
+
+type ReadyReplicasPredicate struct{}
+
+func (s *ReadyReplicasPredicate) String() string {
+	return "ReadyReplicasPredicate(Has all replicas ready)"
+}
+
+func (s *ReadyReplicasPredicate) Matches(obj client.Object) (bool, error) {
 	u, err := asUnstructured(obj)
 	if err != nil {
 		return false, fmt.Errorf("failed to convert to unstructured: %w", err)

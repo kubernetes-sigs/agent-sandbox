@@ -137,7 +137,7 @@ func (cl *ClusterClient) MatchesPredicates(ctx context.Context, obj client.Objec
 		return false, fmt.Errorf("MatchesPredicates %T (%s): %w", obj, nn.String(), err)
 	}
 	for _, predicate := range p {
-		predicateMatches, err := predicate(obj)
+		predicateMatches, err := predicate.Matches(obj)
 		if err != nil {
 			return false, fmt.Errorf("MatchesPredicates %T (%s): %w", obj, nn.String(), err)
 		}
@@ -322,7 +322,7 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 			// Check if predicates are satisfied
 			allSatisfied := true
 			for _, predicate := range p {
-				predicateSatisfied, err := predicate(obj)
+				predicateSatisfied, err := predicate.Matches(obj)
 				if err != nil {
 					return err
 				}

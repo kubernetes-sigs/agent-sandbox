@@ -210,6 +210,7 @@ func TestReconcile(t *testing.T) {
 		name                 string
 		initialObjs          []runtime.Object
 		sandboxSpec          sandboxv1alpha1.SandboxSpec
+		sandboxAnnotations   map[string]string
 		wantStatus           sandboxv1alpha1.SandboxStatus
 		wantObjs             []client.Object
 		wantDeletedObjs      []client.Object
@@ -458,6 +459,56 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "sandbox expired with retain policy and adopted pod annotation",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "adopted-pod-name",
+						Namespace: sandboxNs,
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			sandboxAnnotations: map[string]string{
+				SandboxPodNameAnnotation: "adopted-pod-name",
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
+			wantDeletedObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "adopted-pod-name", Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
 			name: "sandbox expired with delete policy",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
@@ -504,6 +555,7 @@ func TestReconcile(t *testing.T) {
 			sb.Namespace = sandboxNs
 			sb.Generation = 1
 			sb.Spec = tc.sandboxSpec
+			sb.Annotations = tc.sandboxAnnotations
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sb)...),
 				Scheme: Scheme,

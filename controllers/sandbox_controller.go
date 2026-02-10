@@ -649,9 +649,14 @@ func (r *SandboxReconciler) adoptPodPVCs(ctx context.Context, sandbox *sandboxv1
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
 	var allErrors error
+	podName := sandbox.Name
+	if trackedPodName, ok := sandbox.Annotations[SandboxPodNameAnnotation]; ok && trackedPodName != "" {
+		podName = trackedPodName
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
+			Name:      podName,
 			Namespace: sandbox.Namespace,
 		},
 	}

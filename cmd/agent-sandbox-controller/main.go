@@ -38,6 +38,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -69,9 +70,12 @@ func main() {
 	var sandboxWarmPoolMaxBatchSize int
 	var enableWarmPoolEviction bool
 	var printVersion bool
+	var watchNamespace string
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&watchNamespace, "namespace", "",
+		"Namespace to watch. If set, the controller only reconciles resources in this namespace. Empty means all namespaces.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
@@ -220,14 +224,22 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
-	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+	mgrOpts := ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsOpts,
 		HealthProbeBindAddress:  probeAddr,
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
-	})
+	}
+	if watchNamespace != "" {
+		mgrOpts.Cache = cache.Options{
+			DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
+		}
+		setupLog.Info("running in namespaced mode", "namespace", watchNamespace)
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)

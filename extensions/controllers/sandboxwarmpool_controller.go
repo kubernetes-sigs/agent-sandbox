@@ -256,6 +256,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			if err := r.createPoolPod(ctx, warmPool, poolNameHash); err != nil {
 				log.Error(err, "Failed to create pod")
 				allErrors = errors.Join(allErrors, err)
+				log.Info("Stopping further pod creation after failure", "attempt", i+1, "remaining", podsToCreate-i-1)
+				break
 			}
 		}
 	}
@@ -337,6 +339,27 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 	// Generate a unique suffix for this pod instance
 	podSuffix := rand.String(5)
 	podName := fmt.Sprintf("%s-%s", warmPool.Name, podSuffix)
+	createdPVCNames := make([]string, 0, len(template.Spec.VolumeClaimTemplates))
+
+	cleanupCreatedPVCs := func() error {
+		var cleanupErr error
+		for _, pvcName := range createdPVCNames {
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: warmPool.Namespace,
+				},
+			}
+			if err := r.Delete(ctx, pvc); err != nil {
+				if !k8serrors.IsNotFound(err) {
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("failed to rollback PVC %q: %w", pvcName, err))
+				}
+				continue
+			}
+			log.Info("Rolled back PVC after pod creation failure", "pvc", pvcName, "pod", podName)
+		}
+		return cleanupErr
+	}
 
 	// Create PVCs from volumeClaimTemplates
 	var pvcVolumes []corev1.Volume
@@ -378,9 +401,10 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		if err := r.Create(ctx, pvc); err != nil {
 			if !k8serrors.IsAlreadyExists(err) {
 				log.Error(err, "Failed to create PVC", "pvc", pvcName)
-				return err
+				return errors.Join(err, cleanupCreatedPVCs())
 			}
 		} else {
+			createdPVCNames = append(createdPVCNames, pvcName)
 			log.Info("Created PVC for warm pool pod", "pvc", pvcName)
 		}
 
@@ -412,13 +436,16 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {
-		return fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+		return errors.Join(fmt.Errorf("SetControllerReference for Pod failed: %w", err), cleanupCreatedPVCs())
 	}
 
 	// Create the Pod
 	if err := r.Create(ctx, pod); err != nil {
 		log.Error(err, "Failed to create pod")
-		return err
+		if k8serrors.IsAlreadyExists(err) {
+			return err
+		}
+		return errors.Join(err, cleanupCreatedPVCs())
 	}
 
 	log.Info("Created new pool pod", "pod", pod.Name, "poolName", warmPool.Name, "poolNameHash", poolNameHash)

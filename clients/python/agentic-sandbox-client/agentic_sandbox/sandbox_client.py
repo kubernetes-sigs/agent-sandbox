@@ -17,54 +17,36 @@ It handles lifecycle management (claiming, waiting) and interaction (execution,
 file I/O) with the sandbox environment, including optional OpenTelemetry tracing.
 """
 
-import json
 import os
-import sys
 import time
 import socket
 import subprocess
 import logging
-from dataclasses import dataclass
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from kubernetes import client, config, watch
 
-# Import all tracing components from the trace_manager module
-from .trace_manager import (
-    initialize_tracer, TracerManager, trace_span, trace, OPENTELEMETRY_AVAILABLE
+# Shared base and constants
+from .sandbox_client_base import (
+    ExecutionResult,
+    SandboxClientBase,
+    GATEWAY_API_GROUP,
+    GATEWAY_API_VERSION,
+    GATEWAY_PLURAL,
+    CLAIM_API_GROUP,
+    CLAIM_API_VERSION,
+    CLAIM_PLURAL_NAME,
+    SANDBOX_API_GROUP,
+    SANDBOX_API_VERSION,
+    SANDBOX_PLURAL_NAME,
 )
-
-# Constants for API Groups and Resources
-GATEWAY_API_GROUP = "gateway.networking.k8s.io"
-GATEWAY_API_VERSION = "v1"
-GATEWAY_PLURAL = "gateways"
-
-CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
-CLAIM_API_VERSION = "v1alpha1"
-CLAIM_PLURAL_NAME = "sandboxclaims"
-
-SANDBOX_API_GROUP = "agents.x-k8s.io"
-SANDBOX_API_VERSION = "v1alpha1"
-SANDBOX_PLURAL_NAME = "sandboxes"
-
-POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    stream=sys.stdout)
+# Import all tracing components from the trace_manager module
+from .trace_manager import trace_span, trace
 
 
-@dataclass
-class ExecutionResult:
-    """A structured object for holding the result of a command execution."""
-    stdout: str
-    stderr: str
-    exit_code: int
-
-
-class SandboxClient:
+class SandboxClient(SandboxClientBase):
     """
     A client for creating and interacting with a stateful Sandbox via a router.
     """
@@ -83,35 +65,21 @@ class SandboxClient:
         enable_tracing: bool = False,
         trace_service_name: str = "sandbox-client",
     ):
-        self.trace_service_name = trace_service_name
-        self.tracing_manager = None
-        self.tracer = None
-        if enable_tracing:
-            if not OPENTELEMETRY_AVAILABLE:
-                logging.error(
-                    "OpenTelemetry not installed; skipping tracer initialization.")
-            else:
-                initialize_tracer(service_name=trace_service_name)
-                self.tracing_manager = TracerManager(
-                    service_name=trace_service_name)
-                self.tracer = self.tracing_manager.tracer
-
-        self.template_name = template_name
-        self.namespace = namespace
-        self.gateway_name = gateway_name
-        self.gateway_namespace = gateway_namespace
-        self.base_url = api_url  # If provided, we skip discovery
-        self.server_port = server_port
-        self.sandbox_ready_timeout = sandbox_ready_timeout
-        self.gateway_ready_timeout = gateway_ready_timeout
-        self.port_forward_ready_timeout = port_forward_ready_timeout
+        super().__init__(
+            template_name=template_name,
+            namespace=namespace,
+            gateway_name=gateway_name,
+            gateway_namespace=gateway_namespace,
+            api_url=api_url,
+            server_port=server_port,
+            sandbox_ready_timeout=sandbox_ready_timeout,
+            gateway_ready_timeout=gateway_ready_timeout,
+            port_forward_ready_timeout=port_forward_ready_timeout,
+            enable_tracing=enable_tracing,
+            trace_service_name=trace_service_name,
+        )
 
         self.port_forward_process: subprocess.Popen | None = None
-
-        self.claim_name: str | None = None
-        self.sandbox_name: str | None = None
-        self.pod_name: str | None = None
-        self.annotations: dict | None = None
 
         try:
             config.load_incluster_config()
@@ -131,31 +99,14 @@ class SandboxClient:
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
-    def is_ready(self) -> bool:
-        """Returns True if the sandbox is ready and the Gateway IP has been found."""
-        return self.base_url is not None
-
     @trace_span("create_claim")
     def _create_claim(self, trace_context_str: str = ""):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
-        self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
+        manifest = self._build_claim_manifest(trace_context_str)
 
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", self.claim_name)
-
-        annotations = {}
-        if trace_context_str:
-            annotations["opentelemetry.io/trace-context"] = trace_context_str
-
-        manifest = {
-            "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
-            "kind": "SandboxClaim",
-            "metadata": {"name": self.claim_name,
-                         "annotations": annotations
-                         },
-            "spec": {"sandboxTemplateRef": {"name": self.template_name}}
-        }
         logging.info(
             f"Creating SandboxClaim '{self.claim_name}' "
             f"in namespace '{self.namespace}' "
@@ -198,36 +149,15 @@ class SandboxClient:
                         break
 
                 if is_ready:
-                    metadata = sandbox_object.get(
-                        "metadata", {})
-                    self.sandbox_name = metadata.get(
-                        "name")
-                    if not self.sandbox_name:
-                        raise RuntimeError(
-                            "Could not determine sandbox name from sandbox object.")
+                    self._set_sandbox_metadata(sandbox_object)
                     logging.info(f"Sandbox {self.sandbox_name} is ready.")
 
-                    self.annotations = sandbox_object.get(
-                        'metadata', {}).get('annotations', {})
-                    pod_name = self.annotations.get(POD_NAME_ANNOTATION)
-                    if pod_name:
-                        self.pod_name = pod_name
-                        logging.info(
-                            f"Found pod name from annotation: {self.pod_name}")
-                    else:
-                        self.pod_name = self.sandbox_name
                     w.stop()
                     return
 
         self.__exit__(None, None, None)
         raise TimeoutError(
             f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
-
-    def _get_free_port(self):
-        """Finds a free port on localhost."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', 0))
-            return s.getsockname()[1]
 
     @trace_span("dev_mode_tunnel")
     def _start_and_wait_for_port_forward(self):
@@ -306,16 +236,9 @@ class SandboxClient:
         ):
             if event["type"] in ["ADDED", "MODIFIED"]:
                 gateway_object = event['object']
-                status = gateway_object.get('status', {})
-                addresses = status.get('addresses', [])
-                if addresses:
-                    ip_address = addresses[0].get('value')
-                    if ip_address:
-                        self.base_url = f"http://{ip_address}"
-                        logging.info(
-                            f"Gateway is ready. Base URL set to: {self.base_url}")
-                        w.stop()
-                        return
+                if self._set_base_url_from_gateway(gateway_object):
+                    w.stop()
+                    return
 
         if not self.base_url:
             raise TimeoutError(
@@ -324,12 +247,7 @@ class SandboxClient:
             )
 
     def __enter__(self) -> 'SandboxClient':
-        trace_context_str = ""
-        # We can't use the "with trace..." context management. This is the equivalent.
-        # https://github.com/open-telemetry/opentelemetry-python/issues/2787
-        if self.tracing_manager:
-            self.tracing_manager.start_lifecycle_span()
-            trace_context_str = self.tracing_manager.get_trace_context_json()
+        trace_context_str = self._start_lifecycle_span()
 
         self._create_claim(trace_context_str)
         self._wait_for_sandbox_ready()
@@ -383,11 +301,7 @@ class SandboxClient:
                     f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
 
         # Cleanup Trace if it exists
-        if self.tracing_manager:
-            try:
-                self.tracing_manager.end_lifecycle_span()
-            except Exception as e:
-                logging.error(f"Failed to end tracing span: {e}")
+        self._end_lifecycle_span()
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         if not self.is_ready():
@@ -401,13 +315,8 @@ class SandboxClient:
                 f"Stderr: {stderr.decode(errors='ignore')}"
             )
 
-        url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-
-        headers = kwargs.get("headers", {})
-        headers["X-Sandbox-ID"] = self.claim_name
-        headers["X-Sandbox-Namespace"] = self.namespace
-        headers["X-Sandbox-Port"] = str(self.server_port)
-        kwargs["headers"] = headers
+        url = self._build_url(endpoint)
+        kwargs["headers"] = self._build_request_headers(kwargs.get("headers"))
 
         try:
             response = self.session.request(method, url, **kwargs)

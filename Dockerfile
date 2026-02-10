@@ -1,8 +1,6 @@
-ARG GO_VERSION="1.25.3"
-
 # Build go binaries
 # See https://github.com/golang/go/issues/69255#issuecomment-2523276831
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25.7 AS builder
 
 # Declare TARGETARCH to make it available in this build stage
 ARG TARGETARCH

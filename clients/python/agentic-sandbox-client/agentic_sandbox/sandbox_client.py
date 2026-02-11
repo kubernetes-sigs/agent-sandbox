@@ -58,7 +58,6 @@ logging.basicConfig(level=logging.INFO,
 
 class SandboxStatus(Enum):
     """Enumeration for Sandbox status states."""
-    SANDBOX_NOT_CREATED = "SandboxNotCreated"
     PROVISIONING = "Provisioning"
     RUNNING = "Running"
     SUCCEEDED = "Succeeded"
@@ -128,6 +127,7 @@ class SandboxClient:
             config.load_kube_config()
 
         self.custom_objects_api = client.CustomObjectsApi()
+        self.core_v1_api = client.CoreV1Api()
 
         # HTTP session with retries
         self.session = requests.Session()
@@ -492,16 +492,13 @@ class SandboxClient:
         """
         Returns the lifecycle status of the sandbox.
         """
+        
         span = trace.get_current_span()
         if span.is_recording():
-            span.set_attribute("sandbox.name", self.claim_name)
-
-        if not self.claim_name:
-            return SandboxStatus.SANDBOX_NOT_CREATED
+            span.set_attribute("sandbox.name", self.sandbox_name)
 
         try:
-            v1 = client.CoreV1Api()
-            pod = v1.read_namespaced_pod(
+            pod = self.core_v1_api.read_namespaced_pod(
                 name=self.pod_name, namespace=self.namespace)
             
             status_map = {
@@ -516,7 +513,11 @@ class SandboxClient:
                 span.set_attribute("sandbox.status", status.value)
             return status
 
-        except Exception:
-            logging.error("Failed to fetch sandbox status.", exc_info=True)
+        except client.ApiException as e:
+            if e.status == 404:
+                return SandboxStatus.FAILED
+            logging.error(f"Pod not found: {e}")
+        except Exception as e:
+            logging.error(f"Unexpected error fetching sandbox status: {e}")
             return SandboxStatus.UNKNOWN
         

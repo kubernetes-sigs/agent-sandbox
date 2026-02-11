@@ -75,6 +75,24 @@ class FileEntry(BaseModel):
 class SandboxClient:
     """
     A client for creating and interacting with a stateful Sandbox via a router.
+
+    Args:
+        template_name: Name of the SandboxTemplate to claim.
+        namespace: Kubernetes namespace for the sandbox (default: "default").
+        gateway_name: Optional gateway name for production mode.
+        gateway_namespace: Namespace where the gateway lives (default: "default").
+        api_url: Direct API URL bypassing gateway discovery.
+        server_port: Port the sandbox runtime listens on (default: 8888).
+        sandbox_ready_timeout: Timeout waiting for sandbox readiness (default: 180s).
+        gateway_ready_timeout: Timeout waiting for gateway IP (default: 180s).
+        port_forward_ready_timeout: Timeout waiting for port-forward (default: 30s).
+        enable_tracing: Enable OpenTelemetry tracing.
+        trace_service_name: Service name for tracing (default: "sandbox-client").
+        claim_name: Optional custom claim name. If provided and the claim already
+            exists, the client reconnects to it (check was_reconnected property).
+            If the claim does not exist, a new one is created with this name.
+        delete_on_exit: Whether to delete the sandbox on context exit (default: True).
+            Set to False for persistent sandboxes that survive across sessions.
     """
 
     def __init__(
@@ -90,6 +108,8 @@ class SandboxClient:
         port_forward_ready_timeout: int = 30,
         enable_tracing: bool = False,
         trace_service_name: str = "sandbox-client",
+        claim_name: str | None = None,
+        delete_on_exit: bool = True,
     ):
         self.trace_service_name = trace_service_name
         self.tracing_manager = None
@@ -113,11 +133,14 @@ class SandboxClient:
         self.sandbox_ready_timeout = sandbox_ready_timeout
         self.gateway_ready_timeout = gateway_ready_timeout
         self.port_forward_ready_timeout = port_forward_ready_timeout
+        self.delete_on_exit = delete_on_exit
+        self._custom_claim_name = claim_name
 
         self.port_forward_process: subprocess.Popen | None = None
 
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
+        self._reconnected: bool = False
         self.pod_name: str | None = None
         self.annotations: dict | None = None
 
@@ -143,10 +166,133 @@ class SandboxClient:
         """Returns True if the sandbox is ready and the Gateway IP has been found."""
         return self.base_url is not None
 
+    @property
+    def was_reconnected(self) -> bool:
+        """Returns True if this client reconnected to an existing sandbox.
+
+        Only valid after entering the context manager. Returns True if a
+        custom claim_name was provided and the claim already existed.
+        """
+        return self._reconnected
+
+    @classmethod
+    def connect(
+        cls,
+        claim_name: str,
+        template_name: str,
+        namespace: str = "default",
+        **kwargs,
+    ) -> "SandboxClient":
+        """Connect to an existing sandbox by claim name.
+
+        This is a convenience method for reconnecting to a sandbox that was
+        created with delete_on_exit=False. If the claim doesn't exist, it will
+        be created.
+
+        Note:
+            This method automatically sets delete_on_exit=False, so the sandbox
+            will persist after the context manager exits.
+
+        Args:
+            claim_name: The name of the existing SandboxClaim.
+            template_name: The template name (required for creating if missing).
+            namespace: Kubernetes namespace (default: "default").
+            **kwargs: Additional arguments passed to SandboxClient.
+
+        Returns:
+            SandboxClient configured to connect to the existing sandbox.
+
+        Example:
+            # First session - create persistent sandbox
+            with SandboxClient(
+                template_name="python",
+                claim_name="my-sandbox",
+                delete_on_exit=False
+            ) as client:
+                client.run("echo 'hello' > /app/state.txt")
+
+            # Later session - reconnect (delete_on_exit=False is set automatically)
+            with SandboxClient.connect(
+                claim_name="my-sandbox",
+                template_name="python"
+            ) as client:
+                result = client.run("cat /app/state.txt")
+        """
+        return cls(
+            template_name=template_name,
+            namespace=namespace,
+            claim_name=claim_name,
+            delete_on_exit=False,
+            **kwargs,
+        )
+
+    def delete(self) -> bool:
+        """Explicitly delete the sandbox claim.
+
+        Useful when delete_on_exit=False but you want to clean up manually.
+
+        Returns:
+            True if deleted successfully, False if not found or error.
+        """
+        if not self.claim_name:
+            logging.warning("No claim name set, nothing to delete")
+            return False
+
+        logging.info(f"Explicitly deleting SandboxClaim: {self.claim_name}")
+        try:
+            self.custom_objects_api.delete_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=self.namespace,
+                plural=CLAIM_PLURAL_NAME,
+                name=self.claim_name
+            )
+            return True
+        except client.ApiException as e:
+            if e.status == 404:
+                logging.warning(f"SandboxClaim '{self.claim_name}' not found")
+                return False
+            logging.error(f"Error deleting sandbox claim: {e}", exc_info=True)
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
+            return False
+
+    def _claim_exists(self, claim_name: str) -> bool:
+        """Check if a SandboxClaim with the given name exists."""
+        try:
+            self.custom_objects_api.get_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=self.namespace,
+                plural=CLAIM_PLURAL_NAME,
+                name=claim_name,
+            )
+            return True
+        except client.ApiException as e:
+            if e.status == 404:
+                return False
+            raise
+
     @trace_span("create_claim")
     def _create_claim(self, trace_context_str: str = ""):
-        """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
-        self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
+        """Creates the SandboxClaim custom resource in the Kubernetes cluster.
+
+        If a custom claim_name was provided and that claim already exists,
+        this method will reconnect to it instead of creating a new one.
+        """
+        if self._custom_claim_name:
+            self.claim_name = self._custom_claim_name
+            # Check if the claim already exists
+            if self._claim_exists(self.claim_name):
+                logging.info(
+                    f"Reconnecting to existing SandboxClaim '{self.claim_name}' "
+                    f"in namespace '{self.namespace}'..."
+                )
+                self._reconnected = True
+                return
+        else:
+            self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
 
         span = trace.get_current_span()
         if span.is_recording():
@@ -371,8 +517,8 @@ class SandboxClient:
             except Exception as e:
                 logging.error(f"Failed to stop port-forwarding: {e}")
 
-        # Delete the SandboxClaim
-        if self.claim_name:
+        # Delete the SandboxClaim only if delete_on_exit is True
+        if self.claim_name and self.delete_on_exit:
             logging.info(f"Deleting SandboxClaim: {self.claim_name}")
             try:
                 self.custom_objects_api.delete_namespaced_custom_object(
@@ -389,6 +535,10 @@ class SandboxClient:
             except Exception as e:
                 logging.error(
                     f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
+        elif self.claim_name and not self.delete_on_exit:
+            logging.info(
+                f"Keeping SandboxClaim '{self.claim_name}' alive (delete_on_exit=False)"
+            )
 
         # Cleanup Trace if it exists
         if self.tracing_manager:

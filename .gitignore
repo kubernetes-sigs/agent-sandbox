@@ -11,6 +11,8 @@ release_assets/
 
 # Node.js
 node_modules/
+# Dynamic versioning file (generated during CI/CD)
+clients/python/agentic-sandbox-client/VERSION
 
 # Temporary folders
 tmp/

@@ -85,10 +85,11 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path):
 
 def main(args):
     """Builds and pushes all discovered Docker images."""
-    excluded_dirs = {"dev", "docs", "k8s", "site",
-                     "tests", "bin", ".venv", "tmp", "temp"}
+    excluded_dirs = {"bin", "dev", "docs", "k8s", "site",
+                     "temp", "tests", "tmp", ".venv"}
 
     if args.controller_only:
+        # TODO: Implement an explicit inclusion strategy for controller only Dockerfile.
         excluded_dirs.update({"examples", "clients"})
 
     for root, dirs, files in os.walk(".", topdown=True):

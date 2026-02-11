@@ -27,3 +27,15 @@ go test ./test/e2e/... --parallel=1
 ```
 
 Note: the `--parallel=1` argument makes sure only a single test runs at a time.
+
+## LangChain DeepAgents adapter e2e (optional)
+
+The DeepAgents adapter e2e test is gated by environment variables so it can run
+against an existing cluster/router without extra setup. Set:
+
+- `LANGCHAIN_SANDBOX_TEMPLATE` (required)
+- `LANGCHAIN_NAMESPACE` (optional, default: `default`)
+- `LANGCHAIN_GATEWAY_NAME` or `LANGCHAIN_API_URL` (required unless `LANGCHAIN_USE_TUNNEL=1`)
+- `LANGCHAIN_GATEWAY_NAMESPACE` (optional)
+- `LANGCHAIN_SERVER_PORT` (optional, default: `8888`)
+- `LANGCHAIN_ROOT_DIR` (optional, default: `/app`)

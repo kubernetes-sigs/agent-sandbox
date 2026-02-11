@@ -80,7 +80,6 @@ release-manifests:
 	./dev/tools/release --tag=${TAG} 
 
 # Example usage:
-# make release-python-sdk TAG=v0.1.0 (to release on TestPyPI and PyPI)
 # make release-python-sdk TAG=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
 # make release-python-sdk TAG=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
 .PHONY: release-python-sdk

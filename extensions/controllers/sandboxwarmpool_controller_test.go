@@ -393,7 +393,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 			},
 			Spec: extensionsv1alpha1.SandboxTemplateSpec{
 				PodTemplate: sandboxv1alpha1.PodTemplate{
-					ObjectMeta: sandboxv1alpha1.PodMetadata{
+					ObjectMeta: sandboxv1alpha1.TemplateObjectMetadata{
 						Labels: map[string]string{
 							"pod-label": "from-podtemplate",
 							"version":   "2.0",

@@ -21,23 +21,23 @@ import re
 from agentic_sandbox.gke_extensions import PodSnapshotSandboxClient
 
 
-def test_checkpoint_response(checkpoint_response, checkpoint_name):
+def test_snapshot_response(snapshot_response, snapshot_name):
     assert hasattr(
-        checkpoint_response, "trigger_name"
-    ), "Checkpoint response missing 'trigger_name' attribute"
+        snapshot_response, "trigger_name"
+    ), "snapshot response missing 'trigger_name' attribute"
 
-    print(f"Trigger Name: {checkpoint_response.trigger_name}")
-    print(f"Success: {checkpoint_response.success}")
-    print(f"Error Code: {checkpoint_response.error_code}")
-    print(f"Error Reason: {checkpoint_response.error_reason}")
+    print(f"Trigger Name: {snapshot_response.trigger_name}")
+    print(f"Success: {snapshot_response.success}")
+    print(f"Error Code: {snapshot_response.error_code}")
+    print(f"Error Reason: {snapshot_response.error_reason}")
 
-    assert checkpoint_response.trigger_name.startswith(
-        checkpoint_name
-    ), f"Expected trigger name prefix '{checkpoint_name}', but got '{checkpoint_response.trigger_name}'"
+    assert snapshot_response.trigger_name.startswith(
+        snapshot_name
+    ), f"Expected trigger name prefix '{snapshot_name}', but got '{snapshot_response.trigger_name}'"
     assert (
-        checkpoint_response.success
-    ), f"Expected success=True, but got False. Reason: {checkpoint_response.error_reason}"
-    assert checkpoint_response.error_code == 0
+        snapshot_response.success
+    ), f"Expected success=True, but got False. Reason: {snapshot_response.error_reason}"
+    assert snapshot_response.error_code == 0
 
 
 async def main(
@@ -63,8 +63,8 @@ async def main(
         config.load_kube_config()
 
     wait_time = 10
-    first_checkpoint_name = "test-snapshot-10"
-    second_checkpoint_name = "test-snapshot-20"
+    first_snapshot_name = "test-snapshot-10"
+    second_snapshot_name = "test-snapshot-20"
     core_v1_api = client.CoreV1Api()
 
     try:
@@ -81,18 +81,18 @@ async def main(
 
             time.sleep(wait_time)
             print(
-                f"Creating first pod snapshot '{first_checkpoint_name}' after {wait_time} seconds..."
+                f"Creating first pod snapshot '{first_snapshot_name}' after {wait_time} seconds..."
             )
-            checkpoint_response = sandbox.checkpoint(first_checkpoint_name)
-            test_checkpoint_response(checkpoint_response, first_checkpoint_name)
+            snapshot_response = sandbox.snapshot(first_snapshot_name)
+            test_snapshot_response(snapshot_response, first_snapshot_name)
 
             time.sleep(wait_time)
 
             print(
-                f"\nCreating second pod snapshot '{second_checkpoint_name}' after {wait_time} seconds..."
+                f"\nCreating second pod snapshot '{second_snapshot_name}' after {wait_time} seconds..."
             )
-            checkpoint_response = sandbox.checkpoint(second_checkpoint_name)
-            test_checkpoint_response(checkpoint_response, second_checkpoint_name)
+            snapshot_response = sandbox.snapshot(second_snapshot_name)
+            test_snapshot_response(snapshot_response, second_snapshot_name)
 
         print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
         with PodSnapshotSandboxClient(
@@ -100,7 +100,7 @@ async def main(
             namespace=namespace,
             api_url=api_url,
             server_port=server_port,
-        ) as sandbox_restored:  # restores from second_checkpoint_name by default
+        ) as sandbox_restored:  # restores from second_snapshot_name by default
 
             print("\nWaiting 5 seconds for restored pod to resume printing...")
             time.sleep(5)
@@ -116,7 +116,7 @@ async def main(
                 len(counts) > 0
             ), "Failed to retrieve any 'Count:' logs from restored pod."
 
-            # Verify the counter resumed from the correct checkpoint state.
+            # Verify the counter resumed from the correct snapshot state.
             # The second snapshot was taken after two wait intervals (totaling 20s if wait_time=10).
             min_expected_count_at_restore = wait_time * 2
             first_count_after_restore = counts[0]

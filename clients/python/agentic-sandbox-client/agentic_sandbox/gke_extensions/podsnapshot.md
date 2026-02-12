@@ -1,6 +1,6 @@
 # Agentic Sandbox Pod Snapshot Extension
 
-This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger checkpoints (snapshots) of a running sandbox and restore a new sandbox from the recently created snapshot.
+This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger snapshots of a running sandbox and restore a new sandbox from the recently created snapshot.
 
 ## `podsnapshot_client.py`
 
@@ -21,12 +21,12 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   If snapshot exists, the pod snapshot controller restores from the most recent snapshot matching the label of the `SandboxTemplate`, otherwise creates a new `Sandbox`.
 *   **`snapshot_controller_ready(self) -> bool`**:
     *   Checks if the snapshot agent (both self-installed and GKE managed) is running and ready.
-*   **`checkpoint(self, trigger_name: str) -> tuple[ExecutionResult, str]`**:
+*   **`snapshot(self, trigger_name: str) -> SnapshotResponse`**:
     *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
     *   The trigger_name is suffixed with unique hash.
     *   Waits for the snapshot to be processed.
     *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
-    *   Returns the CheckpointResponse object(success, error_code, error_reason, trigger_name).
+    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name).
 *   **`list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None`**:
     *  TBD
 *   **`delete_snapshots(self, trigger_name: str) -> int`**:
@@ -36,11 +36,11 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
 
 ## `test_podsnapshot_extension.py`
 
-This file, located in the parent directory (`clients/python/agentic-sandbox-client/`), contains an integration test script for the `PodSnapshotSandboxClient` extension. It verifies the checkpoint and restore functionality.
+This file, located in the parent directory (`clients/python/agentic-sandbox-client/`), contains an integration test script for the `PodSnapshotSandboxClient` extension. It verifies the snapshot and restore functionality.
 
 ### Test Phases:
 
-1.  **Phase 1: Starting Counter & Checkpointing**:
+1.  **Phase 1: Starting Counter & Snapshotting**:
     *   Starts a sandbox with a counter application.
     *   Takes a snapshot (`test-snapshot-10`) after ~10 seconds.
     *   Takes a second snapshot (`test-snapshot-20`) after another ~10 seconds.

@@ -129,9 +129,9 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         logging.info("Finished test_snapshot_controller_ready_status_not_ready.")
 
     @patch("agentic_sandbox.gke_extensions.podsnapshot_client.watch.Watch")
-    def test_checkpoint_success(self, mock_watch_class):
-        """Test successful checkpoint creation."""
-        logging.info("Starting test_checkpoint_success...")
+    def test_snapshot_success(self, mock_watch_class):
+        """Test successful snapshot creation."""
+        logging.info("Starting test_snapshot_success...")
 
         # Mock the watch
         mock_watch = MagicMock()
@@ -160,7 +160,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         }
         mock_watch.stream.return_value = [mock_event]
 
-        result = self.client.checkpoint("test-trigger")
+        result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 0)
         self.assertTrue(result.success)
@@ -168,38 +168,38 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         # Verify create call was made
         self.client.custom_objects_api.create_namespaced_custom_object.assert_called_once()
-        logging.info("Finished test_checkpoint_success.")
+        logging.info("Finished test_snapshot_success.")
 
-    def test_checkpoint_controller_not_ready(self):
-        """Test checkpoint when controller is not ready."""
-        logging.info("Starting test_checkpoint_controller_not_ready...")
+    def test_snapshot_controller_not_ready(self):
+        """Test snapshot when controller is not ready."""
+        logging.info("Starting test_snapshot_controller_not_ready...")
         self.client.controller_ready = False
-        result = self.client.checkpoint("test-trigger")
+        result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 1)
         self.assertFalse(result.success)
         self.assertIn("test-trigger", result.trigger_name)
         self.assertIn("Snapshot controller is not ready", result.error_reason)
-        logging.info("Finished test_checkpoint_controller_not_ready.")
+        logging.info("Finished test_snapshot_controller_not_ready.")
 
-    def test_checkpoint_no_pod_name(self):
-        """Test checkpoint when pod name is not set."""
-        logging.info("Starting test_checkpoint_no_pod_name...")
+    def test_snapshot_no_pod_name(self):
+        """Test snapshot when pod name is not set."""
+        logging.info("Starting test_snapshot_no_pod_name...")
         self.client.controller_ready = True
         self.client.pod_name = None
-        result = self.client.checkpoint("test-trigger")
+        result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 1)
         self.assertFalse(result.success)
         self.assertIn("test-trigger", result.trigger_name)
         self.assertIn("Sandbox pod name not found", result.error_reason)
-        logging.info("Finished test_checkpoint_no_pod_name.")
+        logging.info("Finished test_snapshot_no_pod_name.")
 
     @patch("agentic_sandbox.gke_extensions.podsnapshot_client.watch.Watch")
     @patch("agentic_sandbox.gke_extensions.podsnapshot_client.client.CustomObjectsApi")
-    def test_checkpoint_timeout(self, mock_custom_class, mock_watch_class):
-        """Test checkpoint timeout scenario."""
-        logging.info("Starting test_checkpoint_timeout...")
+    def test_snapshot_timeout(self, mock_custom_class, mock_watch_class):
+        """Test snapshot timeout scenario."""
+        logging.info("Starting test_snapshot_timeout...")
         mock_custom = MagicMock()
         mock_custom_class.return_value = mock_custom
 
@@ -213,12 +213,12 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         # Mock empty stream (timeout)
         mock_watch.stream.return_value = []
 
-        result = self.client.checkpoint("test-trigger")
+        result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 1)
         self.assertFalse(result.success)
         self.assertIn("timed out", result.error_reason)
-        logging.info("Finished test_checkpoint_timeout.")
+        logging.info("Finished test_snapshot_timeout.")
 
     @patch("agentic_sandbox.gke_extensions.podsnapshot_client.SandboxClient.__exit__")
     def test_exit(self, mock_super_exit):

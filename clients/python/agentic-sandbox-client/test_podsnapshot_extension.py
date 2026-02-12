@@ -20,32 +20,41 @@ from kubernetes import client, config
 import re
 from agentic_sandbox.gke_extensions import PodSnapshotSandboxClient
 
-POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
-def test_checkpoint_respone(checkpoint_response, checkpoint_name):
-    assert hasattr(checkpoint_response, "execution_result"), "Checkpoint response missing 'execution_result' attribute"
-    assert hasattr(checkpoint_response, "trigger_name"), "Checkpoint response missing 'trigger_name' attribute"
+def test_checkpoint_response(checkpoint_response, checkpoint_name):
+    assert hasattr(
+        checkpoint_response, "trigger_name"
+    ), "Checkpoint response missing 'trigger_name' attribute"
 
-    execution_result = checkpoint_response.execution_result
-    trigger_name = checkpoint_response.trigger_name
+    print(f"Trigger Name: {checkpoint_response.trigger_name}")
+    print(f"Success: {checkpoint_response.success}")
+    print(f"Error Code: {checkpoint_response.error_code}")
+    print(f"Error Reason: {checkpoint_response.error_reason}")
 
-    print(f"Trigger Command Stdout: {execution_result.stdout.strip()}")
-    print(f"Trigger Command Stderr: {execution_result.stderr.strip()}")
-    print(f"Trigger Command Exit Code: {execution_result.exit_code}")
+    assert checkpoint_response.trigger_name.startswith(
+        checkpoint_name
+    ), f"Expected trigger name prefix '{checkpoint_name}', but got '{checkpoint_response.trigger_name}'"
+    assert (
+        checkpoint_response.success
+    ), f"Expected success=True, but got False. Reason: {checkpoint_response.error_reason}"
+    assert checkpoint_response.error_code == 0
 
-    assert trigger_name.startswith(checkpoint_name), f"Expected trigger name prefix '{checkpoint_name}', but got '{trigger_name}'"
-    assert execution_result.stderr == "", f"Expected no error when creating checkpoint '{checkpoint_name}', but got: {execution_result.stderr.strip()}"
-    assert execution_result.exit_code == 0
-    
 
-async def main(template_name: str, api_url: str | None, namespace: str, server_port: int, labels: dict[str, str]):
+async def main(
+    template_name: str,
+    api_url: str | None,
+    namespace: str,
+    server_port: int,
+    labels: dict[str, str],
+):
     """
     Tests the Sandbox client by creating a sandbox, running a command,
     and then cleaning up.
     """
 
     print(
-        f"--- Starting Sandbox Client Test (Namespace: {namespace}, Port: {server_port}) ---")
+        f"--- Starting Sandbox Client Test (Namespace: {namespace}, Port: {server_port}) ---"
+    )
 
     # Load kube config
     try:
@@ -65,49 +74,54 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
             template_name=template_name,
             namespace=namespace,
             api_url=api_url,
-            server_port=server_port
+            server_port=server_port,
         ) as sandbox:
             print("\n======= Testing Pod Snapshot Extension =======")
             assert sandbox.controller_ready == True, "Sandbox controller is not ready."
 
             time.sleep(wait_time)
-            print(f"Creating first pod snapshot '{first_checkpoint_name}' after {wait_time} seconds...")
+            print(
+                f"Creating first pod snapshot '{first_checkpoint_name}' after {wait_time} seconds..."
+            )
             checkpoint_response = sandbox.checkpoint(first_checkpoint_name)
-            test_checkpoint_respone(checkpoint_response, first_checkpoint_name)
-            
+            test_checkpoint_response(checkpoint_response, first_checkpoint_name)
 
             time.sleep(wait_time)
 
-            print(f"\nCreating second pod snapshot '{second_checkpoint_name}' after {wait_time} seconds...")
+            print(
+                f"\nCreating second pod snapshot '{second_checkpoint_name}' after {wait_time} seconds..."
+            )
             checkpoint_response = sandbox.checkpoint(second_checkpoint_name)
-            test_checkpoint_respone(checkpoint_response, second_checkpoint_name)
-
+            test_checkpoint_response(checkpoint_response, second_checkpoint_name)
 
         print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
         with PodSnapshotSandboxClient(
             template_name=template_name,
             namespace=namespace,
             api_url=api_url,
-            server_port=server_port
-        ) as sandbox_restored: # restores from second_checkpoint_name by default
+            server_port=server_port,
+        ) as sandbox_restored:  # restores from second_checkpoint_name by default
 
             print("\nWaiting 5 seconds for restored pod to resume printing...")
             time.sleep(5)
 
-            # Fetch logs using the Kubernetes API 
+            # Fetch logs using the Kubernetes API
             logs = core_v1_api.read_namespaced_pod_log(
-                name=sandbox_restored.pod_name, 
-                namespace=sandbox_restored.namespace
+                name=sandbox_restored.pod_name, namespace=sandbox_restored.namespace
             )
 
             # Extract the sequence of 'Count:' values from the pod logs
             counts = [int(n) for n in re.findall(r"Count: (\d+)", logs)]
-            assert len(counts) > 0, "Failed to retrieve any 'Count:' logs from restored pod."
+            assert (
+                len(counts) > 0
+            ), "Failed to retrieve any 'Count:' logs from restored pod."
 
             # Verify the counter resumed from the correct checkpoint state.
             # The second snapshot was taken after two wait intervals (totaling 20s if wait_time=10).
-            min_expected_count_at_restore = wait_time * 2 
+            min_expected_count_at_restore = wait_time * 2
             first_count_after_restore = counts[0]
+
+            print(f"First count after restore: {first_count_after_restore}")
 
             assert first_count_after_restore >= min_expected_count_at_restore, (
                 f"State Mismatch! Expected counter to start >= {min_expected_count_at_restore}, "
@@ -122,35 +136,48 @@ async def main(template_name: str, api_url: str | None, namespace: str, server_p
     finally:
         print("\n--- Sandbox Client Test Finished ---")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test the Sandbox client.")
     parser.add_argument(
         "--template-name",
         default="python-sandbox-template",
-        help="The name of the sandbox template to use for the test."
+        help="The name of the sandbox template to use for the test.",
     )
 
     # Default is None to allow testing the Port-Forward fallback
     parser.add_argument(
         "--gateway-name",
         default=None,
-        help="The name of the Gateway resource. If omitted, defaults to local port-forward mode."
+        help="The name of the Gateway resource. If omitted, defaults to local port-forward mode.",
     )
 
     parser.add_argument(
         "--gateway-namespace",
         default=None,
-        help="The namespace of the Gateway resource. If omitted, defaults to local port-forward mode."
+        help="The namespace of the Gateway resource. If omitted, defaults to local port-forward mode.",
     )
 
     parser.add_argument(
-        "--api-url", help="Direct URL to router (e.g. http://localhost:8080)", default=None)
-    parser.add_argument("--namespace", default="default",
-                        help="Namespace to create sandbox in")
-    parser.add_argument("--server-port", type=int, default=8888,
-                        help="Port the sandbox container listens on")
-    parser.add_argument("--labels", nargs="+", default=["app=sandbox-test"],
-                        help="Labels for the sandbox pod/claim in key=value format (e.g. app=sandbox-test env=dev)")
+        "--api-url",
+        help="Direct URL to router (e.g. http://localhost:8080)",
+        default=None,
+    )
+    parser.add_argument(
+        "--namespace", default="default", help="Namespace to create sandbox in"
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=8888,
+        help="Port the sandbox container listens on",
+    )
+    parser.add_argument(
+        "--labels",
+        nargs="+",
+        default=["app=sandbox-test"],
+        help="Labels for the sandbox pod/claim in key=value format (e.g. app=sandbox-test env=dev)",
+    )
 
     args = parser.parse_args()
 
@@ -162,11 +189,12 @@ if __name__ == "__main__":
         else:
             print(f"Warning: Ignoring invalid label format '{l}'. Use key=value.")
 
-    asyncio.run(main(
-        template_name=args.template_name,
-        api_url=args.api_url,
-        namespace=args.namespace,
-        server_port=args.server_port,
-        labels=labels_dict
-    ))
-# python3 test_podsnapshot_extension.py --labels app=agent-sandbox-workload --template-name python-counter-template --namespace sandbox-test
+    asyncio.run(
+        main(
+            template_name=args.template_name,
+            api_url=args.api_url,
+            namespace=args.namespace,
+            server_port=args.server_port,
+            labels=labels_dict,
+        )
+    )

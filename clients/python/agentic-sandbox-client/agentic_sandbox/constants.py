@@ -33,7 +33,5 @@ PODSNAPSHOT_PLURAL = "podsnapshots"
 PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
 PODSNAPSHOT_API_KIND = "PodSnapshotManualTrigger"
 
-SNAPSHOT_NAMESPACE_SELF_INSTALLED = "gps-system"
 SNAPSHOT_NAMESPACE_MANAGED = "gke-managed-pod-snapshots"
-SNAPSHOT_CONTROLLER_NAME = "pod-snapshot-controller"
 SNAPSHOT_AGENT = "pod-snapshot-agent"

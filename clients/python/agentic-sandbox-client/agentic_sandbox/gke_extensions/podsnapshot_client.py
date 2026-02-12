@@ -40,8 +40,8 @@ class SnapshotResult:
 
 
 @dataclass
-class CheckpointResponse:
-    """Structured response for checkpoint operations."""
+class SnapshotResponse:
+    """Structured response for snapshot operations."""
 
     success: bool
     trigger_name: str
@@ -250,7 +250,7 @@ class PodSnapshotSandboxClient(SandboxClient):
         self.controller_ready = False
         return self.controller_ready
 
-    def checkpoint(self, trigger_name: str) -> CheckpointResponse:
+    def snapshot(self, trigger_name: str) -> SnapshotResponse:
         """
         Triggers a snapshot of the specified pod by creating a PodSnapshotManualTrigger resource.
         The trigger_name will be suffixed with the current datetime.
@@ -260,14 +260,14 @@ class PodSnapshotSandboxClient(SandboxClient):
         trigger_name = f"{trigger_name}-{os.urandom(4).hex()}"
 
         if not self.controller_ready:
-            return CheckpointResponse(
+            return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
                 error_reason="Snapshot controller is not ready. Ensure it is installed and running.",
                 error_code=1,
             )
         if not self.pod_name:
-            return CheckpointResponse(
+            return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
                 error_reason="Sandbox pod name not found. Ensure sandbox is created.",
@@ -307,14 +307,14 @@ class PodSnapshotSandboxClient(SandboxClient):
             except Exception as e:
                 logging.warning(f"Failed to save snapshot metadata locally: {e}")
 
-            return CheckpointResponse(
+            return SnapshotResponse(
                 success=True, trigger_name=trigger_name, error_reason="", error_code=0
             )
         except ApiException as e:
             logging.exception(
                 f"Failed to create PodSnapshotManualTrigger '{trigger_name}': {e}"
             )
-            return CheckpointResponse(
+            return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
                 error_reason=f"Failed to create PodSnapshotManualTrigger: {e}",
@@ -324,7 +324,7 @@ class PodSnapshotSandboxClient(SandboxClient):
             logging.exception(
                 f"Snapshot creation timed out for trigger '{trigger_name}': {e}"
             )
-            return CheckpointResponse(
+            return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
                 error_reason=f"Snapshot creation timed out: {e}",

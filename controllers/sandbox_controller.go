@@ -681,7 +681,7 @@ func checkProgressDeadline(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duratio
 		deadline = *sandbox.Spec.ProgressDeadlineSeconds
 	}
 
-	// TODO: This logic will need to be updated when Sandbox pause / resume is implemented.
+	// TODO: This logic will need to be updated when Sandbox pause / resume is implemented. Issue #36.
 	elapsed := time.Since(sandbox.CreationTimestamp.Time)
 	deadlineDuration := time.Duration(deadline) * time.Second
 

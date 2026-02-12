@@ -146,6 +146,7 @@ type Lifecycle struct {
 	// ProgressDeadlineSeconds is the maximum time in seconds for a Sandbox to become ready.
 	// Defaults to 600 seconds.
 	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
 

@@ -437,7 +437,7 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				Lifecycle: &sandboxv1alpha1.Lifecycle{
+				Lifecycle: sandboxv1alpha1.Lifecycle{
 					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
@@ -484,7 +484,7 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				Lifecycle: &sandboxv1alpha1.Lifecycle{
+				Lifecycle: sandboxv1alpha1.Lifecycle{
 					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyDelete),
 				},
@@ -586,7 +586,7 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				Lifecycle: &sandboxv1alpha1.Lifecycle{
+				Lifecycle: sandboxv1alpha1.Lifecycle{
 					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
@@ -1077,12 +1077,12 @@ func TestSandboxExpiry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sandbox := &sandboxv1alpha1.Sandbox{
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Lifecycle: &sandboxv1alpha1.Lifecycle{},
+					Lifecycle: sandboxv1alpha1.Lifecycle{},
 				},
 			}
-			sandbox.Spec.Lifecycle.ShutdownTime = tc.shutdownTime
+			sandbox.Spec.ShutdownTime = tc.shutdownTime
 			if tc.deletionPolicy != "" {
-				sandbox.Spec.Lifecycle.ShutdownPolicy = ptr.To(tc.deletionPolicy)
+				sandbox.Spec.ShutdownPolicy = ptr.To(tc.deletionPolicy)
 			}
 			expired, requeueAfter := checkSandboxExpiry(sandbox)
 			require.Equal(t, tc.wantExpired, expired)
@@ -1141,7 +1141,7 @@ func TestCheckProgressDeadline(t *testing.T) {
 					CreationTimestamp: metav1.NewTime(tc.creationTime),
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Lifecycle: &sandboxv1alpha1.Lifecycle{
+					Lifecycle: sandboxv1alpha1.Lifecycle{
 						ProgressDeadlineSeconds: tc.deadline,
 					},
 				},

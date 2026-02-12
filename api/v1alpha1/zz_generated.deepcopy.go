@@ -200,11 +200,7 @@ func (in *SandboxSpec) DeepCopyInto(out *SandboxSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.Lifecycle != nil {
-		in, out := &in.Lifecycle, &out.Lifecycle
-		*out = new(Lifecycle)
-		(*in).DeepCopyInto(*out)
-	}
+	in.Lifecycle.DeepCopyInto(&out.Lifecycle)
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas
 		*out = new(int32)

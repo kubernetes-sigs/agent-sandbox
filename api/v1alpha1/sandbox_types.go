@@ -117,7 +117,7 @@ type SandboxSpec struct {
 
 	// Lifecycle defines when and how the sandbox should be shut down.
 	// +optional
-	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+	Lifecycle `json:",inline"`
 
 	// Replicas is the number of desired replicas.
 	// The only allowed values are 0 and 1.

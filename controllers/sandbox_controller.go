@@ -568,8 +568,8 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
 	}
 
-	if sandbox.Spec.Lifecycle != nil && sandbox.Spec.Lifecycle.ShutdownPolicy != nil &&
-		*sandbox.Spec.Lifecycle.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {
+	if sandbox.Spec.ShutdownPolicy != nil &&
+		*sandbox.Spec.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {
 		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
 		} else {
@@ -625,12 +625,12 @@ func (r *SandboxReconciler) handleProgressDeadline(ctx context.Context,
 // returns true if expired, false otherwise
 // if not expired, also returns the duration to requeue after
 func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
-	// If Lifecycle is not set, the sandbox never expires.
-	if sandbox.Spec.Lifecycle == nil || sandbox.Spec.Lifecycle.ShutdownTime == nil {
+	// If ShutdownTime is not set, the sandbox never expires.
+	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0
 	}
 
-	expiryTime := sandbox.Spec.Lifecycle.ShutdownTime.Time
+	expiryTime := sandbox.Spec.ShutdownTime.Time
 	if time.Now().After(expiryTime) {
 		return true, 0
 	}
@@ -677,8 +677,8 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func checkProgressDeadline(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
 
 	deadline := sandboxv1alpha1.DefaultProgressDeadlineSeconds
-	if sandbox.Spec.Lifecycle != nil && sandbox.Spec.Lifecycle.ProgressDeadlineSeconds != nil {
-		deadline = *sandbox.Spec.Lifecycle.ProgressDeadlineSeconds
+	if sandbox.Spec.ProgressDeadlineSeconds != nil {
+		deadline = *sandbox.Spec.ProgressDeadlineSeconds
 	}
 
 	// TODO: This logic will need to be updated when Sandbox pause / resume is implemented.

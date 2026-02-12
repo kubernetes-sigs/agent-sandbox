@@ -84,16 +84,7 @@ release-manifests:
 # make release-python-sdk TAG=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
 .PHONY: release-python-sdk
 release-python-sdk:
-	@if [ -z "$(TAG)" ]; then \
-		echo "❌ ERROR: TAG is undefined."; \
-		echo ""; \
-		echo "Usage Examples:"; \
-		echo "   • Patch Release:        		make release-python-sdk TAG=v0.1.1.post1"; \
-		echo "   • Release to TestPyPI only:	make release-python-sdk TAG=v0.1.1rc1"; \
-		echo ""; \
-		echo "🛑 Aborting release"; \
-		exit 1; \
-	fi
+	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-python-sdk TAG=vX.Y.Z.postN)"; exit 1; fi
 	./dev/tools/release-python --tag=${TAG} --remote=${REMOTE_UPSTREAM}
 
 .PHONY: toc-update

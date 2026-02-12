@@ -37,6 +37,34 @@ def run_go_e2e_tests(repo_root, artifact_dir, env):
     return subprocess.run(go_test_cmd, env=env, cwd=repo_root).returncode
 
 
+def run_go_e2e_benchmarks(repo_root, artifact_dir, env):
+    """Runs the Go e2e benchmarks and saves output for benchstat"""
+    print("========= Running Go E2E benchmarks... =========")
+    benchmark_file = os.path.join(artifact_dir, "benchmarks-go.txt")
+
+    # Run benchmarks with go test directly (not gotestsum) to get clean benchmark output
+    go_test_cmd = [
+        "go", "test",
+        "-bench=.",
+        "-benchtime=1x",  # Run each benchmark once (e2e tests are expensive)
+        "-run=^$",  # Don't run tests, only benchmarks
+        "./test/e2e/...",
+    ]
+    print(f"Running command: {' '.join(go_test_cmd)}")
+    print(f"Benchmark output will be saved to: {benchmark_file}")
+
+    with open(benchmark_file, "w") as f:
+        process = subprocess.Popen(go_test_cmd, env=env, cwd=repo_root, stdout=subprocess.PIPE, text=True)
+
+        for line in process.stdout:
+            sys.stdout.write(line)  # Print to terminal as it happens
+            f.write(line)           # Save to file also
+
+        process.wait()
+
+    return process.returncode
+
+
 def setup_python_sdk(repo_root, env):
     """Installs the Python SDK and its dependencies"""
     print("========= Ensuring Python SDK is installed... =========")
@@ -110,16 +138,20 @@ def main(args):
     exit_code = 0
 
     go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
+    go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
     python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
 
     if go_test_result != 0:
         print("Go E2E tests failed.")
 
+    if go_benchmark_result != 0:
+        print("Go E2E benchmarks failed.")
+
     if python_test_result != 0:
         print("Python SDK E2E tests failed.")
         exit_code = 1
 
-    if go_test_result != 0 or python_test_result != 0:
+    if go_test_result != 0 or python_test_result != 0 or go_benchmark_result != 0:
         print("One or more E2E tests failed.")
         exit_code = 1
 

@@ -1,6 +1,15 @@
-{{ $file := (.Get "file") }}
-{{ $md := resources.Get $file }}
+{{- $file := (.Get "file") -}}
+{{- $md := resources.Get $file -}}
 
-{{ $newContent := replaceRE `(\s*#[^\n$]*\n*)` "" $md.Content 1 }}
+{{/* Remove first heading */}}
+{{- $content := replaceRE `(\s*#[^\n$]*\n*)` "" $md.Content 1 -}}
 
-{{ $newContent | markdownify }}
+{{/* Get the current page's section path */}}
+{{- $pagePath := .Page.RelPermalink -}}
+{{- $sectionPath := replaceRE "/[^/]+/$" "/" $pagePath -}}
+
+{{/* Fix all relative README.md and INSTALL.md links */}}
+{{- $content = replaceRE `\]\((\./)?README\.md(#[^)]+)?\)` (printf "](%s$1)" (strings.TrimSuffix "/" $sectionPath)) $content -}}
+{{- $content = replaceRE `\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)` "](/docs/getting_started/$2)" $content -}}
+
+{{- $content | markdownify -}}

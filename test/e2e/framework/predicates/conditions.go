@@ -35,23 +35,37 @@ type objectWithStatus struct {
 }
 
 // ReadyConditionIsTrue checks if the given object has a Ready condition set to True.
-func ReadyConditionIsTrue(obj client.Object) error {
+var ReadyConditionIsTrue = &StatusPredicate{
+	MatchType:   "Ready",
+	MatchStatus: metav1.ConditionTrue,
+}
+
+type StatusPredicate struct {
+	MatchType   string
+	MatchStatus metav1.ConditionStatus
+}
+
+func (s *StatusPredicate) Matches(obj client.Object) (bool, error) {
 	u, err := asUnstructured(obj)
 	if err != nil {
-		return fmt.Errorf("failed to convert to unstructured: %w", err)
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
 	}
 
 	var status objectWithStatus
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
-		return fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
 	}
 
 	for _, cond := range status.Status.Conditions {
-		if cond.Type == "Ready" && cond.Status == metav1.ConditionTrue {
-			return nil
+		if cond.Type == s.MatchType && cond.Status == s.MatchStatus {
+			return true, nil
 		}
 	}
-	return fmt.Errorf("object is not ready: %v", status.Status.Conditions)
+	return false, nil
+}
+
+func (s *StatusPredicate) String() string {
+	return fmt.Sprintf("StatusPredicate(Type=%s,Status=%s)", s.MatchType, s.MatchStatus)
 }
 
 // asUnstructured converts a client.Object to an *unstructured.Unstructured.
@@ -68,18 +82,26 @@ func asUnstructured(obj client.Object) (*unstructured.Unstructured, error) {
 }
 
 // ReadyReplicasConditionIsTrue checks if the given object has more than 0 replicas.
-func ReadyReplicasConditionIsTrue(obj client.Object) error {
+var ReadyReplicasConditionIsTrue = &ReadyReplicasPredicate{}
+
+type ReadyReplicasPredicate struct{}
+
+func (s *ReadyReplicasPredicate) String() string {
+	return "ReadyReplicasPredicate(Has all replicas ready)"
+}
+
+func (s *ReadyReplicasPredicate) Matches(obj client.Object) (bool, error) {
 	u, err := asUnstructured(obj)
 	if err != nil {
-		return fmt.Errorf("failed to convert to unstructured: %w", err)
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
 	}
 
 	var status objectWithStatus
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
-		return fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
 	}
 	if status.Status.ReadyReplicas == status.Spec.Replicas {
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("Object has %d ready replicas and the required replicas are %d", status.Status.ReadyReplicas, status.Spec.Replicas)
+	return false, nil
 }

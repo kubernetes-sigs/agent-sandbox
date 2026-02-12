@@ -23,13 +23,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
+
+// ChromeSandboxMetrics holds timing measurements for the chrome sandbox startup.
+type ChromeSandboxMetrics struct {
+	SandboxReady time.Duration // Time for sandbox to become ready
+	PodReady     time.Duration // Time for pod to become ready
+	ChromeReady  time.Duration // Time for chrome to respond on debug port
+	Total        time.Duration // Total time from start to chrome ready
+}
 
 func chromeSandbox() *sandboxv1alpha1.Sandbox {
 	sandbox := &sandboxv1alpha1.Sandbox{}
@@ -52,17 +59,39 @@ func chromeSandbox() *sandboxv1alpha1.Sandbox {
 // TestRunChromeSandbox tests that we can run Chrome inside a Sandbox,
 // it also measures how long it takes for Chrome to start serving the CDP protocol.
 func TestRunChromeSandbox(t *testing.T) {
-	tc := framework.NewTestContext(t)
+	metrics := runChromeSandbox(framework.NewTestContext(t))
+	t.Logf("Metrics: %+v", metrics)
+}
 
+// BenchmarkChromeSandboxStartup measures the time for Chrome to start in a sandbox.
+// Run with: go test -bench=BenchmarkChromeSandboxStartup -benchtime=1x ./test/e2e/...
+// Compare results with: benchstat old.txt new.txt
+func BenchmarkChromeSandboxStartup(b *testing.B) {
+	for b.Loop() {
+		metrics := runChromeSandbox(framework.NewTestContext(b))
+		// Report custom metrics in addition to the default ns/op
+		b.ReportMetric(metrics.SandboxReady.Seconds(), "sandbox-ready-sec")
+		b.ReportMetric(metrics.PodReady.Seconds(), "pod-ready-sec")
+		b.ReportMetric(metrics.ChromeReady.Seconds(), "chrome-ready-sec")
+	}
+}
+
+// runChromeSandbox runs the chrome sandbox test and returns timing metrics.
+func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
+	// Set up a namespace with unique name to avoid conflicts
 	ns := &corev1.Namespace{}
 	ns.Name = fmt.Sprintf("chrome-sandbox-test-%d", time.Now().UnixNano())
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+	t.MustCreateWithCleanup(ns)
 
+	metrics := &ChromeSandboxMetrics{}
 	startTime := time.Now()
+
 	sandboxObj := chromeSandbox()
 	sandboxObj.Namespace = ns.Name
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
-	require.NoError(t, tc.WaitForObject(t.Context(), sandboxObj, predicates.ReadyConditionIsTrue))
+	t.MustCreateWithCleanup(sandboxObj)
+	t.MustWaitForObject(sandboxObj, predicates.ReadyConditionIsTrue)
+
+	metrics.SandboxReady = time.Since(startTime)
 
 	podID := types.NamespacedName{
 		Namespace: ns.Name,
@@ -71,16 +100,24 @@ func TestRunChromeSandbox(t *testing.T) {
 	podObj := &corev1.Pod{}
 	podObj.Name = podID.Name
 	podObj.Namespace = podID.Namespace
-	// Wait for the pod to be ready
-	require.NoError(t, tc.WaitForObject(t.Context(), podObj, predicates.ReadyConditionIsTrue))
-	// Wait for chrome to be ready
-	require.NoError(t, waitForChromeReady(t.Context(), tc, podID))
-	duration := time.Since(startTime)
-	t.Logf("Test took %s", duration)
+
+	t.MustWaitForObject(podObj, predicates.ReadyConditionIsTrue)
+	metrics.PodReady = time.Since(startTime)
+
+	if err := waitForChromeReady(t, podID); err != nil {
+		t.Fatalf("failed to wait for chrome ready: %v", err)
+	}
+	metrics.ChromeReady = time.Since(startTime)
+	metrics.Total = time.Since(startTime)
+
+	return metrics
 }
 
-func waitForChromeReady(ctx context.Context, tc *framework.TestContext, podID types.NamespacedName) error {
+func waitForChromeReady(tc *framework.TestContext, podID types.NamespacedName) error {
 	tc.Helper()
+
+	ctx := tc.Context()
+
 	// Loop until we can query chrome for its version via the debug port
 	pollDuration := 100 * time.Millisecond
 	for {

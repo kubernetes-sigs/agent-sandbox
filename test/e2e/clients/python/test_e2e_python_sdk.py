@@ -16,6 +16,7 @@ import os
 from test.e2e.clients.python.framework.context import TestContext
 
 import pytest
+import yaml
 from agentic_sandbox import SandboxClient
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
@@ -25,6 +26,10 @@ WARMPOOL_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_warmpool.yaml")
 ROUTER_YAML_PATH = (
     "clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"
 )
+GATEWAY_YAML_PATH = (
+    "clients/python/agentic-sandbox-client/gateway-kind/gateway-kind.yaml"
+)
+GATEWAY_NAME = "kind-gateway"
 
 
 @pytest.fixture(scope="module")
@@ -68,6 +73,18 @@ def deploy_router(tc, temp_namespace):
 
     print("Waiting for router deployment to be ready...")
     tc.wait_for_deployment_ready("sandbox-router-deployment", namespace=temp_namespace)
+
+
+@pytest.fixture(scope="function")
+def deploy_gateway(tc, temp_namespace):
+    """Deploys the sandbox gateway into the test namespace"""
+    with open(GATEWAY_YAML_PATH, "r") as f:
+        manifest = f.read()
+
+    print(f"Applying gateway manifest to namespace: {temp_namespace}")
+    tc.apply_manifest_text(manifest, namespace=temp_namespace)
+    print("Waiting for gateway to get an address...")
+    tc.wait_for_gateway_address(GATEWAY_NAME, namespace=temp_namespace)
 
 
 @pytest.fixture(scope="function")
@@ -137,6 +154,49 @@ def test_python_sdk_router_mode_warmpool(
         with SandboxClient(
             template_name=sandbox_template,
             namespace=temp_namespace,
+        ) as sandbox:
+            print("\n--- Running SDK tests with warmpool ---")
+            run_sdk_tests(sandbox)
+            print("SDK test with warmpool passed!")
+
+    except Exception as e:
+        pytest.fail(f"SDK test with warmpool failed: {e}")
+
+
+def test_python_sdk_gateway_mode(
+    tc, temp_namespace, sandbox_template, deploy_router, deploy_gateway
+):
+    """Tests the Python SDK in Production mode (with Gateway and Router) without warmpool."""
+    try:
+        with SandboxClient(
+            template_name=sandbox_template,
+            namespace=temp_namespace,
+            gateway_name=GATEWAY_NAME,
+            gateway_namespace=temp_namespace,
+        ) as sandbox:
+            print("\n--- Running SDK tests without warmpool ---")
+            run_sdk_tests(sandbox)
+            print("SDK test without warmpool passed!")
+
+    except Exception as e:
+        pytest.fail(f"SDK test without warmpool failed: {e}")
+
+
+def test_python_sdk_gateway_mode_warmpool(
+    tc,
+    temp_namespace,
+    sandbox_template,
+    deploy_router,
+    sandbox_warmpool,
+    deploy_gateway,
+):
+    """Tests the Python SDK in Production mode (with gateway and router) with warmpool."""
+    try:
+        with SandboxClient(
+            template_name=sandbox_template,
+            namespace=temp_namespace,
+            gateway_name=GATEWAY_NAME,
+            gateway_namespace=temp_namespace,
         ) as sandbox:
             print("\n--- Running SDK tests with warmpool ---")
             run_sdk_tests(sandbox)

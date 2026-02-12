@@ -1,0 +1,64 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: moltbot-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: moltbot-sandbox
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # Node apps often need to write to /tmp or home, keep false for now unless verified
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: OPENCLAW_GATEWAY_TOKEN
+              value: "dummy-token-for-sandbox"
+          command:
+            - node
+            - dist/index.js
+            - gateway
+            - --bind=lan
+            - --port
+            - "18789"
+            - --allow-unconfigured
+            - --verbose
+          ports:
+            - containerPort: 18789
+            - containerPort: 18790
+          volumeMounts:
+            - mountPath: /home/node/.openclaw/workspace
+              name: workspaces-pvc
+            - mountPath: /home/node/.openclaw
+              name: config-volume
+          # The following securityContext block from the instruction appears to be a misplaced volumes definition.
+          # Assuming the intent was to modify the volumes section, not add a securityContext here.
+          # If a securityContext was intended for the container, it should be merged with the existing one.
+          # If it was for the pod, it should be merged with the pod's securityContext.
+          # Given the content `- name: config-storage emptyDir: {}`, it strongly suggests a volume definition.
+          # I will interpret this as a modification to the `volumes` section below.
+      volumes:
+        - name: config-volume
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: workspaces-pvc
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi

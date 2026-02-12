@@ -70,7 +70,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 
 	// Set a shutdown time that ends shortly
 	shutdown := metav1.NewTime(time.Now().Add(10 * time.Second))
-	sandboxObj.Spec.Lifecycle.ShutdownTime = &shutdown
+	sandboxObj.Spec.ShutdownTime = &shutdown
 	require.NoError(t, tc.Update(t.Context(), sandboxObj))
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{

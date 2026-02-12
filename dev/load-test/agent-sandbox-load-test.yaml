@@ -1,6 +1,9 @@
+{{$replicas := DefaultParam .CL2_REPLICAS 20}}
+{{$namespacePrefix := DefaultParam .CL2_NAMESPACE_PREFIX "agent-sandbox"}}
 name: agent-sandbox-load-test
 namespace:
   number: 1
+  prefix: {{$namespacePrefix}}
 tuningSets:
 - name: BurstCreate
   qpsLoad:
@@ -12,11 +15,12 @@ steps:
     Method: PodStartupLatency # We use Pod latency as Sandboxes wrap Pods
     Params:
       action: start
-      labelSelector: test = agent-load
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      namespace: {{$namespacePrefix}}-1
 - name: Create Sandboxes
   phases:
   - namespaceRange: {min: 1, max: 1}
-    replicasPerNamespace: 20 # Total sandboxes to spin up
+    replicasPerNamespace: {{$replicas}} # Total sandboxes to spin up
     tuningSet: BurstCreate
     objectBundle:
     - basename: agent-env
@@ -28,10 +32,21 @@ steps:
     Params:
       action: start
       labelSelector: "agents.x-k8s.io/sandbox-name-hash"
-      desiredPodCount: 20
+      namespace: {{$namespacePrefix}}-1
+      desiredPodCount: {{$replicas}}
 - name: Gather Results
   measurements:
   - Identifier: SandboxStartupLatency
     Method: PodStartupLatency
     Params:
       action: gather
+      namespace: {{$namespacePrefix}}-1
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+- name: Delete Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-env
+      objectTemplatePath: "cluster-loader-sandbox.yaml"

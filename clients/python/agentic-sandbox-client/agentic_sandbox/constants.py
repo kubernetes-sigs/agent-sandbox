@@ -32,6 +32,7 @@ PODSNAPSHOT_API_VERSION = "v1alpha1"
 PODSNAPSHOT_PLURAL = "podsnapshots"
 PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
 PODSNAPSHOT_API_KIND = "PodSnapshotManualTrigger"
+PODSNAPSHOTPOLICY_PLURAL = "podsnapshotpolicies"
 
 SNAPSHOT_NAMESPACE_MANAGED = "gke-managed-pod-snapshots"
 SNAPSHOT_AGENT = "pod-snapshot-agent"

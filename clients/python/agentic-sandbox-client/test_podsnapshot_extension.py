@@ -65,6 +65,7 @@ async def main(
     wait_time = 10
     first_checkpoint_name = "test-snapshot-10"
     second_checkpoint_name = "test-snapshot-20"
+    policy_name = "example-psp-workload"
     core_v1_api = client.CoreV1Api()
 
     try:
@@ -93,6 +94,11 @@ async def main(
             )
             checkpoint_response = sandbox.checkpoint(second_checkpoint_name)
             test_checkpoint_response(checkpoint_response, second_checkpoint_name)
+
+            print("\n***** List all existing ready snapshots with the policy name. *****") 
+            snapshots = sandbox.list_snapshots(policy_name=policy_name)
+            for snap in snapshots:
+                print(f"Snapshot ID: {snap['snapshot_id']}, Triggered By: {snap['trigger_name']}, Source Pod: {snap['source_pod']}, Creation Time: {snap['creationTimestamp']}, Policy Name: {snap['policy_name']}")
 
         print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
         with PodSnapshotSandboxClient(
@@ -127,6 +133,10 @@ async def main(
                 f"State Mismatch! Expected counter to start >= {min_expected_count_at_restore}, "
                 f"but got {first_count_after_restore}. The pod likely restarted from scratch."
             )
+
+            print("\n**** Deleting snapshots *****")
+            deleted_snapshots = sandbox_restored.delete_snapshots()
+            print(f"Deleted Snapshots: {deleted_snapshots}")
 
         print("--- Pod Snapshot Test Passed! ---")
 

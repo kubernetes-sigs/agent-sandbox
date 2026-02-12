@@ -28,9 +28,15 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
     *   Returns the CheckpointResponse object(success, error_code, error_reason, trigger_name).
 *   **`list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None`**:
-    *  TBD
-*   **`delete_snapshots(self, trigger_name: str) -> int`**:
-    *  TBD
+    *   Lists valid snapshots found in the local metadata storage (`~/.snapshot_metadata/.snapshots.json`).
+    *   Filters by `policy_name` and `ready_only` status (default: True).
+    *   Returns a list of dictionaries containing snapshot details (id, trigger_name, source_pod, uid, creationTimestamp, status, policy_name) sorted by creation timestamp (newest first).
+*   **`delete_snapshots(self, trigger_name: str | None = None) -> int`**:
+    *   Deletes snapshots and their corresponding `PodSnapshotManualTrigger` resources.
+    *   If `trigger_name` is provided, deletes only that specific snapshot.
+    *   If `trigger_name` is `None`, deletes **ALL** snapshots found in the local metadata.
+    *   Cleans up local metadata after successful deletion from K8s.
+    *   Returns the count of successfully deleted snapshots.
 *   **Automatic Cleanup**:
     *   The `__exit__` method cleans up the `SandboxClaim` resources.
 

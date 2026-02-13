@@ -557,7 +557,7 @@ func TestReconcilePod(t *testing.T) {
 			Namespace: sandboxNs,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: ptr.To(int32(1)),
+			Suspended: false,
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -666,7 +666,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0))},
+					Suspended: true},
 			},
 			wantPod: nil,
 		},
@@ -678,7 +678,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Suspended: true,
 				},
 			},
 			wantPod: nil,
@@ -710,7 +710,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Suspended: false,
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -814,7 +814,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Suspended: false,
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -850,12 +850,202 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Suspended: true,
 				},
 			},
 			wantPod:                nil,
 			expectErr:              false,
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
+		},
+		{
+			name: "suspended with PodSnapshotProvider - initiates snapshot",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						"PodSnapshotProvider": "experimental",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Suspended: true,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "test-container"},
+					},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				"PodSnapshotProvider":                    "experimental",
+				"agents.x-k8s.io/pod-snapshot-requested": "Pending",
+			},
+			expectErr: false,
+		},
+		{
+			name: "suspended with PodSnapshotProvider - waits for snapshot",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						"PodSnapshotProvider":       "experimental",
+						SnapshotRequestedAnnotation: podSnapshotValuePending,
+						SnapshotRequestedTimestamp:  time.Now().Format(time.RFC3339),
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Suspended: true,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "test-container"},
+					},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				"PodSnapshotProvider":                    "experimental",
+				"agents.x-k8s.io/pod-snapshot-requested": "Pending",
+			},
+			expectErr: false,
+		},
+		{
+			name: "suspended with PodSnapshotProvider - deletes after snapshot complete",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						"PodSnapshotProvider":       "experimental",
+						SnapshotRequestedAnnotation: podSnapshotValueDone,
+						SnapshotRequestedTimestamp:  time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Suspended: true,
+				},
+			},
+			wantPod: nil,
+			wantSandboxAnnotations: map[string]string{
+				"PodSnapshotProvider": "experimental",
+			},
+			expectErr: false,
+		},
+		{
+			name: "suspended with PodSnapshotProvider - deletes after snapshot timeout",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test-container"},
+						},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						"PodSnapshotProvider":       "experimental",
+						SnapshotRequestedAnnotation: podSnapshotValuePending,
+						SnapshotRequestedTimestamp:  time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Suspended: true,
+				},
+			},
+			wantPod: nil,
+			wantSandboxAnnotations: map[string]string{
+				"PodSnapshotProvider": "experimental",
+			},
+			expectErr: false,
 		},
 	}
 
@@ -901,6 +1091,15 @@ func TestReconcilePod(t *testing.T) {
 				require.NoError(t, err)
 
 				// Check if the annotations match what we expect
+				// Special handling for SnapshotRequestedTimestamp which is set to time.Now()
+				if _, ok := liveSandbox.Annotations[SnapshotRequestedTimestamp]; ok {
+					if _, expected := tc.wantSandboxAnnotations[SnapshotRequestedTimestamp]; !expected {
+						// If not explicitly expected, just verify it's a valid timestamp and remove it for comparison
+						_, err := time.Parse(time.RFC3339, liveSandbox.Annotations[SnapshotRequestedTimestamp])
+						require.NoError(t, err)
+						delete(liveSandbox.Annotations, SnapshotRequestedTimestamp)
+					}
+				}
 				require.Equal(t, tc.wantSandboxAnnotations, liveSandbox.Annotations)
 			}
 		})

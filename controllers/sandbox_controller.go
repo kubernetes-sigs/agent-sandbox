@@ -69,6 +69,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -289,6 +290,10 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 	} else {
 		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		// Ensure status are set for existing service
+		// TODO same as below, this is hardcoded to svc.cluster.local which is the default. Need a way to change it.
+		sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
+		sandbox.Status.Service = service.Name
 		return service, nil
 	}
 

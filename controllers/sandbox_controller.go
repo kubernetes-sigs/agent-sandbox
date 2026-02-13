@@ -404,35 +404,51 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
-		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+    log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
-		if r.Tracer.IsRecording(ctx) {
-			r.Tracer.AddEvent(ctx, "ExistingPodStatusObserved", map[string]string{
-				"pod.Name":  pod.Name,
-				"pod.Phase": string(pod.Status.Phase),
-			})
-		}
+    if r.Tracer.IsRecording(ctx) {
+        r.Tracer.AddEvent(ctx, "ExistingPodStatusObserved", map[string]string{
+            "pod.Name":  pod.Name,
+            "pod.Phase": string(pod.Status.Phase),
+        })
+    }
 
-		if pod.Labels == nil {
-			pod.Labels = make(map[string]string)
-		}
-		pod.Labels[sandboxLabel] = nameHash
+    if pod.Labels == nil {
+        pod.Labels = make(map[string]string)
+    }
+    pod.Labels[sandboxLabel] = nameHash
 
-		// Set controller reference if the pod is not controlled by anything.
-		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
-			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
-				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
-			}
-		}
+    // --- Sync SandboxClaim labels ---
+    if sandbox.Spec.PodTemplate.ObjectMeta.Labels != nil {
+        for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+            pod.Labels[k] = v
+        }
+    }
 
-		if err := r.Update(ctx, pod); err != nil {
-			return nil, fmt.Errorf("failed to update pod: %w", err)
-		}
+    // --- Sync SandboxClaim annotations ---
+    if sandbox.Spec.PodTemplate.ObjectMeta.Annotations != nil {
+        if pod.Annotations == nil {
+            pod.Annotations = make(map[string]string)
+        }
+        for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+            pod.Annotations[k] = v
+        }
+    }
 
-		// TODO - Do we enfore (change) spec if a pod exists ?
-		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
-		return pod, nil
-	}
+    // Set controller reference if the pod is not controlled by anything.
+    if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
+        if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
+            return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+        }
+    }
+
+    if err := r.Update(ctx, pod); err != nil {
+        return nil, fmt.Errorf("failed to update pod: %w", err)
+    }
+
+    return pod, nil
+}
+
 
 	// 3. PATH: Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)

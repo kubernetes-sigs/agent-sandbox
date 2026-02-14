@@ -151,7 +151,37 @@ with SandboxClient(
     sandbox.run("ls -la")
 ```
 
-### 4. Custom Ports
+### 4. Pause and Resume
+
+You can pause a sandbox to release compute resources while keeping the Sandbox CR and Service intact.
+When resumed, the controller creates a new pod.
+
+```python
+with SandboxClient(
+    template_name="python-sandbox-template",
+    namespace="default"
+) as sandbox:
+    sandbox.run("echo 'Running'")
+
+    # Pause the sandbox (deletes the pod, keeps CR and Service)
+    sandbox.pause()
+
+    # Resume the sandbox and wait for the pod to become ready (default)
+    sandbox.resume()
+    sandbox.run("echo 'Back after resume!'")
+
+    # Or resume without waiting (fire-and-forget)
+    sandbox.resume(wait=False)
+    # Manually wait later when needed
+    sandbox.wait_for_ready()
+```
+
+**Data Persistence:** Pausing deletes the pod, so any data on ephemeral storage (container
+filesystem, `emptyDir` volumes) is **lost**. To persist data across pause/resume, the `Sandbox` CR
+supports `spec.volumeClaimTemplates` for PVC-backed volumes. Note that this field is on the `Sandbox`
+spec directly and is not currently exposed through `SandboxTemplate`/`SandboxClaim`.
+
+### 5. Custom Ports
 
 If your sandbox runtime listens on a port other than 8888 (e.g., a Node.js app on 3000), specify `server_port`.
 

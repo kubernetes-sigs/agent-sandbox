@@ -120,11 +120,17 @@ func NewTestContext(t T) *TestContext {
 		t.Fatalf("building dynamic client: %v", err)
 	}
 
+	watchSet := NewWatchSet(dynamicClient)
+	t.Cleanup(func() {
+		watchSet.Close()
+	})
+
 	th.ClusterClient = &ClusterClient{
 		T:             t,
 		client:        client,
 		dynamicClient: dynamicClient,
 		scheme:        controllers.Scheme,
+		watchSet:      watchSet,
 	}
 	t.Cleanup(func() {
 		t.Helper()

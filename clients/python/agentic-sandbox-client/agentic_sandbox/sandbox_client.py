@@ -25,6 +25,7 @@ import socket
 import subprocess
 import logging
 from dataclasses import dataclass
+from enum import Enum
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -55,6 +56,13 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     stream=sys.stdout)
 
+class SandboxStatus(Enum):
+    """Enumeration for Sandbox status states."""
+    PROVISIONING = "Provisioning"
+    RUNNING = "Running"
+    SUCCEEDED = "Succeeded"
+    FAILED = "Failed"
+    UNKNOWN = "Unknown"
 
 @dataclass
 class ExecutionResult:
@@ -119,6 +127,7 @@ class SandboxClient:
             config.load_kube_config()
 
         self.custom_objects_api = client.CustomObjectsApi()
+        self.core_v1_api = client.CoreV1Api()
 
         # HTTP session with retries
         self.session = requests.Session()
@@ -477,3 +486,38 @@ class SandboxClient:
             span.set_attribute("sandbox.file.size", len(content))
 
         return content
+    
+    @trace_span("status")
+    def status(self) -> SandboxStatus:
+        """
+        Returns the lifecycle status of the sandbox.
+        """
+        
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.name", self.sandbox_name)
+
+        try:
+            pod = self.core_v1_api.read_namespaced_pod(
+                name=self.pod_name, namespace=self.namespace)
+            
+            status_map = {
+                "Pending": SandboxStatus.PROVISIONING,
+                "Running": SandboxStatus.RUNNING,
+                "Succeeded": SandboxStatus.SUCCEEDED,
+                "Failed": SandboxStatus.FAILED,
+                "Unknown": SandboxStatus.UNKNOWN
+            }
+            status = status_map.get(pod.status.phase, SandboxStatus.UNKNOWN)
+            if span.is_recording():
+                span.set_attribute("sandbox.status", status.value)
+            return status
+
+        except client.ApiException as e:
+            if e.status == 404:
+                return SandboxStatus.FAILED
+            logging.error(f"Pod not found: {e}")
+        except Exception as e:
+            logging.error(f"Unexpected error fetching sandbox status: {e}")
+            return SandboxStatus.UNKNOWN
+        

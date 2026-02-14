@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, patch, call
 from datetime import datetime
 from agentic_sandbox.gke_extensions.podsnapshot_client import (
     PodSnapshotSandboxClient,
-    SnapshotPersistenceManager,
 )
 from agentic_sandbox.constants import *
 from kubernetes import config

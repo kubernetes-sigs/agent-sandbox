@@ -43,35 +43,9 @@ class SnapshotResponse:
 
     success: bool
     trigger_name: str
+    snapshot_uid: str
     error_reason: str
     error_code: int
-
-
-class SnapshotPersistenceManager:
-    """
-    Manages local persistence of snapshot metadata in a secure directory.
-    Stores metadata as a dictionary keyed by trigger_name.
-    """
-
-    def __init__(self):
-        """Initializes the persistence manager and ensures the secure directory exists."""
-        pass
-
-    def _ensure_secure_dir(self):
-        """Ensures the directory exists with 700 permissions."""
-        pass
-
-    def _load_metadata(self) -> dict[str, Any]:
-        """Loads metadata. Returns an empty dict if file doesn't exist or is invalid."""
-        pass
-
-    def save_snapshot_metadata(self, record: dict[str, Any]):
-        """Saves a snapshot record to the local registry."""
-        pass
-
-    def delete_snapshot_metadata(self, trigger_name: str):
-        """Deletes a snapshot record from the local registry."""
-        pass
 
 
 class PodSnapshotSandboxClient(SandboxClient):
@@ -222,10 +196,12 @@ class PodSnapshotSandboxClient(SandboxClient):
             )
             snapshot_result = self._wait_for_snapshot_processed(trigger_name)
 
-            # TODO: Add snapshot metadata persistence logic here using SnapshotPersistenceManager
-
             return SnapshotResponse(
-                success=True, trigger_name=trigger_name, error_reason="", error_code=0
+                success=True,
+                trigger_name=trigger_name,
+                snapshot_uid=snapshot_result.snapshot_uid,
+                error_reason="",
+                error_code=0,
             )
         except ApiException as e:
             logging.exception(
@@ -234,6 +210,7 @@ class PodSnapshotSandboxClient(SandboxClient):
             return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
+                snapshot_uid=None,
                 error_reason=f"Failed to create PodSnapshotManualTrigger: {e}",
                 error_code=1,
             )
@@ -244,25 +221,45 @@ class PodSnapshotSandboxClient(SandboxClient):
             return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
+                snapshot_uid=None,
                 error_reason=f"Snapshot creation timed out: {e}",
                 error_code=1,
             )
 
-    def list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None:
+    def is_restored(self) -> tuple[bool, str | None]:
         """
-        Checks for existing snapshots matching the label selector and optional policy name.
-        Returns a list of valid snapshots sorted by creation timestamp (newest first).
-        policy_name: Filters snapshots by their spec.policyName.
-        ready_only: If True, filters out snapshots that are only in 'Ready' state.
+        Checks if the sandbox pod was restored from a snapshot.
+        Verifies this by checking for the 'PodRestored' condition in the pod status.
+        Returns:
+             tuple[bool, str | None]: (True, snapshot_uuid) if restored, (False, None) otherwise.
         """
-        pass
+        if not self.pod_name:
+            logging.warning("Cannot check restore status: pod_name is unknown.")
+            return False, None
 
-    def delete_snapshots(self, trigger_name: str) -> int:
-        """
-        Deletes snapshots matching the provided trigger name and the PSMT resources.
-        Returns the count of successfully deleted snapshots.
-        """
-        pass
+        try:
+            v1 = client.CoreV1Api()
+            pod = v1.read_namespaced_pod(self.pod_name, self.namespace)
+
+            if not pod.status or not pod.status.conditions:
+                return False, None
+
+            for condition in pod.status.conditions:
+                if condition.type == "PodRestored" and condition.status == "True":
+                    # Attempt to extract UUID from the message
+                    # Message format: "pod successfully restored from pod snapshot namespace/uuid"
+                    if condition.message:
+                        parts = condition.message.split("/")
+                        if len(parts) > 1:
+                            return True, parts[-1].split()[0]
+
+                    return True, None
+
+            return False, None
+
+        except ApiException as e:
+            logging.error(f"Failed to check pod restore status: {e}")
+            return False, None
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """

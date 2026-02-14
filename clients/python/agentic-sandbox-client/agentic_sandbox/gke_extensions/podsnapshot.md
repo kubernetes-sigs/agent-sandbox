@@ -4,11 +4,7 @@ This directory contains the Python client extension for interacting with the Age
 
 ## `podsnapshot_client.py`
 
-This file defines the `SnapshotPersistenceManager` and `PodSnapshotSandboxClient` class, which extend the base `SandboxClient` to provide snapshot capabilities.
-
-### `SnapshotPersistenceManager`
-
-A utility class for managing local persistence of snapshot metadata in a secure directory. Stores metadata as a dictionary keyed by `trigger_name`.
+This file defines the `PodSnapshotSandboxClient` class, which extend the base `SandboxClient` to provide snapshot capabilities.
 
 ### `PodSnapshotSandboxClient`
 
@@ -27,10 +23,6 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   Waits for the snapshot to be processed.
     *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
     *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name).
-*   **`list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None`**:
-    *  TBD
-*   **`delete_snapshots(self, trigger_name: str) -> int`**:
-    *  TBD
 *   **Automatic Cleanup**:
     *   The `__exit__` method cleans up the `SandboxClaim` resources.
 

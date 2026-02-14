@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"time"
 
@@ -29,9 +30,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -44,7 +50,9 @@ const (
 // ClusterClient is an abstraction layer for test cases to interact with the cluster.
 type ClusterClient struct {
 	T
-	client client.Client
+	client        client.Client
+	dynamicClient dynamic.Interface
+	scheme        *runtime.Scheme
 }
 
 // List retrieves a list of objects matching the provided options.
@@ -85,6 +93,27 @@ func (cl *ClusterClient) Update(ctx context.Context, obj client.Object) error {
 		return fmt.Errorf("update %T (%s): %w", obj, nn.String(), err)
 	}
 	return nil
+}
+
+// MustUpdateObject updates the specified object, using the provided updateFunc to modify
+// the object.  This ensures that we always update the latest version of the object from the cluster.
+// In future we might support automatic retries on optimistic-concurrency "misses".
+func MustUpdateObject[T client.Object](cl *ClusterClient, obj T, updateFunc func(obj T)) {
+	cl.Helper()
+
+	ctx := cl.Context()
+
+	id := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	latest := reflect.New(reflect.TypeOf(obj).Elem()).Interface().(T)
+	if err := cl.Get(ctx, id, latest); err != nil {
+		cl.Fatalf("MustUpdateObject: failed to get latest %T (%s): %v", obj, id.String(), err)
+	}
+
+	updateFunc(latest)
+
+	if err := cl.Update(ctx, latest); err != nil {
+		cl.Fatalf("MustUpdateObject: failed to update %T (%s): %v", obj, id.String(), err)
+	}
 }
 
 // CreateWithCleanup creates the specified object and cleans up the object after
@@ -130,7 +159,7 @@ func (cl *ClusterClient) MatchesPredicates(ctx context.Context, obj client.Objec
 		return false, fmt.Errorf("MatchesPredicates %T (%s): %w", obj, nn.String(), err)
 	}
 	for _, predicate := range p {
-		predicateMatches, err := predicate(obj)
+		predicateMatches, err := predicate.Matches(obj)
 		if err != nil {
 			return false, fmt.Errorf("MatchesPredicates %T (%s): %w", obj, nn.String(), err)
 		}
@@ -187,10 +216,12 @@ func (cl *ClusterClient) ValidateObjectNotFound(ctx context.Context, obj client.
 	return nil // happy path - object not found
 }
 
-// WaitForObject waits for the specified object to exist and satisfy the provided
-// predicates.
-func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
+// PollUntilObjectMatches polls for the specified object to exist and satisfy the provided
+// predicates. Use WaitForObject for more precise timing via watches.
+func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicates.ObjectPredicate) error {
 	cl.Helper()
+	ctx := cl.Context()
+
 	var cancel context.CancelFunc
 	if _, ok := ctx.Deadline(); !ok {
 		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)
@@ -200,7 +231,7 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 	defer func() {
 		cl.Helper()
-		cl.Logf("WaitForObject %T (%s) took %s", obj, nn, time.Since(start))
+		cl.Logf("PollUntilObjectMatches %T (%s) took %s", obj, nn, time.Since(start))
 	}()
 	for {
 		select {
@@ -218,6 +249,155 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 			// Simple sleep for fixed duration (basic MVP)
 			time.Sleep(time.Second)
 		}
+	}
+}
+
+// WaitForObject waits for the specified object to exist and satisfy
+// the provided predicates.
+// It will wait for the object to be created, but if the object is deleted,
+// it will return an error.
+// A timeout can be specified via the context, or it will default to 1 minute.
+// It uses a watch for more precise timing than polling.
+func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
+	cl.Helper()
+
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)
+		defer cancel()
+	}
+	start := time.Now()
+	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	defer func() {
+		cl.Helper()
+		cl.Logf("WaitForObject %T (%s) took %s", obj, nn, time.Since(start))
+	}()
+
+	gvk, err := cl.gvkForObject(obj)
+	if err != nil {
+		return fmt.Errorf("failed to get GVK: %w", err)
+	}
+
+	gvr, err := cl.gvrForGVK(gvk)
+	if err != nil {
+		return fmt.Errorf("failed to get GVR for GVK %v: %w", gvk, err)
+	}
+
+	var resourceInterface dynamic.ResourceInterface
+	if nn.Namespace != "" {
+		resourceInterface = cl.dynamicClient.Resource(gvr).Namespace(nn.Namespace)
+	} else {
+		resourceInterface = cl.dynamicClient.Resource(gvr)
+	}
+
+	// First check if the object already satisfies the predicates
+	if valid, validationErr := cl.MatchesPredicates(ctx, obj, p...); validationErr == nil && valid {
+		return nil
+	}
+
+	// Set up the watch with field selector for the specific object
+	listOptions := metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", nn.Name).String(),
+		Watch:         true,
+	}
+
+	watcher, err := resourceInterface.Watch(ctx, listOptions)
+	if err != nil {
+		return fmt.Errorf("failed to create watch: %w", err)
+	}
+	defer watcher.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			cl.Logf("Timed out waiting for object %s/%s", obj.GetNamespace(), obj.GetName())
+			return fmt.Errorf("timed out waiting for object")
+		case event, ok := <-watcher.ResultChan():
+			if !ok {
+				// Watch channel closed, restart the watch
+				watcher, err = resourceInterface.Watch(ctx, listOptions)
+				if err != nil {
+					return fmt.Errorf("failed to restart watch: %w", err)
+				}
+				continue
+			}
+
+			if event.Type == watch.Error {
+				return fmt.Errorf("received error event while watching object %s/%s: %v", nn.Namespace, nn.Name, event)
+			}
+
+			if event.Type == watch.Deleted {
+				return fmt.Errorf("object %s/%s was deleted", nn.Namespace, nn.Name)
+			}
+
+			// Convert to client.Object and validate
+			u, ok := event.Object.(*unstructured.Unstructured)
+			if !ok {
+				return fmt.Errorf("unexpected type for event object: %T", event.Object)
+			}
+
+			// Copy the unstructured data to the provided object
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, obj); err != nil {
+				return fmt.Errorf("failed to convert unstructured to object: %w", err)
+			}
+
+			// Check if predicates are satisfied
+			allSatisfied := true
+			for _, predicate := range p {
+				predicateSatisfied, err := predicate.Matches(obj)
+				if err != nil {
+					return err
+				}
+				if !predicateSatisfied {
+					allSatisfied = false
+					break
+				}
+			}
+
+			if allSatisfied {
+				return nil
+			}
+		}
+	}
+}
+
+// gvkForObject returns the GroupVersionKind for the given object.
+func (cl *ClusterClient) gvkForObject(obj client.Object) (schema.GroupVersionKind, error) {
+	cl.Helper()
+
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	if gvk.Kind != "" {
+		return gvk, nil
+	}
+
+	// If GVK is not set on the object, try to get it from the scheme
+	gvks, _, err := cl.scheme.ObjectKinds(obj)
+	if err != nil {
+		return schema.GroupVersionKind{}, fmt.Errorf("failed to get GVK from scheme for object type %T: %w", obj, err)
+	}
+	if len(gvks) == 0 {
+		return schema.GroupVersionKind{}, fmt.Errorf("no GVK found for object type %T", obj)
+	}
+	return gvks[0], nil
+}
+
+// gvrForGVK returns the GroupVersionResource for the given GroupVersionKind.
+func (cl *ClusterClient) gvrForGVK(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
+	// We use a hard-coded list rather than going through discovery for simplicity and speed.
+	gv := gvk.GroupVersion()
+	switch gvk.GroupKind() {
+	case sandboxGVK.GroupKind():
+		return gv.WithResource("sandboxes"), nil
+	case sandboxWarmpoolGVK.GroupKind():
+		return gv.WithResource("sandboxwarmpools"), nil
+	case schema.GroupKind{Kind: "Pod"}:
+		return gv.WithResource("pods"), nil
+	case schema.GroupKind{Kind: "Namespace"}:
+		return gv.WithResource("namespaces"), nil
+	case schema.GroupKind{Kind: "SandboxClaim", Group: "extensions.agents.x-k8s.io"}:
+		return gv.WithResource("sandboxclaims"), nil
+	default:
+		return schema.GroupVersionResource{}, fmt.Errorf("unknown GVK %v in gvrForGVK", gvk)
 	}
 }
 

@@ -70,8 +70,10 @@ func TestSandboxReplicas(t *testing.T) {
 	tc.MustExist(service)
 
 	// Set replicas to zero
-	sandboxObj.Spec.Replicas = ptr.To(int32(0))
-	require.NoError(t, tc.Update(t.Context(), sandboxObj))
+	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1alpha1.Sandbox) {
+		obj.Spec.Replicas = ptr.To(int32(0))
+	})
+
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{

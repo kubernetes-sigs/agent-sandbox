@@ -18,12 +18,17 @@ span creation, and context propagation. If OpenTelemetry is not installed, it
 falls back to no-op mock objects.
 """
 
+from __future__ import annotations
+
 import atexit
 import functools
 import json
 import logging
 import threading
 from contextlib import nullcontext
+from typing import Any, Callable, TypeVar
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 # If optional dependency OpenTelemetry is not installed, define a complete set of mock objects
 # to prevent runtime errors.
@@ -34,7 +39,7 @@ try:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-    OPENTELEMETRY_AVAILABLE = True
+    OPENTELEMETRY_AVAILABLE: bool = True
 except ImportError:
     OPENTELEMETRY_AVAILABLE = False
     logging.debug("OpenTelemetry not installed; using MockTracer.")
@@ -42,72 +47,72 @@ except ImportError:
     class MockSpan:
         """Mock class for OpenTelemetry Span."""
 
-        def is_recording(self):
+        def is_recording(self) -> bool:
             """Mock is_recording."""
             return False
 
-        def set_attribute(self, key, value):
+        def set_attribute(self, key: str, value: Any) -> None:
             """Mock set_attribute."""
 
-        def end(self):
+        def end(self) -> None:
             """Mock end."""
 
     class MockTracer:
         """Mock class for OpenTelemetry Tracer."""
 
-        def start_as_current_span(self, *args, **kwargs):
+        def start_as_current_span(self, *args: Any, **kwargs: Any) -> nullcontext[None]:
             """Mock start_as_current_span."""
             return nullcontext()
 
-        def start_span(self, *args, **kwargs):
+        def start_span(self, *args: Any, **kwargs: Any) -> MockSpan:
             """Mock start_span."""
             return MockSpan()
 
     class TraceStub:
         """Mock class for OpenTelemetry trace module."""
         @staticmethod
-        def get_current_span():
+        def get_current_span() -> MockSpan:
             """Mock get_current_span."""
             return MockSpan()
 
         @staticmethod
-        def set_tracer_provider(_):
+        def set_tracer_provider(_: Any) -> None:
             """Mock set_tracer_provider."""
         @staticmethod
-        def get_tracer(name, version=None):
+        def get_tracer(name: str, version: str | None = None) -> MockTracer:
             """Mock get_tracer."""
             return MockTracer()
 
         @staticmethod
-        def set_span_in_context(span, context=None):
+        def set_span_in_context(span: Any, context: Any = None) -> None:
             """Mock set_span_in_context."""
 
-    class TraceContextTextMapPropagator:
+    class TraceContextTextMapPropagator:  # type: ignore[no-redef]
         """Mock class for OpenTelemetry TraceContextTextMapPropagator."""
 
-        def inject(self, carrier, context=None, setter=None):
+        def inject(self, carrier: dict[str, str], context: Any = None, setter: Any = None) -> None:
             """Mock inject."""
 
     class ContextStub:
         """Mock class for OpenTelemetry context module."""
         @staticmethod
-        def attach(*args, **kwargs):
+        def attach(*args: Any, **kwargs: Any) -> None:
             """Mock attach."""
 
         @staticmethod
-        def detach(*args, **kwargs):
+        def detach(*args: Any, **kwargs: Any) -> None:
             """Mock detach."""
 
     # Assign mock stubs to match import names
-    trace = TraceStub
-    context = ContextStub
+    trace = TraceStub  # type: ignore[assignment]
+    context = ContextStub  # type: ignore[assignment]
 
 # --- Global state for the singleton TracerProvider ---
-_TRACER_PROVIDER = None
+_TRACER_PROVIDER: Any = None
 _TRACER_PROVIDER_LOCK = threading.Lock()
 
 
-def initialize_tracer(service_name: str):
+def initialize_tracer(service_name: str) -> None:
     """
     Initializes the global OpenTelemetry TracerProvider using the singleton pattern.
 
@@ -157,7 +162,7 @@ def initialize_tracer(service_name: str):
                 f"Global OpenTelemetry TracerProvider configured for service '{service_name}'.")
 
 
-def trace_span(span_suffix):
+def trace_span(span_suffix: str) -> Callable[[F], F]:
     """
     Decorator to wrap a method in an OpenTelemetry span with a dynamic name.
 
@@ -170,9 +175,9 @@ def trace_span(span_suffix):
 
     If `self.tracer` is None (tracing disabled), the method runs without decoration.
     """
-    def decorator(func):
+    def decorator(func: F) -> F:
         @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
             tracer = getattr(self, 'tracer', None)
             if not tracer:
                 return func(self, *args, **kwargs)
@@ -184,7 +189,7 @@ def trace_span(span_suffix):
 
             with tracer.start_as_current_span(span_name):
                 return func(self, *args, **kwargs)
-        return wrapper
+        return wrapper  # type: ignore[return-value]
     return decorator
 
 
@@ -198,15 +203,15 @@ class TracerManager:
     3. Handling the attachment/detachment of the OTel context to the current thread.
     """
 
-    def __init__(self, service_name: str):
+    def __init__(self, service_name: str) -> None:
         instrumentation_scope_name = service_name.replace('-', '_')
-        self.tracer = trace.get_tracer(instrumentation_scope_name)
-        self.lifecycle_span_name = f"{service_name}.lifecycle"
-        self.parent_span = None
-        self.context_token = None
-        self.propagator = TraceContextTextMapPropagator()
+        self.tracer: Any = trace.get_tracer(instrumentation_scope_name)
+        self.lifecycle_span_name: str = f"{service_name}.lifecycle"
+        self.parent_span: Any = None
+        self.context_token: Any = None
+        self.propagator: TraceContextTextMapPropagator = TraceContextTextMapPropagator()
 
-    def start_lifecycle_span(self):
+    def start_lifecycle_span(self) -> None:
         """Starts the main parent span for the client's lifecycle."""
         if not self.tracer:
             return
@@ -215,7 +220,7 @@ class TracerManager:
         ctx = trace.set_span_in_context(self.parent_span)
         self.context_token = context.attach(ctx)
 
-    def end_lifecycle_span(self):
+    def end_lifecycle_span(self) -> None:
         """Ends the main parent span and detaches the context."""
         if self.context_token:
             context.detach(self.context_token)
@@ -224,6 +229,6 @@ class TracerManager:
 
     def get_trace_context_json(self) -> str:
         """Captures only traceparent and tracestate (excludes baggage)."""
-        carrier = {}
+        carrier: dict[str, str] = {}
         self.propagator.inject(carrier)
         return json.dumps(carrier) if carrier else ""

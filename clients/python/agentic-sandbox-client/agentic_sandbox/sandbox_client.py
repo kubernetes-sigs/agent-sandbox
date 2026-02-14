@@ -24,7 +24,9 @@ import time
 import socket
 import subprocess
 import logging
+import urllib.parse
 from dataclasses import dataclass
+from typing import List
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -62,6 +64,14 @@ class ExecutionResult:
     stdout: str
     stderr: str
     exit_code: int
+    
+@dataclass
+class FileEntry:
+    """Represents a file or directory entry in the sandbox."""
+    name: str
+    size: int
+    type: str  # 'file' or 'directory'
+    mod_time: float
 
 
 class SandboxClient:
@@ -469,11 +479,57 @@ class SandboxClient:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
 
+        encoded_path = urllib.parse.quote(path, safe='')
         response = self._request(
-            "GET", f"download/{path}", timeout=timeout)
+            "GET", f"download/{encoded_path}", timeout=timeout)
         content = response.content
 
         if span.is_recording():
             span.set_attribute("sandbox.file.size", len(content))
 
         return content
+    
+    @trace_span("list")
+    def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
+        """
+        Lists the contents of a directory in the sandbox.
+        Returns a list of FileEntry objects containing name, size, type, and mod_time.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        encoded_path = urllib.parse.quote(path, safe='')
+        response = self._request("GET", f"list/{encoded_path}", timeout=timeout)
+        
+        entries = response.json()
+        if not entries:
+            return []
+
+        file_entries = [
+            FileEntry(
+                name=e["name"],
+                size=e["size"],
+                type=e["type"],
+                mod_time=e["mod_time"]
+            ) for e in entries
+        ]
+        
+        if span.is_recording():
+            span.set_attribute("sandbox.file.count", len(file_entries))
+        return file_entries
+
+    @trace_span("exists")
+    def exists(self, path: str, timeout: int = 60) -> bool:
+        """
+        Checks if a file or directory exists at the given path.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        encoded_path = urllib.parse.quote(path, safe='')
+        response = self._request("GET", f"exists/{encoded_path}", timeout=timeout)
+        exists = response.json().get("exists", False)
+        if span.is_recording():
+            span.set_attribute("sandbox.file.exists", exists)
+        return exists
+    

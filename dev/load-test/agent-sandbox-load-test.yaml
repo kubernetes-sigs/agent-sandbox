@@ -1,5 +1,6 @@
 {{$replicas := DefaultParam .CL2_REPLICAS 20}}
-{{$namespaces := DefaultParam .CL2_NAMESPACES 2}}
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+{{$qps := DefaultParam .CL2_QPS 10}}
 {{$namespacePrefix := DefaultParam .CL2_NAMESPACE_PREFIX "agent-sandbox"}}
 name: agent-sandbox-load-test
 namespace:
@@ -8,7 +9,7 @@ namespace:
 tuningSets:
 - name: BurstCreate
   qpsLoad:
-    qps: 10 # Adjust based on your cluster's capacity
+    qps: {{$qps}} # Adjust based on your cluster's capacity
 steps:
 - name: Start Startup Latency Measurement
   measurements:

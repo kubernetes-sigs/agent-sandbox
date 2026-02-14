@@ -22,7 +22,11 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   The trigger_name is suffixed with unique hash.
     *   Waits for the snapshot to be processed.
     *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
-    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name).
+    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
+*   **`isrestored(self) -> tuple[bool, str | None]`**:
+    *   Checks if the sandbox pod was restored from a snapshot.
+    *   Verifies this by checking for the 'PodRestored' condition in the pod status.
+    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
 *   **Automatic Cleanup**:
     *   The `__exit__` method cleans up the `SandboxClaim` resources.
 
@@ -38,7 +42,7 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
     *   Takes a second snapshot (`test-snapshot-20`) after another ~10 seconds.
 2.  **Phase 2: Restoring from Recent Snapshot**:
     *   Restores a sandbox from the second snapshot.
-    *   Verifies that the counter continues from where it left off (>= 20), proving the state was preserved.
+    *   Verifies that sandbox has been restored from the recent snapshot. 
 
 ### Prerequisites
 

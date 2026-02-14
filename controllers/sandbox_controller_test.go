@@ -993,7 +993,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "1",
 					Labels: map[string]string{
 						sandboxv1alpha1.SandboxNameHashLabel: nameHash,
-						"custom-label": "label-val",
+						"custom-label":                       "label-val",
 					},
 					Annotations: map[string]string{
 						"custom-annotation": "anno-val",

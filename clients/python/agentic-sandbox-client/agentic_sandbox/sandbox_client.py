@@ -17,6 +17,8 @@ It handles lifecycle management (claiming, waiting) and interaction (execution,
 file I/O) with the sandbox environment, including optional OpenTelemetry tracing.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -25,6 +27,8 @@ import socket
 import subprocess
 import logging
 from dataclasses import dataclass
+from types import TracebackType
+from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -84,8 +88,8 @@ class SandboxClient:
         trace_service_name: str = "sandbox-client",
     ):
         self.trace_service_name = trace_service_name
-        self.tracing_manager = None
-        self.tracer = None
+        self.tracing_manager: TracerManager | None = None
+        self.tracer: Any = None
         if enable_tracing:
             if not OPENTELEMETRY_AVAILABLE:
                 logging.error(
@@ -111,7 +115,7 @@ class SandboxClient:
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
         self.pod_name: str | None = None
-        self.annotations: dict | None = None
+        self.annotations: dict[str, str] | None = None
 
         try:
             config.load_incluster_config()
@@ -136,7 +140,7 @@ class SandboxClient:
         return self.base_url is not None
 
     @trace_span("create_claim")
-    def _create_claim(self, trace_context_str: str = ""):
+    def _create_claim(self, trace_context_str: str = "") -> None:
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
 
@@ -170,7 +174,7 @@ class SandboxClient:
         )
 
     @trace_span("wait_for_sandbox_ready")
-    def _wait_for_sandbox_ready(self):
+    def _wait_for_sandbox_ready(self) -> None:
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
         if not self.claim_name:
             raise RuntimeError(
@@ -223,14 +227,14 @@ class SandboxClient:
         raise TimeoutError(
             f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
 
-    def _get_free_port(self):
+    def _get_free_port(self) -> int:
         """Finds a free port on localhost."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
             return s.getsockname()[1]
 
     @trace_span("dev_mode_tunnel")
-    def _start_and_wait_for_port_forward(self):
+    def _start_and_wait_for_port_forward(self) -> None:
         """
         Starts 'kubectl port-forward' to the Router Service.
         This allows 'Dev Mode' without needing a public Gateway IP.
@@ -280,7 +284,7 @@ class SandboxClient:
         raise TimeoutError("Failed to establish tunnel to Router Service.")
 
     @trace_span("wait_for_gateway")
-    def _wait_for_gateway_ip(self):
+    def _wait_for_gateway_ip(self) -> None:
         """Waits for the Gateway to be assigned an external IP."""
         span = trace.get_current_span()
         if span.is_recording():
@@ -323,7 +327,7 @@ class SandboxClient:
                 f" an IP within {self.gateway_ready_timeout} seconds."
             )
 
-    def __enter__(self) -> 'SandboxClient':
+    def __enter__(self) -> SandboxClient:
         trace_context_str = ""
         # We can't use the "with trace..." context management. This is the equivalent.
         # https://github.com/open-telemetry/opentelemetry-python/issues/2787
@@ -349,7 +353,11 @@ class SandboxClient:
 
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+    ) -> None:
         # Cleanup Port Forward if it exists
         if self.port_forward_process:
             try:
@@ -389,7 +397,7 @@ class SandboxClient:
             except Exception as e:
                 logging.error(f"Failed to end tracing span: {e}")
 
-    def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+    def _request(self, method: str, endpoint: str, **kwargs: Any) -> requests.Response:
         if not self.is_ready():
             raise RuntimeError("Sandbox is not ready for communication.")
 
@@ -448,7 +456,7 @@ class SandboxClient:
         return result
 
     @trace_span("write")
-    def write(self, path: str, content: bytes | str, timeout: int = 60):
+    def write(self, path: str, content: bytes | str, timeout: int = 60) -> None:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)

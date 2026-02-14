@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import requests
 from ..sandbox_client import SandboxClient, ExecutionResult
 
 class ComputerUseSandbox(SandboxClient):
     """
     A specialized Sandbox client for the computer-use example.
     """
-    def __init__(self, template_name: str, namespace: str = "default", server_port: int = 8080):
+    def __init__(self, template_name: str, namespace: str = "default", server_port: int = 8080) -> None:
         super().__init__(template_name, namespace, server_port=server_port)
 
     def agent(self, query: str, timeout: int = 60) -> ExecutionResult:

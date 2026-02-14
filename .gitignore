@@ -15,3 +15,4 @@ clients/python/agentic-sandbox-client/VERSION
 # Temporary folders
 tmp/
 temp/
+.tmp/

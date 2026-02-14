@@ -5,6 +5,9 @@ metadata:
   name: {{.Name}}
 spec:
   podTemplate:
+    metadata:
+      labels:
+        app: agent-sandbox-load-test
     spec:
       containers:
       - name: sample-sandbox

@@ -1,8 +1,9 @@
 {{$replicas := DefaultParam .CL2_REPLICAS 20}}
+{{$namespaces := DefaultParam .CL2_NAMESPACES 2}}
 {{$namespacePrefix := DefaultParam .CL2_NAMESPACE_PREFIX "agent-sandbox"}}
 name: agent-sandbox-load-test
 namespace:
-  number: 1
+  number: {{$namespaces}}
   prefix: {{$namespacePrefix}}
 tuningSets:
 - name: BurstCreate
@@ -11,15 +12,17 @@ tuningSets:
 steps:
 - name: Start Startup Latency Measurement
   measurements:
+  # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
+  # once agent_sandbox_creation_latency_ms metrics are available to measure 
+  # end-to-end controller overhead.  
   - Identifier: SandboxStartupLatency
-    Method: PodStartupLatency # We use Pod latency as Sandboxes wrap Pods
+    Method: PodStartupLatency # Warning: this only measures the downstream Pod latency, not the end-to-end Sandbox lifecycle
     Params:
       action: start
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
-      namespace: {{$namespacePrefix}}-1
+      labelSelector: "app=agent-sandbox-load-test"
 - name: Create Sandboxes
   phases:
-  - namespaceRange: {min: 1, max: 1}
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
     replicasPerNamespace: {{$replicas}} # Total sandboxes to spin up
     tuningSet: BurstCreate
     objectBundle:
@@ -31,20 +34,18 @@ steps:
     Method: WaitForRunningPods
     Params:
       action: start
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
-      namespace: {{$namespacePrefix}}-1
-      desiredPodCount: {{$replicas}}
+      labelSelector: "app=agent-sandbox-load-test"
+      desiredPodCount: {{MultiplyInt $replicas $namespaces}}
 - name: Gather Results
   measurements:
   - Identifier: SandboxStartupLatency
     Method: PodStartupLatency
     Params:
       action: gather
-      namespace: {{$namespacePrefix}}-1
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      labelSelector: "app=agent-sandbox-load-test"
 - name: Delete Sandboxes
   phases:
-  - namespaceRange: {min: 1, max: 1}
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
     replicasPerNamespace: 0
     tuningSet: BurstCreate
     objectBundle:

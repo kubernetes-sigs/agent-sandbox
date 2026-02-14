@@ -85,7 +85,7 @@ params:
       # The responses that the user sees after clicking "yes" (the page was helpful) or "no" (the page was not helpful).
       yes: 'Glad to hear it! Please <a href="https://github.com/kubernetes-sigs/agent-sandbox/issues/new">tell us how we can improve</a>.'
       no: 'Sorry to hear that. Please <a href="https://github.com/kubernetes-sigs/agent-sandbox/issues/new">tell us how we can improve</a>.'
-    
+
     links:
       user:
         - name: User mailing list
@@ -135,7 +135,7 @@ module:
   - disableWatch: true
     source: ../
     target: assets/additional
-    includeFiles: ["CONTRIBUTING.md", "README.md"]
+    includeFiles: ["CONTRIBUTING.md", "README.md", "docs_api.md"]
   - disableWatch: true
     source: ../examples
     target: assets/additional/examples
@@ -146,7 +146,7 @@ module:
   - disableWatch: true
     source: ../docs
     target: assets/additional/docs
-    includeFiles: ["testing.md"]
+    includeFiles: ["testing.md", "api.md"]
   imports:
     - path: github.com/google/docsy
       disable: false

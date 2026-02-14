@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -209,6 +210,7 @@ func TestReconcile(t *testing.T) {
 	testCases := []struct {
 		name                 string
 		initialObjs          []runtime.Object
+		sandboxAnnotations   map[string]string
 		sandboxSpec          sandboxv1alpha1.SandboxSpec
 		wantStatus           sandboxv1alpha1.SandboxStatus
 		wantObjs             []client.Object
@@ -495,6 +497,161 @@ func TestReconcile(t *testing.T) {
 			},
 			expectSandboxDeleted: true,
 		},
+		{
+			name: "sandbox spec with container ports creates service ports",
+			sandboxAnnotations: map[string]string{
+				SandboxExposePortsAnnotation: "true",
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "main",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "http",
+										ContainerPort: 8080,
+									},
+									{
+										Name:          "metrics",
+										ContainerPort: 9090,
+										Protocol:      corev1.ProtocolTCP,
+									},
+									{
+										Name:          "duplicate",
+										ContainerPort: 8080,
+									},
+								},
+							},
+							{
+								Name: "sidecar",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "admin",
+										ContainerPort: 9000,
+										Protocol:      corev1.ProtocolTCP,
+									},
+									{
+										Name:          "http",
+										ContainerPort: 9091,
+										Protocol:      corev1.ProtocolTCP,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Service:       sandboxName,
+				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
+				Replicas:      1,
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "DependenciesNotReady",
+						Message:            "Pod exists with phase: ; Service Exists",
+					},
+				},
+			},
+			wantObjs: []client.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "main",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "http",
+										ContainerPort: 8080,
+									},
+									{
+										Name:          "metrics",
+										ContainerPort: 9090,
+										Protocol:      corev1.ProtocolTCP,
+									},
+									{
+										Name:          "duplicate",
+										ContainerPort: 8080,
+									},
+								},
+							},
+							{
+								Name: "sidecar",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "admin",
+										ContainerPort: 9000,
+										Protocol:      corev1.ProtocolTCP,
+									},
+									{
+										Name:          "http",
+										ContainerPort: 9091,
+										Protocol:      corev1.ProtocolTCP,
+									},
+								},
+							},
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						Selector: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						ClusterIP: "None",
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "http",
+								Port:       8080,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(8080),
+							},
+							{
+								Name:       "metrics",
+								Port:       9090,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(9090),
+							},
+							{
+								Name:       "admin",
+								Port:       9000,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(9000),
+							},
+							{
+								Name:       "http-9091-tcp",
+								Port:       9091,
+								Protocol:   corev1.ProtocolTCP,
+								TargetPort: intstr.FromInt32(9091),
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -503,6 +660,9 @@ func TestReconcile(t *testing.T) {
 			sb.Name = sandboxName
 			sb.Namespace = sandboxNs
 			sb.Generation = 1
+			if tc.sandboxAnnotations != nil {
+				sb.Annotations = tc.sandboxAnnotations
+			}
 			sb.Spec = tc.sandboxSpec
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sb)...),
@@ -903,6 +1063,234 @@ func TestReconcilePod(t *testing.T) {
 				// Check if the annotations match what we expect
 				require.Equal(t, tc.wantSandboxAnnotations, liveSandbox.Annotations)
 			}
+		})
+	}
+}
+
+func TestReconcileService(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := "name-hash"
+
+	baseSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "main",
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "http",
+									ContainerPort: 8080,
+								},
+								{
+									Name:          "metrics",
+									ContainerPort: 9090,
+									Protocol:      corev1.ProtocolTCP,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name        string
+		initialObjs []runtime.Object
+		sandbox     *sandboxv1alpha1.Sandbox
+		wantService *corev1.Service
+		wantErr     bool
+	}{
+		{
+			name: "returns existing service without changes",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "None",
+						Selector: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						},
+					},
+				},
+			},
+			sandbox: baseSandbox,
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+				},
+			},
+		},
+		{
+			name:    "creates service without ports when annotation missing",
+			sandbox: baseSandbox,
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+				},
+			},
+		},
+		{
+			name: "creates service with ports when annotation enabled",
+			sandbox: func() *sandboxv1alpha1.Sandbox {
+				sb := baseSandbox.DeepCopy()
+				sb.Annotations = map[string]string{
+					SandboxExposePortsAnnotation: "true",
+				}
+				return sb
+			}(),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						{
+							Name:       "http",
+							Port:       8080,
+							Protocol:   corev1.ProtocolTCP,
+							TargetPort: intstr.FromInt32(8080),
+						},
+						{
+							Name:       "metrics",
+							Port:       9090,
+							Protocol:   corev1.ProtocolTCP,
+							TargetPort: intstr.FromInt32(9090),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "creates service with unique port names when container port names collide",
+			sandbox: func() *sandboxv1alpha1.Sandbox {
+				sb := baseSandbox.DeepCopy()
+				sb.Annotations = map[string]string{
+					SandboxExposePortsAnnotation: "true",
+				}
+				sb.Spec.PodTemplate.Spec.Containers = []corev1.Container{
+					{
+						Name: "main",
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "http",
+								ContainerPort: 8080,
+							},
+						},
+					},
+					{
+						Name: "sidecar",
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "http",
+								ContainerPort: 9091,
+								Protocol:      corev1.ProtocolTCP,
+							},
+						},
+					},
+				}
+				return sb
+			}(),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						{
+							Name:       "http",
+							Port:       8080,
+							Protocol:   corev1.ProtocolTCP,
+							TargetPort: intstr.FromInt32(8080),
+						},
+						{
+							Name:       "http-9091-tcp",
+							Port:       9091,
+							Protocol:   corev1.ProtocolTCP,
+							TargetPort: intstr.FromInt32(9091),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &SandboxReconciler{
+				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
+				Scheme: Scheme,
+			}
+
+			svc, err := r.reconcileService(t.Context(), tc.sandbox, nameHash)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, svc)
+
+			liveSvc := &corev1.Service{}
+			err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, liveSvc)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantService, liveSvc)
 		})
 	}
 }

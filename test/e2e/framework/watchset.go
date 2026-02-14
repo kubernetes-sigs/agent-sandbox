@@ -16,6 +16,7 @@ package framework
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -28,15 +29,25 @@ import (
 
 // Subscription represents a subscription to events from a ResourceWatch.
 type Subscription struct {
-	// Events is the channel where events are delivered.
-	Events chan watch.Event
-
 	id uint64
 
 	// filter allows us to use a broader watch and filter events per subscription.
 	filter WatchFilter
 
 	resourceWatch *ResourceWatch
+
+	events *ConcurrentQueue[watch.Event]
+}
+
+// Next waits for and returns the next event.
+// It returns an error if the context is cancelled or the subscription is closed.
+func (s *Subscription) Next(ctx context.Context) (watch.Event, error) {
+	event, err := s.events.Wait(ctx)
+	if err != nil {
+		return watch.Event{}, err
+	}
+
+	return event, nil
 }
 
 // ResourceWatch maintains a watch for a specific GVR+namespace combination.
@@ -155,9 +166,9 @@ func (rw *ResourceWatch) subscribe(filter WatchFilter) *Subscription {
 
 	sub := &Subscription{
 		id:            rw.nextSubID,
-		Events:        make(chan watch.Event, 100), // Buffered to reduce blocking
 		filter:        filter,
 		resourceWatch: rw,
+		events:        NewConcurrentQueue[watch.Event](),
 	}
 	rw.nextSubID++
 	rw.subscriptions[sub.id] = sub
@@ -172,7 +183,8 @@ func (rw *ResourceWatch) unsubscribe(sub *Subscription) {
 
 	if _, ok := rw.subscriptions[sub.id]; ok {
 		delete(rw.subscriptions, sub.id)
-		close(sub.Events)
+
+		sub.events.Close(fmt.Errorf("subscription closed"))
 	}
 
 	// TODO: Stop the watch if there are no more subscriptions
@@ -186,7 +198,7 @@ func (rw *ResourceWatch) stop() {
 	rw.cancelWatchLoop()
 
 	for _, sub := range rw.subscriptions {
-		close(sub.Events)
+		sub.events.Close(fmt.Errorf("subscription closed"))
 	}
 	rw.subscriptions = nil
 }
@@ -272,21 +284,85 @@ func (rw *ResourceWatch) broadcast(event watch.Event) {
 	defer rw.mu.RUnlock()
 
 	for _, sub := range rw.subscriptions {
-		if event.Type == watch.Error || event.Type == watch.Bookmark {
+		switch event.Type {
+		case watch.Error, watch.Bookmark:
 			// Always send errors and bookmarks
-			sub.Events <- event
-			continue
-		}
-
-		// Check if subscription filter matches
-		if sub.filter.Namespace != "" && sub.filter.Namespace != namespace {
-			continue
-		}
-		if sub.filter.Name != "" && sub.filter.Name != name {
-			continue
+		default:
+			// Check if subscription filter matches
+			if sub.filter.Namespace != "" && sub.filter.Namespace != namespace {
+				continue
+			}
+			if sub.filter.Name != "" && sub.filter.Name != name {
+				continue
+			}
 		}
 
 		// Send event
-		sub.Events <- event
+		sub.events.Push(event)
 	}
+}
+
+// ConcurrentQueue is a thread-safe queue.
+type ConcurrentQueue[T any] struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	items  []T
+	closed error
+}
+
+func NewConcurrentQueue[T any]() *ConcurrentQueue[T] {
+	l := &ConcurrentQueue[T]{}
+	l.cond = sync.NewCond(&l.mu)
+	return l
+}
+
+// Close marks the queue as closed and wakes up all waiters.
+func (l *ConcurrentQueue[T]) Close(err error) {
+	l.mu.Lock()
+	l.closed = err
+	l.cond.Broadcast()
+	l.mu.Unlock()
+}
+
+func (l *ConcurrentQueue[T]) Push(item T) {
+	l.mu.Lock()
+	l.items = append(l.items, item)
+	l.cond.Broadcast()
+	l.mu.Unlock()
+}
+
+// contextTimeout is called when any context waiting on the condition is cancelled.
+// It wakes up all waiters so they can check their context.
+// We make this a method because that _should_ be more efficient than a closure (?)
+func (l *ConcurrentQueue[T]) contextTimeout() {
+	l.mu.Lock()
+	l.cond.Broadcast()
+	l.mu.Unlock()
+}
+
+func (l *ConcurrentQueue[T]) Wait(ctx context.Context) (T, error) {
+	var zeroT T
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	stop := context.AfterFunc(ctx, l.contextTimeout)
+	defer stop()
+
+	for len(l.items) == 0 {
+		l.cond.Wait()
+
+		if ctx.Err() != nil {
+			return zeroT, ctx.Err()
+		}
+
+		if l.closed != nil {
+			return zeroT, l.closed
+		}
+	}
+
+	item := l.items[0]
+	l.items[0] = zeroT // Help GC
+	l.items = l.items[1:]
+	return item, nil
 }

@@ -1,0 +1,59 @@
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SandboxTemplate for LangChain DeepAgents
+# This template defines the container image and resources for sandbox pods.
+---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: python-deepagent
+spec:
+  podTemplateSpec:
+    metadata:
+      labels:
+        app: deepagent-sandbox
+    spec:
+      containers:
+        - name: sandbox-runtime
+          # Uses the python-runtime-sandbox image from examples
+          # Build with: docker build -t sandbox-runtime:latest examples/python-runtime-sandbox/
+          image: sandbox-runtime:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8888
+              name: runtime
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          securityContext:
+            allowPrivilegeEscalation: false
+          # Working directory for agent files
+          workingDir: /app
+---
+# Optional: WarmPool for faster sandbox startup
+# Uncomment to pre-warm sandbox pods
+# apiVersion: extensions.agents.x-k8s.io/v1alpha1
+# kind: SandboxWarmPool
+# metadata:
+#   name: python-pool
+# spec:
+#   sandboxTemplateRef:
+#     name: python-deepagent
+#   replicas: 2
+#   maxReplicas: 5

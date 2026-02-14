@@ -102,6 +102,20 @@ def test_ls_info_parses_entries():
     _require(entries[1]["is_dir"] is True, "Unexpected second entry type")
 
 
+def test_ls_info_filters_dot_and_dotdot_with_trailing_slash():
+    """ls -a -p on Linux outputs ./ and ../ — these must be filtered."""
+    client = StubClient(
+        run_result=SimpleNamespace(stdout="./\n../\nfile.txt\ndir/\n", stderr="", exit_code=0)
+    )
+    backend = AgentSandboxBackend(client)
+
+    entries = backend.ls_info("/")
+
+    _require(len(entries) == 2, f"Expected 2 entries (no . or ..), got {len(entries)}")
+    paths = [e["path"] for e in entries]
+    _require("/." not in paths and "/.." not in paths, f"Dot entries leaked: {paths}")
+
+
 def test_upload_files_invalid_path():
     client = StubClient()
     backend = AgentSandboxBackend(client)

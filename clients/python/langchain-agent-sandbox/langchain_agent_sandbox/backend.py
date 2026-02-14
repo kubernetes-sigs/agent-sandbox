@@ -180,7 +180,7 @@ class AgentSandboxBackend:
         entries: List[FileInfo] = []
         public_dir = self._normalize_public_dir(path)
         for entry in result.stdout.splitlines():
-            if entry in (".", ".."):
+            if not entry or entry.rstrip("/") in (".", ".."):
                 continue
             is_dir = entry.endswith("/")
             name = entry[:-1] if is_dir else entry

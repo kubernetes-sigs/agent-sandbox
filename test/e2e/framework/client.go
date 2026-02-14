@@ -331,22 +331,20 @@ func (cl *ClusterClient) Watch(gvr schema.GroupVersionResource, filter WatchFilt
 	defer sub.Close()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return false, fmt.Errorf("timed out watching object: %w", ctx.Err())
-
-		case event, ok := <-sub.Events:
-			if !ok {
-				return false, fmt.Errorf("subscription closed during watch of %v", gvr)
+		event, err := sub.Next(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false, fmt.Errorf("timed out watching object: %w", err)
 			}
+			return false, fmt.Errorf("subscription closed or error during watch of %v: %w", gvr, err)
+		}
 
-			if event.Type == watch.Error {
-				return false, fmt.Errorf("received error event during watch of %v", gvr)
-			}
+		if event.Type == watch.Error {
+			return false, fmt.Errorf("received error event during watch of %v", gvr)
+		}
 
-			if done, err := callback(event); done || err != nil {
-				return done, err
-			}
+		if done, err := callback(event); done || err != nil {
+			return done, err
 		}
 	}
 }

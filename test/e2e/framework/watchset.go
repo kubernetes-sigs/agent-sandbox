@@ -16,6 +16,7 @@ package framework
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -28,15 +29,41 @@ import (
 
 // Subscription represents a subscription to events from a ResourceWatch.
 type Subscription struct {
-	// Events is the channel where events are delivered.
-	Events chan watch.Event
-
 	id uint64
 
 	// filter allows us to use a broader watch and filter events per subscription.
 	filter WatchFilter
 
 	resourceWatch *ResourceWatch
+
+	mu     sync.Mutex
+	events []watch.Event
+	signal waitableCondition
+	closed bool
+}
+
+// Next waits for and returns the next event.
+// It returns an error if the context is cancelled or the subscription is closed.
+func (s *Subscription) Next(ctx context.Context) (watch.Event, error) {
+	for {
+		s.mu.Lock()
+		if len(s.events) > 0 {
+			event := s.events[0]
+			s.events[0] = watch.Event{} // Help GC
+			s.events = s.events[1:]
+			s.mu.Unlock()
+			return event, nil
+		}
+		if s.closed {
+			s.mu.Unlock()
+			return watch.Event{}, fmt.Errorf("subscription closed")
+		}
+		s.mu.Unlock()
+
+		if err := s.signal.Wait(ctx); err != nil {
+			return watch.Event{}, err
+		}
+	}
 }
 
 // ResourceWatch maintains a watch for a specific GVR+namespace combination.
@@ -155,10 +182,10 @@ func (rw *ResourceWatch) subscribe(filter WatchFilter) *Subscription {
 
 	sub := &Subscription{
 		id:            rw.nextSubID,
-		Events:        make(chan watch.Event, 100), // Buffered to reduce blocking
 		filter:        filter,
 		resourceWatch: rw,
 	}
+	sub.signal.Init()
 	rw.nextSubID++
 	rw.subscriptions[sub.id] = sub
 
@@ -172,7 +199,12 @@ func (rw *ResourceWatch) unsubscribe(sub *Subscription) {
 
 	if _, ok := rw.subscriptions[sub.id]; ok {
 		delete(rw.subscriptions, sub.id)
-		close(sub.Events)
+
+		sub.mu.Lock()
+		sub.closed = true
+		sub.mu.Unlock()
+
+		sub.signal.Signal()
 	}
 
 	// TODO: Stop the watch if there are no more subscriptions
@@ -186,7 +218,11 @@ func (rw *ResourceWatch) stop() {
 	rw.cancelWatchLoop()
 
 	for _, sub := range rw.subscriptions {
-		close(sub.Events)
+		sub.mu.Lock()
+		sub.closed = true
+		sub.mu.Unlock()
+
+		sub.signal.Signal()
 	}
 	rw.subscriptions = nil
 }
@@ -272,21 +308,53 @@ func (rw *ResourceWatch) broadcast(event watch.Event) {
 	defer rw.mu.RUnlock()
 
 	for _, sub := range rw.subscriptions {
-		if event.Type == watch.Error || event.Type == watch.Bookmark {
+		switch event.Type {
+		case watch.Error, watch.Bookmark:
 			// Always send errors and bookmarks
-			sub.Events <- event
-			continue
-		}
-
-		// Check if subscription filter matches
-		if sub.filter.Namespace != "" && sub.filter.Namespace != namespace {
-			continue
-		}
-		if sub.filter.Name != "" && sub.filter.Name != name {
-			continue
+		default:
+			// Check if subscription filter matches
+			if sub.filter.Namespace != "" && sub.filter.Namespace != namespace {
+				continue
+			}
+			if sub.filter.Name != "" && sub.filter.Name != name {
+				continue
+			}
 		}
 
 		// Send event
-		sub.Events <- event
+		sub.mu.Lock()
+		sub.events = append(sub.events, event)
+		sub.mu.Unlock()
+
+		sub.signal.Signal()
+	}
+}
+
+// waitableCondition is like a condition, but supports context-aware waiting.
+// Note that we only support a single waiter at a time, which is sufficient for our use case.
+type waitableCondition struct {
+	ch chan struct{}
+}
+
+// Init initializes the Signal.
+func (s *waitableCondition) Init() {
+	s.ch = make(chan struct{}, 1)
+}
+
+// Signal signals the waiter.  We can only wake up one goroutine.
+func (s *waitableCondition) Signal() {
+	select {
+	case s.ch <- struct{}{}:
+	default:
+	}
+}
+
+// Wait blocks until a signal is received or the context is cancelled.
+func (s *waitableCondition) Wait(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.ch:
+		return nil
 	}
 }

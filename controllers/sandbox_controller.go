@@ -63,6 +63,26 @@ const (
 	reasonAdoptedBySandbox = "AdoptedBySandbox"
 )
 
+// MergeVolumeClaimVolumes merges PVC-backed volumes into an existing volume
+// list, replacing any volumes with matching names. This follows StatefulSet
+// semantics where volumeClaimTemplate volumes take priority.
+func MergeVolumeClaimVolumes(existing []corev1.Volume, pvcVolumes []corev1.Volume) []corev1.Volume {
+	if len(pvcVolumes) == 0 {
+		return existing
+	}
+	vctNames := make(map[string]struct{}, len(pvcVolumes))
+	for _, v := range pvcVolumes {
+		vctNames[v.Name] = struct{}{}
+	}
+	filtered := make([]corev1.Volume, 0, len(existing))
+	for _, v := range existing {
+		if _, ok := vctNames[v.Name]; !ok {
+			filtered = append(filtered, v)
+		}
+	}
+	return append(filtered, pvcVolumes...)
+}
+
 // pvcNameSuffix returns the suffix to use for PVC names.
 // If the sandbox adopted a pod from a warm pool, use the original pod name
 // to match the existing PVC names. Otherwise use the sandbox name.
@@ -493,11 +513,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 
-	// Use the appropriate suffix for PVC names (adopted pod name or sandbox name)
+	// Build PVC volumes from volumeClaimTemplates
 	pvcSuffix := pvcNameSuffix(sandbox)
+	var pvcVolumes []corev1.Volume
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvcName := pvcTemplate.Name + "-" + pvcSuffix
-		mutatedSpec.Volumes = append(mutatedSpec.Volumes, corev1.Volume{
+		pvcVolumes = append(pvcVolumes, corev1.Volume{
 			Name: pvcTemplate.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -506,6 +527,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			},
 		})
 	}
+	mutatedSpec.Volumes = MergeVolumeClaimVolumes(mutatedSpec.Volumes, pvcVolumes)
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        newPodName,

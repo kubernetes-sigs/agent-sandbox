@@ -431,8 +431,8 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
 	}
 
-	// Add PVC volumes to pod spec
-	pod.Spec.Volumes = append(pod.Spec.Volumes, pvcVolumes...)
+	// Add PVC volumes to pod spec, replacing any pod template volumes with matching names
+	pod.Spec.Volumes = sandboxcontrollers.MergeVolumeClaimVolumes(pod.Spec.Volumes, pvcVolumes)
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {

@@ -1304,3 +1304,55 @@ func TestAdoptPodPVCs(t *testing.T) {
 		require.Nil(t, metav1.GetControllerOf(&pvc), "PVC without warm pool annotation should not be adopted")
 	})
 }
+
+func TestMergeVolumeClaimVolumes(t *testing.T) {
+	pvcVol := corev1.Volume{
+		Name: "data",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: "data-my-pod",
+			},
+		},
+	}
+
+	t.Run("replaces conflicting volume", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, []corev1.Volume{pvcVol})
+
+		require.Len(t, result, 2)
+		// config preserved
+		require.Equal(t, "config", result[0].Name)
+		require.NotNil(t, result[0].ConfigMap)
+		// data replaced by PVC
+		require.Equal(t, "data", result[1].Name)
+		require.NotNil(t, result[1].PersistentVolumeClaim)
+	})
+
+	t.Run("appends when no conflict", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, []corev1.Volume{pvcVol})
+
+		require.Len(t, result, 2)
+		require.Equal(t, "config", result[0].Name)
+		require.Equal(t, "data", result[1].Name)
+	})
+
+	t.Run("no-op when pvcVolumes is empty", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, nil)
+
+		require.Len(t, result, 1)
+		require.Equal(t, "data", result[0].Name)
+		require.NotNil(t, result[0].EmptyDir)
+	})
+}

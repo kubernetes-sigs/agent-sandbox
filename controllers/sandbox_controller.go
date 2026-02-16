@@ -606,21 +606,6 @@ func (r *SandboxReconciler) adoptPodPVCs(ctx context.Context, sandbox *sandboxv1
 			return fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
 		}
 
-		// Check if PVC already has an owner
-		if controllerRef := metav1.GetControllerOf(pvc); controllerRef != nil {
-			// Already owned - check if it's us
-			if controllerRef.UID == sandbox.UID {
-				// Already owned by this sandbox
-				continue
-			}
-			// Owned by something else - skip
-			log.Info("PVC already owned by another controller, skipping adoption",
-				"pvc", pvcName,
-				"owner", controllerRef.Name,
-				"ownerKind", controllerRef.Kind)
-			continue
-		}
-
 		// Only adopt PVCs that came from the warm pool to avoid stealing
 		// pre-existing shared PVCs that users may have created manually
 		if pvc.Annotations[WarmPoolPVCAnnotation] != "true" {
@@ -628,8 +613,31 @@ func (r *SandboxReconciler) adoptPodPVCs(ctx context.Context, sandbox *sandboxv1
 			continue
 		}
 
-		// PVC is orphaned and from warm pool - adopt it
-		log.Info("Adopting orphaned PVC", "pvc", pvcName, "sandbox", sandbox.Name)
+		// Check if PVC already has an owner
+		if controllerRef := metav1.GetControllerOf(pvc); controllerRef != nil {
+			if controllerRef.UID == sandbox.UID {
+				continue
+			}
+			// Allow taking over from warm pool (crash recovery: transferPVCOwnership
+			// in the sandboxclaim controller didn't complete)
+			if controllerRef.Kind != "SandboxWarmPool" {
+				log.Info("PVC already owned by another controller, skipping adoption",
+					"pvc", pvcName,
+					"owner", controllerRef.Name,
+					"ownerKind", controllerRef.Kind)
+				continue
+			}
+			// Remove the warm pool owner ref before setting sandbox as owner
+			var filteredOwnerRefs []metav1.OwnerReference
+			for _, ref := range pvc.OwnerReferences {
+				if ref.Kind != "SandboxWarmPool" {
+					filteredOwnerRefs = append(filteredOwnerRefs, ref)
+				}
+			}
+			pvc.OwnerReferences = filteredOwnerRefs
+		}
+
+		log.Info("Adopting PVC", "pvc", pvcName, "sandbox", sandbox.Name)
 		if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 			return fmt.Errorf("failed to set controller reference for PVC %s: %w", pvcName, err)
 		}

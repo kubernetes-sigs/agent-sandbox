@@ -997,6 +997,9 @@ func TestSandboxClaimPVCAdoption(t *testing.T) {
 					poolLabel:              poolNameHash,
 					sandboxTemplateRefHash: templateRefHash,
 				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPVCAnnotation: "true",
+				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
 						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
@@ -1070,16 +1073,20 @@ func TestSandboxClaimPVCAdoption(t *testing.T) {
 			t.Errorf("template ref label should be removed from adopted PVC")
 		}
 
-		// Owner references should be cleared (sandbox controller will adopt later)
-		if len(adoptedPVC.OwnerReferences) != 0 {
-			t.Errorf("owner references should be cleared from adopted PVC, got %v", adoptedPVC.OwnerReferences)
-		}
-
 		// Verify sandbox was created WITH volumeClaimTemplates (for visibility and pod recreation)
 		var sandbox sandboxv1alpha1.Sandbox
 		err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 		if err != nil {
 			t.Fatalf("failed to get sandbox: %v", err)
+		}
+
+		// PVC should now be owned by the sandbox (ownership transferred after sandbox creation)
+		controllerRef := metav1.GetControllerOf(&adoptedPVC)
+		if controllerRef == nil {
+			t.Fatalf("PVC should have a controller reference after ownership transfer")
+		}
+		if controllerRef.UID != sandbox.UID {
+			t.Errorf("PVC should be owned by sandbox, got owner UID %v", controllerRef.UID)
 		}
 		if len(sandbox.Spec.VolumeClaimTemplates) != 1 {
 			t.Errorf("sandbox should have volumeClaimTemplates, got %d", len(sandbox.Spec.VolumeClaimTemplates))

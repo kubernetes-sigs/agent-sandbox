@@ -1231,6 +1231,49 @@ func TestAdoptPodPVCs(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("adopts PVC still owned by warm pool (crash recovery)", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "test-pvc")
+		warmPoolPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pvc",
+				Namespace: "default",
+				Annotations: map[string]string{
+					WarmPoolPVCAnnotation: "true",
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       "test-pool",
+						UID:        "warmpool-uid",
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod, warmPoolPVC)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+
+		var pvc corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-pvc", Namespace: "default"}, &pvc)
+		require.NoError(t, err)
+
+		controllerRef := metav1.GetControllerOf(&pvc)
+		require.NotNil(t, controllerRef, "PVC should have a controller reference")
+		require.Equal(t, sandbox.UID, controllerRef.UID, "PVC should be owned by sandbox")
+	})
+
 	t.Run("skips PVC without warm pool annotation", func(t *testing.T) {
 		pod := createPodWithPVC("test-pod", "test-pvc")
 		// PVC without warm pool annotation (e.g., pre-existing shared PVC)

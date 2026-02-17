@@ -16,6 +16,7 @@ classifiers = [
 dependencies = [
     "kubernetes",
     "requests",
+    "pydantic",
 ]
 
 [project.urls]

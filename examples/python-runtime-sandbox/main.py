@@ -34,10 +34,10 @@ class ExecuteResponse(BaseModel):
 
 def get_safe_path(file_path: str) -> str:
     """Sanitizes the file path to ensure it stays within /app."""
-    base_dir = os.path.abspath("/app")
+    base_dir = os.path.realpath("/app")
     # Remove leading slashes to ensure path is relative
     clean_path = file_path.lstrip("/")
-    full_path = os.path.abspath(os.path.join(base_dir, clean_path))
+    full_path = os.path.realpath(os.path.join(base_dir, clean_path))
 
     if os.path.commonpath([base_dir, full_path]) != base_dir:
         raise ValueError("Access denied: Path must be within /app")
@@ -149,7 +149,7 @@ async def list_files(encoded_file_path: str):
                 })
         return JSONResponse(status_code=200, content=entries)
     except Exception as e:
-        return JSONResponse(status_code=500, content={"List files failed": str(e)})
+        return JSONResponse(status_code=500, content={"message": f"List files failed: {str(e)}"})
 
 @app.get("/exists/{encoded_file_path:path}", summary="Check if the relative path exists")
 async def exists(encoded_file_path: str):
@@ -163,6 +163,6 @@ async def exists(encoded_file_path: str):
         return JSONResponse(status_code=403, content={"message": "Access denied"})
 
     return JSONResponse(status_code=200, content={
-        "path": full_path,
+        "path": decoded_path,
         "exists": os.path.exists(full_path)
     })

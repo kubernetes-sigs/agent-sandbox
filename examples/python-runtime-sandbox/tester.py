@@ -86,6 +86,7 @@ def test_exists(base_url):
         
         print("Exists check successful!")
         print("Response JSON:", response.json())
+        assert response.json()["path"] == ""
         assert response.json()["exists"] is True
 
         url = f"{base_url}/exists/does_not_exist"
@@ -95,6 +96,7 @@ def test_exists(base_url):
         
         print("Exists check (negative) successful!")
         print("Response JSON:", response.json())
+        assert response.json()["path"] == "does_not_exist"
         assert response.json()["exists"] is False
         
     except (requests.exceptions.RequestException, AssertionError) as e:

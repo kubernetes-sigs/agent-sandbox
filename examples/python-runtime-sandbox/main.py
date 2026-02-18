@@ -27,8 +27,8 @@ class ExecuteRequest(BaseModel):
     """Request model for the /execute endpoint."""
     command: str
 
-class ExecuteStatefulRequest(BaseModel):
-    """Request model for the /execute_command_stateful endpoint."""
+class ExecuteCodeRequest(BaseModel):
+    """Request model for the /execute_code endpoint."""
     code: str
     language: str = "python"
     timeout: int = 10  # Default timeout in seconds
@@ -40,8 +40,8 @@ class ExecuteResponse(BaseModel):
     stderr: str
     exit_code: int
     
-class ExecuteStatefulResponse(BaseModel): 
-    """Response model for the /execute_command_stateful endpoint."""
+class ExecuteCodeResponse(BaseModel): 
+    """Response model for the /execute_code endpoint."""
     stdout: str
     stderr: str
     exit_code: int
@@ -96,7 +96,7 @@ async def interrupt_and_drain():
         await kernel_manager.interrupt_kernel()
         while True:
             # Use a short timeout to avoid hanging forever if the kernel is dead
-            msg = await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=2.0)
+            msg = await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=1.0)
             if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
                 break
     except (asyncio.TimeoutError, Exception):
@@ -132,96 +132,89 @@ async def execute_command(request: ExecuteRequest):
             exit_code=1
         )
 
-@app.post("/execute_command_stateful", summary="Execute code in a stateful way.", response_model=ExecuteStatefulResponse)
-async def execute_command_stateful(request: ExecuteStatefulRequest):
-    if not kernel_client:
-        return ExecuteStatefulResponse(
-            stdout="",
-            stderr="IPython kernel is not initialized.",
-            exit_code=1
-        )
-
+@app.post("/execute_code", summary="Execute code in a stateful way.", response_model=ExecuteCodeResponse)
+async def execute_code(request: ExecuteCodeRequest):
+    if request.language != "python":
+        return ExecuteCodeResponse(stdout="", stderr=f"Unsupported language: {request.language}", exit_code=1)
+    
+    # 1. Self-healing check: If client is missing or dead, try to start it
     async with kernel_lock:
-        # Check if the kernel is alive before executing
+        if not kernel_client or not kernel_manager.has_kernel:
+            logging.warning("Kernel not initialized. Attempting to start...")
+            await _start_kernel_internal()
+
+        # 2. Check Liveness
         is_alive = False
-        if kernel_manager.has_kernel:
-            try:
-                check = kernel_manager.is_alive()
-                if asyncio.iscoroutine(check):
-                    is_alive = await check
-                else:
-                    is_alive = check
-            except Exception:
-                pass
+        try:
+            check = kernel_manager.is_alive()
+            is_alive = await check if asyncio.iscoroutine(check) else check
+        except Exception:
+            pass
         
         if not is_alive:
-            logging.warning("Kernel is not alive. Restarting...")
+            logging.warning("Kernel is dead. Restarting...")
             await _start_kernel_internal()
-            
-        # 1. Send the code to the kernel for execution. This returns a msg_id that we can use to track related messages.
-        msg_id = kernel_client.execute(request.code)
-        
-        stdout = []
-        stderr = []
-        
-        # 2. Listen for messages in the IOPub channel related to our execution. We will break out of this loop either when 
-        # we see the 'idle' status or if we hit a timeout.
-        async def read_message_from_iopub_channel():
+
+        # 3. Flush the IOPub channel before starting
+        # This prevents "ghost" output from previous timed-out runs
+        try:
             while True:
+                await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=0.01)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+        # 4. Execute the requested code.
+        msg_id = kernel_client.execute(request.code)
+        stdout, stderr = [], []
+        exit_code = 0
+
+        async def collect_io():
+            nonlocal exit_code
+            while True:
+                # We listen to IOPub for the "Stream" of output
                 msg = await kernel_client.get_iopub_msg()
-                
-                # Double-check: Even with a purge, we filter by msg_id for safety
-                if msg['parent_header'].get('msg_id') != msg_id:
+                if msg.get('parent_header', {}).get('msg_id') != msg_id:
                     continue
 
                 msg_type = msg['header']['msg_type']
                 content = msg['content']
 
                 if msg_type == 'stream':
-                    text = content['text']
                     if content['name'] == 'stdout':
-                        stdout.append(text)
+                        stdout.append(content['text'])
                     else:
-                        stderr.append(text)
-                
-                elif msg_type == 'execute_result':
+                        stderr.append(content['text'])
+                elif msg_type in ('execute_result', 'display_data'):
+                    # Capture rich output/returned values
                     data = content['data'].get('text/plain', '')
                     stdout.append(data)
-
                 elif msg_type == 'error':
-                    # Captures Python Tracebacks if the code fails
                     stderr.append("\n".join(content['traceback']))
-
-                # 'idle' status indicates the kernel has finished execution
-                if msg_type == 'status' and content['execution_state'] == 'idle':
+                elif msg_type == 'status' and content['execution_state'] == 'idle':
                     break
 
         try:
-            # 4. Execute with the user-defined timeout
-            await asyncio.wait_for(read_message_from_iopub_channel(), timeout=request.timeout)
+            # 5. Wait for IO and the shell reply
+            await asyncio.wait_for(collect_io(), timeout=request.timeout)
             
-            return ExecuteStatefulResponse(
+            # 6. Get the actual exit status from the shell channel
+            shell_msg = await asyncio.wait_for(kernel_client.get_shell_msg(), timeout=1.0)
+            if shell_msg['content'].get('status') == 'error':
+                exit_code = 1
+            
+            return ExecuteCodeResponse(
                 stdout="".join(stdout),
                 stderr="".join(stderr),
-                exit_code=0 if not stderr else 1
+                exit_code=exit_code
             )
 
         except asyncio.TimeoutError:
-            # 5. Handle Timeout: Interrupt but don't wait for the drain
-            stderr.append(f"Execution timed out after {request.timeout} seconds.")
             await interrupt_and_drain()
-            
-            return ExecuteStatefulResponse(
+            return ExecuteCodeResponse(
                 stdout="".join(stdout),
-                stderr="".join(stderr),
+                stderr="".join(stderr) + f"\n[Timeout after {request.timeout}s]",
                 exit_code=130
             )
-
-    return {
-        "stdout": "".join(stdout),
-        "stderr": "".join(stderr),
-        "exit_code": 0 if not stderr else 1
-    }
     
 @app.post("/upload", summary="Upload a file to the sandbox")
 async def upload_file(file: UploadFile = File(...)):

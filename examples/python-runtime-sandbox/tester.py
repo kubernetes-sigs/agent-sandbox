@@ -62,11 +62,11 @@ def test_execute(base_url):
         print(f"An error occurred during execute command: {e}")
         sys.exit(1)
 
-def test_execute_command_stateful(base_url):
+def test_execute_code(base_url):
     """
-    Tests the execute_command_stateful endpoint.
+    Tests the execute_code endpoint.
     """
-    url = f"{base_url}/execute_command_stateful"
+    url = f"{base_url}/execute_code"
     
     try:
         print(f"\n--- Testing Execute stateful endpoint ---")
@@ -91,11 +91,11 @@ def test_execute_command_stateful(base_url):
         print(f"An error occurred during execute stateful: {e}")
         sys.exit(1)
 
-def test_execute_command_stateful_long_running(base_url):
+def test_execute_code_long_running(base_url):
     """
-    Tests the execute_command_stateful endpoint with a long-running command.
+    Tests the execute_code endpoint with a long-running command.
     """
-    url = f"{base_url}/execute_command_stateful"
+    url = f"{base_url}/execute_code"
     
     try:
         print(f"\n--- Testing Execute stateful Long Running (Custom Timeout) ---")
@@ -115,11 +115,11 @@ def test_execute_command_stateful_long_running(base_url):
         print(f"An error occurred during execute stateful long running: {e}")
         sys.exit(1)
 
-def test_execute_command_stateful_timeout(base_url):
+def test_execute_code_timeout(base_url):
     """
     Tests that a command that exceeds the specified timeout is properly interrupted and returns an error.
     """
-    url = f"{base_url}/execute_command_stateful"
+    url = f"{base_url}/execute_code"
     
     try:
         print(f"\n--- Testing Execute stateful Timeout ---")
@@ -136,19 +136,19 @@ def test_execute_command_stateful_timeout(base_url):
         
         # Verify that we didn't get the output because of the timeout
         assert "Should not see this" not in response.json()["stdout"]
-        assert response.json()["stderr"] == "Execution timed out after 10 seconds."
+        assert response.json()["stderr"] == "\n[Timeout after 10s]"
         assert response.json()["exit_code"] == 130
         
     except (requests.exceptions.RequestException, AssertionError) as e:
         print(f"An error occurred during execute stateful timeout: {e}")
         sys.exit(1)
 
-def test_execute_command_stateful_infinite_loop_with_output(base_url):
+def test_execute_code_infinite_loop_with_output(base_url):
     """
     Tests that an infinite loop producing output is correctly timed out.
     This verifies that the timeout is a deadline, not just an inactivity timeout.
     """
-    url = f"{base_url}/execute_command_stateful"
+    url = f"{base_url}/execute_code"
     
     try:
         print(f"\n--- Testing Execute stateful Infinite Loop with Output ---")
@@ -172,9 +172,10 @@ def test_execute_command_stateful_infinite_loop_with_output(base_url):
         json_response = response.json()
         
         # Verify timeout message
-        assert json_response["stderr"] == "Execution timed out after 3 seconds."
-        assert json_response["exit_code"] == 130
         assert "spam" in json_response["stdout"]
+        assert json_response["stderr"] == "\n[Timeout after 3s]"
+        assert json_response["exit_code"] == 130
+        
         
         # Verify it didn't run forever (e.g. > 10s)
         assert duration < 10, f"Test took too long: {duration}s"
@@ -183,11 +184,11 @@ def test_execute_command_stateful_infinite_loop_with_output(base_url):
         print(f"An error occurred during execute stateful infinite loop: {e}")
         sys.exit(1)
 
-def test_execute_command_stateful_concurrent(base_url):
+def test_execute_code_concurrent(base_url):
     """
     Tests concurrent execution requests to ensure the server handles them safely (serialized).
     """
-    url = f"{base_url}/execute_command_stateful"
+    url = f"{base_url}/execute_code"
     print(f"\n--- Testing Execute stateful Concurrent ---")
 
     def run_request(code, expected):
@@ -215,17 +216,16 @@ def test_execute_command_stateful_concurrent(base_url):
         print(f"An error occurred during concurrent execution test: {e}")
         sys.exit(1)
 
-def test_execute_command_stateful_interruption(base_url):
+def test_execute_code_interruption(base_url):
     """
     Tests that a timed-out command actually stops the kernel (interrupts it),
     allowing subsequent commands to run immediately.
     """
-    url = f"{base_url}/execute_command_stateful"
+    url = f"{base_url}/execute_code"
     print(f"\n--- Testing Execute stateful Interruption ---")
 
     try:
         # 1. Run a command that sleeps for 10s, but timeout after 1s.
-        # If the bug exists, the kernel will keep sleeping for 9 more seconds.
         print("Sending long-running command (should timeout)...")
         requests.post(url, json={"code": "import time; time.sleep(10)", "timeout": 1})
 
@@ -289,10 +289,10 @@ if __name__ == "__main__":
     
     test_health_check(base_url)
     test_execute(base_url)
-    test_execute_command_stateful(base_url)
-    test_execute_command_stateful_long_running(base_url)
-    test_execute_command_stateful_concurrent(base_url)
-    test_execute_command_stateful_interruption(base_url)
-    test_execute_command_stateful_timeout(base_url)
-    test_execute_command_stateful_infinite_loop_with_output(base_url)
+    test_execute_code(base_url)
+    test_execute_code_long_running(base_url)
+    test_execute_code_concurrent(base_url)
+    test_execute_code_interruption(base_url)
+    test_execute_code_timeout(base_url)
+    test_execute_code_infinite_loop_with_output(base_url)
     test_upload_download(base_url)

@@ -484,12 +484,17 @@ class SandboxClient:
         Executes code in a stateful environment inside the sandbox.
         Subsequent calls to run_stateful will share state (e.g. variables, files) within the same sandbox.
         """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.language", language)
+            span.set_attribute("sandbox.code.size", len(code))
+            
         payload = {"code": code, "language": language}
         
         response = self._request(
-            "POST", "execute_command_stateful", json=payload, timeout=120)
+            "POST", "execute_code", json=payload, timeout=120)
         response_data = response.json()
-
+        
         return ExecutionResult(
             stdout=response_data.get("stdout", ""),
             stderr=response_data.get("stderr", ""),

@@ -24,9 +24,9 @@ dependencies = [
 "Bug Tracker" = "https://github.com/kubernetes-sigs/agent-sandbox/issues"
 
 [tool.setuptools]
-# This line tells setuptools to only include the 'agentic_sandbox'
+# This line tells setuptools to only include the 'k8s_agent_sandbox'
 # package and to ignore other directories like 'sandbox_router'.
-packages = ["agentic_sandbox"]
+packages = ["k8s_agent_sandbox"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}

@@ -16,8 +16,8 @@ import argparse
 import asyncio
 from unittest.mock import MagicMock
 from pydantic import ValidationError
-from agentic_sandbox import SandboxClient
-from agentic_sandbox.sandbox_client import ExecutionResult, FileEntry
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.sandbox_client import ExecutionResult, FileEntry
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 

@@ -17,7 +17,7 @@ import os
 import subprocess
 import time
 import logging
-from agentic_sandbox.extensions.computer_use import ComputerUseSandbox
+from k8s_agent_sandbox.extensions.computer_use import ComputerUseSandbox
 from kubernetes import client, config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

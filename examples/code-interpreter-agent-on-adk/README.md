@@ -29,7 +29,7 @@ The guide walks you through the process of creating a simple [ADK](https://googl
 
    ```sh
    from google.adk.agents.llm_agent import Agent
-   from agentic_sandbox import SandboxClient
+   from k8s_agent_sandbox import SandboxClient
    
    
    def execute_python(code: str):

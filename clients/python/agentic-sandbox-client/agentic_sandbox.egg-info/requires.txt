@@ -1,0 +1,13 @@
+kubernetes
+requests
+pydantic
+
+[test]
+pytest
+pytest-xdist
+
+[tracing]
+opentelemetry-api~=1.39.0
+opentelemetry-sdk~=1.39.0
+opentelemetry-exporter-otlp~=1.39.0
+opentelemetry-instrumentation-requests~=0.60b0

@@ -1,3 +1,26 @@
+Metadata-Version: 2.4
+Name: agentic_sandbox
+Version: 0.1.0
+Summary: A client library to interact with the Agentic Sandbox on Kubernetes.
+Project-URL: Homepage, https://github.com/kubernetes-sigs/agent-sandbox
+Project-URL: Bug Tracker, https://github.com/kubernetes-sigs/agent-sandbox/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+Requires-Dist: kubernetes
+Requires-Dist: requests
+Requires-Dist: pydantic
+Provides-Extra: test
+Requires-Dist: pytest; extra == "test"
+Requires-Dist: pytest-xdist; extra == "test"
+Provides-Extra: tracing
+Requires-Dist: opentelemetry-api~=1.39.0; extra == "tracing"
+Requires-Dist: opentelemetry-sdk~=1.39.0; extra == "tracing"
+Requires-Dist: opentelemetry-exporter-otlp~=1.39.0; extra == "tracing"
+Requires-Dist: opentelemetry-instrumentation-requests~=0.60b0; extra == "tracing"
+
 # Agentic Sandbox Client Python
 
 This Python client provides a simple, high-level interface for creating and interacting with
@@ -51,22 +74,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     source .venv/bin/activate
     ```
 
-2.  **Option 1: Install from PyPI (Recommended):**
-
-    The package is available on [PyPI](https://pypi.org/project/k8s-agent-sandbox/) as `k8s-agent-sandbox`.
-
-    ```bash
-    pip install k8s-agent-sandbox
-    ```
-
-    If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
-    install with the optional tracing dependencies:
-
-    ```bash
-    pip install "k8s-agent-sandbox[tracing]"
-    ```
-
-3.  **Option 2: Install from source via git:**
+2.  **Option 1: Install from source via git:**
 
     ```bash
     # Replace "main" with a specific version tag (e.g., "v0.1.0") from
@@ -76,7 +84,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
     ```
 
-4.  **Option 3: Install from source in editable mode:**
+3.  **Option 2: Install from source in editable mode:**
 
     If you have not already done so, first clone this repository:
 
@@ -107,7 +115,7 @@ Use this when running against a real cluster with a public Gateway IP. The clien
 discovers the Gateway.
 
 ```python
-from k8s_agent_sandbox import SandboxClient
+from agentic_sandbox import SandboxClient
 
 # Connect via the GKE Gateway
 with SandboxClient(
@@ -124,7 +132,7 @@ Use this for local development or CI. If you omit `gateway_name`, the client aut
 secure tunnel to the Router Service using `kubectl`.
 
 ```python
-from k8s_agent_sandbox import SandboxClient
+from agentic_sandbox import SandboxClient
 
 # Automatically tunnels to svc/sandbox-router-svc
 with SandboxClient(

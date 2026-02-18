@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+agentic_sandbox/__init__.py
+agentic_sandbox/sandbox_client.py
+agentic_sandbox/trace_manager.py
+agentic_sandbox.egg-info/PKG-INFO
+agentic_sandbox.egg-info/SOURCES.txt
+agentic_sandbox.egg-info/dependency_links.txt
+agentic_sandbox.egg-info/requires.txt
+agentic_sandbox.egg-info/top_level.txt

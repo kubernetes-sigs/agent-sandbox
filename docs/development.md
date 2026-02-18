@@ -8,7 +8,7 @@ Before you begin, ensure you have the following tools installed:
 
 * [Go](https://golang.org/doc/install)
 * [Docker](https://docs.docker.com/get-docker/)
-  * [Docker buildx plugin](https://github.com/docker/buildx?tab=readme-ov-file#installing) On debian based systems, `apt install docker-buildx-plugin`
+  * [Docker buildx plugin](https://github.com/docker/buildx?tab=readme-ov-file#installing) On Debian-based systems, `apt install docker-buildx-plugin`
 * [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) (optional, a convenient tool for running local Kubernetes clusters using Docker container)
 * [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
 
@@ -33,7 +33,7 @@ For working with a remote cluster you can build and push the image to a containe
 
 ### Regenerate CRD and RBAC
 
-When ever any changes are made to the `api/` folder or the `controllers/` folder (kubebuilder tags), you may have to regenerate the CRDs and the RBAC manifests. 
+Whenever any changes are made to the `api/` folder or the `controllers/` folder (kubebuilder tags), you may have to regenerate the CRDs and the RBAC manifests.
 
 ```sh
 make all 

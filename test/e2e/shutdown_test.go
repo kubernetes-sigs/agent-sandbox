@@ -62,16 +62,18 @@ func TestSandboxShutdownTime(t *testing.T) {
 	pod := &corev1.Pod{}
 	pod.Name = "my-sandbox"
 	pod.Namespace = ns.Name
-	require.NoError(t, tc.ValidateObject(t.Context(), pod))
+	tc.MustExist(pod)
 	service := &corev1.Service{}
 	service.Name = "my-sandbox"
 	service.Namespace = ns.Name
-	require.NoError(t, tc.ValidateObject(t.Context(), service))
+	tc.MustExist(service)
 
 	// Set a shutdown time that ends shortly
 	shutdown := metav1.NewTime(time.Now().Add(10 * time.Second))
-	sandboxObj.Spec.ShutdownTime = &shutdown
-	require.NoError(t, tc.Update(t.Context(), sandboxObj))
+	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1alpha1.Sandbox) {
+		obj.Spec.ShutdownTime = &shutdown
+	})
+
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
@@ -90,7 +92,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 			},
 		}),
 	}
-	require.NoError(t, tc.WaitForObject(t.Context(), sandboxObj, p...))
+	require.NoError(t, tc.PollUntilObjectMatches(sandboxObj, p...))
 	// Verify that the sandbox was shut down at or after the specified shutdownTime
 	require.True(t, !time.Now().Before(shutdown.Time))
 	// Verify Pod and Service are deleted

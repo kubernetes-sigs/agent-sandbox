@@ -85,10 +85,14 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path):
 
 def main(args):
     """Builds and pushes all discovered Docker images."""
-    excluded_dirs = {"dev", "docs", "k8s", "site", "tests"}
+    excluded_dirs = {"bin", "dev", "docs", "k8s", "site",
+                     "temp", "tests", "tmp", ".venv"}
+
+    if args.controller_only:
+        # TODO: Implement an explicit inclusion strategy for controller only Dockerfile.
+        excluded_dirs.update({"examples", "clients"})
 
     for root, dirs, files in os.walk(".", topdown=True):
-        # Exclude directories
         dirs[:] = [d for d in dirs if d not in excluded_dirs]
 
         if "Dockerfile" in files:
@@ -132,6 +136,10 @@ if __name__ == "__main__":
                         help="Name of the kind cluster. If set, images will be loaded into the cluster",
                         type=str,
                         default=os.getenv("KIND_CLUSTER_NAME"))
+    parser.add_argument("--controller-only",
+                        dest="controller_only",
+                        action="store_true",
+                        help="Only build and push the agent-sandbox-controller image.")
     args = parser.parse_args()
 
     if args.kind_cluster_name:

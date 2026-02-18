@@ -1,0 +1,163 @@
+name: Publish Python 🐍 distribution 📦 to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run Unit Tests 🧪
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    defaults:
+      run:
+        working-directory: clients/python/agentic-sandbox-client
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Display Python version
+      run: python -c "import sys; print(sys.version)"
+    
+    - name: Create VERSION file
+      shell: bash
+      run: |
+        # Determine the version
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+
+          # Strip the 'v' from 'v0.1.0' or 'v0.1.0.post1'
+          FINAL_VERSION=$(echo $TAG_NAME | sed 's/^v//')
+          echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
+          
+        else
+          echo "::error::No valid tag found. This workflow expects a tag trigger."
+          exit 1
+        fi
+
+        echo "$FINAL_VERSION" > VERSION
+        
+        # Verify
+        echo "Generated VERSION file content:"
+        cat VERSION
+        
+    - name: Install dependencies (including tests)
+      run: python3 -m pip install ".[test]" 
+
+    - name: Run Unit Tests
+      run: python3 -m pytest
+
+  build:
+    name: Build distribution 📦
+    needs: test
+
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/python/agentic-sandbox-client
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    
+    - name: Create VERSION file
+      shell: bash
+      run: |
+        # Determine the version
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+
+          # Strip the 'v' from 'v0.1.0' or 'v0.1.0.post1'
+          FINAL_VERSION=$(echo $TAG_NAME | sed 's/^v//')
+          echo "Tag mode: Derived $FINAL_VERSION from $TAG_NAME"
+          
+        else
+          echo "::error::No valid tag found. This workflow expects a tag trigger."
+          exit 1
+        fi
+
+        echo "$FINAL_VERSION" > VERSION
+        
+        # Verify
+        echo "Generated VERSION file content:"
+        cat VERSION
+
+    - name: Install pypa/build
+      run: >-
+        python3 -m pip install build
+        
+    - name: Build a binary wheel and a source tarball
+      run: python3 -m build
+      
+    - name: Store the distribution packages
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-package-distributions
+        path: clients/python/agentic-sandbox-client/dist/
+
+  publish-to-testpypi:
+    name: >-
+      Publish Python 🐍 distribution 📦 to TestPyPI
+    needs:
+    - build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi 
+      url: https://test.pypi.org/p/k8s-agent-sandbox
+    permissions:
+      id-token: write  # IMPORTANT: mandatory for trusted publishing
+      contents: read
+
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v4
+      with:
+        name: python-package-distributions
+        path: dist/
+        
+    - name: Publish distribution 📦 to TestPyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/
+
+  publish-to-pypi:
+    name: >-
+      Publish Python 🐍 distribution 📦 to PyPI
+    needs:
+    - publish-to-testpypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/k8s-agent-sandbox
+    permissions:
+      id-token: write  # IMPORTANT: mandatory for trusted publishing
+      contents: read
+
+    # Run if it is a push event AND NOT a release candidate
+    if: >-
+      (github.event_name == 'push' && !contains(github.ref, 'rc'))
+
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v4
+      with:
+        name: python-package-distributions
+        path: dist/
+        
+    - name: Publish distribution 📦 to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1

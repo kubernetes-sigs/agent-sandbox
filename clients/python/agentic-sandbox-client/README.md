@@ -51,7 +51,22 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     source .venv/bin/activate
     ```
 
-2.  **Option 1: Install from source via git:**
+2.  **Option 1: Install from PyPI (Recommended):**
+
+    The package is available on [PyPI](https://pypi.org/project/k8s-agent-sandbox/) as `k8s-agent-sandbox`.
+
+    ```bash
+    pip install k8s-agent-sandbox
+    ```
+
+    If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
+    install with the optional tracing dependencies:
+
+    ```bash
+    pip install "k8s-agent-sandbox[tracing]"
+    ```
+
+3.  **Option 2: Install from source via git:**
 
     ```bash
     # Replace "main" with a specific version tag (e.g., "v0.1.0") from
@@ -61,7 +76,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
     ```
 
-3.  **Option 2: Install from source in editable mode:**
+4.  **Option 3: Install from source in editable mode:**
 
     If you have not already done so, first clone this repository:
 

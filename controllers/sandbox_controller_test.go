@@ -29,10 +29,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
@@ -505,6 +507,7 @@ func TestReconcile(t *testing.T) {
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sb)...),
 				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
 			}
 
 			_, err := r.Reconcile(t.Context(), ctrl.Request{
@@ -861,6 +864,7 @@ func TestReconcilePod(t *testing.T) {
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
 				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
 			}
 
 			pod, err := r.reconcilePod(t.Context(), tc.sandbox, nameHash)

@@ -1,0 +1,23 @@
+name: "PR Velocity Analytics"
+on:
+  workflow_dispatch: # Allows manual triggers for specific date ranges
+  schedule:
+    - cron: "0 0 * * 1" # Runs every Monday at midnight
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Generate PR Report"
+        uses: AlexSim93/pull-request-analytics-action@v4.10.0
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_OWNERS_REPOS: "kubernetes-sigs/agent-sandbox"
+          GITHUB_OWNER_FOR_ISSUE: "kubernetes-sigs"
+          GITHUB_REPO_FOR_ISSUE: "agent-sandbox"
+          # Velocity-focused configurations
+          CORE_HOURS_START: "09:00"
+          CORE_HOURS_END: "17:00"
+          TIMEZONE: "America/Los_Angeles" # Or "UTC"
+          SHOW_STATS_TYPES: "timeline, workload, response-time, code-review-engagement"
+          USE_CHARTS: "true" # Generates visual Mermaid diagrams

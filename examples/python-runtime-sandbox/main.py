@@ -84,8 +84,11 @@ async def _start_kernel_internal():
     await kernel_manager.start_kernel()
     kernel_client = kernel_manager.client()
     kernel_client.start_channels()
-    # Change the working directory to /app to ensure all code execution happens in the correct context
-    kernel_client.execute("import os, pickle; os.chdir('/app')")
+
+    check = kernel_manager.is_alive()
+    if await check if asyncio.iscoroutine(check) else check:
+        # Change the working directory to /app to ensure all code execution happens in the correct context
+        kernel_client.execute("import os, pickle; os.chdir('/app')")
 
 @app.on_event("startup")
 async def start_kernel():

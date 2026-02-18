@@ -84,7 +84,6 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     cd ~
     git clone https://github.com/kubernetes-sigs/agent-sandbox.git
     cd agent-sandbox/clients/python/agentic-sandbox-client
-    echo "0.0.0-dev" > VERSION
     ```
 
     And then install the agentic-sandbox-client into your activated .venv:

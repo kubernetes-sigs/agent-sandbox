@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -28,8 +28,8 @@ dependencies = [
 # package and to ignore other directories like 'sandbox_router'.
 packages = ["k8s_agent_sandbox"]
 
-[tool.setuptools.dynamic]
-version = {file = "VERSION"}
+[tool.setuptools_scm]
+root = "../../.."
 
 [project.optional-dependencies]
 test = [

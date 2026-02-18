@@ -32,6 +32,7 @@ try:
         FileInfo,
         FileUploadResponse,
         GrepMatch,
+        SandboxBackendProtocol,
         WriteResult,
     )
 except (ImportError, ModuleNotFoundError) as exc:
@@ -42,10 +43,10 @@ except (ImportError, ModuleNotFoundError) as exc:
 logger = logging.getLogger(__name__)
 
 
-class AgentSandboxBackend:
+class AgentSandboxBackend(SandboxBackendProtocol):
     """DeepAgents backend adapter for agent-sandbox runtimes.
 
-    Implements the DeepAgents BackendProtocol by wrapping a SandboxClient.
+    Implements the DeepAgents SandboxBackendProtocol by wrapping a SandboxClient.
     All file operations are virtualized under `root_dir` (default: /app).
 
     Requirements:
@@ -559,7 +560,13 @@ class AgentSandboxBackend:
             normalized = normalized.lstrip("/")
         normalized = normalized.lstrip("/")
         internal_path = posixpath.normpath(posixpath.join(self._root_dir, normalized))
-        if internal_path != self._root_dir and not internal_path.startswith(self._root_dir + "/"):
+        # When root_dir is "/" every absolute path is valid; the naive
+        # ``startswith(root_dir + "/")`` check becomes ``startswith("//")``
+        # which incorrectly rejects all paths.
+        if self._root_dir == "/":
+            if not internal_path.startswith("/"):
+                raise ValueError(f"Path '{path}' escapes root_dir '{self._root_dir}'")
+        elif internal_path != self._root_dir and not internal_path.startswith(self._root_dir + "/"):
             raise ValueError(f"Path '{path}' escapes root_dir '{self._root_dir}'")
         return internal_path
 

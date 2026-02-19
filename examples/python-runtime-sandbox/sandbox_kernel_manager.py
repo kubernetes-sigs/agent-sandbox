@@ -12,7 +12,7 @@ class SandboxKernelManager:
 
     async def start(self):
         """Starts or restarts the kernel."""
-        # 1. Ensure any existing client channels are stopped before restarting
+        # 1. Ensure any existing client channels are stopped before restarting.
         if self.kernel_client:
             self.kernel_client.stop_channels()
 
@@ -31,7 +31,7 @@ class SandboxKernelManager:
                 self.kernel_client.execute("import os, pickle; os.chdir('/app')")
                 return
             except Exception:
-                # Optimization: If the kernel process is dead, stop waiting immediately.
+                # If the kernel process is dead, stop waiting immediately.
                 check = self.kernel_manager.is_alive()
                 if not (await check if asyncio.iscoroutine(check) else check):
                     raise RuntimeError("Kernel process died unexpectedly during startup.")
@@ -57,7 +57,7 @@ class SandboxKernelManager:
             # 1. Trigger the interrupt
             await self.kernel_manager.interrupt_kernel()
             
-            # 2. Drain with a global deadline to prevent infinite loops
+            # 2. Drain with a deadline.
             async with asyncio.timeout(5.0):  # Total max time to wait for idle
                 while True:
                     try:
@@ -77,12 +77,12 @@ class SandboxKernelManager:
     async def execute(self, code: str, timeout: int) -> tuple[str, str, int]:
         """Executes code in the kernel and returns stdout, stderr, and exit code."""
         async with self.lock:
-            # 1. Self-healing check: If client is missing or dead, try to start it
+            # 1. Self-healing check: If client is missing or dead, try to re-start the kernel again.
             if not self.kernel_client or not self.kernel_manager.has_kernel:
                 logging.warning("Kernel not initialized. Attempting to start...")
                 await self.start()
 
-            # 2. Check Liveness
+            # 2. Check if Kernel is alive before executing the code.
             is_alive = False
             try:
                 check = self.kernel_manager.is_alive()
@@ -130,6 +130,7 @@ class SandboxKernelManager:
                         break
 
             try:
+                # 5. Collect the messages from IOPub and Shell channel and return to the user.
                 await asyncio.wait_for(collect_io(), timeout=timeout)
                 
                 shell_msg = await asyncio.wait_for(self.kernel_client.get_shell_msg(), timeout=1.0)

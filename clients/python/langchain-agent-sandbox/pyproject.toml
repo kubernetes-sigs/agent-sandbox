@@ -16,7 +16,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "agentic_sandbox",
+    "k8s-agent-sandbox",
     "deepagents>=0.3.0",
 ]
 
@@ -43,7 +43,7 @@ dev = [
 asyncio_mode = "auto"
 
 [tool.uv.sources]
-agentic_sandbox = { path = "../agentic-sandbox-client", editable = true }
+k8s-agent-sandbox = { path = "../agentic-sandbox-client", editable = true }
 
 [tool.mypy]
 python_version = "3.11"
@@ -51,5 +51,5 @@ warn_unused_ignores = true
 no_implicit_optional = true
 
 [[tool.mypy.overrides]]
-module = ["agentic_sandbox.*", "deepagents.*", "pytest.*"]
+module = ["k8s_agent_sandbox.*", "deepagents.*", "pytest.*"]
 ignore_missing_imports = true

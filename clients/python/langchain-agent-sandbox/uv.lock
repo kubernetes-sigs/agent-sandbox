@@ -3,28 +3,6 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
-name = "agentic-sandbox"
-version = "0.1.0"
-source = { editable = "../agentic-sandbox-client" }
-dependencies = [
-    { name = "kubernetes" },
-    { name = "requests" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "kubernetes" },
-    { name = "opentelemetry-api", marker = "extra == 'tracing'", specifier = "~=1.39.0" },
-    { name = "opentelemetry-exporter-otlp", marker = "extra == 'tracing'", specifier = "~=1.39.0" },
-    { name = "opentelemetry-instrumentation-requests", marker = "extra == 'tracing'", specifier = "~=0.60b0" },
-    { name = "opentelemetry-sdk", marker = "extra == 'tracing'", specifier = "~=1.39.0" },
-    { name = "pytest", marker = "extra == 'test'" },
-    { name = "pytest-xdist", marker = "extra == 'test'" },
-    { name = "requests" },
-]
-provides-extras = ["test", "tracing"]
-
-[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -548,6 +526,29 @@ wheels = [
 ]
 
 [[package]]
+name = "k8s-agent-sandbox"
+source = { editable = "../agentic-sandbox-client" }
+dependencies = [
+    { name = "kubernetes" },
+    { name = "pydantic" },
+    { name = "requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "kubernetes" },
+    { name = "opentelemetry-api", marker = "extra == 'tracing'", specifier = "~=1.39.0" },
+    { name = "opentelemetry-exporter-otlp", marker = "extra == 'tracing'", specifier = "~=1.39.0" },
+    { name = "opentelemetry-instrumentation-requests", marker = "extra == 'tracing'", specifier = "~=0.60b0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'tracing'", specifier = "~=1.39.0" },
+    { name = "pydantic" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "pytest-xdist", marker = "extra == 'test'" },
+    { name = "requests" },
+]
+provides-extras = ["test", "tracing"]
+
+[[package]]
 name = "kubernetes"
 version = "35.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -586,8 +587,8 @@ name = "langchain-agent-sandbox"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "agentic-sandbox" },
     { name = "deepagents" },
+    { name = "k8s-agent-sandbox" },
 ]
 
 [package.optional-dependencies]
@@ -604,8 +605,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentic-sandbox", editable = "../agentic-sandbox-client" },
     { name = "deepagents", specifier = ">=0.3.0" },
+    { name = "k8s-agent-sandbox", editable = "../agentic-sandbox-client" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.21.0" },
 ]

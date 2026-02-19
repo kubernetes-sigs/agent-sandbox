@@ -21,7 +21,7 @@ test = ["pytest>=7.0"]
 
 [tool.uv.sources]
 langchain-agent-sandbox = { path = "../../clients/python/langchain-agent-sandbox", editable = true }
-agentic_sandbox = { path = "../../clients/python/agentic-sandbox-client", editable = true }
+k8s-agent-sandbox = { path = "../../clients/python/agentic-sandbox-client", editable = true }
 
 [dependency-groups]
 dev = [

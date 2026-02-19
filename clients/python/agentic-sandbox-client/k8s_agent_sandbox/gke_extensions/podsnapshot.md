@@ -16,19 +16,20 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   Initializes the client with optional podsnapshot timeout and server port.
     *   If snapshot exists, the pod snapshot controller restores from the most recent snapshot matching the label of the `SandboxTemplate`, otherwise creates a new `Sandbox`.
 *   **`snapshot_controller_ready(self) -> bool`**:
-    *   Checks if the snapshot agent (both self-installed and GKE managed) is running and ready.
+    *   Checks if the snapshot agent (GKE managed) is running and ready.
 *   **`snapshot(self, trigger_name: str) -> SnapshotResponse`**:
     *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
-    *   The trigger_name is suffixed with unique hash.
+    *   The `trigger_name` is suffixed with unique hash.
     *   Waits for the snapshot to be processed.
     *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
     *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
-*   **`isrestored(self) -> tuple[bool, str | None]`**:
-    *   Checks if the sandbox pod was restored from a snapshot.
-    *   Verifies this by checking for the 'PodRestored' condition in the pod status.
-    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
-*   **Automatic Cleanup**:
-    *   The `__exit__` method cleans up the `SandboxClaim` resources.
+*   **`is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreResult`**:
+    *   Checks if the sandbox pod was restored from the specified snapshot.
+    *   Verifies restoration by checking the 'PodRestored' condition in the pod status and confirming the message contains the expected snapshot UID.
+    *   Returns RestoreResult object(success, error_code, error_reason).
+*   **`__exit__(self)`**:
+    *   Cleans up the `PodSnapshotManualTrigger` resources.
+    *   Cleans up the `SandboxClaim` resources.
 
 ## `test_podsnapshot_extension.py`
 

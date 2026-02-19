@@ -18,7 +18,7 @@ import time
 import sys
 from kubernetes import client, config
 import re
-from agentic_sandbox.gke_extensions import PodSnapshotSandboxClient
+from k8s_agent_sandbox.gke_extensions import PodSnapshotSandboxClient
 
 
 def test_snapshot_response(snapshot_response, snapshot_name):
@@ -66,7 +66,6 @@ async def main(
     wait_time = 10
     first_snapshot_name = "test-snapshot-10"
     second_snapshot_name = "test-snapshot-20"
-    core_v1_api = client.CoreV1Api()
 
     try:
         print("\n***** Phase 1: Starting Counter *****")
@@ -108,12 +107,12 @@ async def main(
             print("\nWaiting 5 seconds for restored pod to resume printing...")
             time.sleep(5)
 
-            is_restored, restored_snapshot_uid = sandbox_restored.is_restored()
-            assert is_restored, "Pod was not restored from a snapshot."
-            assert (
-                restored_snapshot_uid == recent_snapshot_uid
-            ), "Restored snapshot UID does not match the most recent snapshot UID."
+            restore_result = sandbox_restored.is_restored_from_snapshot(
+                recent_snapshot_uid
+            )
+            assert restore_result.success, "Pod was not restored from a snapshot."
             print("Pod was restored from the most recent snapshot.")
+
         print("--- Pod Snapshot Test Passed! ---")
 
     except Exception as e:

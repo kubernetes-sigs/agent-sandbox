@@ -22,11 +22,7 @@ from kubernetes.client import ApiException
 from ..sandbox_client import SandboxClient, ExecutionResult
 from ..constants import *
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    stream=sys.stdout,
-)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +44,15 @@ class SnapshotResponse:
     error_code: int
 
 
+@dataclass
+class RestoreResult:
+    """Result of a restore operation."""
+
+    success: bool
+    error_reason: str
+    error_code: int
+
+
 class PodSnapshotSandboxClient(SandboxClient):
     """
     A specialized Sandbox client for interacting with the gke pod snapshot controller.
@@ -65,20 +70,47 @@ class PodSnapshotSandboxClient(SandboxClient):
 
         self.controller_ready = False
         self.podsnapshot_timeout = podsnapshot_timeout
+        self.core_v1_api = client.CoreV1Api()
+
+        self.created_manual_triggers = []
 
     def __enter__(self) -> "PodSnapshotSandboxClient":
         self.controller_ready = self.snapshot_controller_ready()
         super().__enter__()
         return self
 
-    def _wait_for_snapshot_processed(self, trigger_name: str) -> SnapshotResult:
+    def _parse_snapshot_result(self, obj) -> SnapshotResult | None:
+        """Parses the object to see if snapshot is complete."""
+        status = obj.get("status", {})
+        conditions = status.get("conditions", [])
+        for condition in conditions:
+            if (
+                condition.get("type") == "Triggered"
+                and condition.get("status") == "True"
+                and condition.get("reason") == "Complete"
+            ):
+                snapshot_uid = status.get("snapshotCreated", {}).get("name")
+                snapshot_timestamp = condition.get("lastTransitionTime")
+                return SnapshotResult(
+                    snapshot_uid=snapshot_uid,
+                    snapshot_timestamp=snapshot_timestamp,
+                )
+        return None
+
+    def _wait_for_snapshot_processed(
+        self, trigger_name: str, resource_version: str | None = None
+    ) -> SnapshotResult:
         """
         Waits for the PodSnapshotManualTrigger to be processed and returns SnapshotResult.
         """
         w = watch.Watch()
-        logging.info(
+        logger.info(
             f"Waiting for snapshot manual trigger '{trigger_name}' to be processed..."
         )
+
+        kwargs = {}
+        if resource_version:
+            kwargs["resource_version"] = resource_version
 
         try:
             for event in w.stream(
@@ -89,30 +121,19 @@ class PodSnapshotSandboxClient(SandboxClient):
                 plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
                 field_selector=f"metadata.name={trigger_name}",
                 timeout_seconds=self.podsnapshot_timeout,
+                **kwargs,
             ):
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     obj = event["object"]
-                    status = obj.get("status", {})
-                    conditions = status.get("conditions", [])
-
-                    for condition in conditions:
-                        if (
-                            condition.get("type") == "Triggered"
-                            and condition.get("status") == "True"
-                            and condition.get("reason") == "Complete"
-                        ):
-                            snapshot_uid = status.get("snapshotCreated", {}).get("name")
-                            snapshot_timestamp = condition.get("lastTransitionTime")
-                            logging.info(
-                                f"Snapshot manual trigger '{trigger_name}' processed successfully. Created Snapshot UID: {snapshot_uid}"
-                            )
-                            w.stop()
-                            return SnapshotResult(
-                                snapshot_uid=snapshot_uid,
-                                snapshot_timestamp=snapshot_timestamp,
-                            )
+                    result = self._parse_snapshot_result(obj)
+                    if result:
+                        logger.info(
+                            f"Snapshot manual trigger '{trigger_name}' processed successfully. Created Snapshot UID: {result.snapshot_uid}"
+                        )
+                        w.stop()
+                        return result
         except Exception as e:
-            logging.error(f"Error watching snapshot: {e}")
+            logger.error(f"Error watching snapshot: {e}")
             raise
 
         raise TimeoutError(
@@ -122,16 +143,36 @@ class PodSnapshotSandboxClient(SandboxClient):
     def snapshot_controller_ready(self) -> bool:
         """
         Checks if the snapshot agent pods are running in a GKE-managed pod snapshot cluster.
+        Falls back to checking CRD existence if pod listing is forbidden.
         """
 
         if self.controller_ready:
             return True
 
-        core_v1_api = client.CoreV1Api()
+        def check_crd_installed() -> bool:
+            try:
+                # Check directly if the API resource exists using CustomObjectsApi
+                resource_list = self.custom_objects_api.get_api_resources(
+                    group=PODSNAPSHOT_API_GROUP,
+                    version=PODSNAPSHOT_API_VERSION,
+                )
+
+                if not resource_list or not resource_list.resources:
+                    return False
+
+                for resource in resource_list.resources:
+                    if resource.kind == PODSNAPSHOT_API_KIND:
+                        return True
+                return False
+            except ApiException as e:
+                # If discovery fails with 403/404, we assume not ready/accessible
+                if e.status == 403 or e.status == 404:
+                    return False
+                raise
 
         def check_namespace(namespace: str, required_components: list[str]) -> bool:
             try:
-                pods = core_v1_api.list_namespaced_pod(namespace)
+                pods = self.core_v1_api.list_namespaced_pod(namespace)
                 found_components = {
                     component: False for component in required_components
                 }
@@ -144,8 +185,15 @@ class PodSnapshotSandboxClient(SandboxClient):
                                 found_components[component] = True
 
                 return all(found_components.values())
-            except ApiException:
-                return False
+            except ApiException as e:
+                if e.status == 403:
+                    logger.info(
+                        f"Permission denied listing pods in {namespace}. Checking CRD existence."
+                    )
+                    return check_crd_installed()
+                if e.status == 404:
+                    return False
+                raise
 
         # Check managed: requires only agent in gke-managed-pod-snapshots
         if check_namespace(SNAPSHOT_NAMESPACE_MANAGED, [SNAPSHOT_AGENT]):
@@ -168,6 +216,7 @@ class PodSnapshotSandboxClient(SandboxClient):
             return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
+                snapshot_uid=None,
                 error_reason="Snapshot controller is not ready. Ensure it is installed and running.",
                 error_code=1,
             )
@@ -175,6 +224,7 @@ class PodSnapshotSandboxClient(SandboxClient):
             return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
+                snapshot_uid=None,
                 error_reason="Sandbox pod name not found. Ensure sandbox is created.",
                 error_code=1,
             )
@@ -187,14 +237,21 @@ class PodSnapshotSandboxClient(SandboxClient):
         }
 
         try:
-            self.custom_objects_api.create_namespaced_custom_object(
+            created_obj = self.custom_objects_api.create_namespaced_custom_object(
                 group=PODSNAPSHOT_API_GROUP,
                 version=PODSNAPSHOT_API_VERSION,
                 namespace=self.namespace,
                 plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
                 body=manifest,
             )
-            snapshot_result = self._wait_for_snapshot_processed(trigger_name)
+
+            # Start watching from the version we just created to avoid missing updates
+            resource_version = created_obj.get("metadata", {}).get("resourceVersion")
+            snapshot_result = self._wait_for_snapshot_processed(
+                trigger_name, resource_version
+            )
+
+            self.created_manual_triggers.append(trigger_name)
 
             return SnapshotResponse(
                 success=True,
@@ -204,7 +261,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 error_code=0,
             )
         except ApiException as e:
-            logging.exception(
+            logger.exception(
                 f"Failed to create PodSnapshotManualTrigger '{trigger_name}': {e}"
             )
             return SnapshotResponse(
@@ -215,7 +272,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 error_code=1,
             )
         except TimeoutError as e:
-            logging.exception(
+            logger.exception(
                 f"Snapshot creation timed out for trigger '{trigger_name}': {e}"
             )
             return SnapshotResponse(
@@ -226,43 +283,91 @@ class PodSnapshotSandboxClient(SandboxClient):
                 error_code=1,
             )
 
-    def is_restored(self) -> tuple[bool, str | None]:
+    def is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreResult:
         """
-        Checks if the sandbox pod was restored from a snapshot.
-        Verifies this by checking for the 'PodRestored' condition in the pod status.
+        Checks if the sandbox pod was restored from the specified snapshot.
+
+        This is verified by inspecting the 'PodRestored' condition in the pod status
+        and confirming that the condition's message contains the provided snapshot UID.
+
         Returns:
-             tuple[bool, str | None]: (True, snapshot_uuid) if restored, (False, None) otherwise.
+            RestoreResult: The result of the restore operation.
         """
+        if not snapshot_uid:
+            return RestoreResult(
+                success=False,
+                error_reason="Snapshot UID cannot be empty.",
+                error_code=1,
+            )
+
         if not self.pod_name:
-            logging.warning("Cannot check restore status: pod_name is unknown.")
-            return False, None
+            logger.warning("Cannot check restore status: pod_name is unknown.")
+            return RestoreResult(
+                success=False,
+                error_reason="Pod name not found. Ensure sandbox is created.",
+                error_code=1,
+            )
 
         try:
-            v1 = client.CoreV1Api()
-            pod = v1.read_namespaced_pod(self.pod_name, self.namespace)
+            pod = self.core_v1_api.read_namespaced_pod(self.pod_name, self.namespace)
 
             if not pod.status or not pod.status.conditions:
-                return False, None
+                return RestoreResult(
+                    success=False,
+                    error_reason="Pod status or conditions not found.",
+                    error_code=1,
+                )
 
             for condition in pod.status.conditions:
                 if condition.type == "PodRestored" and condition.status == "True":
-                    # Attempt to extract UUID from the message
-                    # Message format: "pod successfully restored from pod snapshot namespace/uuid"
-                    if condition.message:
-                        parts = condition.message.split("/")
-                        if len(parts) > 1:
-                            return True, parts[-1].split()[0]
+                    # Check if Snapshot UUID is present in the condition.message
+                    if condition.message and snapshot_uid in condition.message:
+                        return RestoreResult(
+                            success=True,
+                            error_reason="",
+                            error_code=0,
+                        )
+                    else:
+                        return RestoreResult(
+                            success=False,
+                            error_reason="Pod was not restored from the given snapshot",
+                            error_code=1,
+                        )
 
-                    return True, None
-
-            return False, None
+            return RestoreResult(
+                success=False,
+                error_reason="Pod was not restored from any snapshot",
+                error_code=1,
+            )
 
         except ApiException as e:
-            logging.error(f"Failed to check pod restore status: {e}")
-            return False, None
+            logger.error(f"Failed to check pod restore status: {e}")
+            return RestoreResult(
+                success=False,
+                error_reason=f"Failed to check pod restore status: {e}",
+                error_code=1,
+            )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
+        Cleans up the PodSnapshotManualTrigger Resources.
         Automatically cleans up the Sandbox.
+
+        TODO: Add cleanup for PodSnapshot resources.
         """
+        for trigger_name in self.created_manual_triggers:
+            try:
+                self.custom_objects_api.delete_namespaced_custom_object(
+                    group=PODSNAPSHOT_API_GROUP,
+                    version=PODSNAPSHOT_API_VERSION,
+                    namespace=self.namespace,
+                    plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+                    name=trigger_name,
+                )
+                logger.info(f"Deleted PodSnapshotManualTrigger '{trigger_name}'")
+            except ApiException as e:
+                logger.error(
+                    f"Failed to delete PodSnapshotManualTrigger '{trigger_name}': {e}"
+                )
+
         super().__exit__(exc_type, exc_val, exc_tb)

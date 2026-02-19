@@ -15,14 +15,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import posixpath
 import shlex
 from pathlib import PurePosixPath
 from typing import Callable, Iterable, Optional, Dict, List, Union, Tuple, Any
 
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 
 try:
     from deepagents.backends.protocol import (
@@ -50,7 +49,7 @@ class AgentSandboxBackend(SandboxBackendProtocol):
     All file operations are virtualized under `root_dir` (default: /app).
 
     Requirements:
-        - Sandbox image must have POSIX utilities: sh, base64, grep, find, mkdir, ls, test, printf
+        - Sandbox image must have POSIX utilities: sh, grep, find, mkdir, ls, test, printf
         - SandboxClient must be configured and connected before use
 
     Note:
@@ -63,6 +62,7 @@ class AgentSandboxBackend(SandboxBackendProtocol):
         client: SandboxClient,
         root_dir: str = "/app",
         manage_client: bool = False,
+        allow_absolute_paths: bool = False,
     ) -> None:
         """Initialize the backend with a SandboxClient.
 
@@ -70,6 +70,8 @@ class AgentSandboxBackend(SandboxBackendProtocol):
             client: A configured SandboxClient instance.
             root_dir: Virtual root for file operations. Must be an absolute path.
             manage_client: If True, the backend manages the client lifecycle via context manager.
+            allow_absolute_paths: If True, write/upload operations may target
+                absolute paths outside root_dir.
 
         Raises:
             ValueError: If root_dir is not an absolute path.
@@ -79,6 +81,7 @@ class AgentSandboxBackend(SandboxBackendProtocol):
         self._client = client
         self._root_dir = posixpath.normpath(root_dir)
         self._manage_client = manage_client
+        self._allow_absolute_paths = allow_absolute_paths
 
     def __enter__(self) -> "AgentSandboxBackend":
         if self._manage_client:
@@ -105,6 +108,7 @@ class AgentSandboxBackend(SandboxBackendProtocol):
         api_url: Optional[str] = None,
         server_port: int = 8888,
         root_dir: str = "/app",
+        allow_absolute_paths: bool = False,
         **kwargs: Any,
     ) -> "AgentSandboxBackend":
         """Create a backend with an internally-managed SandboxClient.
@@ -120,6 +124,8 @@ class AgentSandboxBackend(SandboxBackendProtocol):
             api_url: Direct URL to bypass gateway discovery.
             server_port: Port the sandbox runtime listens on.
             root_dir: Virtual root for file operations.
+            allow_absolute_paths: If True, write/upload operations may target
+                absolute paths outside root_dir.
             **kwargs: Additional arguments passed to SandboxClient.
 
         Returns:
@@ -134,7 +140,12 @@ class AgentSandboxBackend(SandboxBackendProtocol):
             server_port=server_port,
             **kwargs,
         )
-        return cls(client, root_dir=root_dir, manage_client=True)
+        return cls(
+            client,
+            root_dir=root_dir,
+            manage_client=True,
+            allow_absolute_paths=allow_absolute_paths,
+        )
 
     def execute(self, command: str) -> ExecuteResponse:
         """Execute a shell command in the sandbox.
@@ -330,7 +341,14 @@ class AgentSandboxBackend(SandboxBackendProtocol):
             WriteResult with error=None on success, or error message on failure.
             Fails if file already exists.
         """
-        internal_path = self._to_internal(file_path)
+        try:
+            internal_path = self._resolve_write_path(file_path)
+        except ValueError as e:
+            return WriteResult(
+                error=f"Error: Invalid path '{file_path}': {e}",
+                path=file_path,
+                files_update=None,
+            )
         if self._exists(internal_path):
             return WriteResult(
                 error=f"File '{file_path}' already exists",
@@ -432,7 +450,7 @@ class AgentSandboxBackend(SandboxBackendProtocol):
         responses: List[FileUploadResponse] = []
         for path, payload in items:
             try:
-                internal_path = self._to_internal(path)
+                internal_path = self._resolve_write_path(path)
             except ValueError as e:
                 logger.warning("Invalid path '%s': %s", path, e)
                 responses.append(FileUploadResponse(path=path, error="invalid_path"))
@@ -526,16 +544,27 @@ class AgentSandboxBackend(SandboxBackendProtocol):
             raise RuntimeError(f"Cannot create parent directory '{parent}': {error_msg}")
 
     def _upload_bytes(self, internal_path: str, payload: bytes) -> None:
-        parent = posixpath.dirname(internal_path)
-        filename = posixpath.basename(internal_path)
-        content_b64 = base64.b64encode(payload).decode("ascii")
-        command = (
-            f"printf %s {shlex.quote(content_b64)} | base64 -d > {shlex.quote(posixpath.join(parent, filename))}"
-        )
-        result = self._client.run(f"sh -c {shlex.quote(command)}")
-        if result.exit_code != 0:
-            error_detail = result.stderr.strip() if result.stderr else f"exit code {result.exit_code}"
-            raise RuntimeError(f"Upload failed for {internal_path}: {error_detail}")
+        try:
+            # Bypass SandboxClient.write basename behavior by calling router upload directly.
+            files_payload = {"file": (internal_path, payload)}
+            self._client._request("POST", "upload", files=files_payload)
+        except Exception as e:
+            raise RuntimeError(f"Upload failed for {internal_path}: {e}") from e
+
+    def _resolve_write_path(self, path: str) -> str:
+        """Resolve a write path while allowing absolute paths outside root_dir."""
+        candidate = path.strip()
+        if not candidate:
+            raise ValueError("empty path")
+        normalized = posixpath.normpath(candidate)
+        if (
+            self._allow_absolute_paths
+            and normalized.startswith("/")
+            and normalized != self._root_dir
+            and not normalized.startswith(self._root_dir + "/")
+        ):
+            return normalized
+        return self._to_internal(candidate)
 
     def _to_internal(self, path: str) -> str:
         """Convert a public virtual path to an internal filesystem path.
@@ -711,9 +740,13 @@ class SandboxPolicyWrapper:
         audit_log: Optional[Callable[[str, str, dict], None]] = None,
     ) -> None:
         self._backend = backend
-        self._deny_prefixes = [
-            p.rstrip("/") + "/" for p in (deny_prefixes or [])
-        ]
+        self._deny_prefixes = []
+        for prefix in (deny_prefixes or []):
+            canonical_prefix = self._canonicalize_path(prefix)
+            if canonical_prefix == "/":
+                self._deny_prefixes.append("/")
+            else:
+                self._deny_prefixes.append(canonical_prefix.rstrip("/") + "/")
         self._deny_commands = deny_commands or []
         self._audit_log = audit_log
 
@@ -730,9 +763,15 @@ class SandboxPolicyWrapper:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         self.__exit__(exc_type, exc, tb)
 
+    @staticmethod
+    def _canonicalize_path(path: str) -> str:
+        normalized = posixpath.normpath(path.strip() or "/")
+        return "/" + normalized.lstrip("/")
+
     def _is_denied_path(self, path: str) -> bool:
-        normalized = path.rstrip("/") + "/" if path != "/" else "/"
-        return any(normalized.startswith(p) for p in self._deny_prefixes)
+        canonical_path = self._canonicalize_path(path)
+        normalized = canonical_path.rstrip("/") + "/" if canonical_path != "/" else "/"
+        return any(normalized.startswith(prefix) for prefix in self._deny_prefixes)
 
     def _is_denied_command(self, cmd: str) -> bool:
         return any(pattern in cmd for pattern in self._deny_commands)

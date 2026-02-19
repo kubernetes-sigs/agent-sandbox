@@ -1,3 +1,17 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -237,6 +251,65 @@ def test_to_internal_allows_root_dir_itself():
     _require(result == "/app", f"Expected /app, got {result}")
 
 
+def test_write_allows_absolute_path_outside_root_dir():
+    client = StubClient()
+    backend = AgentSandboxBackend(client, root_dir="/app", allow_absolute_paths=True)
+    seen = {}
+
+    def fake_exists(path):
+        seen["exists"] = path
+        return False
+
+    def fake_ensure_parent(path):
+        seen["mkdir"] = path
+
+    uploaded = []
+    backend._exists = fake_exists
+    backend._ensure_parent_dir = fake_ensure_parent
+    backend._upload_bytes = lambda path, content: uploaded.append((path, content))
+
+    result = backend.write("/tmp/nested/file.txt", "hello")
+
+    _require(result.error is None, f"Unexpected write error: {result.error}")
+    _require(seen["exists"] == "/tmp/nested/file.txt", f"Unexpected exists path: {seen['exists']}")
+    _require(seen["mkdir"] == "/tmp/nested/file.txt", f"Unexpected mkdir path: {seen['mkdir']}")
+    _require(uploaded == [("/tmp/nested/file.txt", b"hello")], f"Unexpected upload args: {uploaded}")
+
+
+def test_upload_files_allows_absolute_path_outside_root_dir():
+    client = StubClient()
+    backend = AgentSandboxBackend(client, root_dir="/app", allow_absolute_paths=True)
+    backend._file_state = lambda _: "missing"
+    backend._dir_state = lambda _: "writable"
+    uploaded = []
+    backend._upload_bytes = lambda path, content: uploaded.append((path, content))
+
+    responses = backend.upload_files({"/tmp/nested/file.txt": b"payload"})
+
+    _require(len(responses) == 1, f"Expected 1 response, got {len(responses)}")
+    _require(responses[0].error is None, f"Expected success, got error={responses[0].error}")
+    _require(uploaded == [("/tmp/nested/file.txt", b"payload")], f"Unexpected upload args: {uploaded}")
+
+
+def test_write_absolute_path_defaults_to_root_virtualization():
+    client = StubClient()
+    backend = AgentSandboxBackend(client, root_dir="/app")
+    seen = {}
+
+    def fake_exists(path):
+        seen["exists"] = path
+        return False
+
+    backend._exists = fake_exists
+    backend._ensure_parent_dir = lambda _path: None
+    backend._upload_bytes = lambda _path, _content: None
+
+    result = backend.write("/tmp/nested/file.txt", "hello")
+
+    _require(result.error is None, f"Unexpected write error: {result.error}")
+    _require(seen["exists"] == "/app/tmp/nested/file.txt", f"Unexpected path mapping: {seen['exists']}")
+
+
 def test_ensure_parent_dir_raises_on_failure():
     client = StubClient(run_result=SimpleNamespace(stdout="", stderr="Permission denied", exit_code=1))
     backend = AgentSandboxBackend(client)
@@ -324,6 +397,21 @@ def test_policy_wrapper_blocks_denied_paths():
     result = wrapped.edit("/sys/kernel/config", "old", "new")
     _require(result.error is not None, "Expected edit to be denied")
     _require("Policy denied" in result.error, f"Unexpected error: {result.error}")
+
+
+def test_policy_wrapper_canonicalizes_denied_paths():
+    """Policy checks should block normalized traversal paths like /app/../etc."""
+    client = StubClient()
+    backend = AgentSandboxBackend(client)
+    wrapped = SandboxPolicyWrapper(backend, deny_prefixes=["/etc"])
+
+    result = wrapped.write("/app/../etc/passwd", "bad content")
+    _require(result.error is not None, "Expected write to be denied")
+    _require("Policy denied" in result.error, f"Unexpected error: {result.error}")
+
+    responses = wrapped.upload_files({"/app/../etc/shadow": b"bad"})
+    _require(len(responses) == 1, f"Expected 1 response, got {len(responses)}")
+    _require(responses[0].error == "policy_denied", f"Expected policy_denied, got {responses[0].error}")
 
 
 def test_policy_wrapper_blocks_denied_commands():
@@ -699,11 +787,13 @@ def test_from_template_creates_managed_backend():
             namespace="test-ns",
             gateway_name="my-gateway",
             root_dir="/workspace",
+            allow_absolute_paths=True,
         )
 
         # Verify manage_client is True
         _require(backend._manage_client is True, "Expected manage_client=True")
         _require(backend._root_dir == "/workspace", f"Expected /workspace, got {backend._root_dir}")
+        _require(backend._allow_absolute_paths is True, "Expected allow_absolute_paths=True")
 
         # Verify SandboxClient was called with correct args
         call_kwargs = MockClient.call_args.kwargs
@@ -712,16 +802,35 @@ def test_from_template_creates_managed_backend():
         _require(call_kwargs["gateway_name"] == "my-gateway", "Expected gateway_name")
 
 
+def test_upload_bytes_uses_router_upload_endpoint():
+    """Test _upload_bytes sends multipart upload with full internal path."""
+    client = StubClient()
+    backend = AgentSandboxBackend(client)
+
+    backend._upload_bytes("/tmp/file.txt", b"content")
+
+    _require(len(client.requests) == 1, f"Expected 1 request, got {len(client.requests)}")
+    method, endpoint, kwargs = client.requests[0]
+    _require(method == "POST", f"Expected POST, got {method}")
+    _require(endpoint == "upload", f"Expected upload endpoint, got {endpoint}")
+    files = kwargs.get("files", {})
+    _require("file" in files, f"Expected file in multipart payload, got {files}")
+    uploaded_path, uploaded_content = files["file"]
+    _require(uploaded_path == "/tmp/file.txt", f"Unexpected upload path: {uploaded_path}")
+    _require(uploaded_content == b"content", f"Unexpected upload content: {uploaded_content}")
+
+
 def test_upload_bytes_raises_with_details():
-    """Test _upload_bytes raises RuntimeError with stderr details."""
-    client = StubClient(run_result=SimpleNamespace(stdout="", stderr="Permission denied", exit_code=1))
+    """Test _upload_bytes wraps request errors with path details."""
+    client = StubClient()
+    client._request = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Permission denied"))
     backend = AgentSandboxBackend(client)
 
     with pytest.raises(RuntimeError) as exc_info:
         backend._upload_bytes("/app/file.txt", b"content")
 
     _require("Upload failed" in str(exc_info.value), f"Unexpected error: {exc_info.value}")
-    _require("Permission denied" in str(exc_info.value), f"Expected stderr in error: {exc_info.value}")
+    _require("Permission denied" in str(exc_info.value), f"Expected request error in message: {exc_info.value}")
 
 
 def test_edit_nonexistent_file_returns_error():

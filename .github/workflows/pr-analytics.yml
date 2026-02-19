@@ -7,6 +7,8 @@ on:
 jobs:
   report:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write # Required for creating reports (as issues)
     steps:
       - name: "Generate PR Report"
         uses: AlexSim93/pull-request-analytics-action@v4.10.0

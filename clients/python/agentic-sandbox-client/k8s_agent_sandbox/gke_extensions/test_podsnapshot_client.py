@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch, call
 from datetime import datetime
 from k8s_agent_sandbox.gke_extensions.podsnapshot_client import (
     PodSnapshotSandboxClient,
+    PolicyMetadata,
 )
 from k8s_agent_sandbox.constants import *
 from kubernetes.client import ApiException
@@ -52,7 +53,10 @@ def load_kubernetes_config():
 class TestPodSnapshotSandboxClient(unittest.TestCase):
 
     @patch("kubernetes.config")
-    def setUp(self, mock_config):
+    @patch(
+        "k8s_agent_sandbox.gke_extensions.podsnapshot_client.SnapshotPersistenceManager"
+    )
+    def setUp(self, mock_persistence_cls, mock_config):
         logging.info("Setting up TestPodSnapshotSandboxClient...")
         # Mock kubernetes config loading
         mock_config.load_incluster_config.side_effect = config.ConfigException(
@@ -60,11 +64,16 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         )
         mock_config.load_kube_config.return_value = None
 
+        self.mock_persistence_manager = mock_persistence_cls.return_value
+
         # Create client without patching super, as it's tested separately
         with patch.object(
             PodSnapshotSandboxClient, "snapshot_controller_ready", return_value=True
         ):
             self.client = PodSnapshotSandboxClient("test-template")
+
+        # Verify persistence manager is mocked
+        self.client.persistence_manager = self.mock_persistence_manager
 
         # Mock the kubernetes APIs on the client instance
         self.client.custom_objects_api = MagicMock()
@@ -217,7 +226,14 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             mock_created_obj
         )
 
-        result = self.client.snapshot("test-trigger")
+        # Mock _get_policy_info to return valid data
+        policy_metadata = PolicyMetadata(
+            policy_name="test-policy", policy_labels={"app": "foo"}
+        )
+        with patch.object(
+            self.client, "_get_policy_info", return_value=policy_metadata
+        ):
+            result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 0)
         self.assertTrue(result.success)
@@ -229,6 +245,14 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         mock_watch.stream.assert_called_once()
         _, kwargs = mock_watch.stream.call_args
         self.assertEqual(kwargs.get("resource_version"), "123")
+
+        # Verify metadata saved
+        self.mock_persistence_manager.save_snapshot_metadata.assert_called_once()
+        args, _ = self.mock_persistence_manager.save_snapshot_metadata.call_args
+        record = args[0]
+        self.assertEqual(record["snapshot_uid"], "snapshot-uid")
+        self.assertEqual(record["policy_name"], "test-policy")
+
         logging.info("Finished test_snapshot_success.")
 
     def test_snapshot_controller_not_ready(self):
@@ -429,6 +453,47 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.assertEqual(result.error_code, 1)
         self.assertIn("Snapshot UID cannot be empty", result.error_reason)
         logging.info("Finished test_is_restored_from_snapshot_empty_uid.")
+
+    def test_delete_snapshots_by_uid(self):
+        """Test delete_snapshots by specific UID."""
+        logging.info("Starting test_delete_snapshots_by_uid...")
+        self.mock_persistence_manager._load_metadata.return_value = {
+            "uid-1": {"uid": "uid-1", "policy_name": "p1"},
+            "uid-2": {"uid": "uid-2", "policy_name": "p2"},
+        }
+
+        count = self.client.delete_snapshots(snapshot_uid="uid-1")
+
+        self.assertEqual(count, 1)
+        # Verify deletions
+        self.mock_persistence_manager.delete_snapshot_metadata.assert_called_with(
+            "uid-1"
+        )
+        self.client.custom_objects_api.delete_namespaced_custom_object.assert_any_call(
+            group=PODSNAPSHOT_API_GROUP,
+            version=PODSNAPSHOT_API_VERSION,
+            namespace=self.client.namespace,
+            plural=PODSNAPSHOT_PLURAL,
+            name="uid-1",
+        )
+        logging.info("Finished test_delete_snapshots_by_uid.")
+
+    def test_delete_snapshots_by_policy(self):
+        """Test delete_snapshots by policy name."""
+        logging.info("Starting test_delete_snapshots_by_policy...")
+        self.mock_persistence_manager._load_metadata.return_value = {
+            "uid-1": {"uid": "uid-1", "policy_name": "p1"},
+            "uid-2": {"uid": "uid-2", "policy_name": "p1"},  # Same policy
+            "uid-3": {"uid": "uid-3", "policy_name": "p2"},
+        }
+
+        count = self.client.delete_snapshots(policy_name="p1")
+
+        self.assertEqual(count, 2)
+        # Verify deletions for both
+        self.mock_persistence_manager.delete_snapshot_metadata.assert_any_call("uid-1")
+        self.mock_persistence_manager.delete_snapshot_metadata.assert_any_call("uid-2")
+        logging.info("Finished test_delete_snapshots_by_policy.")
 
 
 if __name__ == "__main__":

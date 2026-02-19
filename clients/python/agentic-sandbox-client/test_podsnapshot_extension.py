@@ -66,6 +66,7 @@ async def main(
     wait_time = 10
     first_snapshot_name = "test-snapshot-10"
     second_snapshot_name = "test-snapshot-20"
+    policy_name = "example-psp-workload"  # PodSnapshotPolicy defined in the cluster.
 
     try:
         print("\n***** Phase 1: Starting Counter *****")
@@ -85,6 +86,7 @@ async def main(
             )
             snapshot_response = sandbox.snapshot(first_snapshot_name)
             test_snapshot_response(snapshot_response, first_snapshot_name)
+            first_snapshot_uid = snapshot_response.snapshot_uid
 
             time.sleep(wait_time)
 
@@ -96,10 +98,14 @@ async def main(
             recent_snapshot_uid = snapshot_response.snapshot_uid
             print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
-            print("\n***** List all existing ready snapshots with the policy name. *****") 
+            print(
+                "\n***** List all existing ready snapshots with the policy name. *****"
+            )
             snapshots = sandbox.list_snapshots(policy_name=policy_name)
             for snap in snapshots:
-                print(f"Snapshot ID: {snap['snapshot_id']}, Triggered By: {snap['trigger_name']}, Source Pod: {snap['source_pod']}, Creation Time: {snap['creationTimestamp']}, Policy Name: {snap['policy_name']}")
+                print(
+                    f"Snapshot ID: {snap['snapshot_id']}, Source Pod: {snap['source_pod']}, Creation Time: {snap['creationTimestamp']}, Policy Name: {snap['policy_name']}"
+                )
 
         print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
         with PodSnapshotSandboxClient(

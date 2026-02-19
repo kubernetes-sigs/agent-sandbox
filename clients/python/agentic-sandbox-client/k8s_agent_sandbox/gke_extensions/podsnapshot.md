@@ -30,16 +30,29 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
 *   **`list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None`**:
     *   Lists valid snapshots found in the local metadata storage (`~/.snapshot_metadata/.snapshots.json`).
     *   Filters by `policy_name` and `ready_only` status (default: True).
-    *   Returns a list of dictionaries containing snapshot details (id, trigger_name, source_pod, uid, creationTimestamp, status, policy_name) sorted by creation timestamp (newest first).
-*   **`delete_snapshots(self, trigger_name: str | None = None) -> int`**:
+    *   Returns a list of dictionaries containing snapshot details (id, source_pod, uid, creationTimestamp, status, policy_name) sorted by creation timestamp (newest first).
+*   **`delete_snapshots(self, snapshot_uid: str | None = None, policy_name: str | None = None) -> int`**:
     *   Deletes snapshots and their corresponding `PodSnapshotManualTrigger` resources.
-    *   If `trigger_name` is provided, deletes only that specific snapshot.
-    *   If `trigger_name` is `None`, deletes **ALL** snapshots found in the local metadata.
+    *   If `snapshot_uid` is provided, deletes that specific snapshot.
+    *   If `policy_name` is provided, deletes all snapshots associated with that policy.
+    *   If neither is provided, deletes **ALL** snapshots found in the local metadata.
     *   Cleans up local metadata after successful deletion from K8s.
     *   Returns the count of successfully deleted snapshots.
 *   **`__exit__(self)`**:
     *   Cleans up the `PodSnapshotManualTrigger` resources.
     *   Cleans up the `SandboxClaim` resources.
+
+### `SnapshotPersistenceManager`
+
+Manages local persistence of snapshot metadata in a secure directory.
+
+*   **File Location**: `~/.snapshot_metadata/.snapshots.json`
+*   **Security**: Ensures the directory has `0o700` permissions and the file has `0o600` permissions.
+*   **Storage**: Metadata is stored as a JSON object keyed by `snapshot_uid`.
+*   **Functionality**:
+    *   **`save_snapshot_metadata`**: Saves a snapshot record.
+    *   **`delete_snapshot_metadata`**: Deletes a snapshot record by UID.
+    *   **`_load_metadata`**: Loads and returns the metadata dictionary.
 
 ## `test_podsnapshot_extension.py`
 

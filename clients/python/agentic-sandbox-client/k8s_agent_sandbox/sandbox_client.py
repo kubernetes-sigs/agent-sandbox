@@ -484,7 +484,7 @@ class SandboxClient:
         return content
 
     @trace_span("run_stateful")
-    def run_stateful(self, code: str, language: str = "python") -> ExecutionResult:
+    def run_stateful(self, code: str, language: str = "python", timeout: int = 30) -> ExecutionResult:
         """
         Executes code in a stateful environment inside the sandbox.
         Subsequent calls to run_stateful will share state (e.g. variables, files) within the same sandbox.
@@ -494,10 +494,12 @@ class SandboxClient:
             span.set_attribute("sandbox.language", language)
             span.set_attribute("sandbox.code.size", len(code))
             
-        payload = {"code": code, "language": language}
+        payload = {"code": code, "language": language, "timeout": timeout}
         
+        # Use a slightly larger timeout for the HTTP request to allow the server
+        # to handle the timeout gracefully and return the response.
         response = self._request(
-            "POST", "execute_code", json=payload, timeout=120)
+            "POST", "execute_code", json=payload, timeout=timeout + 5)
         response_data = response.json()
         
         return ExecutionResult(

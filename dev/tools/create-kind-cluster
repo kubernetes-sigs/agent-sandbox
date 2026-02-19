@@ -17,12 +17,42 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
+import textwrap
+
+
+def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
+    """Create a kind config with kubelet verbosity and containerd settings."""
+    config = textwrap.dedent(f"""\
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        nodes:
+        - role: control-plane
+          kubeadmConfigPatches:
+          - |
+            kind: KubeletConfiguration
+            logging:
+              verbosity: {kubelet_verbosity}
+        """)
+    if containerd_loglevel:
+        config += textwrap.dedent(f"""\
+            containerdConfigPatches:
+            - |-
+              [debug]
+                level = "{containerd_loglevel}"
+            """)
+    return config
+
 
 def main():
     parser = argparse.ArgumentParser(description="Create a kind cluster.")
     parser.add_argument("name", help="The name of the cluster.")
     parser.add_argument("--recreate", action="store_true", help="Delete the cluster if it already exists.")
     parser.add_argument("--kubeconfig", help="Path to export the kubeconfig to.")
+    parser.add_argument("--containerd-loglevel", default="debug",
+                        help="Containerd log level (default: debug). Set to empty string to skip.")
+    parser.add_argument("--kubelet-verbosity", type=int, default=8,
+                        help="Kubelet verbosity level (requires cluster creation, not applied to existing clusters).")
     args = parser.parse_args()
 
     clusters = subprocess.run(["kind", "get", "clusters"], capture_output=True, text=True).stdout.splitlines()
@@ -38,7 +68,25 @@ def main():
 
     if not cluster_exists:
         print(f"Creating cluster '{args.name}'.")
-        subprocess.run(["kind", "create", "cluster", "--name", args.name], check=True)
+
+        create_cmd = ["kind", "create", "cluster", "--name", args.name]
+
+        # Create a temporary config file with kubelet verbosity and containerd settings
+        config_content = create_kind_config(args.kubelet_verbosity, args.containerd_loglevel)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write(config_content)
+            config_path = f.name
+
+        print(f"Using kind config with kubelet verbosity: {args.kubelet_verbosity}")
+        create_cmd.extend(["--config", config_path])
+
+        try:
+            subprocess.run(create_cmd, check=True)
+        finally:
+            os.unlink(config_path)
+    else:
+        if args.kubelet_verbosity is not None or args.containerd_loglevel:
+            print(f"Note: --kubelet-verbosity and --containerd-loglevel require cluster recreation (use --recreate).")
 
     if args.kubeconfig:
         kubeconfig_dir = os.path.dirname(args.kubeconfig)

@@ -37,13 +37,13 @@ Three connection modes are supported:
 # Install from git (not yet published to PyPI)
 pip install "git+https://github.com/mayflower/agent-sandbox.git@feat-langchain-deepagents-backend#subdirectory=clients/python/langchain-agent-sandbox"
 
-# Also requires agentic-sandbox-client
+# Also requires k8s-agent-sandbox client
 pip install "git+https://github.com/mayflower/agent-sandbox.git@feat-langchain-deepagents-backend#subdirectory=clients/python/agentic-sandbox-client"
 ```
 
 **Requirements:**
 - Python 3.11+
-- `agentic-sandbox` SDK
+- `k8s-agent-sandbox` SDK
 - `deepagents` package
 - Kubernetes cluster with agent-sandbox controller
 - `kubectl` installed and configured (for Gateway discovery and Tunnel mode)
@@ -61,7 +61,7 @@ pip install "git+https://github.com/mayflower/agent-sandbox.git@feat-langchain-d
 ### Direct client
 
 ```python
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 from deepagents import create_deep_agent
 from langchain_agent_sandbox import AgentSandboxBackend
 
@@ -239,6 +239,8 @@ with secured:
     agent = create_deep_agent(backend=secured)
     result = agent.invoke("Run the analysis script")
 ```
+
+The policy wrapper is a best-effort guardrail, not a security boundary. It canonicalizes paths before deny-prefix checks (for example `/app/../etc` is treated as `/etc`), but command pattern checks can still be bypassed with shell tricks. Use kernel-level isolation (for example gVisor or Kata Containers) for stronger containment.
 
 ### Policy options
 

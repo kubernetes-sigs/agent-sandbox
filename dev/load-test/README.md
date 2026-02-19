@@ -6,7 +6,7 @@ This directory contains configuration files for running load tests on the Agent 
 
 1.  **Kubernetes Cluster**: You need a running Kubernetes cluster. 
 2.  **Agent Sandbox Controller**: The controller and CRDs must be installed on the cluster.
-3.  **Go Lang**: The clusterloader2 uses go to execute the load tests.
+3.  **Go Lang**: The clusterloader2 uses Go to execute the load tests.
 
 ## Setup
 

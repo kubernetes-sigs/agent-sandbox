@@ -239,18 +239,20 @@ class SandboxClient:
             return False
 
         logging.info(f"Explicitly deleting SandboxClaim: {self.claim_name}")
+        claim_name = self.claim_name
         try:
             self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=self.namespace,
                 plural=CLAIM_PLURAL_NAME,
-                name=self.claim_name
+                name=claim_name
             )
+            self.claim_name = None
             return True
         except client.ApiException as e:
             if e.status == 404:
-                logging.warning(f"SandboxClaim '{self.claim_name}' not found")
+                logging.warning(f"SandboxClaim '{claim_name}' not found")
                 return False
             logging.error(f"Error deleting sandbox claim: {e}", exc_info=True)
             return False
@@ -258,33 +260,45 @@ class SandboxClient:
             logging.error(f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
             return False
 
-    def _claim_exists(self, claim_name: str) -> bool:
-        """Check if a SandboxClaim with the given name exists."""
+    def _get_claim(self, claim_name: str) -> dict | None:
+        """Get SandboxClaim with the given name, or None if not found."""
         try:
-            self.custom_objects_api.get_namespaced_custom_object(
+            return self.custom_objects_api.get_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=self.namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=claim_name,
             )
-            return True
         except client.ApiException as e:
             if e.status == 404:
-                return False
+                return None
             raise
 
-    @trace_span("create_claim")
-    def _create_claim(self, trace_context_str: str = ""):
-        """Creates the SandboxClaim custom resource in the Kubernetes cluster.
+    def _validate_claim_template_match(self, claim_object: dict) -> None:
+        actual_template = (
+            claim_object.get("spec", {})
+            .get("sandboxTemplateRef", {})
+            .get("name")
+        )
+        if actual_template != self.template_name:
+            raise RuntimeError(
+                f"Cannot reconnect to SandboxClaim '{self.claim_name}': "
+                f"expected template '{self.template_name}', got '{actual_template}'."
+            )
+
+    @trace_span("setup_claim")
+    def _setup_claim(self, trace_context_str: str = ""):
+        """Set up a SandboxClaim by creating one or reconnecting to an existing claim.
 
         If a custom claim_name was provided and that claim already exists,
         this method will reconnect to it instead of creating a new one.
         """
         if self._custom_claim_name:
             self.claim_name = self._custom_claim_name
-            # Check if the claim already exists
-            if self._claim_exists(self.claim_name):
+            claim_object = self._get_claim(self.claim_name)
+            if claim_object:
+                self._validate_claim_template_match(claim_object)
                 logging.info(
                     f"Reconnecting to existing SandboxClaim '{self.claim_name}' "
                     f"in namespace '{self.namespace}'..."
@@ -485,7 +499,7 @@ class SandboxClient:
             self.tracing_manager.start_lifecycle_span()
             trace_context_str = self.tracing_manager.get_trace_context_json()
 
-        self._create_claim(trace_context_str)
+        self._setup_claim(trace_context_str)
         self._wait_for_sandbox_ready()
 
         # STRATEGY SELECTION
@@ -520,14 +534,16 @@ class SandboxClient:
         # Delete the SandboxClaim only if delete_on_exit is True
         if self.claim_name and self.delete_on_exit:
             logging.info(f"Deleting SandboxClaim: {self.claim_name}")
+            claim_name = self.claim_name
             try:
                 self.custom_objects_api.delete_namespaced_custom_object(
                     group=CLAIM_API_GROUP,
                     version=CLAIM_API_VERSION,
                     namespace=self.namespace,
                     plural=CLAIM_PLURAL_NAME,
-                    name=self.claim_name
+                    name=claim_name
                 )
+                self.claim_name = None
             except client.ApiException as e:
                 if e.status != 404:
                     logging.error(

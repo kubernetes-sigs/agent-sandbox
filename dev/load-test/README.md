@@ -6,29 +6,29 @@ This directory contains configuration files for running load tests on the Agent 
 
 1.  **Kubernetes Cluster**: You need a running Kubernetes cluster. 
 2.  **Agent Sandbox Controller**: The controller and CRDs must be installed on the cluster.
-3.  **Go Lang**: The clusterloader2 uses Go to execute the load tests.
+3.  **Go Lang**: The clusterloader2 uses go to execute the load tests.
 
 ## Setup
 
 ### 1. Install Agent Sandbox Controller
 
-You can install the agent-sandbox controller by following the instructions: https://github.com/kubernetes-sigs/agent-sandbox#installation.
+You can install the agent-sandbox controller and its CRDs with the following command.
+
+```bash
+# Replace "vX.Y.Z" with a specific version tag (e.g., "v0.1.0") from
+# https://github.com/kubernetes-sigs/agent-sandbox/releases
+export VERSION="vX.Y.Z"
+
+# To install only the core components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+
+# To install the extensions components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+```
 
 ### 2. Install ClusterLoader2
 
-Follow the instructions to install [ClusterLoader2](https://github.com/kubernetes/perf-tests/blob/master/clusterloader2/docs/GETTING_STARTED.md#clusterloader2). This creates a new local repository as a sibling to this repository.
-
-The expected directory structure is:
-
-```text
-workspace/
-├── agent-sandbox/          # This repository
-│   └── dev/
-│       └── load-test/
-│           └── agent-sandbox-load-test.yaml
-└── perf-tests/             # Cloned from kubernetes/perf-tests
-    └── clusterloader2/
-```
+Follow the instructions to install [ClusterLoader2](https://github.com/kubernetes/perf-tests/blob/master/clusterloader2/docs/GETTING_STARTED.md#clusterloader2) here. This creates a new local repository where you can find the `clusterloader2` directory.
 
 ## Running the Load Test
 

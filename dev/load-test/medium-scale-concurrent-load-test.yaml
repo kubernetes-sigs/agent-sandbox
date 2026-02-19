@@ -1,0 +1,95 @@
+{{$constantChurnQps := DefaultParam .CL2_CONSTANT_CHURN_QPS 2}}
+{{$quickDeleteQps := DefaultParam .CL2_QUICK_DELETE_QPS 100}}
+{{$replicas := DefaultParam .CL2_REPLICAS 1200}}
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+name: performance-churn-test-steady-state
+automanagedNamespaces: {{$namespaces}}
+
+tuningSets:
+- name: ConstantChurn
+  qpsLoad:
+    qps: {{$constantChurnQps}}
+- name: QuickFinalDeletion
+  qpsLoad:
+    qps: {{$quickDeleteQps}}
+
+steps:
+# 1. Initial Warmup to establish steady state for Group A
+- name: Initial Warmup
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: {{$replicas}}
+    tuningSet: ConstantChurn
+    objectBundle:
+    - basename: churn-initial-warmup-group
+      objectTemplatePath: cluster-loader-sandbox.yaml
+      templateFillMap:
+        Group: initial-warmup-group
+    waits:
+    - type: Running
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+
+# # 2. Start Measurements for Group B sandbox creations
+- name: Start Measurements
+  measurements:
+  # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
+  # once agent_sandbox_creation_latency_ms metrics are available to measure 
+  # end-to-end controller overhead.
+  - identifier: PodStartupLatency
+    method: PodStartupLatency
+    params:
+      action: start
+      labelSelector: "group=continuous-churn-group"
+
+# # 3. Create Continuous Churn Loop with sandboxes getting created 
+# # in Group B while sandboxes in Group A are getting deleted concurrently 
+# # to maintain steady state.
+- name: Continuous Churn Cycle
+  phases:
+  - name: Create
+    namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: {{$replicas}}
+    tuningSet: ConstantChurn
+    objectBundle:
+    - basename: churn-continuous-churn-group
+      objectTemplatePath: cluster-loader-sandbox.yaml
+      templateFillMap:
+        Group: continuous-churn-group
+    waits:
+    - type: Running
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+  - name: Delete
+    namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: ConstantChurn
+    objectBundle:
+    - basename: churn-initial-warmup-group
+      objectTemplatePath: cluster-loader-sandbox.yaml
+    waits:
+    - type: Deleted
+      labelSelector: "group=initial-warmup-group"
+
+# # 4. Gather Measurements for Group B sandbox creations
+- name: Gather Measurements
+  measurements:
+  - identifier: PodStartupLatency
+    method: PodStartupLatency
+    params:
+      action: gather
+      labelSelector: "group=continuous-churn-group"
+
+# 5. Cleanup any remaining Sandboxes to keep the cluster clean
+- name: Cleanup Remaining Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: ConstantChurn
+    objectBundle:
+    - basename: churn-initial-warmup-group
+      objectTemplatePath: cluster-loader-sandbox.yaml
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: QuickFinalDeletion
+    objectBundle:
+    - basename: churn-continuous-churn-group
+      objectTemplatePath: cluster-loader-sandbox.yaml

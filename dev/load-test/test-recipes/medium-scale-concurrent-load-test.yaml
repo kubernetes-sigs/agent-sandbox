@@ -22,12 +22,12 @@ steps:
     tuningSet: ConstantChurn
     objectBundle:
     - basename: churn-initial-warmup-group
-      objectTemplatePath: cluster-loader-sandbox.yaml
+      objectTemplatePath: ../cluster-loader-sandbox.yaml
       templateFillMap:
         Group: initial-warmup-group
     waits:
     - type: Running
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      labelSelector: "group=initial-warmup-group"
 
 # # 2. Start Measurements for Group B sandbox creations
 - name: Start Measurements
@@ -35,8 +35,8 @@ steps:
   # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
   # once agent_sandbox_creation_latency_ms metrics are available to measure 
   # end-to-end controller overhead.
-  - identifier: PodStartupLatency
-    method: PodStartupLatency
+  - identifier: SandboxStartupLatency
+    method: PodStartupLatency # Warning: this only measures the downstream Pod latency, not the end-to-end Sandbox lifecycle
     params:
       action: start
       labelSelector: "group=continuous-churn-group"
@@ -52,19 +52,19 @@ steps:
     tuningSet: ConstantChurn
     objectBundle:
     - basename: churn-continuous-churn-group
-      objectTemplatePath: cluster-loader-sandbox.yaml
+      objectTemplatePath: ../cluster-loader-sandbox.yaml
       templateFillMap:
         Group: continuous-churn-group
     waits:
     - type: Running
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      labelSelector: "group=continuous-churn-group"
   - name: Delete
     namespaceRange: {min: 1, max: {{$namespaces}}}
     replicasPerNamespace: 0
     tuningSet: ConstantChurn
     objectBundle:
     - basename: churn-initial-warmup-group
-      objectTemplatePath: cluster-loader-sandbox.yaml
+      objectTemplatePath: ../cluster-loader-sandbox.yaml
     waits:
     - type: Deleted
       labelSelector: "group=initial-warmup-group"
@@ -72,7 +72,7 @@ steps:
 # # 4. Gather Measurements for Group B sandbox creations
 - name: Gather Measurements
   measurements:
-  - identifier: PodStartupLatency
+  - identifier: SandboxStartupLatency
     method: PodStartupLatency
     params:
       action: gather
@@ -86,10 +86,10 @@ steps:
     tuningSet: ConstantChurn
     objectBundle:
     - basename: churn-initial-warmup-group
-      objectTemplatePath: cluster-loader-sandbox.yaml
+      objectTemplatePath: ../cluster-loader-sandbox.yaml
   - namespaceRange: {min: 1, max: {{$namespaces}}}
     replicasPerNamespace: 0
     tuningSet: QuickFinalDeletion
     objectBundle:
     - basename: churn-continuous-churn-group
-      objectTemplatePath: cluster-loader-sandbox.yaml
+      objectTemplatePath: ../cluster-loader-sandbox.yaml

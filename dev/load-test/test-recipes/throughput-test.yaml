@@ -1,4 +1,5 @@
-{{$qps := DefaultParam .CL2_THROUGHPUT_QPS 200}}
+{{$qps := DefaultParam .CL2_THROUGHPUT_QPS 200}} # Keep increasing this to find the max. 
+{{$quickDeleteQps := DefaultParam .CL2_QUICK_DELETE_QPS 100}}
 {{$replicas := DefaultParam .CL2_REPLICAS 12000}}
 {{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
 name: throughput-test
@@ -10,7 +11,10 @@ namespace:
 tuningSets:
 - name: ConstantRate
   qpsLoad:
-    qps: {{$qps}} # Keep increasing this to find the max. 
+    qps: {{$qps}}
+- name: QuickFinalDeletion
+  qpsLoad:
+    qps: {{$quickDeleteQps}}
 
 steps:
 - name: Start Throughput Monitor
@@ -36,7 +40,7 @@ steps:
     Method: PodStartupLatency
     Params:
       action: start
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      labelSelector: "group=throughput-test"
 
 
 - name: Create Workload
@@ -48,7 +52,7 @@ steps:
     tuningSet: ConstantRate
     objectBundle:
     - basename: agent-pod
-      objectTemplatePath: "cluster-loader-sandbox.yaml"
+      objectTemplatePath: "../cluster-loader-sandbox.yaml"
       templateFillMap:
         Group: throughput-test
 
@@ -83,7 +87,7 @@ steps:
     Method: PodStartupLatency
     Params:
       action: gather
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      labelSelector: "group=throughput-test"
 
 - name: Delete Sandboxes
   phases:
@@ -91,8 +95,8 @@ steps:
       min: 1
       max: {{$namespaces}}
     replicasPerNamespace: 0
-    tuningSet: ConstantRate
+    tuningSet: QuickFinalDeletion
     objectBundle:
     - basename: agent-pod
-      objectTemplatePath: "cluster-loader-sandbox.yaml"
+      objectTemplatePath: "../cluster-loader-sandbox.yaml"
       

@@ -29,6 +29,8 @@ steps:
     objectBundle:
     - basename: agent-env
       objectTemplatePath: "cluster-loader-sandbox.yaml"
+      templateFillMap:
+        Group: agent-sandbox-load-test
 - name: Wait for Sandboxes to be Ready
   measurements:
   - Identifier: WaitForSandboxes

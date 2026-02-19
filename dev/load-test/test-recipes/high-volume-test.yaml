@@ -1,6 +1,6 @@
 {{$rampUpQps := DefaultParam .CL2_RAMP_UP_QPS 10}}
 {{$rampDownQps := DefaultParam .CL2_RAMP_DOWN_QPS 50}}
-{{$replicas := DefaultParam .CL2_REPLICAS 100}}
+{{$replicas := DefaultParam .CL2_REPLICAS 100}} # Keep increasing this to find the max.
 {{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
 name: high-volume-test
 automanagedNamespaces: {{$namespaces}}
@@ -25,7 +25,7 @@ steps:
   # once agent_sandbox_creation_latency_ms metrics are available to measure 
   # end-to-end controller overhead.
   - identifier: SandboxStartupLatency
-    method: PodStartupLatency
+    method: PodStartupLatency # Warning: this only measures the downstream Pod latency, not the end-to-end Sandbox lifecycle
     params:
       action: start
       labelSelector: "group=linear-rampup"
@@ -36,11 +36,11 @@ steps:
   - name: Scale Up
     namespaceRange: {min: 1, max: {{$namespaces}}}
     tuningSet: RampUp
-    replicasPerNamespace: {{$replicas}} # Keep increasing this to find the max. 
+    replicasPerNamespace: {{$replicas}}
     objectBundle:
     - basename: agent-sandbox
       identifier: "linear-rampup"
-      objectTemplatePath: cluster-loader-sandbox.yaml
+      objectTemplatePath: ../cluster-loader-sandbox.yaml
       templateFillMap:
         Group: linear-rampup
     waits:
@@ -74,4 +74,4 @@ steps:
     tuningSet: RampDown
     objectBundle:
     - basename: agent-sandbox
-      objectTemplatePath: cluster-loader-sandbox.yaml
+      objectTemplatePath: ../cluster-loader-sandbox.yaml

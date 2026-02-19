@@ -547,7 +547,7 @@ class AgentSandboxBackend(SandboxBackendProtocol):
         try:
             # Bypass SandboxClient.write basename behavior by calling router upload directly.
             files_payload = {"file": (internal_path, payload)}
-            self._client._request("POST", "upload", files=files_payload)
+            self._client._request("POST", "upload", files=files_payload, timeout=60)
         except Exception as e:
             raise RuntimeError(f"Upload failed for {internal_path}: {e}") from e
 
@@ -740,13 +740,19 @@ class SandboxPolicyWrapper:
         audit_log: Optional[Callable[[str, str, dict], None]] = None,
     ) -> None:
         self._backend = backend
-        self._deny_prefixes = []
+        self._deny_prefixes_write: List[str] = []
+        self._deny_prefixes_edit: List[str] = []
+        self._deny_prefixes_canonical: List[str] = []
         for prefix in (deny_prefixes or []):
-            canonical_prefix = self._canonicalize_path(prefix)
-            if canonical_prefix == "/":
-                self._deny_prefixes.append("/")
-            else:
-                self._deny_prefixes.append(canonical_prefix.rstrip("/") + "/")
+            self._deny_prefixes_write.append(
+                self._normalize_prefix(self._resolve_prefix(prefix, for_write=True))
+            )
+            self._deny_prefixes_edit.append(
+                self._normalize_prefix(self._resolve_prefix(prefix, for_write=False))
+            )
+            self._deny_prefixes_canonical.append(
+                self._normalize_prefix(self._canonicalize_path(prefix))
+            )
         self._deny_commands = deny_commands or []
         self._audit_log = audit_log
 
@@ -768,10 +774,43 @@ class SandboxPolicyWrapper:
         normalized = posixpath.normpath(path.strip() or "/")
         return "/" + normalized.lstrip("/")
 
-    def _is_denied_path(self, path: str) -> bool:
-        canonical_path = self._canonicalize_path(path)
-        normalized = canonical_path.rstrip("/") + "/" if canonical_path != "/" else "/"
-        return any(normalized.startswith(prefix) for prefix in self._deny_prefixes)
+    @staticmethod
+    def _normalize_prefix(path: str) -> str:
+        canonical_path = SandboxPolicyWrapper._canonicalize_path(path)
+        return canonical_path.rstrip("/") + "/" if canonical_path != "/" else "/"
+
+    def _resolve_prefix(self, path: str, for_write: bool) -> str:
+        stripped = path.strip() or "/"
+        if stripped == "/":
+            return "/"
+        try:
+            if for_write:
+                return self._backend._resolve_write_path(stripped)
+            return self._backend._to_internal(stripped)
+        except ValueError:
+            return self._canonicalize_path(stripped)
+
+    def _resolve_candidate_path(self, path: str, for_write: bool) -> str:
+        try:
+            if for_write:
+                return self._backend._resolve_write_path(path)
+            return self._backend._to_internal(path)
+        except ValueError:
+            return self._canonicalize_path(path)
+
+    def _is_denied_path(self, path: str, for_write: bool) -> bool:
+        normalized = self._normalize_prefix(self._resolve_candidate_path(path, for_write))
+        deny_prefixes = self._deny_prefixes_write if for_write else self._deny_prefixes_edit
+        if any(normalized.startswith(prefix) for prefix in deny_prefixes):
+            return True
+
+        # Catch traversal-style bypasses (e.g. /app/../etc) using canonical path checks.
+        parts = [part for part in path.split("/") if part]
+        if ".." in parts:
+            canonical = self._normalize_prefix(self._canonicalize_path(path))
+            return any(canonical.startswith(prefix) for prefix in self._deny_prefixes_canonical)
+
+        return False
 
     def _is_denied_command(self, cmd: str) -> bool:
         return any(pattern in cmd for pattern in self._deny_commands)
@@ -828,7 +867,7 @@ class SandboxPolicyWrapper:
 
     def write(self, file_path: str, content: str) -> WriteResult:
         """Write file with policy check."""
-        if self._is_denied_path(file_path):
+        if self._is_denied_path(file_path, for_write=True):
             return WriteResult(
                 error=f"Policy denied: writes not allowed under '{file_path}'",
                 path=file_path,
@@ -853,7 +892,7 @@ class SandboxPolicyWrapper:
         replace_all: bool = False,
     ) -> EditResult:
         """Edit file with policy check."""
-        if self._is_denied_path(file_path):
+        if self._is_denied_path(file_path, for_write=False):
             return EditResult(
                 error=f"Policy denied: edits not allowed under '{file_path}'",
                 path=file_path,
@@ -907,7 +946,7 @@ class SandboxPolicyWrapper:
         allowed_files: List[Tuple[str, bytes]] = []
 
         for path, payload in items:
-            if self._is_denied_path(path):
+            if self._is_denied_path(path, for_write=True):
                 responses.append(
                     FileUploadResponse(path=path, error="policy_denied")
                 )

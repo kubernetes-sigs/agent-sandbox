@@ -35,10 +35,10 @@ Three connection modes are supported:
 
 ```sh
 # Install from git (not yet published to PyPI)
-pip install "git+https://github.com/mayflower/agent-sandbox.git@feat-langchain-deepagents-backend#subdirectory=clients/python/langchain-agent-sandbox"
+pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@main#subdirectory=clients/python/langchain-agent-sandbox"
 
 # Also requires k8s-agent-sandbox client
-pip install "git+https://github.com/mayflower/agent-sandbox.git@feat-langchain-deepagents-backend#subdirectory=clients/python/agentic-sandbox-client"
+pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@main#subdirectory=clients/python/agentic-sandbox-client"
 ```
 
 **Requirements:**

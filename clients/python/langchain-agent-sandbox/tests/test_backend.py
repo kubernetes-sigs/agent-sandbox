@@ -414,6 +414,23 @@ def test_policy_wrapper_canonicalizes_denied_paths():
     _require(responses[0].error == "policy_denied", f"Expected policy_denied, got {responses[0].error}")
 
 
+def test_policy_wrapper_write_resolution_distinguishes_absolute_and_relative_prefixes():
+    """With absolute write mode enabled, /etc policy should not block relative etc/* under root_dir."""
+    client = StubClient()
+    backend = AgentSandboxBackend(client, root_dir="/app", allow_absolute_paths=True)
+    backend._exists = lambda _: False
+    backend._ensure_parent_dir = lambda _: None
+    backend._upload_bytes = lambda _path, _content: None
+    wrapped = SandboxPolicyWrapper(backend, deny_prefixes=["/etc"])
+
+    relative_result = wrapped.write("etc/config.txt", "safe")
+    _require(relative_result.error is None, f"Unexpected relative-path deny: {relative_result.error}")
+
+    absolute_result = wrapped.write("/etc/passwd", "bad")
+    _require(absolute_result.error is not None, "Expected absolute /etc write to be denied")
+    _require("Policy denied" in absolute_result.error, f"Unexpected error: {absolute_result.error}")
+
+
 def test_policy_wrapper_blocks_denied_commands():
     """Test that execute is blocked on denied command patterns."""
     client = StubClient()
@@ -813,6 +830,7 @@ def test_upload_bytes_uses_router_upload_endpoint():
     method, endpoint, kwargs = client.requests[0]
     _require(method == "POST", f"Expected POST, got {method}")
     _require(endpoint == "upload", f"Expected upload endpoint, got {endpoint}")
+    _require(kwargs.get("timeout") == 60, f"Expected timeout=60, got {kwargs.get('timeout')}")
     files = kwargs.get("files", {})
     _require("file" in files, f"Expected file in multipart payload, got {files}")
     uploaded_path, uploaded_content = files["file"]

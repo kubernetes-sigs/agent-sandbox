@@ -4,18 +4,14 @@ This example demonstrates how to use LangChain DeepAgents with Kubernetes-native
 
 ## Architecture
 
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  DeepAgent      │────▶│  AgentSandbox    │────▶│  Sandbox Pod    │
-│  (LangGraph)    │     │  Backend         │     │  (Kubernetes)   │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-        │                       │                        │
-        │                       │                        │
-   Planning &              Protocol               Isolated
-   Tool Calls              Translation            Execution
+```mermaid
+flowchart LR
+    A["DeepAgent (LangGraph)"] -->|"Planning & Tool Calls"| B["AgentSandbox Backend"]
+    B -->|"Protocol Translation"| C["Sandbox Pod (Kubernetes)"]
+    C -->|"Isolated Execution"| D["Runtime Process"]
 ```
 
-The backend translates DeepAgents protocol calls (`execute`, `read`, `write`, `edit`) into sandbox operations via the `agentic-sandbox` SDK.
+The backend translates DeepAgents protocol calls (`execute`, `read`, `write`, `edit`) into sandbox operations via the `k8s-agent-sandbox` SDK.
 
 ## Prerequisites
 
@@ -235,6 +231,8 @@ with AgentSandboxBackend.from_template("python-deepagent") as backend:
     result = agent.invoke({"messages": [("user", "Run analysis")]})
 ```
 
+Policy wrapper checks are best-effort guardrails. Paths are canonicalized before prefix checks (for example, `/app/../etc` is treated as `/etc`), but command pattern blocking can still be bypassed with shell variations or aliases. Use sandbox/container isolation controls for real security boundaries (for example gVisor or Kata Containers).
+
 ### WarmPool for Fast Startup
 
 ```python
@@ -308,4 +306,4 @@ This script:
 - [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) - Kubernetes CRD and controller
 - [LangChain DeepAgents](https://docs.langchain.com/oss/python/deepagents/overview) - Agent framework documentation
 - [langchain-agent-sandbox](../../clients/python/langchain-agent-sandbox/) - Backend implementation
-- [agentic-sandbox-client](../../clients/python/agentic-sandbox-client/) - Core Python SDK
+- [k8s-agent-sandbox client](../../clients/python/agentic-sandbox-client/) - Core Python SDK

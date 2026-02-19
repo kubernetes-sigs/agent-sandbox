@@ -584,3 +584,26 @@ func (cl *ClusterClient) GetSandbox(ctx context.Context, sandboxID types.Namespa
 	}
 	return sandbox, nil
 }
+
+// ExecuteOnNode executes a command on a node.
+// nodeName should be the Kubernetes node name (e.g., "agent-sandbox-control-plane").
+// This function assumes we're running on kind, we'll need to adjust this (for example to use SSH) if we want to run on other platforms.
+// For kind, it uses "docker exec" to run the command in the kind node container.
+func (cl *ClusterClient) ExecuteOnNode(ctx context.Context, nodeName string, command []string) (string, string, error) {
+	cl.Helper()
+
+	args := append([]string{"exec", nodeName}, command...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cl.Logf("executing on kind node: docker %s", strings.Join(args, " "))
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return stdout.String(), stderr.String(), fmt.Errorf("docker exec failed: %w (stderr: %s)", err, stderr.String())
+	}
+
+	return stdout.String(), stderr.String(), nil
+}

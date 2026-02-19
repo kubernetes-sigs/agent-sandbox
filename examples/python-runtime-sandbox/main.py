@@ -16,11 +16,10 @@ import subprocess
 import os
 import shlex
 import logging
-import asyncio
 import urllib.parse
 
 from fastapi import FastAPI, UploadFile, File
-from jupyter_client import AsyncKernelManager
+from sandbox_kernel_manager import SandboxKernelManager
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -66,58 +65,22 @@ app = FastAPI(
 )
 
 # Global state to manage the IPython kernel
-kernel_manager = AsyncKernelManager(kernel_name='python3')
-kernel_client = None
-kernel_lock = asyncio.Lock()
+sandbox_kernel = SandboxKernelManager()
 
 @app.get("/", summary="Health Check")
 async def health_check():
     """A simple health check endpoint to confirm the server is running."""
     return {"status": "ok", "message": "Sandbox Runtime is active."}
 
-async def _start_kernel_internal():
-    """Helper to start or restart the kernel."""
-    global kernel_client
-    if kernel_manager.has_kernel:
-        await kernel_manager.shutdown_kernel(now=True)
-        
-    await kernel_manager.start_kernel()
-    kernel_client = kernel_manager.client()
-    kernel_client.start_channels()
-
-    check = kernel_manager.is_alive()
-    if await check if asyncio.iscoroutine(check) else check:
-        # Change the working directory to /app to ensure all code execution happens in the correct context
-        kernel_client.execute("import os, pickle; os.chdir('/app')")
-
 @app.on_event("startup")
 async def start_kernel():
     """Starts the IPython kernel when the sandbox starts."""
-    await _start_kernel_internal()
+    await sandbox_kernel.start()
 
 @app.on_event("shutdown")
 async def shutdown_kernel():
     """Cleans up the IPython kernel when the sandbox stops."""
-    if kernel_client:
-        kernel_client.stop_channels()
-    if kernel_manager:
-        await kernel_manager.shutdown_kernel()
-    
-async def interrupt_and_drain():
-    """Interrupts the kernel and drains the IOPub channel until idle."""
-    if not kernel_manager or not kernel_client:
-        return
-    
-    try:
-        await kernel_manager.interrupt_kernel()
-        while True:
-            # Use a short timeout to avoid hanging forever if the kernel is dead
-            msg = await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=1.0)
-            if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
-                break
-    except (asyncio.TimeoutError, Exception):
-        logging.warning("Kernel interruption or drain failed. Forcing kernel restart.")
-        await _start_kernel_internal()
+    await sandbox_kernel.shutdown()
 
 @app.post("/execute", summary="Execute a shell command", response_model=ExecuteResponse)
 async def execute_command(request: ExecuteRequest):
@@ -150,87 +113,13 @@ async def execute_command(request: ExecuteRequest):
 
 @app.post("/execute_code", summary="Execute code in a stateful way.", response_model=ExecuteCodeResponse)
 async def execute_code(request: ExecuteCodeRequest):
-    if request.language != "python":
-        return ExecuteCodeResponse(stdout="", stderr=f"Unsupported language: {request.language}", exit_code=1)
+    stdout, stderr, exit_code = await sandbox_kernel.execute(request.code, request.timeout)
     
-    # 1. Self-healing check: If client is missing or dead, try to start it
-    async with kernel_lock:
-        if not kernel_client or not kernel_manager.has_kernel:
-            logging.warning("Kernel not initialized. Attempting to start...")
-            await _start_kernel_internal()
-
-        # 2. Check Liveness
-        is_alive = False
-        try:
-            check = kernel_manager.is_alive()
-            is_alive = await check if asyncio.iscoroutine(check) else check
-        except Exception:
-            pass
-        
-        if not is_alive:
-            logging.warning("Kernel is dead. Restarting...")
-            await _start_kernel_internal()
-
-        # 3. Flush the IOPub channel before starting
-        # This prevents "ghost" output from previous timed-out runs
-        try:
-            while True:
-                await asyncio.wait_for(kernel_client.get_iopub_msg(), timeout=0.01)
-        except (asyncio.TimeoutError, Exception):
-            pass
-
-        # 4. Execute the requested code.
-        msg_id = kernel_client.execute(request.code)
-        stdout, stderr = [], []
-        exit_code = 0
-
-        async def collect_io():
-            nonlocal exit_code
-            while True:
-                # We listen to IOPub for the "Stream" of output
-                msg = await kernel_client.get_iopub_msg()
-                if msg.get('parent_header', {}).get('msg_id') != msg_id:
-                    continue
-
-                msg_type = msg['header']['msg_type']
-                content = msg['content']
-
-                if msg_type == 'stream':
-                    if content['name'] == 'stdout':
-                        stdout.append(content['text'])
-                    else:
-                        stderr.append(content['text'])
-                elif msg_type in ('execute_result', 'display_data'):
-                    # Capture rich output/returned values
-                    data = content['data'].get('text/plain', '')
-                    stdout.append(data)
-                elif msg_type == 'error':
-                    stderr.append("\n".join(content['traceback']))
-                elif msg_type == 'status' and content['execution_state'] == 'idle':
-                    break
-
-        try:
-            # 5. Wait for IO and the shell reply
-            await asyncio.wait_for(collect_io(), timeout=request.timeout)
-            
-            # 6. Get the actual exit status from the shell channel
-            shell_msg = await asyncio.wait_for(kernel_client.get_shell_msg(), timeout=1.0)
-            if shell_msg['content'].get('status') == 'error':
-                exit_code = 1
-            
-            return ExecuteCodeResponse(
-                stdout="".join(stdout),
-                stderr="".join(stderr),
-                exit_code=exit_code
-            )
-
-        except asyncio.TimeoutError:
-            await interrupt_and_drain()
-            return ExecuteCodeResponse(
-                stdout="".join(stdout),
-                stderr="".join(stderr) + f"\n[Timeout after {request.timeout}s]",
-                exit_code=130
-            )
+    return ExecuteCodeResponse(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code
+    )
     
 @app.post("/upload", summary="Upload a file to the sandbox")
 async def upload_file(file: UploadFile = File(...)):

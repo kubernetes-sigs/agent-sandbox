@@ -94,7 +94,7 @@ We aim for the Sandbox to be vendor-neutral, supporting various runtimes. Key ch
 
 ## Roadmap
 
-The current Roadmap can be found at [Roadmap.md](Roadmap.md).
+The current Roadmap can be found at [roadmap.md](roadmap.md).
 
 ## Community, Discussion, Contribution, and Support
 

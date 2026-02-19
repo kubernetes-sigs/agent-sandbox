@@ -3977,6 +3977,8 @@ spec:
                   - type
                   type: object
                 type: array
+              phase:
+                type: string
               replicas:
                 format: int32
                 type: integer

@@ -29,8 +29,8 @@ class ExecuteRequest(BaseModel):
 
 class ExecuteCodeRequest(BaseModel):
     """Request model for the /execute_code endpoint."""
-    code: str
-    language: str = "python"
+    code: str # The code block to execute
+    language: str = "python" # The language of the code block
     timeout: int = 10  # Default timeout in seconds
     
 
@@ -113,6 +113,9 @@ async def execute_command(request: ExecuteRequest):
 
 @app.post("/execute_code", summary="Execute code in a stateful way.", response_model=ExecuteCodeResponse)
 async def execute_code(request: ExecuteCodeRequest):
+    if request.language != "python":
+        return ExecuteCodeResponse(stdout="", stderr=f"Unsupported language: {request.language}", exit_code=1)
+    
     stdout, stderr, exit_code = await sandbox_kernel.execute(request.code, request.timeout)
     
     return ExecuteCodeResponse(

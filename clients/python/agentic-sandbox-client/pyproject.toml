@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentic_sandbox"
-version = "0.1.0"
+name = "k8s-agent-sandbox"
+dynamic = ["version"]
 description = "A client library to interact with the Agentic Sandbox on Kubernetes."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
@@ -16,6 +16,7 @@ classifiers = [
 dependencies = [
     "kubernetes",
     "requests",
+    "pydantic",
 ]
 
 [project.urls]
@@ -23,9 +24,12 @@ dependencies = [
 "Bug Tracker" = "https://github.com/kubernetes-sigs/agent-sandbox/issues"
 
 [tool.setuptools]
-# This line tells setuptools to only include the 'agentic_sandbox'
+# This line tells setuptools to only include the 'k8s_agent_sandbox'
 # package and to ignore other directories like 'sandbox_router'.
-packages = ["agentic_sandbox"]
+packages = ["k8s_agent_sandbox"]
+
+[tool.setuptools_scm]
+root = "../../.."
 
 [project.optional-dependencies]
 test = [

@@ -18,7 +18,7 @@ import time
 import sys
 from kubernetes import client, config
 import re
-from agentic_sandbox.gke_extensions import PodSnapshotSandboxClient
+from k8s_agent_sandbox.gke_extensions import PodSnapshotSandboxClient
 
 
 def test_snapshot_response(snapshot_response, snapshot_name):
@@ -27,6 +27,7 @@ def test_snapshot_response(snapshot_response, snapshot_name):
     ), "snapshot response missing 'trigger_name' attribute"
 
     print(f"Trigger Name: {snapshot_response.trigger_name}")
+    print(f"Snapshot UID: {snapshot_response.snapshot_uid}")
     print(f"Success: {snapshot_response.success}")
     print(f"Error Code: {snapshot_response.error_code}")
     print(f"Error Reason: {snapshot_response.error_reason}")
@@ -65,7 +66,6 @@ async def main(
     wait_time = 10
     first_snapshot_name = "test-snapshot-10"
     second_snapshot_name = "test-snapshot-20"
-    core_v1_api = client.CoreV1Api()
 
     try:
         print("\n***** Phase 1: Starting Counter *****")
@@ -93,6 +93,8 @@ async def main(
             )
             snapshot_response = sandbox.snapshot(second_snapshot_name)
             test_snapshot_response(snapshot_response, second_snapshot_name)
+            recent_snapshot_uid = snapshot_response.snapshot_uid
+            print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
             print("\n***** List all existing ready snapshots with the policy name. *****") 
             snapshots = sandbox.list_snapshots(policy_name=policy_name)
@@ -110,28 +112,11 @@ async def main(
             print("\nWaiting 5 seconds for restored pod to resume printing...")
             time.sleep(5)
 
-            # Fetch logs using the Kubernetes API
-            logs = core_v1_api.read_namespaced_pod_log(
-                name=sandbox_restored.pod_name, namespace=sandbox_restored.namespace
+            restore_result = sandbox_restored.is_restored_from_snapshot(
+                recent_snapshot_uid
             )
-
-            # Extract the sequence of 'Count:' values from the pod logs
-            counts = [int(n) for n in re.findall(r"Count: (\d+)", logs)]
-            assert (
-                len(counts) > 0
-            ), "Failed to retrieve any 'Count:' logs from restored pod."
-
-            # Verify the counter resumed from the correct snapshot state.
-            # The second snapshot was taken after two wait intervals (totaling 20s if wait_time=10).
-            min_expected_count_at_restore = wait_time * 2
-            first_count_after_restore = counts[0]
-
-            print(f"First count after restore: {first_count_after_restore}")
-
-            assert first_count_after_restore >= min_expected_count_at_restore, (
-                f"State Mismatch! Expected counter to start >= {min_expected_count_at_restore}, "
-                f"but got {first_count_after_restore}. The pod likely restarted from scratch."
-            )
+            assert restore_result.success, "Pod was not restored from a snapshot."
+            print("Pod was restored from the most recent snapshot.")
 
             print("\n**** Deleting snapshots *****")
             deleted_snapshots = sandbox_restored.delete_snapshots()

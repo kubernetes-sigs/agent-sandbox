@@ -14,7 +14,10 @@
 
 import argparse
 import asyncio
-from agentic_sandbox import SandboxClient
+from unittest.mock import MagicMock
+from pydantic import ValidationError
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.sandbox_client import ExecutionResult, FileEntry
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
@@ -88,7 +91,29 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
 
             print(f"Read content: '{read_content}'")
             assert read_content == file_content
+            
             print("--- File Operations Test Passed! ---")
+
+            # Test list and exists
+            print("\n--- Testing List and Exists ---")
+            print(f"Checking if '{file_path}' exists...")
+            exists = sandbox.exists(file_path)
+            assert exists is True, f"Expected '{file_path}' to exist"
+
+            print("Checking if 'non_existent_file.txt' exists...")
+            not_exists = sandbox.exists("non_existent_file.txt")
+            assert not_exists is False, "Expected 'non_existent_file.txt' to not exist"
+
+            print("Listing files in '.' ...")
+            files = sandbox.list(".")
+            print(f"Files found: {[f.name for f in files]}")
+
+            found = any(f.name == file_path for f in files)
+            assert found is True, f"Expected '{file_path}' to be in the file list"
+
+            file_entry = next(f for f in files if f.name == file_path)
+            assert file_entry.size == len(file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
+            print("--- List and Exists Test Passed! ---")
 
             # Test introspection commands
             print("\n--- Testing Pod Introspection ---")
@@ -102,6 +127,42 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
             print(env_result.stdout)
 
             print("--- Introspection Tests Finished ---")
+            
+            print("\n--- Testing Pydantic Validation ---")
+            
+            # Test: ExecutionResult defaults (partial response)
+            original_request = sandbox._request
+            
+            mock_response = MagicMock()
+            mock_response.json.return_value = {} # Empty response
+            sandbox._request = MagicMock(return_value=mock_response)
+            
+            print("Testing ExecutionResult defaults with empty response...")
+            # This should not raise error because of defaults
+            res = sandbox.run("echo test") 
+            assert res.exit_code == -1
+            assert res.stdout == ""
+            assert isinstance(res, ExecutionResult)
+            print("ExecutionResult defaults verified.")
+
+            # Test: FileEntry validation (invalid type)
+            mock_response.json.return_value = [{
+                "name": "bad_file",
+                "size": 100,
+                "type": "invalid_type", # Invalid literal
+                "mod_time": 12345.6
+            }]
+            
+            print("Testing FileEntry validation with invalid type...")
+            try:
+                sandbox.list(".")
+                raise AssertionError("ValidationError not raised for invalid FileEntry type")
+            except ValidationError as e:
+                print(f"Caught expected ValidationError: {e}")
+            
+            # Restore original method
+            sandbox._request = original_request
+            print("--- Pydantic Validation Tests Passed ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")

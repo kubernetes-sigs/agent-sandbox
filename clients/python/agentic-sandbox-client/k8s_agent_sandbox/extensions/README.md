@@ -34,7 +34,7 @@ Before running the tests, you must have the following set up:
     source .venv/bin/activate
     ```
 
-2.  **Install Needed Dependencies**: Install the required Python packages, including the local `agentic_sandbox` client in editable mode.
+2.  **Install Needed Dependencies**: Install the required Python packages, including the local `k8s_agent_sandbox` client in editable mode.
     ```bash
     pip install kubernetes requests
     pip install -e clients/python/agentic-sandbox-client/

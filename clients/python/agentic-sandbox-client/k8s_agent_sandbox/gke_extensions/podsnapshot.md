@@ -4,11 +4,7 @@ This directory contains the Python client extension for interacting with the Age
 
 ## `podsnapshot_client.py`
 
-This file defines the `SnapshotPersistenceManager` and `PodSnapshotSandboxClient` class, which extend the base `SandboxClient` to provide snapshot capabilities.
-
-### `SnapshotPersistenceManager`
-
-A utility class for managing local persistence of snapshot metadata in a secure directory. Stores metadata as a dictionary keyed by `trigger_name`.
+This file defines the `PodSnapshotSandboxClient` class, which extend the base `SandboxClient` to provide snapshot capabilities.
 
 ### `PodSnapshotSandboxClient`
 
@@ -20,13 +16,17 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   Initializes the client with optional podsnapshot timeout and server port.
     *   If snapshot exists, the pod snapshot controller restores from the most recent snapshot matching the label of the `SandboxTemplate`, otherwise creates a new `Sandbox`.
 *   **`snapshot_controller_ready(self) -> bool`**:
-    *   Checks if the snapshot agent (both self-installed and GKE managed) is running and ready.
+    *   Checks if the snapshot agent (GKE managed) is running and ready.
 *   **`snapshot(self, trigger_name: str) -> SnapshotResponse`**:
     *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
-    *   The trigger_name is suffixed with unique hash.
+    *   The `trigger_name` is suffixed with unique hash.
     *   Waits for the snapshot to be processed.
     *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
-    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name).
+    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
+*   **`is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreResult`**:
+    *   Checks if the sandbox pod was restored from the specified snapshot.
+    *   Verifies restoration by checking the 'PodRestored' condition in the pod status and confirming the message contains the expected snapshot UID.
+    *   Returns RestoreResult object(success, error_code, error_reason).
 *   **`list_snapshots(self, policy_name: str, ready_only: bool = True) -> list | None`**:
     *   Lists valid snapshots found in the local metadata storage (`~/.snapshot_metadata/.snapshots.json`).
     *   Filters by `policy_name` and `ready_only` status (default: True).
@@ -37,8 +37,9 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   If `trigger_name` is `None`, deletes **ALL** snapshots found in the local metadata.
     *   Cleans up local metadata after successful deletion from K8s.
     *   Returns the count of successfully deleted snapshots.
-*   **Automatic Cleanup**:
-    *   The `__exit__` method cleans up the `SandboxClaim` resources.
+*   **`__exit__(self)`**:
+    *   Cleans up the `PodSnapshotManualTrigger` resources.
+    *   Cleans up the `SandboxClaim` resources.
 
 ## `test_podsnapshot_extension.py`
 
@@ -52,7 +53,7 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
     *   Takes a second snapshot (`test-snapshot-20`) after another ~10 seconds.
 2.  **Phase 2: Restoring from Recent Snapshot**:
     *   Restores a sandbox from the second snapshot.
-    *   Verifies that the counter continues from where it left off (>= 20), proving the state was preserved.
+    *   Verifies that sandbox has been restored from the recent snapshot. 
 
 ### Prerequisites
 

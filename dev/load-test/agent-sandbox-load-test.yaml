@@ -1,0 +1,54 @@
+{{$replicas := DefaultParam .CL2_REPLICAS 20}}
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+{{$qps := DefaultParam .CL2_QPS 10}}
+{{$namespacePrefix := DefaultParam .CL2_NAMESPACE_PREFIX "agent-sandbox"}}
+name: agent-sandbox-load-test
+namespace:
+  number: {{$namespaces}}
+  prefix: {{$namespacePrefix}}
+tuningSets:
+- name: BurstCreate
+  qpsLoad:
+    qps: {{$qps}} # Adjust based on your cluster's capacity
+steps:
+- name: Start Startup Latency Measurement
+  measurements:
+  # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
+  # once agent_sandbox_creation_latency_ms metrics are available to measure 
+  # end-to-end controller overhead.  
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency # Warning: this only measures the downstream Pod latency, not the end-to-end Sandbox lifecycle
+    Params:
+      action: start
+      labelSelector: "app=agent-sandbox-load-test"
+- name: Create Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: {{$replicas}} # Total sandboxes to spin up
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-env
+      objectTemplatePath: "cluster-loader-sandbox.yaml"
+- name: Wait for Sandboxes to be Ready
+  measurements:
+  - Identifier: WaitForSandboxes
+    Method: WaitForRunningPods
+    Params:
+      action: start
+      labelSelector: "app=agent-sandbox-load-test"
+      desiredPodCount: {{MultiplyInt $replicas $namespaces}}
+- name: Gather Results
+  measurements:
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
+      labelSelector: "app=agent-sandbox-load-test"
+- name: Delete Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-env
+      objectTemplatePath: "cluster-loader-sandbox.yaml"

@@ -9,6 +9,9 @@ bin/
 dist/
 release_assets/
 
+# Dynamic versioning file (generated during CI/CD)
+clients/python/agentic-sandbox-client/VERSION
+
 # Temporary folders
 tmp/
 temp/

@@ -169,7 +169,7 @@ func TestRunPythonRuntimeSandbox(testingT *testing.T) {
 	require.NoError(testingT, err)
 	sandboxObj.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxObj))
-	require.NoError(testingT, testContext.WaitForObject(testingT.Context(), sandboxObj, predicates.ReadyConditionIsTrue))
+	testContext.MustWaitForObject(sandboxObj, predicates.ReadyConditionIsTrue)
 
 	// Pod and sandboxID have the same name
 	sandboxID := types.NamespacedName{
@@ -182,7 +182,7 @@ func TestRunPythonRuntimeSandbox(testingT *testing.T) {
 	podObj.Namespace = sandboxID.Namespace
 
 	// Wait for the pod to be ready
-	require.NoError(testingT, testContext.WaitForObject(testingT.Context(), podObj, predicates.ReadyConditionIsTrue))
+	testContext.MustWaitForObject(podObj, predicates.ReadyConditionIsTrue)
 
 	testingT.Logf("Pod is ready: podID - %s", sandboxID.Name)
 	// Run the tests on the pod
@@ -213,22 +213,27 @@ func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	sandboxTemplate.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxTemplate))
 
+	// Create the sandbox claim and wait for readiness
 	sandboxClaim, err := sandboxClaimFromManifest(claimManifest)
 	require.NoError(testingT, err)
 	sandboxClaim.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxClaim))
+	testContext.MustWaitForObject(sandboxClaim, predicates.ReadyConditionIsTrue)
 
 	sandboxID := types.NamespacedName{
 		Namespace: ns.Name,
 		Name:      "python-sandbox-claim",
 	}
 
+	// Wait for the sandbox to be ready (meaning the pod has been created)
+	require.NoError(testingT, testContext.WaitForSandboxReady(testingT.Context(), sandboxID))
+
 	podObj := &corev1.Pod{}
 	podObj.Name = sandboxID.Name
 	podObj.Namespace = sandboxID.Namespace
 
 	// Wait for the pod to be ready
-	require.NoError(testingT, testContext.WaitForObject(testingT.Context(), podObj, predicates.ReadyConditionIsTrue))
+	testContext.MustWaitForObject(podObj, predicates.ReadyConditionIsTrue)
 
 	testingT.Logf("Sandbox is ready: sandboxName - %s", sandboxID.Name)
 
@@ -278,6 +283,8 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 	require.NoError(testingT, err)
 	sandboxClaim.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxClaim))
+
+	testContext.MustWaitForObject(sandboxClaim, predicates.ReadyConditionIsTrue)
 
 	sandboxID := types.NamespacedName{
 		Namespace: ns.Name,

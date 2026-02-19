@@ -88,7 +88,7 @@ We aim for the Sandbox to be vendor-neutral, supporting various runtimes. Key ch
 *   **Deep hibernation:** Saving state to persistent storage and potentially archiving the Sandbox object.
 *   **Automatic resume:** Resuming a sandbox on network connection.
 *   **Efficient persistence:** Elastic and rapidly provisioned storage.
-*   **Memory sharing across sandboxes:** Exploring possibilities to share memory across Sandboxes on the same host, even if they are primarily non-homogenous. This capability is a feature of the specific runtime, and users should select a runtime that aligns with their security and performance requirements.
+*   **Memory sharing across sandboxes:** Exploring possibilities to share memory across Sandboxes on the same host, even if they are primarily non-homogeneous. This capability is a feature of the specific runtime, and users should select a runtime that aligns with their security and performance requirements.
 *   **Rich identity & connectivity:** Exploring dual user/sandbox identities and efficient traffic routing without per-sandbox Services.
 *   **Programmable:** Encouraging applications and agents to programmatically consume the Sandbox API.
 

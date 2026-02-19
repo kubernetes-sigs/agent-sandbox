@@ -457,7 +457,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
-		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)
+		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
 		return nil, err
 	}
 
@@ -478,7 +478,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	if err := r.Create(ctx, sandbox); err != nil {
 		err = fmt.Errorf("sandbox create error: %w", err)
-		logger.Error(err, "Error creating sandbox for claim: %q", claim.Name)
+		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
 		return nil, err
 	}
 

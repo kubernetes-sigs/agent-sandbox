@@ -16,7 +16,7 @@ import os
 from typing import Optional
 
 import pytest
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 from langchain_agent_sandbox import AgentSandboxBackend
 
 

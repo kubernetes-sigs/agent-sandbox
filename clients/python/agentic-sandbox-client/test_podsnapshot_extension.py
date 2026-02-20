@@ -124,7 +124,39 @@ async def main(
             assert restore_result.success, "Pod was not restored from a snapshot."
             print("Pod was restored from the most recent snapshot.")
 
-            print("\n**** Deleting snapshots *****")
+            print("\n**** Deleting Specific snapshot *****")
+            deleted_snapshots = sandbox_restored.delete_snapshots(snapshot_uid=first_snapshot_uid)
+            print(f"Deleted Snapshots: {deleted_snapshots}")
+
+            print(
+                "\n***** List all existing ready snapshots with the policy name. *****"
+            )
+            snapshots = sandbox_restored.list_snapshots(policy_name=policy_name)
+            for snap in snapshots:
+                print(
+                    f"Snapshot ID: {snap['snapshot_id']}, Source Pod: {snap['source_pod']}, Creation Time: {snap['creationTimestamp']}, Policy Name: {snap['policy_name']}"
+                )
+        
+        print("\n***** Phase 3: Restoring from previous snapshot in an interactive mode *****")
+        with PodSnapshotSandboxClient(
+            template_name=template_name,
+            namespace=namespace,
+            api_url=api_url,
+            server_port=server_port,
+            interactive_mode=True,
+        ) as sandbox_restored:  # gives the list of snapshots to restore from
+
+            print("\nWaiting 5 seconds for restored pod to resume printing...")
+            time.sleep(5)
+
+            print("\nAssuming the user selects the recent snapshot from the list...")
+            restore_result = sandbox_restored.is_restored_from_snapshot(
+                recent_snapshot_uid
+            )
+            assert restore_result.success, "Pod was not restored from a snapshot."
+            print("Pod was restored from the recent snapshot.")
+
+            print("\n**** Deleting All snapshots *****")
             deleted_snapshots = sandbox_restored.delete_snapshots()
             print(f"Deleted Snapshots: {deleted_snapshots}")
 

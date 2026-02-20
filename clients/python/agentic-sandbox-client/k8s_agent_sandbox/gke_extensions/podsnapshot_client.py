@@ -64,7 +64,7 @@ class PolicyMetadata:
 class SnapshotPersistenceManager:
     """
     Manages local persistence of snapshot metadata in a secure directory.
-    Stores metadata as a dictionary keyed by trigger_name.
+    Stores metadata as a dictionary keyed by snapshot_uid.
     """
 
     def __init__(self):
@@ -94,7 +94,7 @@ class SnapshotPersistenceManager:
                     return {}
                 return data
         except (json.JSONDecodeError, IOError) as e:
-            logging.warning(f"Failed to load snapshot metadata: {e}")
+            logger.warning(f"Failed to load snapshot metadata: {e}")
             return {}
 
     def save_snapshot_metadata(self, record: dict[str, Any]):
@@ -142,8 +142,11 @@ class PodSnapshotSandboxClient(SandboxClient):
     def __init__(
         self,
         template_name: str,
+        labels: dict[str, str] | None = None,
         podsnapshot_timeout: int = 180,
         server_port: int = 8080,
+        snapshot_uid: str | None = None,
+        interactive_mode: bool = False,
         **kwargs,
     ):
         super().__init__(template_name, server_port=server_port, **kwargs)
@@ -152,13 +155,24 @@ class PodSnapshotSandboxClient(SandboxClient):
         self.podsnapshot_timeout = podsnapshot_timeout
         self.persistence_manager = SnapshotPersistenceManager()
         self.core_v1_api = client.CoreV1Api()
+        self.labels = labels or {}
+        self.annotations = {}
 
         self.created_manual_triggers = []
+        self.restore_snapshot_uid = snapshot_uid
+        self.interactive_mode = interactive_mode
 
     def __enter__(self) -> "PodSnapshotSandboxClient":
         self.controller_ready = self.snapshot_controller_ready()
+
+        if self.restore_snapshot_uid:
+            self._configure_snapshot_restore(self.restore_snapshot_uid)
+        elif self.interactive_mode:
+            self._prompt_user_restoration()
+        
         super().__enter__()
         return self
+
 
     def _get_policy_info(self, snapshot_uid: str) -> PolicyMetadata:
         """
@@ -255,6 +269,146 @@ class PodSnapshotSandboxClient(SandboxClient):
         raise TimeoutError(
             f"Snapshot manual trigger '{trigger_name}' was not processed within {self.podsnapshot_timeout} seconds."
         )
+        
+    def _get_template_labels(self) -> dict[str, str]:
+        """Fetches default labels from the SandboxTemplate's podTemplate."""
+        if not self.custom_objects_api:
+            try:
+                config.load_incluster_config()
+            except config.ConfigException:
+                config.load_kube_config()
+            self.custom_objects_api = client.CustomObjectsApi()
+
+        try:
+            template = self.custom_objects_api.get_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=self.namespace,
+                plural="sandboxtemplates",
+                name=self.template_name
+            )
+            # Labels are in spec.podTemplate.metadata.labels
+            return template.get("spec", {}).get("podTemplate", {}).get("metadata", {}).get("labels", {})
+        except Exception as e:
+            logging.warning(f"Failed to fetch SandboxTemplate '{self.template_name}': {e}. Proceeding with client labels only.")
+            return {}
+
+    def _prompt_user_restoration(self):
+        """
+        Prompts the user to select a snapshot from local metadata.
+        """
+        # Read metadata directly for filtering by policy_labels
+        local_meta = self.persistence_manager._load_metadata()
+        filtered_snapshots = []
+        
+        template_labels = self._get_template_labels()
+        if template_labels:
+            logging.info(f"Loaded labels from SandboxTemplate '{self.template_name}': {template_labels}")
+
+        current_labels = {**(template_labels or {}), **(self.labels or {})}
+        print(f"Current labels (merged with template): {current_labels}")
+
+        for key, record in local_meta.items():
+            # Check if policy_labels is a subset of current_labels
+            # i.e. ALL labels in policy_labels must be present and equal in current_labels
+            policy_labels = record.get("policy_labels", {})
+            if not policy_labels:
+                is_match = True
+            else:
+                is_match = True
+                for pk, pv in policy_labels.items():
+                    if current_labels.get(pk) != pv:
+                        is_match = False
+                        break
+            
+            if is_match:
+                 filtered_snapshots.append(record)
+        
+        # Sort by timestamp descending
+        filtered_snapshots.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+        if not filtered_snapshots:
+            print(f"No existing snapshots found for current labels. Starting fresh.")
+            return
+
+        print(f"\nAvailable Snapshots (Template: {self.template_name}):")
+        print("0. Exit")
+        
+        for idx, snap in enumerate(filtered_snapshots, 1):
+            policy_labels = snap.get("policy_labels", {})
+            label_str = ", ".join([f"{k}={v}" for k,v in policy_labels.items()]) or "none"
+            # Handle missing fields gracefully
+            ts = snap.get('timestamp', 'N/A')
+            sn_name = snap.get('snapshot_uid', 'Unknown')
+            print(f"{idx}. {ts} | Snapshot: {sn_name} | Labels: {label_str}")
+
+        while True:
+            choice = input(f"\nSelect a snapshot to restore (0-{len(filtered_snapshots)}): ").strip()
+            if not choice.isdigit():
+                print("Invalid input. Please enter a number.")
+                continue
+            
+            idx = int(choice)
+            if 0 <= idx <= len(filtered_snapshots):
+                if idx == 0:
+                    print("Exiting...")
+                    sys.exit(0)
+                
+                selected_snap = filtered_snapshots[idx - 1]
+                sn_name = selected_snap.get("snapshot_uid")
+                print(f"Restoring from snapshot '{sn_name}'...")
+                self._configure_snapshot_restore(sn_name)
+                return
+            else:
+                print("Selection out of range.")
+
+    def _configure_snapshot_restore(self, snapshot_uid: str):
+        """Configures the client to restore from a specific snapshot UID."""
+
+        if not self.custom_objects_api:
+            try:
+                config.load_incluster_config()
+            except config.ConfigException:
+                config.load_kube_config()
+            self.custom_objects_api = client.CustomObjectsApi()
+
+        self._check_snapshot_ready(snapshot_uid)
+        if self.annotations is None:
+            self.annotations = {}
+        self.annotations["podsnapshot.gke.io/ps-name"] = snapshot_uid
+        logging.info(f"Using snapshot UID '{snapshot_uid}' for sandbox restoration.")
+
+    def _check_snapshot_ready(self, snapshot_uid: str):
+        """
+        Checks if the PodSnapshot resource is in Ready state.
+        """
+        logging.info(f"Checking if PodSnapshot '{snapshot_uid}' is ready...")
+        try:
+            snapshot = self.custom_objects_api.get_namespaced_custom_object(
+                group=PODSNAPSHOT_API_GROUP,
+                version=PODSNAPSHOT_API_VERSION,
+                namespace=self.namespace,
+                plural=PODSNAPSHOT_PLURAL,
+                name=snapshot_uid
+            )
+            
+            status = snapshot.get("status", {})
+            conditions = status.get("conditions", [])
+            
+            is_ready = False
+            for condition in conditions:
+                if condition.get("type") == "Ready" and condition.get("status") == "True":
+                    is_ready = True
+                    break
+            
+            if not is_ready:
+                raise RuntimeError(f"PodSnapshot '{snapshot_uid}' is not in Ready state.")
+                
+            logging.info(f"PodSnapshot '{snapshot_uid}' is ready.")
+
+        except ApiException as e:
+            logging.error(f"Failed to get PodSnapshot '{snapshot_uid}': {e}")
+            raise
 
     def snapshot_controller_ready(self) -> bool:
         """
@@ -324,7 +478,7 @@ class PodSnapshotSandboxClient(SandboxClient):
         Triggers a snapshot of the specified pod by creating a PodSnapshotManualTrigger resource.
         The trigger_name will be suffixed with the current datetime.
         Returns:
-            tuple[ExecutionResult, str]: The result of the operation and the final trigger name (with suffix).
+            SnapshotResponse: The result of the operation and the final trigger name (with suffix).
         """
         trigger_name = f"{trigger_name}-{os.urandom(4).hex()}"
 

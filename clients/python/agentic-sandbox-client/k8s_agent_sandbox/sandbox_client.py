@@ -106,7 +106,8 @@ class SandboxClient:
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
         self.pod_name: str | None = None
-        self.annotations: dict | None = None
+        self.labels: dict[str, str] = {}
+        self.annotations: dict[str, str] = {}
 
         try:
             config.load_incluster_config()
@@ -133,22 +134,30 @@ class SandboxClient:
     @trace_span("create_claim")
     def _create_claim(self, trace_context_str: str = ""):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
-        self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
+        if not self.claim_name:
+            self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
 
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", self.claim_name)
 
-        annotations = {}
+        # Merge trace context into annotations
+        annotations = self.annotations.copy()
         if trace_context_str:
             annotations["opentelemetry.io/trace-context"] = trace_context_str
+
+        metadata = {
+            "name": self.claim_name,
+        }
+        if annotations:
+            metadata["annotations"] = annotations
+        if self.labels:
+            metadata["labels"] = self.labels
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
             "kind": "SandboxClaim",
-            "metadata": {"name": self.claim_name,
-                         "annotations": annotations
-                         },
+            "metadata": metadata,
             "spec": {"sandboxTemplateRef": {"name": self.template_name}}
         }
         logging.info(

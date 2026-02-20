@@ -12,11 +12,15 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
 
 ### Key Features:
 
-*   **`PodSnapshotSandboxClient(template_name: str, podsnapshot_timeout: int = 180, server_port: int = 8080, ...)`**:
-    *   Initializes the client with optional podsnapshot timeout and server port.
-    *   If snapshot exists, the pod snapshot controller restores from the most recent snapshot matching the label of the `SandboxTemplate`, otherwise creates a new `Sandbox`.
+*   **`PodSnapshotSandboxClient(template_name: str, labels: dict[str, str] = None, snapshot_uid: str = None, interactive_mode: bool = False, ...)`**:
+    *   Initializes the client with the sandbox template name.
+    *   **`labels`**: Optional labels to match when searching for snapshots.
+    *   **`snapshot_uid`**: If provided, the client will attempt to restore from this specific snapshot.
+    *   **`interactive_mode`**: If True, the client will prompt the user to select from available snapshots matching the criteria.
+    *   If a `snapshot_uid` is provided or selected via `interactive_mode`, the client configures the sandbox to restore from that state.
 *   **`snapshot_controller_ready(self) -> bool`**:
-    *   Checks if the snapshot agent (GKE managed) is running and ready.
+    *   Checks if the pod snapshot controller is ready.
+    *   Uses a robust check that falls back to verifying CRD existence if listing pods in the controller namespace is forbidden (e.g., due to RBAC restrictions).
 *   **`snapshot(self, trigger_name: str) -> SnapshotResponse`**:
     *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
     *   The `trigger_name` is suffixed with unique hash.
@@ -40,7 +44,7 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   Returns the count of successfully deleted snapshots.
 *   **`__exit__(self)`**:
     *   Cleans up the `PodSnapshotManualTrigger` resources.
-    *   Cleans up the `SandboxClaim` resources.
+    *   Triggers cleanup of the `SandboxClaim` resources.
 
 ### `SnapshotPersistenceManager`
 

@@ -38,20 +38,7 @@ from .trace_manager import (
     initialize_tracer, TracerManager, trace_span, trace, OPENTELEMETRY_AVAILABLE
 )
 
-# Constants for API Groups and Resources
-GATEWAY_API_GROUP = "gateway.networking.k8s.io"
-GATEWAY_API_VERSION = "v1"
-GATEWAY_PLURAL = "gateways"
-
-CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
-CLAIM_API_VERSION = "v1alpha1"
-CLAIM_PLURAL_NAME = "sandboxclaims"
-
-SANDBOX_API_GROUP = "agents.x-k8s.io"
-SANDBOX_API_VERSION = "v1alpha1"
-SANDBOX_PLURAL_NAME = "sandboxes"
-
-POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
+from .constants import *
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',

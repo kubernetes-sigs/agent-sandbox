@@ -20,21 +20,25 @@ import subprocess
 
 from shared import utils
 
+repo_root = utils.get_repo_root()
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+    
+from dev.tools.shared import utils as tools_utils
 
 def main():
     """ invokes e2e tests in kind cluster and outputs a junit report in the ARTIFACTS dir
 
     The ARTIFACTS environment variable is set by prow.
     """
-    repo_root = utils.get_repo_root()
-
+    image_tag = tools_utils.get_image_tag()
     result = subprocess.run([f"{repo_root}/dev/tools/create-kind-cluster", "e2e-test", "--recreate", "--kubeconfig", f"{repo_root}/bin/KUBECONFIG"])
     if result.returncode != 0:
         return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/push-images", "--kind-cluster-name", "e2e-test", "--image-prefix", "kind.local/"])
+    result = subprocess.run([f"{repo_root}/dev/tools/push-images", "--kind-cluster-name", "e2e-test", "--image-prefix", "kind.local/", "--image-tag", image_tag])
     if result.returncode != 0:
         return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/deploy-to-kube", "--image-prefix", "kind.local/"])
+    result = subprocess.run([f"{repo_root}/dev/tools/deploy-to-kube", "--image-prefix", "kind.local/", "--image-tag", image_tag])
     if result.returncode != 0:
         return result.returncode
     result = subprocess.run([f"{repo_root}/dev/tools/deploy-cloud-provider"])

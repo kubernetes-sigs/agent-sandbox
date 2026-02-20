@@ -210,6 +210,7 @@ func TestReconcile(t *testing.T) {
 		name                 string
 		initialObjs          []runtime.Object
 		sandboxSpec          sandboxv1alpha1.SandboxSpec
+		sandboxAnnotations   map[string]string
 		wantStatus           sandboxv1alpha1.SandboxStatus
 		wantObjs             []client.Object
 		wantDeletedObjs      []client.Object
@@ -458,6 +459,56 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "sandbox expired with retain policy and adopted pod annotation",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "adopted-pod-name",
+						Namespace: sandboxNs,
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			sandboxAnnotations: map[string]string{
+				SandboxPodNameAnnotation: "adopted-pod-name",
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
+			wantDeletedObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "adopted-pod-name", Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
 			name: "sandbox expired with delete policy",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
@@ -504,6 +555,7 @@ func TestReconcile(t *testing.T) {
 			sb.Namespace = sandboxNs
 			sb.Generation = 1
 			sb.Spec = tc.sandboxSpec
+			sb.Annotations = tc.sandboxAnnotations
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sb)...),
 				Scheme: Scheme,
@@ -666,7 +718,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0))},
+					Replicas: ptr.To(int32(0)),
+				},
 			},
 			wantPod: nil,
 		},
@@ -803,14 +856,14 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
-			name:        "error when annotated pod does not exist",
+			name:        "recovers when annotated pod does not exist by recreating pod with same name",
 			initialObjs: []runtime.Object{},
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "non-existent-pod",
+						SandboxPodNameAnnotation: "warm-pool-pod-name",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -826,8 +879,25 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantPod:   nil,
-			expectErr: true,
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "warm-pool-pod-name",
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+						},
+					},
+				},
+			},
+			expectErr: false,
 		},
 		{
 			name: "remove pod name annotation when replicas is 0",
@@ -873,19 +943,19 @@ func TestReconcilePod(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, tc.wantPod, pod)
 
 			// Validate the Pod from the "cluster" (fake client)
 			if tc.wantPod != nil {
+				require.NotNil(t, pod, "expected pod to be returned")
 				livePod := &corev1.Pod{}
 				err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
 				require.NoError(t, err)
 				require.Equal(t, tc.wantPod, livePod)
 			} else if !tc.expectErr {
 				// When wantPod is nil and no error expected, verify pod doesn't exist
+				require.Nil(t, pod, "expected no pod to be returned")
 				livePod := &corev1.Pod{}
 				podName := sandboxName
-				// Check if there's an annotation with a non-empty value
 				if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
 					podName = annotatedPod
 				}
@@ -958,4 +1028,331 @@ func TestSandboxExpiry(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAdoptPodPVCs(t *testing.T) {
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			UID:       "sandbox-uid-123",
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "test-container", Image: "test-image"},
+					},
+				},
+			},
+		},
+	}
+
+	createPodWithPVC := func(podName, pvcName string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podName,
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "test-container", Image: "test-image"},
+				},
+				Volumes: []corev1.Volume{
+					{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: pvcName,
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("adopts orphaned PVC from warm pool", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "test-pvc")
+		orphanedPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pvc",
+				Namespace: "default",
+				Annotations: map[string]string{
+					WarmPoolPVCAnnotation: "true",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod, orphanedPVC)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+
+		// Verify PVC was adopted (now owned by sandbox)
+		var adoptedPVC corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-pvc", Namespace: "default"}, &adoptedPVC)
+		require.NoError(t, err)
+
+		controllerRef := metav1.GetControllerOf(&adoptedPVC)
+		require.NotNil(t, controllerRef, "PVC should have a controller reference")
+		require.Equal(t, sandbox.UID, controllerRef.UID, "PVC should be owned by sandbox")
+	})
+
+	t.Run("skips PVC already owned by sandbox", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "test-pvc")
+		ownedPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pvc",
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "agents.x-k8s.io/v1alpha1",
+						Kind:       "Sandbox",
+						Name:       sandbox.Name,
+						UID:        sandbox.UID,
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod, ownedPVC)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+
+		// Verify PVC is still owned by sandbox (no change)
+		var pvc corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-pvc", Namespace: "default"}, &pvc)
+		require.NoError(t, err)
+		require.Len(t, pvc.OwnerReferences, 1)
+	})
+
+	t.Run("skips PVC owned by another controller", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "test-pvc")
+		otherOwnerPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pvc",
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "apps/v1",
+						Kind:       "StatefulSet",
+						Name:       "other-controller",
+						UID:        "other-uid",
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod, otherOwnerPVC)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+
+		// Verify PVC is still owned by original controller (not changed)
+		var pvc corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-pvc", Namespace: "default"}, &pvc)
+		require.NoError(t, err)
+		require.Len(t, pvc.OwnerReferences, 1)
+		require.Equal(t, types.UID("other-uid"), pvc.OwnerReferences[0].UID)
+	})
+
+	t.Run("handles missing PVC gracefully", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "nonexistent-pvc")
+
+		fakeClient := newFakeClient(sandbox, pod)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err, "should not error on missing PVC")
+	})
+
+	t.Run("skips non-PVC volumes", func(t *testing.T) {
+		// Pod with only emptyDir volume (no PVC)
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "test-container", Image: "test-image"},
+				},
+				Volumes: []corev1.Volume{
+					{
+						Name: "tmp",
+						VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+	})
+
+	t.Run("adopts PVC still owned by warm pool (crash recovery)", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "test-pvc")
+		warmPoolPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pvc",
+				Namespace: "default",
+				Annotations: map[string]string{
+					WarmPoolPVCAnnotation: "true",
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       "test-pool",
+						UID:        "warmpool-uid",
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod, warmPoolPVC)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+
+		var pvc corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-pvc", Namespace: "default"}, &pvc)
+		require.NoError(t, err)
+
+		controllerRef := metav1.GetControllerOf(&pvc)
+		require.NotNil(t, controllerRef, "PVC should have a controller reference")
+		require.Equal(t, sandbox.UID, controllerRef.UID, "PVC should be owned by sandbox")
+	})
+
+	t.Run("skips PVC without warm pool annotation", func(t *testing.T) {
+		pod := createPodWithPVC("test-pod", "test-pvc")
+		// PVC without warm pool annotation (e.g., pre-existing shared PVC)
+		preExistingPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pvc",
+				Namespace: "default",
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		fakeClient := newFakeClient(sandbox, pod, preExistingPVC)
+		r := &SandboxReconciler{
+			Client: fakeClient,
+			Scheme: Scheme,
+		}
+
+		ctx := t.Context()
+		err := r.adoptPodPVCs(ctx, sandbox, pod)
+		require.NoError(t, err)
+
+		// Verify PVC was NOT adopted (no owner reference added)
+		var pvc corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-pvc", Namespace: "default"}, &pvc)
+		require.NoError(t, err)
+		require.Nil(t, metav1.GetControllerOf(&pvc), "PVC without warm pool annotation should not be adopted")
+	})
+}
+
+func TestMergeVolumeClaimVolumes(t *testing.T) {
+	pvcVol := corev1.Volume{
+		Name: "data",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: "data-my-pod",
+			},
+		},
+	}
+
+	t.Run("replaces conflicting volume", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, []corev1.Volume{pvcVol})
+
+		require.Len(t, result, 2)
+		// config preserved
+		require.Equal(t, "config", result[0].Name)
+		require.NotNil(t, result[0].ConfigMap)
+		// data replaced by PVC
+		require.Equal(t, "data", result[1].Name)
+		require.NotNil(t, result[1].PersistentVolumeClaim)
+	})
+
+	t.Run("appends when no conflict", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, []corev1.Volume{pvcVol})
+
+		require.Len(t, result, 2)
+		require.Equal(t, "config", result[0].Name)
+		require.Equal(t, "data", result[1].Name)
+	})
+
+	t.Run("no-op when pvcVolumes is empty", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, nil)
+
+		require.Len(t, result, 1)
+		require.Equal(t, "data", result[0].Name)
+		require.NotNil(t, result[0].EmptyDir)
+	})
 }

@@ -24,8 +24,10 @@ def git_describe():
         ["git", "describe", "--always", "--dirty"], text=True).strip()
 
 
-def get_image_tag():
+def get_image_tag(tag=None):
     """Gets the image tag based on the date and git commit."""
+    if tag:
+        return tag
     day = datetime.today().strftime("%Y%m%d")
     return f"v{day}-{git_describe()}"
 

@@ -37,7 +37,7 @@ import (
 
 const (
 	poolLabel              = "agents.x-k8s.io/pool"
-	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
+	sandboxTemplateRefHash = "agents.x-k8s.io/template-name-hash"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object

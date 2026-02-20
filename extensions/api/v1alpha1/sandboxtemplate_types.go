@@ -55,7 +55,10 @@ type SandboxTemplateSpec struct {
 	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 
 	// NetworkPolicy defines the network policy to be applied to the sandboxes
-	// created from this template.
+	// created from this template. A single shared NetworkPolicy is created per Template.
+	// If this field is omitted (nil), the controller applies a SECURE DEFAULT policy:
+	// - Ingress: Allow traffic ONLY from the Sandbox Router. All other ingress is denied.
+	// - Egress: Allow DNS Only (UDP/TCP Port 53). All other traffic (including Internet and Metadata Server) is blocked.
 	// NOTE: This is a restricted subset of the standard Kubernetes NetworkPolicySpec.
 	// Fields like 'PodSelector' and 'PolicyTypes' are intentionally excluded because
 	// they are managed by the controller to ensure strict isolation and default-deny posture.

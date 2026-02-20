@@ -29,8 +29,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubectl/pkg/util/podutils"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -45,7 +47,8 @@ import (
 
 // TODO: These constants should be imported from the main controller package Issue #216
 const (
-	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel         = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxTemplateLabel = "agents.x-k8s.io/template-name-hash"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -404,6 +407,8 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Label required by NetworkPolicy
 	// We add the new label with the Claim UID for unique targeting.
 	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// Adopted pods must have the template hash label to ensure they are selected by the correct NetworkPolicy.
+	pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
@@ -454,6 +459,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// This handles the scenario where the Warm Pool is empty (or disabled), and you have to create a brand new Pod from scratch.
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(template.Name)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
@@ -549,28 +556,15 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
 	logger := log.FromContext(ctx)
 
-	// 1. Cleanup Check: If missing, delete existing policy
-	if template == nil || template.Spec.NetworkPolicy == nil {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-network-policy",
-				Namespace: claim.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, existingNP); err != nil {
-			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
-				return err
-			}
-		} else {
-			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
-		}
-		return nil
+	// If template is nil, we cannot create a template-level policy.
+	if template == nil {
+		return fmt.Errorf("cannot reconcile network policy without a template")
 	}
 
 	np := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      claim.Name + "-network-policy",
+			// Name the policy after the Template to ensure it is unique per Template and can be reused across Claims using the same Template.
+			Name:      template.Name + "-network-policy",
 			Namespace: claim.Namespace,
 		},
 	}
@@ -578,33 +572,101 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
 		np.Spec.PodSelector = metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
+				// Select pods based on the template hash label.
+				// This must match the label added in createPoolPod (Warm Pool) AND createSandbox (Cold Start).
+				sandboxTemplateLabel: sandboxcontrollers.NameHash(template.Name),
 			},
 		}
+
 		np.Spec.PolicyTypes = []networkingv1.PolicyType{
 			networkingv1.PolicyTypeIngress,
 			networkingv1.PolicyTypeEgress,
 		}
 
-		templateNP := template.Spec.NetworkPolicy
+		if template.Spec.NetworkPolicy == nil {
+			// No Policy Provided -> Apply Secure Default
 
-		if len(templateNP.Ingress) > 0 {
+			// 1. INGRESS: Allow traffic ONLY from the Sandbox Router
+			np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{
+				{
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"app": "sandbox-router",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			// 2. EGRESS: Secure Default Configuration
+			np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{
+				// Rule A: DNS Exception
+				// We must allow UDP/TCP 53 to ANY destination.
+				// Why: Kubernetes CoreDNS runs on a Private ClusterIP (e.g., 10.96.0.10).
+				// If we restricted this to Public IPs only, the Sandbox could not resolve internal or external domains.
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: ptr.To(corev1.ProtocolUDP),
+							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+						},
+						{
+							Protocol: ptr.To(corev1.ProtocolTCP),
+							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+						},
+					},
+				},
+				// Rule B: Public Internet Access (Strict Isolation)
+				// Allow all other traffic, but restrict the destination to PUBLIC IPs only.
+				// This explicitly blocks:
+				// - 10.0.0.0/8 (Other Pods, Nodes, Internal Services)
+				// - 169.254.169.254 (GCE Metadata Server - critical credential protection)
+				// - 172.16/12 & 192.168/16 (Other Private ranges)
+				{
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							IPBlock: &networkingv1.IPBlock{
+								CIDR: "0.0.0.0/0",
+								Except: []string{
+									"10.0.0.0/8",     // Block Private Class A (Cluster/VPC Network)
+									"172.16.0.0/12",  // Block Private Class B
+									"192.168.0.0/16", // Block Private Class C
+									"169.254.0.0/16", // Block Link-Local (Metadata Server)
+								},
+							},
+						},
+						{
+							IPBlock: &networkingv1.IPBlock{
+								CIDR: "::/0", // IPv6 Catch-all
+								Except: []string{
+									"fc00::/7", // Block IPv6 Unique Local Addresses (Internal)
+								},
+							},
+						},
+					},
+				},
+			}
+		} else {
+			// User Policy Provided -> Pass-through
+			// If the user specifies a policy, we respect it as-is.
+			templateNP := template.Spec.NetworkPolicy
 			np.Spec.Ingress = templateNP.Ingress
-		}
-
-		if len(templateNP.Egress) > 0 {
 			np.Spec.Egress = templateNP.Egress
 		}
 
-		return controllerutil.SetControllerReference(claim, np, r.Scheme)
+		// The Template must own this policy, not the Claim
+		return controllerutil.SetControllerReference(template, np, r.Scheme)
 	})
 
 	if err != nil {
-		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
+		logger.Error(err, "Failed to create or update NetworkPolicy for template")
 		return err
 	}
 
-	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
+	logger.Info("Successfully reconciled NetworkPolicy for template", "NetworkPolicy.Name", np.Name)
 	return nil
 }
 

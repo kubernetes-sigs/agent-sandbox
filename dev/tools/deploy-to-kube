@@ -22,8 +22,18 @@ import yaml
 from shared import utils
 
 
-def find_and_replace_images(doc, service_name, image_prefix, image_tag):
-    """Recursively finds and replaces container images in a Kubernetes manifest."""
+def find_and_replace_images(doc, image_prefix, image_tag):
+    """Recursively finds and replaces container images in a Kubernetes manifest.
+
+    This function specifically targets image fields that either use the 'ko://'
+    prefix or have a ':latest' tag, replacing them with a fully qualified
+    and versioned image name.
+
+    Args:
+        doc (dict): The Kubernetes manifest document to process.
+        image_prefix (str): The image registry prefix (e.g., 'us-docker.pkg.dev/my-project/').
+        image_tag (str): The image tag to apply (e.g., 'v1.2.3').
+    """
     def fn(field_path, v):
         if field_path == ".spec.template.spec.containers[].image":
             # We only replace images that look like :latest
@@ -43,7 +53,15 @@ def find_and_replace_images(doc, service_name, image_prefix, image_tag):
 
 
 def walk_object(obj, fn, field_path=""):
-    """Recursively walks an object, and calls fn with the field_path to allow for value replacement."""
+    """Recursively walks through a nested dictionary or list and applies a function.
+
+    Args:
+        obj (dict | list): The object to walk through.
+        fn (function): A function to apply to each field. It receives the
+            field path (e.g., '.spec.template.spec') and the value.
+        field_path (str, optional): The current path in the object. Used for
+            recursive calls. Defaults to "".
+    """
     if isinstance(obj, dict):
         for k, v in obj.items():
             v2 = fn(f"{field_path}.{k}", v)
@@ -59,65 +77,153 @@ def walk_object(obj, fn, field_path=""):
 
 
 def kubectl_apply_objects(docs, repo_root):
-    """Helper to apply a list of k8s objects."""
+    """Applies a list of Kubernetes documents using 'kubectl apply'.
+
+    Args:
+        docs (list): A list of Kubernetes manifest documents.
+        repo_root (str): The path to the repository root, used as the working
+            directory for the subprocess call.
+    """
     if not docs: return
     string_stream = io.StringIO()
     yaml.dump_all(docs, string_stream)
     subprocess.run(["kubectl", "apply", "-f", "-"], cwd=repo_root, check=True, input=string_stream.getvalue(), text=True)
 
 
-def main(args):
-    repo_root = utils.get_repo_root()
+def gather_manifests(manifests_path):
+    """Scans a directory for YAML files and parses them into a structured list.
 
-    manifests_path = os.path.join(repo_root, "k8s")
+    This function walks through the given directory, reads all '.yaml' or '.yml'
+    files, and handles multi-Kubernetes object files by splitting them into individual
+    objects.
 
+    Args:
+        manifests_path (str): The path to the directory containing manifests.
+
+    Returns:
+        list: A flat list of dictionaries. Each dictionary represents a single
+              Kubernetes object and contains the document itself ('doc'), its
+              original 'filename', its 'kind', and the 'root' directory it was found in.
+    """
+    all_docs = []
     if not os.path.isdir(manifests_path):
         print("k8s directory not found")
-        return
+        return all_docs
 
-    prereq_docs = []
-    other_docs = []
-
-    for root, dirs, files in os.walk(manifests_path):
+    for root, _, files in os.walk(manifests_path):
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
                 continue
-
             path = os.path.join(root, filename)
             with open(path, "r") as f:
-                # Use safe_load_all for multi-document YAML files
                 docs = list(yaml.safe_load_all(f))
+                for doc in docs:
+                    if doc:
+                        all_docs.append({
+                            "doc": doc,
+                            "filename": filename,
+                            "kind": doc.get("kind"),
+                        })
+    return all_docs
 
-            service_name = os.path.basename(root)
-            image_prefix = utils.get_image_prefix(args)
-            image_tag = utils.get_image_tag()
 
-            # Process each document in the file
-            for doc in docs:
-                if not doc: continue
+def process_manifests(all_docs, args):
+    """Filters, modifies, and sorts a list of raw manifest objects.
 
-                # Rule 1: CRDs need to be applied first
-                is_crd = doc.get("kind") == "CustomResourceDefinition"
-                if is_crd:
-                      prereq_docs.append(doc)
-                      continue
+    This function applies the core deployment logic based on the script's
+    arguments. It filters out unwanted documents, replaces image tags, and
+    sorts the documents into three batches for ordered application:
+    prerequisites, standard documents, and extensions documents.
 
-                # Rule 2: Namespaces also need to be applied first
-                if doc.get("kind") == "Namespace":
-                      prereq_docs.append(doc)
-                      continue
-                
-                # Rule 3: Everything else (Deployments, StatefulSets, etc.)
-                # If we got here, it's a resource we want to apply.
-                find_and_replace_images(doc, service_name, image_prefix, image_tag)
-                other_docs.append(doc)
+    Args:
+        all_docs (list): The raw list of manifest objects from gather_manifests.
+        args (argparse.Namespace): The parsed command-line arguments.
 
+    Returns:
+        tuple: A tuple containing three lists of documents:
+               (prereq_docs, other_docs, extensions_docs).
+    """
+    prereq_docs = []
+    extensions_docs = []
+    other_docs = []
+
+    image_prefix = utils.get_image_prefix(args)
+    image_tag = utils.get_image_tag()
+
+    for item in all_docs:
+        doc = item["doc"]
+        filename = item["filename"]
+        kind = item["kind"]
+
+        is_extension_file = filename.startswith("extensions")
+        if is_extension_file and not args.extensions:
+            continue
+
+        # When extensions is enabled, we skip the core controller manifest because
+        # it will be replaced by the one in the extensions directory.
+        is_core_controller = (
+            doc.get("metadata", {}).get("name") == "agent-sandbox-controller" and
+            kind in ["StatefulSet", "Deployment"] and
+            not is_extension_file
+        )
+        if args.extensions and is_core_controller:
+            continue
+
+        find_and_replace_images(doc, image_prefix, image_tag)
+
+        if kind in ["CustomResourceDefinition", "Namespace"]:
+            prereq_docs.append(doc)
+        elif is_extension_file:
+            extensions_docs.append(doc)
+        else:
+            other_docs.append(doc)
+
+    return prereq_docs, other_docs, extensions_docs
+
+
+def apply_manifests(prereq_docs, other_docs, extensions_docs, repo_root, apply_extensions):
+    """Applies the processed manifests to the cluster in the correct order.
+
+    The order of application is:
+    1. Prerequisites (Namespaces, CRDs)
+    2. Standard resources
+    3. Extension resources (if enabled)
+
+    Args:
+        prereq_docs (list): A list of prerequisite manifest documents.
+        other_docs (list): A list of standard manifest documents.
+        extension_docs (list): A list of extension manifest documents.
+        repo_root (str): The path to the repository root.
+        apply_extensions (bool): Whether to apply the extension manifests.
+    """
     print(f"Applying {len(prereq_docs)} prerequisite manifests (Namespace, CRDs)...")
     kubectl_apply_objects(prereq_docs, repo_root)
 
     print(f"Applying {len(other_docs)} other manifests...")
     kubectl_apply_objects(other_docs, repo_root)
+
+    if apply_extensions:
+        print(f"Applying {len(extensions_docs)} extensions manifests...")
+        kubectl_apply_objects(extensions_docs, repo_root)
+
     print("Deployment complete.")
+
+
+def main(args):
+    """Orchestrates the Kubernetes deployment process.
+
+    This function calls the gather, process, and apply functions in sequence
+    to carry out the full deployment workflow.
+
+    Args:
+        args (argparse.Namespace): The parsed command-line arguments.
+    """
+    repo_root = utils.get_repo_root()
+    manifests_path = os.path.join(repo_root, "k8s")
+
+    all_docs = gather_manifests(manifests_path)
+    prereq_docs, other_docs, extension_docs = process_manifests(all_docs, args)
+    apply_manifests(prereq_docs, other_docs, extension_docs, repo_root, args.extensions)
 
 
 if __name__ == "__main__":
@@ -127,5 +233,8 @@ if __name__ == "__main__":
                         help="prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
+    parser.add_argument("--extensions",
+                        action="store_true",
+                        help="Apply the extensions controller manifest.")
     args = parser.parse_args()
     main(args)

@@ -21,7 +21,7 @@ The client operates in two modes:
 ## Prerequisites
 
 - A running Kubernetes cluster.
-- The **Agent Sandbox Controller** installed.
+- The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
 - `kubectl` installed and configured locally.
 
 ## Setup: Deploying the Router
@@ -75,6 +75,8 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
 
     pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
     ```
+
+**Note**: This package uses `setuptools-scm` for dynamic versioning. For Option 2 and Option 3, when installing locally, you may notice the version increment if your local repository has uncommitted changes or is ahead of the last tagged release. This is expected behavior to ensure unique versioning during development.
 
 4.  **Option 3: Install from source in editable mode:**
 

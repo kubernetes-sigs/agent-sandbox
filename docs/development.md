@@ -125,3 +125,25 @@ For a faster feedback loop, you can run the controller directly on your host mac
     ```
 
 The controller will now be running on your host machine and will be connected to the `kind` cluster. You can now use a debugger like Delve to debug the controller.
+
+## Testing
+
+### Running Tests
+
+Unit tests:
+
+```sh
+./dev/tools/test-unit
+```
+
+End-to-end tests:
+
+```sh
+./dev/tools/test-e2e
+```
+
+### Race Detection
+
+Both `test-unit` and `test-e2e` run with Go's `-race` flag enabled by default to detect data races in concurrent code. This is especially important because the controllers (`SandboxReconciler`, `SandboxClaimReconciler`, `SandboxWarmPoolReconciler`) run concurrently via controller-runtime.
+
+Note that enabling the race detector increases memory usage (5-10×) and execution time (2-20×). If you need to disable it for local development (e.g., resource-constrained environments), you can run `go test` directly without the `-race` flag.

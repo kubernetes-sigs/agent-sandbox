@@ -29,6 +29,7 @@ def run_go_e2e_tests(repo_root, artifact_dir, env):
         f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
         f"--jsonfile={artifact_dir}/test-e2e.json",
         "--",
+        "-race",
         "./test/e2e/...",
         "--parallel=1",
         "-v",

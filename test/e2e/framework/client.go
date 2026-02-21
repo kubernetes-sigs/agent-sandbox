@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -513,14 +514,33 @@ func (cl *ClusterClient) validateAgentSandboxInstallation() error {
 	return nil
 }
 
+// syncBuffer is a goroutine-safe wrapper around bytes.Buffer.
+// It implements io.Writer and provides a safe String() method.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
 func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedName, localPort, remotePort int) error {
 	cl.Helper()
 	// Set up a port-forward to the Chrome Debug Port
 	portForward := exec.CommandContext(ctx, "kubectl", "-n", pod.Namespace,
 		"port-forward", "pod/"+pod.Name, fmt.Sprintf("%d:%d", localPort, remotePort))
 	cl.Logf("starting port-forward: %s", portForward.String())
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	var stdout syncBuffer
+	var stderr syncBuffer
 	portForward.Stdout = io.MultiWriter(os.Stdout, &stdout)
 	portForward.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	if err := portForward.Start(); err != nil {

@@ -32,7 +32,19 @@ packages = ["k8s_agent_sandbox"]
 root = "../../.."
 
 [project.optional-dependencies]
+langchain = [
+    "langchain",
+]
+adk = [
+    "google-adk",
+]
+crewai = [
+    "crewai[tools]",
+]
 test = [
+    "agentic_sandbox[langchain]",
+    "agentic_sandbox[adk]",
+    "agentic_sandbox[crewai]",
     "pytest",
     "pytest-xdist",
 ]
@@ -41,4 +53,8 @@ tracing = [
     "opentelemetry-sdk~=1.39.0",
     "opentelemetry-exporter-otlp~=1.39.0",
     "opentelemetry-instrumentation-requests~=0.60b0",
+]
+[tool.pytest]
+pythonpath = [
+    "."
 ]

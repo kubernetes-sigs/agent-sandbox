@@ -1,0 +1,18 @@
+max_concurrency = 2
+user_agent = "curl/7.83.1"
+retry_wait_time = 10
+max_retries = 2
+accept = ["200", "429"]
+exclude_all_private = true
+cache_exclude_status = ["429", "500..599", "400..499"]
+cache = true
+no_progress = true
+verbose = "error"
+root_dir = "/workspace/site/public"
+exclude = [
+  "^mailto:",
+  "^tel:",
+  "^data:",
+  "^http://localhost:1313",
+  "^/livereload.js",
+]

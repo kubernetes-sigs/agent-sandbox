@@ -21,6 +21,26 @@ import re
 from k8s_agent_sandbox.gke_extensions import PodSnapshotSandboxClient
 
 
+def test_snapshot_response(snapshot_response, snapshot_name):
+    assert hasattr(
+        snapshot_response, "trigger_name"
+    ), "snapshot response missing 'trigger_name' attribute"
+
+    print(f"Trigger Name: {snapshot_response.trigger_name}")
+    print(f"Snapshot UID: {snapshot_response.snapshot_uid}")
+    print(f"Success: {snapshot_response.success}")
+    print(f"Error Code: {snapshot_response.error_code}")
+    print(f"Error Reason: {snapshot_response.error_reason}")
+
+    assert snapshot_response.trigger_name.startswith(
+        snapshot_name
+    ), f"Expected trigger name prefix '{snapshot_name}', but got '{snapshot_response.trigger_name}'"
+    assert (
+        snapshot_response.success
+    ), f"Expected success=True, but got False. Reason: {snapshot_response.error_reason}"
+    assert snapshot_response.error_code == 0
+
+
 async def main(
     template_name: str,
     api_url: str | None,
@@ -58,6 +78,25 @@ async def main(
         ) as sandbox:
             print("\n======= Testing Pod Snapshot Extension =======")
             assert sandbox.controller_ready == True, "Sandbox controller is not ready."
+
+            time.sleep(wait_time)
+            print(
+                f"Creating first pod snapshot '{first_snapshot_name}' after {wait_time} seconds..."
+            )
+            snapshot_response = sandbox.snapshot(first_snapshot_name)
+            test_snapshot_response(snapshot_response, first_snapshot_name)
+
+            time.sleep(wait_time)
+
+            print(
+                f"\nCreating second pod snapshot '{second_snapshot_name}' after {wait_time} seconds..."
+            )
+            snapshot_response = sandbox.snapshot(second_snapshot_name)
+            test_snapshot_response(snapshot_response, second_snapshot_name)
+            recent_snapshot_uid = snapshot_response.snapshot_uid
+            print(f"Recent snapshot UID: {recent_snapshot_uid}")
+
+        print("--- Pod Snapshot Test Passed! ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")

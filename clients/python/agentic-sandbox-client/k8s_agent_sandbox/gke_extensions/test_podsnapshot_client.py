@@ -179,6 +179,163 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.assertFalse(self.client.controller_ready)
         logging.info("Finished test_snapshot_controller_ready_404.")
 
+    @patch("k8s_agent_sandbox.gke_extensions.podsnapshot_client.watch.Watch")
+    def test_snapshot_success(self, mock_watch_class):
+        """Test successful snapshot creation."""
+        logging.info("Starting test_snapshot_success...")
+
+        # Mock the watch
+        mock_watch = MagicMock()
+        mock_watch_class.return_value = mock_watch
+
+        self.client.pod_name = "test-pod"
+        self.client.controller_ready = True
+        self.client.namespace = "test-ns"
+
+        # Mock the watch stream
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Triggered",
+                            "status": "True",
+                            "reason": "Complete",
+                            "lastTransitionTime": "2023-01-01T00:00:00Z",
+                        }
+                    ],
+                    "snapshotCreated": {"name": "snapshot-uid"},
+                }
+            },
+        }
+        mock_watch.stream.return_value = [mock_event]
+
+        # Mock create to return an object with resourceVersion
+        mock_created_obj = {"metadata": {"resourceVersion": "123"}, "status": {}}
+        self.client.custom_objects_api.create_namespaced_custom_object.return_value = (
+            mock_created_obj
+        )
+
+        result = self.client.snapshot("test-trigger")
+
+        self.assertEqual(result.error_code, 0)
+        self.assertTrue(result.success)
+        self.assertIn("test-trigger", result.trigger_name)
+
+        # Verify create call was made
+        self.client.custom_objects_api.create_namespaced_custom_object.assert_called_once()
+        # Verify watch was called with resource_version
+        mock_watch.stream.assert_called_once()
+        _, kwargs = mock_watch.stream.call_args
+        self.assertEqual(kwargs.get("resource_version"), "123")
+        logging.info("Finished test_snapshot_success.")
+
+    def test_snapshot_controller_not_ready(self):
+        """Test snapshot when controller is not ready."""
+        logging.info("Starting test_snapshot_controller_not_ready...")
+        self.client.controller_ready = False
+        result = self.client.snapshot("test-trigger")
+
+        self.assertEqual(result.error_code, 1)
+        self.assertFalse(result.success)
+        self.assertIn("test-trigger", result.trigger_name)
+        self.assertIn("Snapshot controller is not ready", result.error_reason)
+        logging.info("Finished test_snapshot_controller_not_ready.")
+
+    def test_snapshot_no_pod_name(self):
+        """Test snapshot when pod name is not set."""
+        logging.info("Starting test_snapshot_no_pod_name...")
+        self.client.controller_ready = True
+        self.client.pod_name = None
+        result = self.client.snapshot("test-trigger")
+
+        self.assertEqual(result.error_code, 1)
+        self.assertFalse(result.success)
+        self.assertIn("test-trigger", result.trigger_name)
+        self.assertIn("Sandbox pod name not found", result.error_reason)
+        logging.info("Finished test_snapshot_no_pod_name.")
+
+    def test_snapshot_creation_api_exception(self):
+        """Test snapshot handling of API exception during creation."""
+        logging.info("Starting test_snapshot_creation_api_exception...")
+        self.client.pod_name = "test-pod"
+        self.client.controller_ready = True
+
+        self.client.custom_objects_api.create_namespaced_custom_object.side_effect = (
+            ApiException("Create failed")
+        )
+
+        result = self.client.snapshot("test-trigger")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, 1)
+        self.assertIn("Failed to create PodSnapshotManualTrigger", result.error_reason)
+        logging.info("Finished test_snapshot_creation_api_exception.")
+
+    @patch("k8s_agent_sandbox.gke_extensions.podsnapshot_client.watch.Watch")
+    @patch(
+        "k8s_agent_sandbox.gke_extensions.podsnapshot_client.client.CustomObjectsApi"
+    )
+    def test_snapshot_timeout(self, mock_custom_class, mock_watch_class):
+        """Test snapshot timeout scenario."""
+        logging.info("Starting test_snapshot_timeout...")
+        mock_custom = MagicMock()
+        mock_custom_class.return_value = mock_custom
+
+        mock_watch = MagicMock()
+        mock_watch_class.return_value = mock_watch
+
+        self.client.pod_name = "test-pod"
+        self.client.controller_ready = True
+        self.client.podsnapshot_timeout = 1
+
+        # Mock empty stream (timeout)
+        mock_watch.stream.return_value = []
+
+        result = self.client.snapshot("test-trigger")
+
+        self.assertEqual(result.error_code, 1)
+        self.assertFalse(result.success)
+        self.assertIn("timed out", result.error_reason)
+        logging.info("Finished test_snapshot_timeout.")
+
+    @patch("k8s_agent_sandbox.gke_extensions.podsnapshot_client.SandboxClient.__exit__")
+    def test_exit_cleanup(self, mock_super_exit):
+        """Test __exit__ cleans up created triggers."""
+        logging.info("Starting test_exit_cleanup...")
+        self.client.created_manual_triggers = ["trigger-1", "trigger-2"]
+
+        self.client.__exit__(None, None, None)
+
+        # Check deletion calls
+        self.assertEqual(
+            self.client.custom_objects_api.delete_namespaced_custom_object.call_count, 2
+        )
+
+        calls = [
+            call(
+                group=PODSNAPSHOT_API_GROUP,
+                version=PODSNAPSHOT_API_VERSION,
+                namespace=self.client.namespace,
+                plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+                name="trigger-1",
+            ),
+            call(
+                group=PODSNAPSHOT_API_GROUP,
+                version=PODSNAPSHOT_API_VERSION,
+                namespace=self.client.namespace,
+                plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+                name="trigger-2",
+            ),
+        ]
+        self.client.custom_objects_api.delete_namespaced_custom_object.assert_has_calls(
+            calls, any_order=True
+        )
+
+        mock_super_exit.assert_called_once_with(None, None, None)
+        logging.info("Finished test_exit_cleanup.")
+
 
 if __name__ == "__main__":
     unittest.main()

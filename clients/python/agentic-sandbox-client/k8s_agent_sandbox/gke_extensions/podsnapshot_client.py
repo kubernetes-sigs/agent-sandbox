@@ -16,12 +16,32 @@ import logging
 import sys
 import os
 from typing import Any
+from dataclasses import dataclass
 from kubernetes import client, watch
 from kubernetes.client import ApiException
 from ..sandbox_client import SandboxClient, ExecutionResult
 from ..constants import *
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SnapshotResult:
+    """Result of a snapshot processing operation."""
+
+    snapshot_uid: str
+    snapshot_timestamp: str
+
+
+@dataclass
+class SnapshotResponse:
+    """Structured response for snapshot operations."""
+
+    success: bool
+    trigger_name: str
+    snapshot_uid: str
+    error_reason: str
+    error_code: int
 
 
 class PodSnapshotSandboxClient(SandboxClient):
@@ -43,10 +63,79 @@ class PodSnapshotSandboxClient(SandboxClient):
         self.podsnapshot_timeout = podsnapshot_timeout
         self.core_v1_api = client.CoreV1Api()
 
+        self.created_manual_triggers = []
+
     def __enter__(self) -> "PodSnapshotSandboxClient":
         self.controller_ready = self.snapshot_controller_ready()
         super().__enter__()
         return self
+
+    def _parse_snapshot_result(self, obj) -> SnapshotResult | None:
+        """Parses the object to see if snapshot is complete."""
+        status = obj.get("status", {})
+        conditions = status.get("conditions", [])
+        for condition in conditions:
+            if (
+                condition.get("type") == "Triggered"
+                and condition.get("status") == "True"
+                and condition.get("reason") == "Complete"
+            ):
+                snapshot_uid = status.get("snapshotCreated", {}).get("name")
+                snapshot_timestamp = condition.get("lastTransitionTime")
+                return SnapshotResult(
+                    snapshot_uid=snapshot_uid,
+                    snapshot_timestamp=snapshot_timestamp,
+                )
+        return None
+
+    def _wait_for_snapshot_processed(
+        self, trigger_name: str, resource_version: str | None = None
+    ) -> SnapshotResult:
+        """
+        Waits for the PodSnapshotManualTrigger to be processed and returns SnapshotResult.
+        """
+        w = watch.Watch()
+        logger.info(
+            f"Waiting for snapshot manual trigger '{trigger_name}' to be processed..."
+        )
+
+        kwargs = {}
+        if resource_version:
+            kwargs["resource_version"] = resource_version
+
+        try:
+            for event in w.stream(
+                func=self.custom_objects_api.list_namespaced_custom_object,
+                namespace=self.namespace,
+                group=PODSNAPSHOT_API_GROUP,
+                version=PODSNAPSHOT_API_VERSION,
+                plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+                field_selector=f"metadata.name={trigger_name}",
+                timeout_seconds=self.podsnapshot_timeout,
+                **kwargs,
+            ):
+                if event["type"] in ["ADDED", "MODIFIED"]:
+                    obj = event["object"]
+                    result = self._parse_snapshot_result(obj)
+                    if result:
+                        logger.info(
+                            f"Snapshot manual trigger '{trigger_name}' processed successfully. Created Snapshot UID: {result.snapshot_uid}"
+                        )
+                        w.stop()
+                        return result
+                    else:
+                        logger.error(
+                            f"Snapshot manual trigger '{trigger_name}' was not processed successfully."
+                        )
+                        w.stop()
+                        raise
+        except Exception as e:
+            logger.error(f"Error watching snapshot: {e}")
+            raise
+
+        raise TimeoutError(
+            f"Snapshot manual trigger '{trigger_name}' was not processed within {self.podsnapshot_timeout} seconds."
+        )
 
     def snapshot_controller_ready(self) -> bool:
         """
@@ -111,8 +200,106 @@ class PodSnapshotSandboxClient(SandboxClient):
         self.controller_ready = False
         return self.controller_ready
 
+    def snapshot(self, trigger_name: str) -> SnapshotResponse:
+        """
+        Triggers a snapshot of the specified pod by creating a PodSnapshotManualTrigger resource.
+        The trigger_name will be suffixed with the current datetime.
+        Returns:
+            tuple[ExecutionResult, str]: The result of the operation and the final trigger name (with suffix).
+        """
+        trigger_name = f"{trigger_name}-{os.urandom(4).hex()}"
+
+        if not self.controller_ready:
+            return SnapshotResponse(
+                success=False,
+                trigger_name=trigger_name,
+                snapshot_uid=None,
+                error_reason="Snapshot controller is not ready. Ensure it is installed and running.",
+                error_code=1,
+            )
+        if not self.pod_name:
+            return SnapshotResponse(
+                success=False,
+                trigger_name=trigger_name,
+                snapshot_uid=None,
+                error_reason="Sandbox pod name not found. Ensure sandbox is created.",
+                error_code=1,
+            )
+
+        manifest = {
+            "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
+            "kind": f"{PODSNAPSHOT_API_KIND}",
+            "metadata": {"name": trigger_name, "namespace": self.namespace},
+            "spec": {"targetPod": self.pod_name},
+        }
+
+        try:
+            created_obj = self.custom_objects_api.create_namespaced_custom_object(
+                group=PODSNAPSHOT_API_GROUP,
+                version=PODSNAPSHOT_API_VERSION,
+                namespace=self.namespace,
+                plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+                body=manifest,
+            )
+
+            # Start watching from the version we just created to avoid missing updates
+            resource_version = created_obj.get("metadata", {}).get("resourceVersion")
+            snapshot_result = self._wait_for_snapshot_processed(
+                trigger_name, resource_version
+            )
+
+            self.created_manual_triggers.append(trigger_name)
+
+            return SnapshotResponse(
+                success=True,
+                trigger_name=trigger_name,
+                snapshot_uid=snapshot_result.snapshot_uid,
+                error_reason="",
+                error_code=0,
+            )
+        except ApiException as e:
+            logger.exception(
+                f"Failed to create PodSnapshotManualTrigger '{trigger_name}': {e}"
+            )
+            return SnapshotResponse(
+                success=False,
+                trigger_name=trigger_name,
+                snapshot_uid=None,
+                error_reason=f"Failed to create PodSnapshotManualTrigger: {e}",
+                error_code=1,
+            )
+        except TimeoutError as e:
+            logger.exception(
+                f"Snapshot creation timed out for trigger '{trigger_name}': {e}"
+            )
+            return SnapshotResponse(
+                success=False,
+                trigger_name=trigger_name,
+                snapshot_uid=None,
+                error_reason=f"Snapshot creation timed out: {e}",
+                error_code=1,
+            )
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
+        Cleans up the PodSnapshotManualTrigger Resources.
         Automatically cleans up the Sandbox.
+
+        TODO: Add cleanup for PodSnapshot resources.
         """
+        for trigger_name in self.created_manual_triggers:
+            try:
+                self.custom_objects_api.delete_namespaced_custom_object(
+                    group=PODSNAPSHOT_API_GROUP,
+                    version=PODSNAPSHOT_API_VERSION,
+                    namespace=self.namespace,
+                    plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+                    name=trigger_name,
+                )
+                logger.info(f"Deleted PodSnapshotManualTrigger '{trigger_name}'")
+            except ApiException as e:
+                logger.error(
+                    f"Failed to delete PodSnapshotManualTrigger '{trigger_name}': {e}"
+                )
+
         super().__exit__(exc_type, exc_val, exc_tb)

@@ -16,7 +16,14 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
     *   Initializes the client with optional podsnapshot timeout and server port.
 *   **`snapshot_controller_ready(self) -> bool`**:
     *   Checks if the snapshot agent (GKE managed) is running and ready.
+*   **`snapshot(self, trigger_name: str) -> SnapshotResponse`**:
+    *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
+    *   The `trigger_name` is suffixed with unique hash.
+    *   Waits for the snapshot to be processed.
+    *   The pod snapshot controller creates a `PodSnapshot` resource automatically.
+    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
 *   **`__exit__(self)`**:
+    *   Cleans up the `PodSnapshotManualTrigger` resources.
     *   Cleans up the `SandboxClaim` resources.
 
 ## `test_podsnapshot_extension.py`
@@ -25,8 +32,10 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
 
 ### Test Phases:
 
-1.  **Phase 1: Starting Counter Sandbox**:
+1.  **Phase 1: Starting Counter Sandbox & Snapshotting**:
     *   Starts a sandbox with a counter application.
+    *   Takes a snapshot (`test-snapshot-10`) after ~10 seconds.
+    *   Takes a snapshot (`test-snapshot-20`) after ~20 seconds.
 
 ### Prerequisites
 

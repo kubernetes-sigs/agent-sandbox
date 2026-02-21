@@ -1,0 +1,7 @@
+processor:
+  # This ignores the standard Kubernetes 'List' types in the docs
+  ignoreTypes:
+    - ".*List$"
+render:
+  # The title of your documentation page
+  projectName: "Agent Sandbox API"

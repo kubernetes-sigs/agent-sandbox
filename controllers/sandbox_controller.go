@@ -42,7 +42,7 @@ import (
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	//sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
@@ -178,7 +178,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.LabelSelector = ""
 	} else {
 		sandbox.Status.Replicas = 1
-		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxv1alpha1.SandboxNameHashLabel, NameHash(sandbox.Name))
 	}
 
 	// Reconcile Service
@@ -298,13 +298,13 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			Name:      sandbox.Name,
 			Namespace: sandbox.Namespace,
 			Labels: map[string]string{
-				sandboxLabel: nameHash,
+				sandboxv1alpha1.SandboxNameHashLabel: nameHash,
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
 			Selector: map[string]string{
-				sandboxLabel: nameHash,
+				sandboxv1alpha1.SandboxNameHashLabel: nameHash,
 			},
 		},
 	}
@@ -337,7 +337,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
 	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxLabel: nameHash,
+		sandboxv1alpha1.SandboxNameHashLabel: nameHash,
 	})
 
 	if err := r.List(ctx, podList, &client.ListOptions{
@@ -416,7 +416,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
-		pod.Labels[sandboxLabel] = nameHash
+		pod.Labels[sandboxv1alpha1.SandboxNameHashLabel] = nameHash
 
 		// Set controller reference if the pod is not controlled by anything.
 		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
@@ -437,7 +437,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// 3. PATH: Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
-		sandboxLabel: nameHash,
+		sandboxv1alpha1.SandboxNameHashLabel: nameHash,
 	}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		labels[k] = v
@@ -611,7 +611,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{
-				Key:      sandboxLabel,
+				Key:      sandboxv1alpha1.SandboxNameHashLabel,
 				Operator: metav1.LabelSelectorOpExists,
 				Values:   []string{},
 			},

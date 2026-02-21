@@ -9,8 +9,10 @@ jobs:
   lint-workflows:
     name: Lint Workflows
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run actionlint
-        uses: rhysd/actionlint@v1
+      - uses: devops-actions/actionlint@v0.1.10

@@ -79,7 +79,7 @@ def main(args):
     other_docs = []
 
     image_prefix = utils.get_image_prefix(args)
-    image_tag = utils.get_image_tag(args.image_tag)
+    image_tag = utils.get_image_tag()
 
     for root, dirs, files in os.walk(manifests_path):
         for filename in files:
@@ -128,10 +128,5 @@ if __name__ == "__main__":
                         help="prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
-    parser.add_argument("--image-tag",
-                        dest="image_tag",
-                        help="Image tag for this build. If not set, a default tag is generated based on date and git commit",
-                        type=str,
-                        default=os.getenv("IMAGE_TAG"))
     args = parser.parse_args()
     main(args)

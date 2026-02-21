@@ -10,13 +10,12 @@ build:
 	go build -o bin/manager cmd/agent-sandbox-controller/main.go
 
 KIND_CLUSTER=agent-sandbox
-IMAGE_TAG=v$(shell date +%Y%m%d)-$(shell git describe --always --dirty)
 
 .PHONY: deploy-kind
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} --image-tag=$(IMAGE_TAG)
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/ --image-tag=$(IMAGE_TAG)
+	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
+	./dev/tools/deploy-to-kube --image-prefix=kind.local/
 
 	@if [ "$(EXTENSIONS)" = "true" ]; then \
 		echo "🔧 Patching controller to enable extensions..."; \

@@ -69,6 +69,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -289,6 +290,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 	} else {
 		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+		setServiceStatus(sandbox, service)
 		return service, nil
 	}
 
@@ -320,10 +322,15 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		return nil, err
 	}
 
-	// TODO(barney-s) : hardcoded to svc.cluster.local which is the default. Need a way to change it.
-	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
-	sandbox.Status.Service = service.Name
+	setServiceStatus(sandbox, service)
 	return service, nil
+}
+
+// setServiceStatus updates the sandbox status with the service name and FQDN.
+// TODO(barney-s): hardcoded to svc.cluster.local which is the default. Need a way to change it.
+func setServiceStatus(sandbox *sandboxv1alpha1.Sandbox, service *corev1.Service) {
+	sandbox.Status.Service = service.Name
+	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {

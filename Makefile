@@ -19,7 +19,7 @@ deploy-kind:
 
 	@if [ "$(EXTENSIONS)" = "true" ]; then \
 		echo "🔧 Patching controller to enable extensions..."; \
-		kubectl patch statefulset agent-sandbox-controller \
+		kubectl patch deployment agent-sandbox-controller \
 			-n agent-sandbox-system \
 			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
 	fi

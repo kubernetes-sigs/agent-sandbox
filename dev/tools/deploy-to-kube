@@ -78,6 +78,9 @@ def main(args):
     prereq_docs = []
     other_docs = []
 
+    image_prefix = utils.get_image_prefix(args)
+    image_tag = utils.get_image_tag()
+
     for root, dirs, files in os.walk(manifests_path):
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
@@ -89,9 +92,7 @@ def main(args):
                 docs = list(yaml.safe_load_all(f))
 
             service_name = os.path.basename(root)
-            image_prefix = utils.get_image_prefix(args)
-            image_tag = utils.get_image_tag()
-
+            
             # Process each document in the file
             for doc in docs:
                 if not doc: continue

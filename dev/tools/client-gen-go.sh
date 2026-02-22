@@ -73,4 +73,7 @@ ${CMD}/cmd/informer-gen \
   --listers-package "${EXT_CLIENT_PKG}/listers" \
   "${EXT_API_PKG}"
 
+echo "Fixing license headers..."
+"${SCRIPT_ROOT}"/dev/tools/fix-boilerplate
+
 echo "Done."

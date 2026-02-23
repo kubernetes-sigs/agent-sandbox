@@ -54,7 +54,8 @@ class PodSnapshotSandboxClient(SandboxClient):
         except Exception as e:
             self.__exit__(None, None, None)
             raise RuntimeError(
-                f"Failed to enter pod snapshot sandbox context: {e}"
+                f"Failed to initialize PodSnapshotSandboxClient. Ensure that you are connected to a GKE cluster "
+                f"with the Pod Snapshot Controller enabled. Error details: {e}"
             ) from e
 
     def snapshot_controller_ready(self) -> bool:
@@ -103,6 +104,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                         f"Permission denied listing pods in {namespace}. Checking CRD existence."
                     )
                     return check_crd_installed()
+                # If discovery fails with 404, we assume not ready/accessible
                 if e.status == 404:
                     return False
                 raise

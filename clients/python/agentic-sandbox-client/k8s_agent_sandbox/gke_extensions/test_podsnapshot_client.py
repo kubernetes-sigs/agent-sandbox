@@ -211,7 +211,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as context:
                     self.client.__enter__()
                 self.assertIn(
-                    "Failed to enter pod snapshot sandbox context",
+                    "Failed to initialize PodSnapshotSandboxClient",
                     str(context.exception),
                 )
                 mock_exit.assert_called_once_with(None, None, None)

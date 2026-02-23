@@ -13,13 +13,16 @@
 # limitations under the License.
 
 import logging
-import sys
-import os
-from typing import Any
-from kubernetes import client, watch
+from kubernetes import client
 from kubernetes.client import ApiException
-from ..sandbox_client import SandboxClient, ExecutionResult
-from ..constants import *
+from ..sandbox_client import SandboxClient
+from ..constants import (
+    PODSNAPSHOT_NAMESPACE_MANAGED,
+    PODSNAPSHOT_AGENT,
+    PODSNAPSHOT_API_GROUP,
+    PODSNAPSHOT_API_VERSION,
+    PODSNAPSHOT_API_KIND,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +47,15 @@ class PodSnapshotSandboxClient(SandboxClient):
         self.core_v1_api = client.CoreV1Api()
 
     def __enter__(self) -> "PodSnapshotSandboxClient":
-        self.controller_ready = self.snapshot_controller_ready()
-        super().__enter__()
-        return self
+        try:
+            self.controller_ready = self.snapshot_controller_ready()
+            super().__enter__()
+            return self
+        except Exception as e:
+            self.__exit__(None, None, None)
+            raise RuntimeError(
+                f"Failed to enter pod snapshot sandbox context: {e}"
+            ) from e
 
     def snapshot_controller_ready(self) -> bool:
         """
@@ -78,21 +87,16 @@ class PodSnapshotSandboxClient(SandboxClient):
                     return False
                 raise
 
-        def check_namespace(namespace: str, required_components: list[str]) -> bool:
+        def check_pod_running(namespace: str, pod_name_substring: str) -> bool:
             try:
                 pods = self.core_v1_api.list_namespaced_pod(namespace)
-                found_components = {
-                    component: False for component in required_components
-                }
-
                 for pod in pods.items:
-                    if pod.status.phase == "Running":
-                        name = pod.metadata.name
-                        for component in required_components:
-                            if component in name:
-                                found_components[component] = True
-
-                return all(found_components.values())
+                    if (
+                        pod.status.phase == "Running"
+                        and pod_name_substring in pod.metadata.name
+                    ):
+                        return True
+                return False
             except ApiException as e:
                 if e.status == 403:
                     logger.info(
@@ -104,12 +108,10 @@ class PodSnapshotSandboxClient(SandboxClient):
                 raise
 
         # Check managed: requires only agent in gke-managed-pod-snapshots
-        if check_namespace(SNAPSHOT_NAMESPACE_MANAGED, [SNAPSHOT_AGENT]):
-            self.controller_ready = True
+        if check_pod_running(PODSNAPSHOT_NAMESPACE_MANAGED, PODSNAPSHOT_AGENT):
             return True
 
-        self.controller_ready = False
-        return self.controller_ready
+        return False
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """

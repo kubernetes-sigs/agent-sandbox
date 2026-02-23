@@ -56,9 +56,8 @@ To run the integration test, execute the script with the appropriate arguments:
 
 ```bash
 python3 clients/python/agentic-sandbox-client/test_podsnapshot_extension.py \
-  --labels app=agent-sandbox-workload \
   --template-name python-counter-template \
   --namespace sandbox-test
 ```
 
-Adjust the `--namespace`, `--template-name`, and `--labels` as needed for your environment.
+Adjust the `--namespace`, `--template-name` as needed for your environment.

@@ -27,11 +27,9 @@ SANDBOX_PLURAL_NAME = "sandboxes"
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
+PODSNAPSHOT_NAMESPACE_MANAGED = "gke-managed-pod-snapshots"
+PODSNAPSHOT_AGENT = "pod-snapshot-agent"
+
 PODSNAPSHOT_API_GROUP = "podsnapshot.gke.io"
 PODSNAPSHOT_API_VERSION = "v1alpha1"
-PODSNAPSHOT_PLURAL = "podsnapshots"
-PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
 PODSNAPSHOT_API_KIND = "PodSnapshotManualTrigger"
-
-SNAPSHOT_NAMESPACE_MANAGED = "gke-managed-pod-snapshots"
-SNAPSHOT_AGENT = "pod-snapshot-agent"

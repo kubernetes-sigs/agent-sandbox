@@ -13,20 +13,15 @@
 # limitations under the License.
 
 import argparse
-import asyncio
-import time
-import sys
-from kubernetes import client, config
-import re
+from kubernetes import config
 from k8s_agent_sandbox.gke_extensions import PodSnapshotSandboxClient
 
 
-async def main(
+def main(
     template_name: str,
     api_url: str | None,
     namespace: str,
     server_port: int,
-    labels: dict[str, str],
 ):
     """
     Tests the Sandbox client by creating a sandbox, running a command,
@@ -42,10 +37,6 @@ async def main(
         config.load_incluster_config()
     except config.ConfigException:
         config.load_kube_config()
-
-    wait_time = 10
-    first_snapshot_name = "test-snapshot-10"
-    second_snapshot_name = "test-snapshot-20"
 
     try:
         print("\n***** Phase 1: Starting Counter *****")
@@ -101,29 +92,12 @@ if __name__ == "__main__":
         default=8888,
         help="Port the sandbox container listens on",
     )
-    parser.add_argument(
-        "--labels",
-        nargs="+",
-        default=["app=sandbox-test"],
-        help="Labels for the sandbox pod/claim in key=value format (e.g. app=sandbox-test env=dev)",
-    )
 
     args = parser.parse_args()
 
-    labels_dict = {}
-    for l in args.labels:
-        if "=" in l:
-            k, v = l.split("=", 1)
-            labels_dict[k] = v
-        else:
-            print(f"Warning: Ignoring invalid label format '{l}'. Use key=value.")
-
-    asyncio.run(
-        main(
-            template_name=args.template_name,
-            api_url=args.api_url,
-            namespace=args.namespace,
-            server_port=args.server_port,
-            labels=labels_dict,
-        )
+    main(
+        template_name=args.template_name,
+        api_url=args.api_url,
+        namespace=args.namespace,
+        server_port=args.server_port,
     )

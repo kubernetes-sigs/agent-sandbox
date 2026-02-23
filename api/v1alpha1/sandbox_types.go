@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
 const SandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 
 // ConditionType is a type of condition for a resource.

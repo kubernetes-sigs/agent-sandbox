@@ -547,8 +547,6 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
-
-
 func TestReconcilePod(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"

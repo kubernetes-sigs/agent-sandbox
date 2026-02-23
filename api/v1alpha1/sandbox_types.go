@@ -18,7 +18,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
 const SandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 
 // ConditionType is a type of condition for a resource.
@@ -97,6 +96,9 @@ type PersistentVolumeClaimTemplate struct {
 
 // SandboxSpec defines the desired state of Sandbox
 type SandboxSpec struct {
+	// The following markers will use OpenAPI v3 schema to validate the value
+	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+
 	// PodTemplate describes the pod spec that will be used to create an agent sandbox.
 	// +kubebuilder:validation:Required
 	PodTemplate PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
@@ -104,6 +106,7 @@ type SandboxSpec struct {
 	// VolumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
 	// +optional
+	// +kubebuilder:validation:Optional
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.
@@ -188,6 +191,7 @@ type Sandbox struct {
 }
 
 // +kubebuilder:object:root=true
+
 // SandboxList contains a list of Sandbox
 type SandboxList struct {
 	metav1.TypeMeta `json:",inline"`

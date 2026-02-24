@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 class PodSnapshotSandboxClient(SandboxClient):
     """
     A specialized Sandbox client for interacting with the gke pod snapshot controller.
-    Currently supports manual triggering via PodSnapshotManualTrigger.
     """
 
     def __init__(

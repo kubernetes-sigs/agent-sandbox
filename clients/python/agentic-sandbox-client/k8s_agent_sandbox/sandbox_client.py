@@ -45,6 +45,10 @@ from .constants import (
     POD_NAME_ANNOTATION,
 )
 
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    stream=sys.stdout)
+
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""

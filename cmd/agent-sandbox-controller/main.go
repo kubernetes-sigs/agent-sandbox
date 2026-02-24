@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -81,6 +82,12 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	// Validate flags after parsing
+	if enableLeaderElection && leaderElectionNamespace == "" {
+		setupLog.Error(fmt.Errorf("missing required flag"), "--leader-elect is enabled, but --leader-election-namespace is empty. A namespace is required for leader election.")
+		os.Exit(1)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	ctx := ctrl.SetupSignalHandler()

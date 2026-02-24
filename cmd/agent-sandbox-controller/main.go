@@ -17,7 +17,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -48,7 +47,6 @@ var (
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
-	var leaderElectionID string
 	var leaderElectionNamespace string
 	var probeAddr string
 	var extensions bool
@@ -62,7 +60,6 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	flag.StringVar(&leaderElectionID, "leader-election-id", "agent-sandbox-controller", "The name of the resource that will be used for leader election.")
 	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "", "The namespace in which the leader election resource will be created.")
 	flag.BoolVar(&extensions, "extensions", false, "Enable extensions controllers.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false, "Enable OpenTelemetry tracing via OTLP.")
@@ -85,8 +82,7 @@ func main() {
 
 	// Validate flags after parsing
 	if enableLeaderElection && leaderElectionNamespace == "" {
-		setupLog.Error(fmt.Errorf("missing required flag"), "--leader-elect is enabled, but --leader-election-namespace is empty. A namespace is required for leader election.")
-		os.Exit(1)
+		setupLog.Info("WARNING: leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty. The controller-runtime will attempt to auto-detect the namespace.")
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -160,7 +156,7 @@ func main() {
 		HealthProbeBindAddress:  probeAddr,
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
-		LeaderElectionID:        leaderElectionID,
+		LeaderElectionID:        "agent-sandbox-controller",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

@@ -38,7 +38,16 @@ from .trace_manager import (
     initialize_tracer, TracerManager, trace_span, trace, OPENTELEMETRY_AVAILABLE
 )
 
-from .constants import *
+from .constants import (
+    GATEWAY_API_GROUP, GATEWAY_API_VERSION, GATEWAY_PLURAL,
+    CLAIM_API_GROUP, CLAIM_API_VERSION, CLAIM_PLURAL_NAME,
+    SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME,
+    POD_NAME_ANNOTATION,
+)
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    stream=sys.stdout)
 
 
 class ExecutionResult(BaseModel):

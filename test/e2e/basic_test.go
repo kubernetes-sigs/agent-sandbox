@@ -17,6 +17,7 @@ package e2e
 import (
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,8 +26,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // NameHash generates an FNV-1a hash from a string and returns
@@ -129,4 +132,85 @@ func TestSimpleSandbox(t *testing.T) {
 	service.Name = "my-sandbox"
 	service.Namespace = ns.Name
 	tc.MustMatchPredicates(service, p...)
+}
+
+func TestResourceNameValidation(t *testing.T) {
+	f := framework.NewTestContext(t)
+
+	// Boundary success: 63 characters (DNS label limit)
+	validName := strings.Repeat("a", 63)
+	// Boundary failure: 64 characters
+	invalidName := strings.Repeat("a", 64)
+
+	testCases := []struct {
+		name    string
+		obj     client.Object
+		wantErr bool
+	}{
+		{
+			name: "Sandbox with 63 chars succeeds",
+			obj: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: validName, Namespace: "default"},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "pause",
+									Image: "registry.k8s.io/pause:3.10",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Sandbox with 64 chars fails",
+			obj: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: invalidName, Namespace: "default"},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "pause",
+									Image: "registry.k8s.io/pause:3.10",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "SandboxClaim with 64 chars fails",
+			obj: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: invalidName, Namespace: "default"},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test"}},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := f.Context()
+			err := f.CreateWithCleanup(ctx, tc.obj)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error for > 63 chars, but got nil")
+				}
+				if !strings.Contains(err.Error(), "name must not exceed 63 characters") {
+					t.Errorf("unexpected error message: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected success for 63 chars, but got err: %v", err)
+				}
+			}
+		})
+	}
 }

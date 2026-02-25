@@ -156,7 +156,7 @@ func main() {
 		HealthProbeBindAddress:  probeAddr,
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
-		LeaderElectionID:        "agent-sandbox-controller",
+		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

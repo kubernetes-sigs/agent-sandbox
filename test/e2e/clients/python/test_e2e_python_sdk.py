@@ -17,7 +17,7 @@ from test.e2e.clients.python.framework.context import TestContext
 
 import pytest
 import yaml
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
 TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")

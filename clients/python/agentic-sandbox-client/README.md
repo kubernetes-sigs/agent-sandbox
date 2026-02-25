@@ -21,7 +21,7 @@ The client operates in two modes:
 ## Prerequisites
 
 - A running Kubernetes cluster.
-- The **Agent Sandbox Controller** installed.
+- The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
 - `kubectl` installed and configured locally.
 
 ## Setup: Deploying the Router
@@ -51,7 +51,22 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     source .venv/bin/activate
     ```
 
-2.  **Option 1: Install from source via git:**
+2.  **Option 1: Install from PyPI (Recommended):**
+
+    The package is available on [PyPI](https://pypi.org/project/k8s-agent-sandbox/) as `k8s-agent-sandbox`.
+
+    ```bash
+    pip install k8s-agent-sandbox
+    ```
+
+    If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
+    install with the optional tracing dependencies:
+
+    ```bash
+    pip install "k8s-agent-sandbox[tracing]"
+    ```
+
+3.  **Option 2: Install from source via git:**
 
     ```bash
     # Replace "main" with a specific version tag (e.g., "v0.1.0") from
@@ -61,7 +76,9 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
     ```
 
-3.  **Option 2: Install from source in editable mode:**
+**Note**: This package uses `setuptools-scm` for dynamic versioning. For Option 2 and Option 3, when installing locally, you may notice the version increment if your local repository has uncommitted changes or is ahead of the last tagged release. This is expected behavior to ensure unique versioning during development.
+
+4.  **Option 3: Install from source in editable mode:**
 
     If you have not already done so, first clone this repository:
 
@@ -92,7 +109,7 @@ Use this when running against a real cluster with a public Gateway IP. The clien
 discovers the Gateway.
 
 ```python
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 
 # Connect via the GKE Gateway
 with SandboxClient(
@@ -109,7 +126,7 @@ Use this for local development or CI. If you omit `gateway_name`, the client aut
 secure tunnel to the Router Service using `kubectl`.
 
 ```python
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 
 # Automatically tunnels to svc/sandbox-router-svc
 with SandboxClient(

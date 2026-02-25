@@ -92,6 +92,10 @@ We aim for the Sandbox to be vendor-neutral, supporting various runtimes. Key ch
 *   **Rich identity & connectivity:** Exploring dual user/sandbox identities and efficient traffic routing without per-sandbox Services.
 *   **Programmable:** Encouraging applications and agents to programmatically consume the Sandbox API.
 
+## Roadmap
+
+The current Roadmap can be found at [roadmap.md](roadmap.md).
+
 ## Community, Discussion, Contribution, and Support
 
 This is a community-driven effort, and we welcome collaboration!

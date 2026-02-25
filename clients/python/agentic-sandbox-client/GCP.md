@@ -60,7 +60,7 @@ To run the client and generate traces, instantiate the SandboxClient with the `e
 flag in your Python script.
 
 ```python
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 
 def main():
     # ...

@@ -51,6 +51,7 @@ def main():
     if artifact_dir:
         shutil.copy(f"{repo_root}/bin/e2e-go-junit.xml", f"{artifact_dir}/junit_go.xml")
         shutil.copy(f"{repo_root}/bin/e2e-python-sdk-junit.xml", f"{artifact_dir}/junit_python_sdk.xml")
+        shutil.copy(f"{repo_root}/bin/e2e-ts-sdk-junit.xml", f"{artifact_dir}/junit_ts_sdk.xml")
 
     return result.returncode
 

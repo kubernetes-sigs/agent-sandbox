@@ -82,7 +82,7 @@ func main() {
 
 	// Validate flags after parsing
 	if enableLeaderElection && leaderElectionNamespace == "" {
-		setupLog.Info("WARNING: leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty. The controller-runtime will attempt to auto-detect the namespace.")
+		setupLog.V(1).Info("leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty; attempting auto-detection")
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))

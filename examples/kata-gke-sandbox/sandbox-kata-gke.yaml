@@ -1,0 +1,15 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: kata-gke-example
+spec:
+  podTemplate:
+    spec:
+      runtimeClassName: kata-qemu
+      containers:
+      - name: hello-kata
+        image: busybox
+        command: ["sh", "-c", "echo 'Hello from an Agent Sandbox running in Kata!' && sleep 3600"]
+      nodeSelector:
+        # Force this pod onto the Ubuntu/Intel pool where Kata is installed
+        cloud.google.com/gke-os-distribution: ubuntu

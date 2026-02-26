@@ -42,7 +42,7 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func computeTemplateHash(template *extensionsv1alpha1.SandboxTemplate) string {
+func computeTemplateSpecHash(template *extensionsv1alpha1.SandboxTemplate) string {
 	specJson, _ := json.Marshal(template.Spec)
 	return sandboxcontrollers.NameHash(string(specJson))
 }
@@ -102,7 +102,7 @@ func TestReconcilePool(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateHash(template)
+	templateHash := computeTemplateSpecHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -207,7 +207,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateHash(template)
+	templateHash := computeTemplateSpecHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -491,7 +491,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateHash(template)
+	templateHash := computeTemplateSpecHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{

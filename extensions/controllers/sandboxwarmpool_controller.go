@@ -116,6 +116,15 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	var activePods []corev1.Pod
 	var allErrors error
 
+	// Fetch template and compute hash once to avoid repeated expensive operations
+	template, tmplErr := r.getTemplate(ctx, warmPool)
+	var currentHash string
+	if tmplErr == nil {
+		currentHash = r.computeTemplateSpecHash(template)
+	} else {
+		log.Error(tmplErr, "Failed to get sandbox template", "templateRef", warmPool.Spec.TemplateRef.Name)
+	}
+
 	for _, pod := range podList.Items {
 		// Skip pods that are being deleted
 		if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -136,7 +145,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			activePods = append(activePods, pod)
 		} else if controllerRef.UID == warmPool.UID {
 			// Pod belongs to this warmpool - check if it's stale
-			if r.isPodStale(ctx, &pod, warmPool) {
+			if tmplErr == nil && r.isPodStale(&pod, currentHash) {
 				log.Info("Deleting stale pod from pool", "pod", pod.Name)
 				if err := r.Delete(ctx, &pod); err != nil {
 					log.Error(err, "Failed to delete stale pod", "pod", pod.Name)
@@ -180,11 +189,15 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// Create new pods if we need more
 	if currentReplicas < desiredReplicas {
+		if tmplErr != nil {
+			return errors.Join(allErrors, tmplErr)
+		}
+
 		podsToCreate := desiredReplicas - currentReplicas
 		log.Info("Creating new pods", "count", podsToCreate)
 
 		for i := int32(0); i < podsToCreate; i++ {
-			if err := r.createPoolPod(ctx, warmPool, poolNameHash); err != nil {
+			if err := r.createPoolPod(ctx, warmPool, poolNameHash, template, currentHash); err != nil {
 				log.Error(err, "Failed to create pod")
 				allErrors = errors.Join(allErrors, err)
 			}
@@ -224,23 +237,14 @@ func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *exte
 }
 
 // createPoolPod creates a new pod for the warm pool
-func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) error {
+func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, currentHash string) error {
 	log := log.FromContext(ctx)
 
 	// Create labels for the pod
 	podLabels := make(map[string]string)
 	podLabels[poolLabel] = poolNameHash
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
-
-	// Try getting template
-	var template *extensionsv1alpha1.SandboxTemplate
-	var err error
-	if template, err = r.getTemplate(ctx, warmPool); err != nil {
-		log.Error(err, "Failed to get sandbox template for warm pool", "warmPoolName", warmPool.Name)
-		return err
-	}
-
-	podLabels[sandboxTemplateSpecHash] = r.computeTemplateHash(template)
+	podLabels[sandboxTemplateSpecHash] = currentHash
 
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {
 		podLabels[k] = v
@@ -262,8 +266,6 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		},
 		Spec: template.Spec.PodTemplate.Spec,
 	}
-
-	// pod.Labels[podNameLabel] = sandboxcontrollers.NameHash(pod.Name)
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {
@@ -315,7 +317,7 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 	return template, nil
 }
 
-func (r *SandboxWarmPoolReconciler) computeTemplateHash(template *extensionsv1alpha1.SandboxTemplate) string {
+func (r *SandboxWarmPoolReconciler) computeTemplateSpecHash(template *extensionsv1alpha1.SandboxTemplate) string {
 	specJson, err := json.Marshal(template.Spec)
 	if err != nil {
 		return ""
@@ -323,15 +325,8 @@ func (r *SandboxWarmPoolReconciler) computeTemplateHash(template *extensionsv1al
 	return sandboxcontrollers.NameHash(string(specJson))
 }
 
-func (r *SandboxWarmPoolReconciler) isPodStale(ctx context.Context, pod *corev1.Pod, warmPool *extensionsv1alpha1.SandboxWarmPool) bool {
-	template, err := r.getTemplate(ctx, warmPool)
-	if err != nil {
-		return false
-	}
-
-	currentHash := r.computeTemplateHash(template)
+func (r *SandboxWarmPoolReconciler) isPodStale(pod *corev1.Pod, currentHash string) bool {
 	podHash := pod.Labels[sandboxTemplateSpecHash]
-
 	return currentHash != podHash
 }
 

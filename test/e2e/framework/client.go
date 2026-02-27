@@ -145,6 +145,17 @@ func (cl *ClusterClient) CreateWithCleanup(ctx context.Context, obj client.Objec
 	return nil
 }
 
+// Create creates the specified object in the cluster.
+func (cl *ClusterClient) Create(ctx context.Context, obj client.Object) error {
+	cl.Helper()
+	nn := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	cl.Logf("Creating object %T (%s)", obj, nn.String())
+	if err := cl.client.Create(ctx, obj); err != nil {
+		return fmt.Errorf("create %T (%s): %w", obj, nn.String(), err)
+	}
+	return nil
+}
+
 // MustCreateWithCleanup is a wrapper around CreateWithCleanup that fails the test on error.
 func (cl *ClusterClient) MustCreateWithCleanup(obj client.Object) {
 	cl.Helper()

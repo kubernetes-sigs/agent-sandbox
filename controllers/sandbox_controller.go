@@ -485,6 +485,16 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 
+	// Create a patch to update only the annotations
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[SandboxPodNameAnnotation] = pod.Name
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return nil, fmt.Errorf("failed to set pod name annotation: %w", err)
+	}
+
 	if r.Tracer.IsRecording(ctx) {
 		r.Tracer.AddEvent(ctx, "NewPodStatusObserved", map[string]string{
 			"pod.Name":  pod.Name,

@@ -87,14 +87,13 @@ class PodSnapshotSandboxClient(SandboxClient):
                     return False
                 raise
 
-        def check_pod_running(namespace: str, pod_name_substring: str) -> bool:
+        def check_pod_running(namespace: str, label_selector: str) -> bool:
             try:
-                pods = self.core_v1_api.list_namespaced_pod(namespace)
+                pods = self.core_v1_api.list_namespaced_pod(
+                    namespace, label_selector=label_selector
+                )
                 for pod in pods.items:
-                    if (
-                        pod.status.phase == "Running"
-                        and pod_name_substring in pod.metadata.name
-                    ):
+                    if pod.status.phase == "Running":
                         return True
                 return False
             except ApiException as e:
@@ -109,7 +108,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 raise
 
         # Check managed: requires only agent in gke-managed-pod-snapshots
-        if check_pod_running(PODSNAPSHOT_NAMESPACE_MANAGED, PODSNAPSHOT_AGENT):
+        if check_pod_running(PODSNAPSHOT_NAMESPACE_MANAGED, f"app={PODSNAPSHOT_AGENT}"):
             return True
 
         return False

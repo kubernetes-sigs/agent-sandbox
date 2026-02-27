@@ -106,7 +106,9 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         self.client.controller_ready = False
         self.assertTrue(self.client.snapshot_controller_ready())
-        mock_v1.list_namespaced_pod.assert_called_with(PODSNAPSHOT_NAMESPACE_MANAGED)
+        mock_v1.list_namespaced_pod.assert_called_with(
+            PODSNAPSHOT_NAMESPACE_MANAGED, label_selector=f"app={PODSNAPSHOT_AGENT}"
+        )
 
         logging.info("TEST: CRD Fallback Success")
         mock_v1.list_namespaced_pod.side_effect = ApiException(status=403)

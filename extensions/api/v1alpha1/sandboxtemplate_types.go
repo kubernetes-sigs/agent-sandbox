@@ -76,6 +76,7 @@ type SandboxTemplateStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
 // SandboxTemplate is the Schema for the sandbox template API
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="name must not exceed 63 characters"
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
 

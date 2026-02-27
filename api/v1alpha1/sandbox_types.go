@@ -173,6 +173,7 @@ type SandboxStatus struct {
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
 // Sandbox is the Schema for the sandboxes API
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="name must not exceed 63 characters"
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`
 

@@ -42,6 +42,7 @@ func TestSandboxReplicas(t *testing.T) {
 	// Assert Sandbox object status reconciles as expected
 	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+			Phase:         "Running",
 			Service:       "my-sandbox",
 			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
 			Replicas:      1,
@@ -77,13 +78,14 @@ func TestSandboxReplicas(t *testing.T) {
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+			Phase:         "Paused",
 			Service:       "my-sandbox",
 			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
 			Replicas:      0,
 			LabelSelector: "",
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod does not exist, replicas is 0; Service Exists",
+					Message:            "Sandbox is paused; Service Exists",
 					ObservedGeneration: 2,
 					Reason:             "DependenciesReady",
 					Status:             "True",

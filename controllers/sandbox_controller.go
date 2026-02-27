@@ -103,16 +103,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.ObjectMeta.DeletionTimestamp.IsZero() {
 		log.Info("Sandbox is being deleted")
+		//sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseTerminating
 		return ctrl.Result{}, nil
+	}
+
+	// Set a default phase
+	if sandbox.Status.Phase == "" {
+		sandbox.Status.Phase = sandboxv1alpha1.SandboxPhasePending
 	}
 
 	// Check if already marked as expired to avoid repeated operations, including cleanups
 	if sandboxMarkedExpired(sandbox) {
 		log.Info("Sandbox is already marked as expired")
+		oldStatus := sandbox.Status.DeepCopy()
+		sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseExpired
+		err := r.updateStatus(ctx, oldStatus, sandbox)
 		// Note: The sandbox won't be deleted if shutdown policy is changed to delete after expiration.
 		//       To delete an expired sandbox, the user should delete the sandbox instead of updating it.
 		//       This keeps the controller code simple.
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, err
 	}
 
 	// Initialize trace ID for active resources missing an ID
@@ -177,9 +186,20 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	if pod == nil {
 		sandbox.Status.Replicas = 0
 		sandbox.Status.LabelSelector = ""
+		if sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0 {
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhasePaused
+		}
 	} else {
 		sandbox.Status.Replicas = 1
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		switch pod.Status.Phase {
+		case corev1.PodRunning:
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseRunning
+		case corev1.PodPending:
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhasePending
+		case corev1.PodFailed:
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseFailed
+		}
 	}
 
 	// Reconcile Service
@@ -226,9 +246,9 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 			}
 		}
 	} else {
-		if sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0 {
-			message = "Pod does not exist, replicas is 0"
+		if sandbox.Status.Phase == sandboxv1alpha1.SandboxPhasePaused {
 			// This is intended behaviour. So marking it ready.
+			message = "Sandbox is paused"
 			podReady = true
 		} else {
 			message = "Pod does not exist"
@@ -561,6 +581,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
 		} else {
+			sandbox.Status.Phase = sandboxv1alpha1.SandboxPhaseTerminating
 			return true, nil
 		}
 	}

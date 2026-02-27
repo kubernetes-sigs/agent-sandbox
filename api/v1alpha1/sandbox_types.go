@@ -19,6 +19,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// SandboxPhase is a simple, high-level summary of where the Sandbox is in its lifecycle.
+type SandboxPhase string
+
+const (
+	// SandboxPhasePending means the sandbox is being created
+	SandboxPhasePending SandboxPhase = "Pending"
+	// SandboxPhaseRunning means the sandbox is running
+	SandboxPhaseRunning SandboxPhase = "Running"
+	// SandboxPhasePaused means the sandbox is paused
+	SandboxPhasePaused SandboxPhase = "Paused"
+	// SandboxPhaseTerminating means the sandbox is terminating
+	SandboxPhaseTerminating SandboxPhase = "Terminating"
+	// SandboxPhaseFailed means the sandbox has failed
+	SandboxPhaseFailed SandboxPhase = "Failed"
+	// SandboxPhaseExpired means the sandbox has expired. This is a terminal phase that can only be set when the ShutdownPolicy is Retain.
+	SandboxPhaseExpired SandboxPhase = "Expired"
+)
+
 // ConditionType is a type of condition for a resource.
 type ConditionType string
 
@@ -149,6 +167,23 @@ type Lifecycle struct {
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
+	// The phase of a Sandbox is a simple, high-level summary of where the Sandbox is in its lifecycle.
+	// The conditions array, the reason and message fields, and the individual container status arrays are
+	// more detail about the pod's status.
+	// There are five possible phase values:
+	//
+	// Pending: The Sandbox has been accepted by the Kubernetes system, but one or more of the Pod
+	// startup steps is not yet complete.
+	// Running: The Sandbox has been bound to a node, and all of the Pods have been created. At least
+	// one Pod is still running, or is in the process of starting or restarting.
+	// Paused: The Sandbox has been paused.
+	// Failed: All Pods in the Sandbox have terminated, and at least one Pod has terminated in a failure
+	// (exited with a non-zero exit code or was terminated by the system).
+	// Terminating: The Sandbox is terminating.
+	//
+	// +optional
+	Phase SandboxPhase `json:"phase,omitempty"`
+
 	// FQDN that is valid for default cluster settings
 	// Limitation: Hardcoded to the domain .cluster.local
 	// e.g. sandbox-example.default.svc.cluster.local

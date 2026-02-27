@@ -137,9 +137,16 @@ def main(args):
 
     exit_code = 0
 
-    go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
-    go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
-    python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
+    go_test_result = 0
+    go_benchmark_result = 0
+    python_test_result = 0
+
+    if args.suite in ["all", "tests"]:
+        go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
+        python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
+        
+    if args.suite in ["all", "benchmarks"]:
+        go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
 
     if go_test_result != 0:
         print("Go E2E tests failed.")
@@ -168,6 +175,14 @@ if __name__ == "__main__":
         help="prefix for the image name. requires slash at the end if a path",
         type=str,
         default=os.getenv("IMAGE_PREFIX"),
+    )
+    parser.add_argument(
+        "--suite",
+        dest="suite",
+        help="which suite of tests to run",
+        type=str,
+        choices=["all", "tests", "benchmarks"],
+        default="all",
     )
     args = parser.parse_args()
     sys.exit(main(args))

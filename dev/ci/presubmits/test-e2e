@@ -26,7 +26,7 @@ if repo_root not in sys.path:
     
 from dev.tools.shared import utils as tools_utils
 
-def main():
+def main(args):
     """ invokes e2e tests in kind cluster and outputs a junit report in the ARTIFACTS dir
 
     The ARTIFACTS environment variable is set by prow.
@@ -35,16 +35,16 @@ def main():
     result = subprocess.run([f"{repo_root}/dev/tools/create-kind-cluster", "e2e-test", "--recreate", "--kubeconfig", f"{repo_root}/bin/KUBECONFIG"])
     if result.returncode != 0:
         return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/push-images", "--kind-cluster-name", "e2e-test", "--image-prefix", "kind.local/", "--image-tag", image_tag])
+    result = subprocess.run([f"{repo_root}/dev/tools/push-images", "--kind-cluster-name", "e2e-test", "--image-prefix", args.image_prefix, "--image-tag", image_tag])
     if result.returncode != 0:
         return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/deploy-to-kube", "--image-prefix", "kind.local/", "--image-tag", image_tag])
+    result = subprocess.run([f"{repo_root}/dev/tools/deploy-to-kube", "--image-prefix", args.image_prefix, "--image-tag", image_tag])
     if result.returncode != 0:
         return result.returncode
     result = subprocess.run([f"{repo_root}/dev/tools/deploy-cloud-provider"])
     if result.returncode != 0:
         return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/test-e2e", "--image-prefix", "kind.local/"])
+    result = subprocess.run([f"{repo_root}/dev/tools/test-e2e", "--image-prefix", args.image_prefix, "--suite", args.suite])
 
     # Always create junit file whether tests pass or fail
     artifact_dir = os.getenv("ARTIFACTS")
@@ -55,5 +55,27 @@ def main():
     return result.returncode
 
 
+def init():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--image-prefix",
+        dest="image_prefix",
+        help="prefix for the image name. requires slash at the end if a path",
+        type=str,
+        default="kind.local/",
+    )
+    parser.add_argument(
+        "--suite",
+        dest="suite",
+        help="which suite of tests to run",
+        type=str,
+        choices=["all", "tests", "benchmarks"],
+        default="all",
+    )
+    args = parser.parse_args()
+    return main(args)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(init())

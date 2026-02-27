@@ -51,13 +51,13 @@ type ChromeSandboxClaimMetrics struct {
 // Run with: go test -bench=BenchmarkChromeSandboxClaimStartup -benchtime=10x ./test/e2e/...
 func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	// Configuration from environment variables
-	warmPoolSize := 20
+	warmPoolSize := 6
 	if s := os.Getenv("WARM_POOL_SIZE"); s != "" {
 		if v, err := strconv.Atoi(s); err == nil {
 			warmPoolSize = v
 		}
 	}
-	parallelism := 10
+	parallelism := 3
 	if s := os.Getenv("PARALLELISM"); s != "" {
 		if v, err := strconv.Atoi(s); err == nil {
 			parallelism = v
@@ -223,11 +223,5 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	return metrics
 }
 
-func maxDuration(a, b time.Duration) time.Duration {
-	if a > b {
-		return a
-	}
-	return b
-}
 
 var claimCounter int64

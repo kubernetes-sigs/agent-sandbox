@@ -34,11 +34,21 @@ KRO is a powerful tool for defining and managing composite resources in Kubernet
 
 ## Example: Using KRO to create an `AgenticSandbox`
 
+### Clone the repository
+First, clone the repository and navigate to the repository directory
+```
+# Clone the repository
+git clone https://github.com/kubernetes-sigs/agent-sandbox.git
+
+# Navigate to the repository directory
+cd agent-sandbox
+```
+
 ### Install KRO
 
-First, install KRO on your cluster:
+Install KRO on your cluster, by running the script:
 ```
-dev/tools/install-kro
+./dev/tools/install-kro
 ```
 
 ### Create RGD
@@ -46,6 +56,10 @@ dev/tools/install-kro
 Install the `ResourceGraphDefinition` (RGD) which defines our new `AgenticSandbox` CRD
 
 ```
+# Switch to the examples directory
+cd examples/composing-sandbox-nw-policies
+
+# Install the RGD
 kubectl apply -f rgd.yaml
 ```
 

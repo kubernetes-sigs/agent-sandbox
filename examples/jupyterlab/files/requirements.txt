@@ -1,0 +1,6 @@
+transformers>=4.51.0
+torch
+huggingface_hub
+ipywidgets
+datasets
+accelerate>=0.26.0

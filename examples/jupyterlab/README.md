@@ -2,9 +2,15 @@
 
 ## Prerequisites
 
+Clone the repository:
+```bash
+git clone https://github.com/kubernetes-sigs/agent-sandbox.git
+cd agent-sandbox/examples/jupyterlab
+```
+
 **You must have agent-sandbox already installed on your cluster.** Follow the installation guide:
 
-**[Agent-Sandbox Installation Guide](../../INSTALL.md)**
+**[Agent-Sandbox Installation Guide](../../README.md)**
 
 Make sure the agent-sandbox controller is running before proceeding:
 
@@ -18,11 +24,12 @@ kubectl get pods -n agent-sandbox-system
 ```
 .
 ├── README.md                    # This file
-├── ../../INSTALL.md             # Agent-sandbox installation guide
+├── ../../README.md              # Agent-sandbox installation guide
 ├── jupyterlab.yaml              # Modular deployment (Secret + Sandbox only)
 ├── jupyterlab-full.yaml         # All-in-one deployment (+ ConfigMap with file contents)
 └── files/
     ├── download_models.py       # Script to download HuggingFace models
+    ├── experiment.ipynb         # Notebook demonstrating complete ML workflow
     ├── requirements.txt         # Python dependencies
     └── welcome.ipynb            # Sample notebook
 ```
@@ -37,19 +44,15 @@ Use `jupyterlab-full.yaml` which contains everything in a single file.
 
 **Steps:**
 
-1. **Edit the HuggingFace token:**
+1. **Create the HuggingFace token secret:**
 
     ```bash
-    # Open jupyterlab-full.yaml and replace HF_TOKEN with your actual token
-    vi jupyterlab-full.yaml
+    kubectl create secret generic jupyter-hf-token \
+      --from-literal=token="<your-hf-token>" \
+      --namespace=default
     ```
 
-    Or use sed:
-
-    ```bash
-    export HF_TOKEN="your_actual_HF_token_here"
-    sed -i "s/HF_TOKEN/$HF_TOKEN/g" jupyterlab-full.yaml
-    ```
+    Get your token from: <https://huggingface.co/settings/tokens>
 
 2. **Deploy everything:**
 
@@ -66,7 +69,17 @@ Use `jupyterlab.yaml` + create ConfigMap from files. This keeps YAML clean.
 
 **Steps:**
 
-1. **Create the ConfigMap from files:**
+1. **Create the HuggingFace token secret:**
+
+    ```bash
+    kubectl create secret generic jupyter-hf-token \
+      --from-literal=token="your_actual_HF_token_here" \
+      --namespace=default
+    ```
+
+    Get your token from: <https://huggingface.co/settings/tokens>
+
+2. **Create the ConfigMap from files:**
 
     ```bash
     kubectl create configmap jupyter-init-files \
@@ -80,20 +93,6 @@ Use `jupyterlab.yaml` + create ConfigMap from files. This keeps YAML clean.
 
     ```bash
     kubectl get configmap jupyter-init-files -o yaml
-    ```
-
-2. **Edit the HuggingFace token:**
-
-    ```bash
-    # Open jupyterlab.yaml and replace HF_TOKEN with your actual token
-    vi jupyterlab.yaml
-    ```
-
-    Or use sed:
-
-    ```bash
-    export HF_TOKEN="your_actual_HF_token_here"
-    sed -i "s/HF_TOKEN/$HF_TOKEN/g" jupyterlab.yaml
     ```
 
 3. **Deploy the Sandbox:**
@@ -212,6 +211,7 @@ Edit `files/download_models.py`:
 ```python
 model_names = [
     "Qwen/Qwen3-Embedding-0.6B",
+    "distilbert-base-uncased-finetuned-sst-2-english",
     "meta-llama/Llama-3.2-1B-Instruct",                          # Add more
 ]
 ```
@@ -274,8 +274,15 @@ kubectl logs jupyterlab-sandbox -c setup-environment
 **Common issues:**
 
 1. **Invalid HuggingFace token** - 401 Unauthorized errors
-   - Solution: Verify your token at https://huggingface.co/settings/tokens
-   - Update the secret: `kubectl delete secret jupyter-hf-token && kubectl create secret ...`
+   - Solution: Verify your token at <https://huggingface.co/settings/tokens>
+   - Update the secret:
+
+     ```bash
+     kubectl delete secret jupyter-hf-token
+     kubectl create secret generic jupyter-hf-token \
+       --from-literal=token="your_new_token_here" \
+       --namespace=default
+     ```
 
 2. **Out of disk space** - Ephemeral storage exceeded
    - This shouldn't happen with current config (everything uses PVC)

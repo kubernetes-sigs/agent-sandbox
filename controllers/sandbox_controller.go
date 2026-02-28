@@ -326,13 +326,6 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	return service, nil
 }
 
-// setServiceStatus updates the sandbox status with the service name and FQDN.
-// TODO(barney-s): hardcoded to svc.cluster.local which is the default. Need a way to change it.
-func setServiceStatus(sandbox *sandboxv1alpha1.Sandbox, service *corev1.Service) {
-	sandbox.Status.Service = service.Name
-	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
-}
-
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
@@ -443,13 +436,31 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// 3. PATH: Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
-	labels := map[string]string{
-		sandboxLabel: nameHash,
+
+	// Start with labels from sandbox object metadata (which would include labels from SandboxClaim)
+	labels := make(map[string]string)
+	for k, v := range sandbox.Labels {
+		// Skip internal labels if needed
+		if k != sandboxLabel {
+			labels[k] = v
+		}
 	}
+
+	// Add the sandbox label
+	labels[sandboxLabel] = nameHash
+
+	// Add/override with labels from PodTemplate
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		labels[k] = v
 	}
-	annotations := map[string]string{}
+
+	// Similarly for annotations - start with sandbox metadata annotations
+	annotations := make(map[string]string)
+	for k, v := range sandbox.Annotations {
+		annotations[k] = v
+	}
+
+	// Add/override with annotations from PodTemplate
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 		annotations[k] = v
 	}
@@ -467,6 +478,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			},
 		})
 	}
+
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sandbox.Name,

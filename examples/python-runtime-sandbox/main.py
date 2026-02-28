@@ -19,6 +19,7 @@ import logging
 import urllib.parse
 
 from fastapi import FastAPI, UploadFile, File
+from sandbox_kernel_manager import SandboxKernelManager
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -26,8 +27,21 @@ class ExecuteRequest(BaseModel):
     """Request model for the /execute endpoint."""
     command: str
 
+class ExecuteCodeRequest(BaseModel):
+    """Request model for the /execute_code endpoint."""
+    code: str # The code block to execute
+    language: str = "python" # The language of the code block
+    timeout: int = 10  # Default timeout in seconds
+    
+
 class ExecuteResponse(BaseModel):
     """Response model for the /execute endpoint."""
+    stdout: str
+    stderr: str
+    exit_code: int
+    
+class ExecuteCodeResponse(BaseModel): 
+    """Response model for the /execute_code endpoint."""
     stdout: str
     stderr: str
     exit_code: int
@@ -50,10 +64,23 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Global state to manage the IPython kernel
+sandbox_kernel = SandboxKernelManager()
+
 @app.get("/", summary="Health Check")
 async def health_check():
     """A simple health check endpoint to confirm the server is running."""
     return {"status": "ok", "message": "Sandbox Runtime is active."}
+
+@app.on_event("startup")
+async def start_kernel():
+    """Starts the IPython kernel when the sandbox starts."""
+    await sandbox_kernel.start()
+
+@app.on_event("shutdown")
+async def shutdown_kernel():
+    """Cleans up the IPython kernel when the sandbox stops."""
+    await sandbox_kernel.shutdown()
 
 @app.post("/execute", summary="Execute a shell command", response_model=ExecuteResponse)
 async def execute_command(request: ExecuteRequest):
@@ -84,6 +111,19 @@ async def execute_command(request: ExecuteRequest):
             exit_code=1
         )
 
+@app.post("/execute_code", summary="Execute code in a stateful way.", response_model=ExecuteCodeResponse)
+async def execute_code(request: ExecuteCodeRequest):
+    if request.language != "python":
+        return ExecuteCodeResponse(stdout="", stderr=f"Unsupported language: {request.language}", exit_code=1)
+    
+    stdout, stderr, exit_code = await sandbox_kernel.execute(request.code, request.timeout)
+    
+    return ExecuteCodeResponse(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code
+    )
+    
 @app.post("/upload", summary="Upload a file to the sandbox")
 async def upload_file(file: UploadFile = File(...)):
     """

@@ -78,6 +78,21 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
 
             print("\n--- Command Execution Test Passed! ---")
 
+            print("\n--- Testing Stateful Execution ---")
+            # 1. Set a variable
+            code_set = "x = 100"
+            print(f"Executing stateful code: '{code_set}'")
+            result_set = sandbox.run_stateful(code_set)
+            assert result_set.exit_code == 0
+
+            # 2. Read the variable
+            code_get = "print(x)"
+            print(f"Executing stateful code: '{code_get}'")
+            result_get = sandbox.run_stateful(code_get)
+            print(f"Stdout: {result_get.stdout.strip()}")
+            assert result_get.stdout.strip() == "100"
+            print("--- Stateful Execution Test Passed! ---")
+
             # Test file operations
             print("\n--- Testing File Operations ---")
             file_content = "This is a test file."

@@ -44,6 +44,10 @@ test-unit:
 test-e2e:
 	./dev/ci/presubmits/test-e2e
 
+.PHONY: test-e2e-race
+test-e2e-race:
+	./dev/ci/presubmits/test-e2e --race
+
 .PHONY: lint-go
 lint-go:
 	./dev/tools/lint-go

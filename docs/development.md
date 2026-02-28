@@ -144,6 +144,4 @@ End-to-end tests:
 
 ### Race Detection
 
-Both `test-unit` and `test-e2e` run with Go's `-race` flag enabled by default to detect data races in concurrent code. This is especially important because the controllers (`SandboxReconciler`, `SandboxClaimReconciler`, `SandboxWarmPoolReconciler`) run concurrently via controller-runtime.
-
-Note that enabling the race detector increases memory usage (5-10×) and execution time (2-20×). If you need to disable it for local development (e.g., resource-constrained environments), you can run `go test` directly without the `-race` flag.
+See [docs/testing.md](testing.md) for details on running tests with the Go race detector.

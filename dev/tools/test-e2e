@@ -21,15 +21,16 @@ import sys
 from shared import utils
 
 
-def run_go_e2e_tests(repo_root, artifact_dir, env):
+def run_go_e2e_tests(repo_root, artifact_dir, env, enable_race=False):
     """Runs the Go e2e tests"""
     print("========= Running Go E2E tests... =========")
+    race_flags = ["-race"] if enable_race else []
     go_test_cmd = utils.go_tool_args(
         "gotestsum",
         f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
         f"--jsonfile={artifact_dir}/test-e2e.json",
         "--",
-        "-race",
+        *race_flags,
         "./test/e2e/...",
         "--parallel=1",
         "-v",
@@ -138,7 +139,7 @@ def main(args):
 
     exit_code = 0
 
-    go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
+    go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env, enable_race=args.race)
     go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
     python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
 
@@ -169,6 +170,12 @@ if __name__ == "__main__":
         help="prefix for the image name. requires slash at the end if a path",
         type=str,
         default=os.getenv("IMAGE_PREFIX"),
+    )
+    parser.add_argument(
+        "--race",
+        action="store_true",
+        default=False,
+        help="enable Go race detector for e2e tests (increases runtime significantly)",
     )
     args = parser.parse_args()
     sys.exit(main(args))

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import os
 import shutil
 import sys
@@ -21,7 +22,7 @@ import subprocess
 from shared import utils
 
 
-def main():
+def main(args):
     """ invokes e2e tests in kind cluster and outputs a junit report in the ARTIFACTS dir
 
     The ARTIFACTS environment variable is set by prow.
@@ -40,7 +41,11 @@ def main():
     result = subprocess.run([f"{repo_root}/dev/tools/deploy-cloud-provider"])
     if result.returncode != 0:
         return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/test-e2e", "--image-prefix", "kind.local/"])
+
+    test_e2e_cmd = [f"{repo_root}/dev/tools/test-e2e", "--image-prefix", "kind.local/"]
+    if args.race:
+        test_e2e_cmd.append("--race")
+    result = subprocess.run(test_e2e_cmd)
 
     # Always create junit file whether tests pass or fail
     artifact_dir = os.getenv("ARTIFACTS")
@@ -52,4 +57,13 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(
+        description="Run e2e tests in a kind cluster"
+    )
+    parser.add_argument(
+        "--race",
+        action="store_true",
+        default=False,
+        help="enable Go race detector for e2e tests (increases runtime significantly)",
+    )
+    sys.exit(main(parser.parse_args()))

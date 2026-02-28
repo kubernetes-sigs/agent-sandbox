@@ -26,6 +26,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/rand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -48,6 +49,7 @@ type SandboxWarmPoolReconciler struct {
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the reconciliation loop for SandboxWarmPool
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -145,11 +147,90 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	desiredReplicas := warmPool.Spec.Replicas
 	currentReplicas := int32(len(activePods))
 
+	// List PVCs for orphan detection and scale-down cleanup
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcList, &client.ListOptions{
+		LabelSelector: labelSelector,
+		Namespace:     warmPool.Namespace,
+	}); err != nil {
+		log.Error(err, "Failed to list PVCs")
+		return err
+	}
+
+	// Build a set of active pod names for orphan detection
+	activePodNames := make(map[string]bool, len(activePods))
+	for i := range activePods {
+		activePodNames[activePods[i].Name] = true
+	}
+
+	// Find orphaned PVCs (owned by warm pool but no matching pod exists)
+	var orphanedPVCs []corev1.PersistentVolumeClaim
+	var ownedPVCs int32
+	for _, pvc := range pvcList.Items {
+		if pvc.ObjectMeta.DeletionTimestamp.IsZero() {
+			controllerRef := metav1.GetControllerOf(&pvc)
+			if controllerRef != nil && controllerRef.UID == warmPool.UID {
+				ownedPVCs++
+				// Check if this PVC has a matching pod using the annotation
+				pvcPodName := pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation]
+				if !activePodNames[pvcPodName] {
+					orphanedPVCs = append(orphanedPVCs, pvc)
+				}
+			}
+		}
+	}
+
 	log.Info("Pool status",
 		"desired", desiredReplicas,
 		"current", currentReplicas,
+		"ownedPVCs", ownedPVCs,
+		"orphanedPVCs", len(orphanedPVCs),
 		"poolName", warmPool.Name,
 		"poolNameHash", poolNameHash)
+
+	// Clean up orphaned PVCs (best effort) before creating new pods
+	// This handles partial failures (PVC created but pod creation failed)
+	// and ensures orphaned resources don't accumulate across reconciles
+	//
+	// Skip orphan cleanup during scale-up to reduce risk of race conditions
+	// where the informer cache hasn't yet seen newly created pods.
+	if currentReplicas < desiredReplicas {
+		log.V(1).Info("Skipping orphan cleanup during scale-up")
+	} else {
+		for i := range orphanedPVCs {
+			pvc := &orphanedPVCs[i]
+			pvcPodName := pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation]
+
+			// Verify pod truly doesn't exist via direct API server call.
+			// The informer cache may be stale, causing us to incorrectly identify
+			// a PVC as orphaned when its pod was just created but not yet in cache.
+			pod := &corev1.Pod{}
+			err := r.Client.Get(ctx, client.ObjectKey{
+				Namespace: pvc.Namespace,
+				Name:      pvcPodName,
+			}, pod)
+			if err == nil {
+				// Pod exists - PVC is not actually orphaned, skip deletion
+				log.V(1).Info("PVC not orphaned, pod exists", "pvc", pvc.Name, "pod", pvcPodName)
+				continue
+			}
+			if !k8serrors.IsNotFound(err) {
+				// API error - skip deletion to be safe
+				log.Error(err, "Failed to verify pod existence, skipping PVC deletion", "pvc", pvc.Name, "pod", pvcPodName)
+				continue
+			}
+
+			// Pod confirmed not to exist via API server - safe to delete PVC
+			if err := r.Delete(ctx, pvc); err != nil {
+				if !k8serrors.IsNotFound(err) {
+					log.Error(err, "Failed to delete orphaned PVC", "pvc", pvc.Name)
+				}
+				// Continue anyway - don't block pod creation due to cleanup failures
+			} else {
+				log.Info("Deleted orphaned PVC", "pvc", pvc.Name)
+			}
+		}
+	}
 
 	// Update status replicas
 	warmPool.Status.Replicas = currentReplicas
@@ -175,6 +256,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			if err := r.createPoolPod(ctx, warmPool, poolNameHash); err != nil {
 				log.Error(err, "Failed to create pod")
 				allErrors = errors.Join(allErrors, err)
+				log.Info("Stopping further pod creation after failure", "attempt", i+1, "remaining", podsToCreate-i-1)
+				break
 			}
 		}
 	}
@@ -192,6 +275,21 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		// Delete the first N active pods from the sorted list (newest first)
 		for i := int32(0); i < podsToDelete && i < int32(len(activePods)); i++ {
 			pod := &activePods[i]
+
+			// Delete associated PVCs (identified by pod name annotation)
+			for j := range pvcList.Items {
+				pvc := &pvcList.Items[j]
+				if pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation] == pod.Name {
+					if err := r.Delete(ctx, pvc); err != nil {
+						if !k8serrors.IsNotFound(err) {
+							log.Error(err, "Failed to delete PVC during scale-down", "pvc", pvc.Name)
+							allErrors = errors.Join(allErrors, err)
+						}
+					} else {
+						log.Info("Deleted PVC during scale-down", "pvc", pvc.Name, "pod", pod.Name)
+					}
+				}
+			}
 
 			if err := r.Delete(ctx, pod); err != nil {
 				log.Error(err, "Failed to delete pod", "pod", pod.Name)
@@ -211,7 +309,7 @@ func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *exte
 	return r.Update(ctx, pod)
 }
 
-// createPoolPod creates a new pod for the warm pool
+// createPoolPod creates a new pod for the warm pool, along with any required PVCs
 func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) error {
 	log := log.FromContext(ctx)
 
@@ -238,28 +336,116 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		podAnnotations[k] = v
 	}
 
+	// Generate a unique suffix for this pod instance
+	podSuffix := rand.String(5)
+	podName := fmt.Sprintf("%s-%s", warmPool.Name, podSuffix)
+	createdPVCNames := make([]string, 0, len(template.Spec.VolumeClaimTemplates))
+
+	cleanupCreatedPVCs := func() error {
+		var cleanupErr error
+		for _, pvcName := range createdPVCNames {
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: warmPool.Namespace,
+				},
+			}
+			if err := r.Delete(ctx, pvc); err != nil {
+				if !k8serrors.IsNotFound(err) {
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("failed to rollback PVC %q: %w", pvcName, err))
+				}
+				continue
+			}
+			log.Info("Rolled back PVC after pod creation failure", "pvc", pvcName, "pod", podName)
+		}
+		return cleanupErr
+	}
+
+	// Create PVCs from volumeClaimTemplates
+	var pvcVolumes []corev1.Volume
+	for _, vctTemplate := range template.Spec.VolumeClaimTemplates {
+		pvcName := fmt.Sprintf("%s-%s", vctTemplate.Name, podName)
+
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        pvcName,
+				Namespace:   warmPool.Namespace,
+				Labels:      podLabels,
+				Annotations: vctTemplate.Annotations,
+			},
+			Spec: vctTemplate.Spec,
+		}
+
+		// Copy labels from template
+		if pvc.Labels == nil {
+			pvc.Labels = make(map[string]string)
+		}
+		for k, v := range vctTemplate.Labels {
+			pvc.Labels[k] = v
+		}
+
+		// Mark PVC as created by warm pool so sandbox controller knows it's safe to adopt
+		// Also store pod name for reliable orphan detection
+		if pvc.Annotations == nil {
+			pvc.Annotations = make(map[string]string)
+		}
+		pvc.Annotations[sandboxcontrollers.WarmPoolPVCAnnotation] = "true"
+		pvc.Annotations[sandboxcontrollers.WarmPoolPodNameAnnotation] = podName
+
+		// Set controller reference so the PVC is owned by the SandboxWarmPool
+		if err := ctrl.SetControllerReference(warmPool, pvc, r.Client.Scheme()); err != nil {
+			return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+		}
+
+		// Create the PVC
+		if err := r.Create(ctx, pvc); err != nil {
+			if !k8serrors.IsAlreadyExists(err) {
+				log.Error(err, "Failed to create PVC", "pvc", pvcName)
+				return errors.Join(err, cleanupCreatedPVCs())
+			}
+		} else {
+			createdPVCNames = append(createdPVCNames, pvcName)
+			log.Info("Created PVC for warm pool pod", "pvc", pvcName)
+		}
+
+		// Add volume reference for pod spec
+		// Note: We don't wait for PVC binding - the scheduler will wait for it
+		pvcVolumes = append(pvcVolumes, corev1.Volume{
+			Name: vctTemplate.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				},
+			},
+		})
+	}
+
 	// Create the pod
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: fmt.Sprintf("%s-", warmPool.Name),
-			Namespace:    warmPool.Namespace,
-			Labels:       podLabels,
-			Annotations:  podAnnotations,
+			Name:        podName,
+			Namespace:   warmPool.Namespace,
+			Labels:      podLabels,
+			Annotations: podAnnotations,
 		},
-		Spec: template.Spec.PodTemplate.Spec,
+		Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
 	}
 
-	// pod.Labels[podNameLabel] = sandboxcontrollers.NameHash(pod.Name)
+	// Add PVC volumes to pod spec, replacing any pod template volumes with matching names
+	pod.Spec.Volumes = sandboxcontrollers.MergeVolumeClaimVolumes(pod.Spec.Volumes, pvcVolumes)
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {
-		return fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+		return errors.Join(fmt.Errorf("SetControllerReference for Pod failed: %w", err), cleanupCreatedPVCs())
 	}
 
 	// Create the Pod
 	if err := r.Create(ctx, pod); err != nil {
 		log.Error(err, "Failed to create pod")
-		return err
+		if k8serrors.IsAlreadyExists(err) {
+			return err
+		}
+		return errors.Join(err, cleanupCreatedPVCs())
 	}
 
 	log.Info("Created new pool pod", "pod", pod.Name, "poolName", warmPool.Name, "poolNameHash", poolNameHash)
@@ -306,5 +492,6 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxWarmPool{}).
 		Owns(&corev1.Pod{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Complete(r)
 }

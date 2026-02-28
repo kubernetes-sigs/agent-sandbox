@@ -909,3 +909,243 @@ func newScheme(t *testing.T) *runtime.Scheme {
 func ignoreTimestamp(_, _ metav1.Time) bool {
 	return true
 }
+
+func TestSandboxClaimPVCAdoption(t *testing.T) {
+	templateWithPVC := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template",
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "data", MountPath: "/data"},
+							},
+						},
+					},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+						Name: "data",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					},
+				},
+			},
+		},
+	}
+
+	warmPoolUID := types.UID("warmpool-uid-123")
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	templateRefHash := sandboxcontrollers.NameHash("test-template")
+
+	createWarmPoolPodWithPVC := func(podName, pvcName string) (*corev1.Pod, *corev1.PersistentVolumeClaim) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podName,
+				Namespace: "default",
+				Labels: map[string]string{
+					poolLabel:              poolNameHash,
+					sandboxTemplateRefHash: templateRefHash,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       "test-pool",
+						UID:        warmPoolUID,
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "test-container", Image: "test-image"},
+				},
+				Volumes: []corev1.Volume{
+					{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: pvcName,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pvcName,
+				Namespace: "default",
+				Labels: map[string]string{
+					poolLabel:              poolNameHash,
+					sandboxTemplateRefHash: templateRefHash,
+				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPVCAnnotation: "true",
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       "test-pool",
+						UID:        warmPoolUID,
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		return pod, pvc
+	}
+
+	t.Run("adopts PVCs when adopting pod from warm pool", func(t *testing.T) {
+		claim := &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-claim",
+				Namespace: "default",
+				UID:       "claim-uid",
+			},
+			Spec: extensionsv1alpha1.SandboxClaimSpec{
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+					Name: "test-template",
+				},
+			},
+		}
+
+		pod, pvc := createWarmPoolPodWithPVC("pool-pod-1", "data-pool-pod-1")
+
+		scheme := newScheme(t)
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(templateWithPVC, claim, pod, pvc).
+			WithStatusSubresource(claim).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client: fakeClient,
+			Scheme: scheme,
+			Tracer: asmetrics.NewNoOp(),
+		}
+
+		ctx := context.Background()
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify PVC was adopted (pool labels removed, owner reference cleared)
+		var adoptedPVC corev1.PersistentVolumeClaim
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "data-pool-pod-1", Namespace: "default"}, &adoptedPVC)
+		if err != nil {
+			t.Fatalf("failed to get adopted PVC: %v", err)
+		}
+
+		// Pool labels should be removed
+		if _, hasPoolLabel := adoptedPVC.Labels[poolLabel]; hasPoolLabel {
+			t.Errorf("pool label should be removed from adopted PVC")
+		}
+
+		if _, hasTemplateRefLabel := adoptedPVC.Labels[sandboxTemplateRefHash]; hasTemplateRefLabel {
+			t.Errorf("template ref label should be removed from adopted PVC")
+		}
+
+		// Verify sandbox was created WITH volumeClaimTemplates (for visibility and pod recreation)
+		var sandbox sandboxv1alpha1.Sandbox
+		err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
+		if err != nil {
+			t.Fatalf("failed to get sandbox: %v", err)
+		}
+
+		// PVC should now be owned by the sandbox (ownership transferred after sandbox creation)
+		controllerRef := metav1.GetControllerOf(&adoptedPVC)
+		if controllerRef == nil {
+			t.Fatalf("PVC should have a controller reference after ownership transfer")
+		}
+		if controllerRef.UID != sandbox.UID {
+			t.Errorf("PVC should be owned by sandbox, got owner UID %v", controllerRef.UID)
+		}
+		if len(sandbox.Spec.VolumeClaimTemplates) != 1 {
+			t.Errorf("sandbox should have volumeClaimTemplates, got %d", len(sandbox.Spec.VolumeClaimTemplates))
+		}
+
+		// Verify the adopted pod name annotation is set (for correct PVC naming)
+		if sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "pool-pod-1" {
+			t.Errorf("sandbox should have pod name annotation set to adopted pod name, got %q", sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation])
+		}
+	})
+
+	t.Run("copies volumeClaimTemplates when no warm pool pod available", func(t *testing.T) {
+		claim := &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-claim-no-pool",
+				Namespace: "default",
+				UID:       "claim-uid-2",
+			},
+			Spec: extensionsv1alpha1.SandboxClaimSpec{
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+					Name: "test-template",
+				},
+			},
+		}
+
+		scheme := newScheme(t)
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(templateWithPVC, claim).
+			WithStatusSubresource(claim).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client: fakeClient,
+			Scheme: scheme,
+			Tracer: asmetrics.NewNoOp(),
+		}
+
+		ctx := context.Background()
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim-no-pool", Namespace: "default"},
+		}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify sandbox was created WITH volumeClaimTemplates
+		var sandbox sandboxv1alpha1.Sandbox
+		err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
+		if err != nil {
+			t.Fatalf("failed to get sandbox: %v", err)
+		}
+		if len(sandbox.Spec.VolumeClaimTemplates) != 1 {
+			t.Errorf("sandbox should have 1 volumeClaimTemplate when no pod is adopted, got %d", len(sandbox.Spec.VolumeClaimTemplates))
+		}
+		if sandbox.Spec.VolumeClaimTemplates[0].Name != "data" {
+			t.Errorf("volumeClaimTemplate name should be 'data', got %q", sandbox.Spec.VolumeClaimTemplates[0].Name)
+		}
+	})
+}

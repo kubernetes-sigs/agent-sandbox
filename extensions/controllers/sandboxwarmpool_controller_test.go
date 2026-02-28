@@ -16,10 +16,13 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,6 +33,7 @@ import (
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // Create a test scheme with extensions types registered
@@ -575,4 +579,621 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
 		})
 	}
+}
+
+func TestReconcilePoolWithVolumeClaimTemplates(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	// Create a SandboxTemplate with volumeClaimTemplates
+	templateWithPVC := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "data",
+									MountPath: "/data",
+								},
+							},
+						},
+					},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+						Name: "data",
+						Labels: map[string]string{
+							"pvc-label": "test-value",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: *mustParseQuantity("1Gi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	t.Run("creates PVCs from volumeClaimTemplates", func(t *testing.T) {
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// Run reconcilePool
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		// Verify pods were created
+		podList := &corev1.PodList{}
+		err = r.List(ctx, podList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, podList.Items, int(replicas))
+
+		// Verify PVCs were created
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, int(replicas), "expected one PVC per pod")
+
+		// Verify each PVC
+		for _, pvc := range pvcList.Items {
+			// Verify PVC is owned by the warm pool
+			controllerRef := metav1.GetControllerOf(&pvc)
+			require.NotNil(t, controllerRef)
+			require.Equal(t, warmPool.UID, controllerRef.UID)
+
+			// Verify PVC has correct labels (pool label + template labels)
+			require.Equal(t, sandboxcontrollers.NameHash(poolName), pvc.Labels[poolLabel])
+			require.Equal(t, "test-value", pvc.Labels["pvc-label"])
+
+			// Verify PVC spec
+			require.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, pvc.Spec.AccessModes)
+		}
+
+		// Verify each pod has PVC volume attached
+		for _, pod := range podList.Items {
+			var foundPVCVolume bool
+			for _, vol := range pod.Spec.Volumes {
+				if vol.PersistentVolumeClaim != nil {
+					foundPVCVolume = true
+					// Verify volume name matches template
+					require.Equal(t, "data", vol.Name)
+					break
+				}
+			}
+			require.True(t, foundPVCVolume, "pod should have PVC volume attached")
+		}
+	})
+
+	t.Run("rolls back PVCs and stops after first pod creation failure", func(t *testing.T) {
+		podCreateAttempts := 0
+		failingWarmPool := warmPool.DeepCopy()
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, baseClient client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if _, ok := obj.(*corev1.Pod); ok {
+							podCreateAttempts++
+							return fmt.Errorf("injected pod create failure")
+						}
+						return baseClient.Create(ctx, obj, opts...)
+					},
+				}).
+				Build(),
+		}
+
+		ctx := context.Background()
+		err := r.reconcilePool(ctx, failingWarmPool)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "injected pod create failure")
+		require.Equal(t, 1, podCreateAttempts, "should stop after first pod creation error")
+
+		podList := &corev1.PodList{}
+		err = r.List(ctx, podList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, podList.Items, 0, "no pods should be created")
+
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, 0, "PVCs created before pod failure should be rolled back")
+	})
+
+	t.Run("cleans up orphaned PVCs after reaching desired replicas", func(t *testing.T) {
+		poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+		// Create an orphaned PVC (simulating partial failure where PVC exists but pod doesn't)
+		orphanedPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-test-pool-abc12",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPodNameAnnotation: "test-pool-abc12", // Pod doesn't exist
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC, orphanedPVC).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// First reconcile - scale up (0 -> 2 pods)
+		// Orphan cleanup is SKIPPED during scale-up to avoid race conditions
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		// Verify pods were created
+		podList := &corev1.PodList{}
+		err = r.List(ctx, podList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, podList.Items, int(warmPool.Spec.Replicas), "should create pods")
+
+		// After first reconcile, orphan PVC still exists (cleanup skipped during scale-up)
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, int(warmPool.Spec.Replicas)+1, "orphan PVC should still exist after scale-up")
+
+		// Second reconcile - at desired replicas (2 == 2)
+		// Orphan cleanup NOW runs since we're not scaling up
+		err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		// Verify orphaned PVC was deleted
+		pvcList = &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, int(warmPool.Spec.Replicas), "should have one PVC per pod after cleanup")
+
+		// Verify the orphaned PVC is gone (none should have the old name)
+		for _, pvc := range pvcList.Items {
+			require.NotEqual(t, "data-test-pool-abc12", pvc.Name, "orphaned PVC should be deleted")
+		}
+	})
+
+	t.Run("deletes PVCs when scaling down pods", func(t *testing.T) {
+		poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+		// Create existing pod with its PVC
+		existingPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pool-existing",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test", Image: "test"}},
+			},
+		}
+
+		existingPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-test-pool-existing",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPodNameAnnotation: "test-pool-existing", // Matches pod name
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		// Warm pool with 0 replicas (scale down)
+		scaledDownPool := warmPool.DeepCopy()
+		scaledDownPool.Spec.Replicas = 0
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC, existingPod, existingPVC).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// Run reconcilePool - should delete pod and its PVC
+		err := r.reconcilePool(ctx, scaledDownPool)
+		require.NoError(t, err)
+
+		// Verify the pod was deleted
+		podList := &corev1.PodList{}
+		err = r.List(ctx, podList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, podList.Items, 0, "pod should be deleted during scale-down")
+
+		// Verify the PVC was also deleted
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, pvcList.Items, 0, "PVC should be deleted during scale-down")
+	})
+}
+
+func mustParseQuantity(s string) *resource.Quantity {
+	q := resource.MustParse(s)
+	return &q
+}
+
+func TestReconcilePoolOrphanPVCDetection(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+
+	// Create a SandboxTemplate with volumeClaimTemplates
+	templateWithPVC := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image",
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "data",
+									MountPath: "/data",
+								},
+							},
+						},
+					},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+						Name: "data",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: *mustParseQuantity("1Gi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: 2,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	t.Run("skips orphan cleanup during scale-up", func(t *testing.T) {
+		// Create an orphaned PVC (no matching pod)
+		orphanedPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-test-pool-orphan",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPodNameAnnotation: "test-pool-orphan", // Pod doesn't exist
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC, orphanedPVC).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// Run reconcilePool - we're scaling up (0 pods -> 2 desired)
+		// Orphan cleanup should be SKIPPED during scale-up
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		// Verify orphaned PVC still exists (not deleted during scale-up)
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		err = r.List(ctx, pvcList, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+
+		foundOrphan := false
+		for _, pvc := range pvcList.Items {
+			if pvc.Name == "data-test-pool-orphan" {
+				foundOrphan = true
+				break
+			}
+		}
+		require.True(t, foundOrphan, "orphaned PVC should NOT be deleted during scale-up")
+	})
+
+	t.Run("does not delete PVC when pod exists via server-side check", func(t *testing.T) {
+		// This tests the server-side verification:
+		// Even if the PVC appears orphaned in cache, we check if pod exists before deleting
+
+		podName := "test-pool-exists"
+
+		// Create a pod that exists
+		existingPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podName,
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test", Image: "test"}},
+			},
+		}
+
+		// Create a PVC that references the pod
+		pvcForPod := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-" + podName,
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPodNameAnnotation: podName,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		// Scale to exactly 1 replica - no scale up, so orphan cleanup runs
+		warmPoolOneReplica := warmPool.DeepCopy()
+		warmPoolOneReplica.Spec.Replicas = 1
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC, existingPod, pvcForPod).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// Run reconcilePool - current=1, desired=1, so orphan cleanup runs
+		// But the PVC should NOT be deleted because pod exists (server-side check)
+		err := r.reconcilePool(ctx, warmPoolOneReplica)
+		require.NoError(t, err)
+
+		// Verify PVC still exists
+		pvc := &corev1.PersistentVolumeClaim{}
+		err = r.Client.Get(ctx, client.ObjectKey{Namespace: poolNamespace, Name: "data-" + podName}, pvc)
+		require.NoError(t, err, "PVC should still exist because pod exists")
+	})
+
+	t.Run("deletes truly orphaned PVC when at desired replicas", func(t *testing.T) {
+		// Create an existing pod
+		existingPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pool-good",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test", Image: "test"}},
+			},
+		}
+
+		// Create PVC for the existing pod
+		goodPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-test-pool-good",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPodNameAnnotation: "test-pool-good",
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		// Create a truly orphaned PVC (pod doesn't exist)
+		orphanedPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-test-pool-orphan",
+				Namespace: poolNamespace,
+				Labels: map[string]string{
+					poolLabel: poolNameHash,
+				},
+				Annotations: map[string]string{
+					sandboxcontrollers.WarmPoolPodNameAnnotation: "test-pool-orphan", // Pod doesn't exist!
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPool.UID,
+						Controller: boolPtr(true),
+					},
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		}
+
+		// Scale to exactly 1 replica
+		warmPoolOneReplica := warmPool.DeepCopy()
+		warmPoolOneReplica.Spec.Replicas = 1
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithRuntimeObjects(templateWithPVC, existingPod, goodPVC, orphanedPVC).
+				Build(),
+		}
+
+		ctx := context.Background()
+
+		// Run reconcilePool - current=1, desired=1, orphan cleanup runs
+		err := r.reconcilePool(ctx, warmPoolOneReplica)
+		require.NoError(t, err)
+
+		// Verify orphaned PVC was deleted
+		pvc := &corev1.PersistentVolumeClaim{}
+		err = r.Client.Get(ctx, client.ObjectKey{Namespace: poolNamespace, Name: "data-test-pool-orphan"}, pvc)
+		require.True(t, k8serrors.IsNotFound(err), "truly orphaned PVC should be deleted")
+
+		// Verify good PVC still exists
+		err = r.Client.Get(ctx, client.ObjectKey{Namespace: poolNamespace, Name: "data-test-pool-good"}, pvc)
+		require.NoError(t, err, "PVC with existing pod should not be deleted")
+	})
 }

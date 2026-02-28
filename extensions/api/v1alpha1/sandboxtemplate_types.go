@@ -54,6 +54,16 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:validation:Required
 	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 
+	// VolumeClaimTemplates is a list of claims that pods created from this template
+	// are allowed to reference. When a SandboxClaim or SandboxWarmPool creates a sandbox
+	// from this template, PVCs will be created from these templates.
+	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
+	// +optional
+	// +kubebuilder:validation:Optional
+	// +listType=atomic
+	VolumeClaimTemplates []sandboxv1alpha1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
+
 	// NetworkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template.
 	// NOTE: This is a restricted subset of the standard Kubernetes NetworkPolicySpec.

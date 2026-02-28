@@ -336,7 +336,9 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 	}
 }
 
-// tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
+// tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool.
+// It also adopts the PVCs that the warm pool pod uses, so they aren't orphaned
+// and don't need to be recreated by the Sandbox controller.
 func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
@@ -416,6 +418,59 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	return pod, nil
 }
 
+// transferPVCOwnership transfers PVC ownership from the SandboxWarmPool to the
+// Sandbox and removes warm pool labels. This must be called after the Sandbox
+// is created so it has a UID.
+func (r *SandboxClaimReconciler) transferPVCOwnership(ctx context.Context, sandbox *v1alpha1.Sandbox, pod *corev1.Pod) error {
+	log := log.FromContext(ctx)
+
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+
+		pvcName := volume.PersistentVolumeClaim.ClaimName
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: pvcName}, pvc); err != nil {
+			if k8errors.IsNotFound(err) {
+				log.Info("PVC not found, skipping ownership transfer", "pvc", pvcName)
+				continue
+			}
+			return fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
+		}
+
+		// Only transfer PVCs that came from the warm pool
+		if pvc.Annotations[sandboxcontrollers.WarmPoolPVCAnnotation] != "true" {
+			continue
+		}
+
+		// Remove warm pool labels
+		delete(pvc.Labels, poolLabel)
+		delete(pvc.Labels, sandboxTemplateRefHash)
+
+		// Remove warm pool owner ref and set sandbox as owner
+		var filteredOwnerRefs []metav1.OwnerReference
+		for _, ref := range pvc.OwnerReferences {
+			if ref.Kind != "SandboxWarmPool" {
+				filteredOwnerRefs = append(filteredOwnerRefs, ref)
+			}
+		}
+		pvc.OwnerReferences = filteredOwnerRefs
+
+		if err := controllerutil.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+			return fmt.Errorf("failed to set controller reference for PVC %s: %w", pvcName, err)
+		}
+
+		if err := r.Update(ctx, pvc); err != nil {
+			return fmt.Errorf("failed to transfer PVC %s ownership: %w", pvcName, err)
+		}
+
+		log.Info("Transferred PVC ownership to sandbox", "pvc", pvcName, "sandbox", sandbox.Name)
+	}
+
+	return nil
+}
+
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 
@@ -441,6 +496,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
+
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas
@@ -469,7 +525,17 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		return nil, adoptErr
 	}
 
+	// Always copy volumeClaimTemplates for visibility and pod recreation support
+	if len(template.Spec.VolumeClaimTemplates) > 0 {
+		sandbox.Spec.VolumeClaimTemplates = make([]sandboxv1alpha1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
+		for i, vct := range template.Spec.VolumeClaimTemplates {
+			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
+		}
+	}
+
 	if adoptedPod != nil {
+		// Pod was adopted from warm pool - store the pod name so the Sandbox
+		// controller uses the correct PVC names (based on original pod name).
 		logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
@@ -484,6 +550,15 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	logger.Info("Created sandbox for claim", "claim", claim.Name)
+
+	// Transfer PVC ownership from the warm pool to the sandbox now that
+	// the Sandbox has been created and has a UID.
+	if adoptedPod != nil {
+		if err := r.transferPVCOwnership(ctx, sandbox, adoptedPod); err != nil {
+			logger.Error(err, "Failed to transfer PVC ownership to sandbox")
+			return sandbox, err
+		}
+	}
 
 	if r.Recorder != nil {
 		r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxProvisioned", fmt.Sprintf("Created Sandbox %q", sandbox.Name))

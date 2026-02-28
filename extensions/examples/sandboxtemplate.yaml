@@ -22,3 +22,18 @@ spec:
         ports:
         - containerPort: 8888
           protocol: TCP
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  # volumeClaimTemplates creates persistent storage for each sandbox.
+  # When used with SandboxWarmPool, PVCs are pre-provisioned with warm pods.
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+      # Uncomment to specify a StorageClass:
+      # storageClassName: standard

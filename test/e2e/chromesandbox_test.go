@@ -62,6 +62,14 @@ func (s *AtomicTimeDuration) String() string {
 	return d.String()
 }
 
+// String returns a safe string representation of ChromeSandboxMetrics,
+// reading all fields through their atomic accessors to avoid data races.
+func (m *ChromeSandboxMetrics) String() string {
+	return fmt.Sprintf("{SandboxReady:%s PodCreated:%s PodScheduled:%s PodRunning:%s PodReady:%s ChromeReady:%s Total:%s}",
+		m.SandboxReady.String(), m.PodCreated.String(), m.PodScheduled.String(),
+		m.PodRunning.String(), m.PodReady.String(), m.ChromeReady.String(), m.Total.String())
+}
+
 // ChromeSandboxMetrics holds timing measurements for the chrome sandbox startup.
 type ChromeSandboxMetrics struct {
 	SandboxReady AtomicTimeDuration // Time for sandbox to become ready
@@ -96,7 +104,7 @@ func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
 // it also measures how long it takes for Chrome to start serving the CDP protocol.
 func TestRunChromeSandbox(t *testing.T) {
 	metrics := runChromeSandbox(framework.NewTestContext(t))
-	t.Logf("Metrics: %+v", metrics)
+	t.Logf("Metrics: %s", metrics)
 }
 
 // BenchmarkChromeSandboxStartup measures the time for Chrome to start in a sandbox.

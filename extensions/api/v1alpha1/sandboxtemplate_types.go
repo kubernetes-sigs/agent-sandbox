@@ -58,6 +58,7 @@ type SandboxTemplateSpec struct {
 	// are allowed to reference. When a SandboxClaim or SandboxWarmPool creates a sandbox
 	// from this template, PVCs will be created from these templates.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
 	// +optional
 	// +kubebuilder:validation:Optional
 	// +listType=atomic

@@ -17,7 +17,6 @@ It handles lifecycle management (claiming, waiting) and interaction (execution,
 file I/O) with the sandbox environment, including optional OpenTelemetry tracing.
 """
 
-import json
 import os
 import sys
 import time
@@ -106,6 +105,8 @@ class SandboxClient:
         sandbox_ready_timeout: int = 180,
         gateway_ready_timeout: int = 180,
         port_forward_ready_timeout: int = 30,
+        api_ready_timeout: float = 15.0,
+        api_probe_interval: float = 0.5,
         enable_tracing: bool = False,
         trace_service_name: str = "sandbox-client",
         claim_name: str | None = None,
@@ -133,6 +134,8 @@ class SandboxClient:
         self.sandbox_ready_timeout = sandbox_ready_timeout
         self.gateway_ready_timeout = gateway_ready_timeout
         self.port_forward_ready_timeout = port_forward_ready_timeout
+        self.api_ready_timeout = api_ready_timeout
+        self.api_probe_interval = api_probe_interval
         self.delete_on_exit = delete_on_exit
         self._custom_claim_name = claim_name
 
@@ -491,6 +494,54 @@ class SandboxClient:
                 f" an IP within {self.gateway_ready_timeout} seconds."
             )
 
+    @trace_span("wait_for_api_ready")
+    def _wait_for_api_ready(self):
+        """Wait until the configured API URL is DNS-resolvable and HTTP-reachable."""
+        if not self.base_url:
+            raise RuntimeError("Cannot wait for API; base_url is not configured.")
+
+        parsed_url = urllib.parse.urlparse(self.base_url)
+        host = parsed_url.hostname
+        if not host:
+            raise RuntimeError(f"Invalid base URL, missing host: '{self.base_url}'")
+
+        port = parsed_url.port
+        if port is None:
+            port = 443 if parsed_url.scheme == "https" else 80
+
+        deadline = time.monotonic() + self.api_ready_timeout
+        last_error: Exception | None = None
+
+        logging.info(f"Waiting for sandbox API reachability at '{self.base_url}'...")
+
+        while time.monotonic() < deadline:
+            try:
+                socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                response = requests.get(
+                    self.base_url,
+                    timeout=1.5,
+                    allow_redirects=False,
+                )
+                if response.status_code < 500:
+                    logging.info(
+                        f"Sandbox API is reachable at '{self.base_url}' "
+                        f"(status {response.status_code})."
+                    )
+                    return
+                last_error = RuntimeError(
+                    f"Received HTTP {response.status_code} from sandbox API."
+                )
+            except (socket.gaierror, requests.exceptions.RequestException) as e:
+                last_error = e
+
+            time.sleep(self.api_probe_interval)
+
+        self.__exit__(None, None, None)
+        raise TimeoutError(
+            f"Sandbox API '{self.base_url}' did not become reachable within "
+            f"{self.api_ready_timeout} seconds. Last error: {last_error}"
+        )
+
     def __enter__(self) -> 'SandboxClient':
         trace_context_str = ""
         # We can't use the "with trace..." context management. This is the equivalent.
@@ -515,6 +566,7 @@ class SandboxClient:
             # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)
             self._start_and_wait_for_port_forward()
 
+        self._wait_for_api_ready()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

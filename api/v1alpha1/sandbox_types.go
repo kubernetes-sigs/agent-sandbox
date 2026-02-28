@@ -25,8 +25,15 @@ type ConditionType string
 func (c ConditionType) String() string { return string(c) }
 
 const (
+	// DefaultProgressDeadlineSeconds is the default maximum time (10 minutes) for a Sandbox to reach
+	// the Ready state.
+	DefaultProgressDeadlineSeconds int32 = 600
+
 	// SandboxConditionReady indicates readiness for Sandbox
 	SandboxConditionReady ConditionType = "Ready"
+
+	// SandboxReasonDeadlineExceeded indicates the sandbox failed to become ready within the deadline.
+	SandboxReasonDeadlineExceeded = "ProgressDeadlineExceeded"
 
 	// SandboxReasonExpired indicates expired state for Sandbox
 	SandboxReasonExpired = "SandboxExpired"
@@ -135,6 +142,14 @@ const (
 
 // Lifecycle defines the lifecycle management for the Sandbox.
 type Lifecycle struct {
+
+	// ProgressDeadlineSeconds is the maximum time in seconds for a Sandbox to become ready.
+	// Defaults to 600 seconds.
+	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
+
 	// ShutdownTime is the absolute time when the sandbox expires.
 	// +kubebuilder:validation:Format="date-time"
 	// +optional

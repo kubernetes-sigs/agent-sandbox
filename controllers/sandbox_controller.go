@@ -45,6 +45,9 @@ const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
+	SandboxClaimMetricRecorded  = "agents.x-k8s.io/sandboxclaim-metric-recorded"
+	ReconcilerError             = "ReconcilerError"
+	TemplateNotFound            = "TemplateNotFound"
 )
 
 var (

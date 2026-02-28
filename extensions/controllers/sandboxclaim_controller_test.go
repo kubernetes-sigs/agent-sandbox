@@ -23,11 +23,13 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -884,6 +886,143 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 						t.Errorf("expected no pod name annotation but found one")
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestRecordCreationLatencyMetric(t *testing.T) {
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	testCases := []struct {
+		name                 string
+		claim                *extensionsv1alpha1.SandboxClaim
+		oldStatus            *extensionsv1alpha1.SandboxClaimStatus
+		sandbox              *sandboxv1alpha1.Sandbox
+		reconcileErr         error
+		claimExpired         bool
+		expectedObservations int
+	}{
+		{
+			name: "records success on first ready transition",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "ok", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations: 1,
+		},
+		{
+			name: "ignores success if already recorded via annotation",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "already-recorded",
+					Annotations: map[string]string{sandboxcontrollers.SandboxClaimMetricRecorded: "true"},
+				},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations: 0,
+		},
+		{
+			name: "ignores success if status was already ready in previous loop (race condition fix)",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "race", CreationTimestamp: pastTime},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus: &extensionsv1alpha1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+			expectedObservations: 0,
+		},
+		{
+			name: "records failure on terminal API error (Forbidden)",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "forbidden", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "Forbidden"}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			reconcileErr:         k8errors.NewForbidden(schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"}, "name", fmt.Errorf("denied")),
+			expectedObservations: 1,
+		},
+		{
+			name: "records failure on terminal expiration",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "expired", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ClaimExpired"}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			claimExpired:         true,
+			expectedObservations: 1,
+		},
+		{
+			name: "records failure on TemplateNotFound status reason",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "tpl-not-found", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: sandboxcontrollers.TemplateNotFound}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations: 1,
+		},
+		{
+			name: "ignores non-terminal reconciler errors (e.g. timeout)",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError"}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			reconcileErr:         fmt.Errorf("api timeout"),
+			expectedObservations: 0,
+		},
+		{
+			name: "uses unknown launch type when sandbox is nil during failure",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "unknown-fail", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: sandboxcontrollers.TemplateNotFound}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			sandbox:              nil,
+			expectedObservations: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset the metrics registry for a clean test
+			asmetrics.ClaimStartupLatency.Reset()
+			r := &SandboxClaimReconciler{}
+
+			recorded := r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox, tc.reconcileErr, tc.claimExpired)
+
+			expectRecorded := tc.expectedObservations > 0
+			if recorded != expectRecorded {
+				t.Errorf("expected recorded to be %v, got %v", expectRecorded, recorded)
+			}
+
+			// Verify the metric was observed in the Prometheus registry
+			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
+			if count != tc.expectedObservations {
+				t.Errorf("expected %d observations, got %d", tc.expectedObservations, count)
 			}
 		})
 	}

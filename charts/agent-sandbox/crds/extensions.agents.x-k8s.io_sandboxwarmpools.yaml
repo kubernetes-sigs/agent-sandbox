@@ -1,0 +1,71 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: sandboxwarmpools.extensions.agents.x-k8s.io
+spec:
+  group: extensions.agents.x-k8s.io
+  names:
+    kind: SandboxWarmPool
+    listKind: SandboxWarmPoolList
+    plural: sandboxwarmpools
+    shortNames:
+    - swp
+    singular: sandboxwarmpool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              replicas:
+                format: int32
+                minimum: 0
+                type: integer
+              sandboxTemplateRef:
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - replicas
+            - sandboxTemplateRef
+            type: object
+          status:
+            properties:
+              readyReplicas:
+                format: int32
+                type: integer
+              replicas:
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}

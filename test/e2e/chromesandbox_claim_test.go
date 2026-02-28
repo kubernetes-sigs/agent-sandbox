@@ -138,13 +138,9 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	metrics.ClaimCreated.Set(time.Since(startTime))
 	tc.Logf("Created claim %s", claimName)
 
-
 	// Ensure cleanup happens at the end of this function (not test end)
 	defer func() {
-		if err := tc.ClusterClient.Delete(context.Background(), claim); err != nil {
-			// unexpected, but just log
-			// tc.Logf("Failed to delete claim %s: %v", claimName, err)
-		}
+		_ = tc.ClusterClient.Delete(context.Background(), claim)
 	}()
 
 	// 2. Wait for Claim Ready
@@ -156,9 +152,7 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	metrics.ClaimReady.Set(time.Since(startTime))
 	tc.Logf("Claim %s is ready", claimName)
 
-
 	return metrics
 }
-
 
 var claimCounter int64

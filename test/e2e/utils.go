@@ -47,10 +47,3 @@ func (s *AtomicTimeDuration) String() string {
 	d := time.Duration(v)
 	return d.String()
 }
-
-func maxDuration(a, b time.Duration) time.Duration {
-	if a > b {
-		return a
-	}
-	return b
-}

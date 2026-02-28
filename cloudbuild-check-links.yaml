@@ -1,0 +1,49 @@
+steps:
+  - name: gcr.io/cloud-builders/gsutil
+    allowFailure: true
+    args: ["cp", "gs://${_LYCHEE_CACHE_BUCKET}/.lycheecache", ".lycheecache"]
+
+  - name: "ghcr.io/hugomods/hugo:ci-0.150.0"
+    env:
+      - GOPATH=/workspace/go
+      - GO111MODULE=on
+      - HUGO_ENABLEGITINFO=false
+      - HUGOxPARAMSxgithub_branch=$BRANCH_NAME
+      - HUGOxPARAMSxgithub_repo="https://github.com/${REPO_FULL_NAME}"
+      - HUGOxPARAMSxgithub_project_repo="https://github.com/${REPO_FULL_NAME}"
+    script: |
+      cd site
+      npm ci
+      hugo build -e production --cleanDestinationDir --baseURL /
+
+  - name: lycheeverse/lychee
+    allowFailure: true
+    entrypoint: bash
+    args:
+      - -c
+      - |-
+        set -e
+        echo "fail" > /workspace/lychee_status
+        lychee /workspace/site/public -c /workspace/lychee.toml
+        echo "pass" > /workspace/lychee_status
+
+  - name: gcr.io/cloud-builders/gsutil
+    allowFailure: true
+    args: ["cp", ".lycheecache", "gs://${_LYCHEE_CACHE_BUCKET}/.lycheecache"]
+
+  - name: bash
+    script: |
+      #!/usr/bin/env bash
+      set -e
+      echo "Checking if the link test completed successfully"
+      if [[ "$(cat /workspace/lychee_status)" != "pass" ]]; then
+        echo "The link test failed"
+        exit 1
+      fi
+      echo "The link test completed successfully"
+
+substitutions:
+  _LYCHEE_CACHE_BUCKET: "k8s-staging-agent-sandbox-website-lychee-cache"
+
+options:
+  logging: CLOUD_LOGGING_ONLY

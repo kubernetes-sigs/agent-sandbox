@@ -36,15 +36,6 @@ import (
 type ChromeSandboxClaimMetrics struct {
 	ClaimCreated AtomicTimeDuration // Time for claim to be created
 	ClaimReady   AtomicTimeDuration // Time for claim to become ready
-
-	// Inherited from ChromeSandboxMetrics logic
-	SandboxReady AtomicTimeDuration // Time for sandbox to become ready
-	PodCreated   AtomicTimeDuration // Time for pod to be created
-	PodScheduled AtomicTimeDuration // Time for pod to be scheduled
-	PodRunning   AtomicTimeDuration // Time for pod to become running
-	PodReady     AtomicTimeDuration // Time for pod to become ready
-	ChromeReady  AtomicTimeDuration // Time for chrome to respond on debug port
-	Total        AtomicTimeDuration // Total time from start to chrome ready
 }
 
 // BenchmarkChromeSandboxClaimStartup measures the time for Chrome to start in a sandbox claim.
@@ -118,16 +109,12 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 			// Record metrics
 			b.ReportMetric(metrics.ClaimCreated.Seconds(), "claim-created-sec")
 			b.ReportMetric(metrics.ClaimReady.Seconds(), "claim-ready-sec")
-			b.ReportMetric(metrics.SandboxReady.Seconds(), "sandbox-ready-sec")
-			b.ReportMetric(metrics.PodReady.Seconds(), "pod-ready-sec")
-			b.ReportMetric(metrics.Total.Seconds(), "total-sec")
 		}
 	})
 }
 
 func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName string) *ChromeSandboxClaimMetrics {
 	metrics := &ChromeSandboxClaimMetrics{}
-	startTime := time.Now()
 
 	// Unique name for this claim
 	claimName := fmt.Sprintf("claim-%d-%d", time.Now().UnixNano(), atomic.AddInt64(&claimCounter, 1))
@@ -140,6 +127,8 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 		ShutdownPolicy: extensionsv1alpha1.ShutdownPolicyDelete,
 	}
 
+	startTime := time.Now()
+
 	// 1. Create Claim
 	// Use a background context for cleanup actions, but the test context for operations
 	if err := tc.ClusterClient.Create(tc.Context(), claim); err != nil {
@@ -147,6 +136,8 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 		return metrics
 	}
 	metrics.ClaimCreated.Set(time.Since(startTime))
+	tc.Logf("Created claim %s", claimName)
+
 
 	// Ensure cleanup happens at the end of this function (not test end)
 	defer func() {
@@ -163,62 +154,8 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 		return metrics
 	}
 	metrics.ClaimReady.Set(time.Since(startTime))
-	metrics.Total.Set(time.Since(startTime))
+	tc.Logf("Claim %s is ready", claimName)
 
-	// 3. Populate detailed metrics
-	// We fetch the Sandbox and Pod to get their timestamps
-	sandboxName := claim.Status.SandboxStatus.Name
-	if sandboxName != "" {
-		sandbox := &sandboxv1alpha1.Sandbox{}
-		if err := tc.ClusterClient.Get(tc.Context(), types.NamespacedName{Name: sandboxName, Namespace: namespace}, sandbox); err == nil {
-			for _, cond := range sandbox.Status.Conditions {
-				if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) {
-					metrics.SandboxReady.Set(maxDuration(0, cond.LastTransitionTime.Time.Sub(startTime)))
-				}
-			}
-
-			// Try to find the pod
-			// We check the annotation on the Sandbox that points to the Pod
-			// Or we just guess the pod name if it matches (it might not if adopted)
-			// Sandbox controller usually puts an annotation or we use label selector
-			// extensions/controllers/sandboxwarmpool_controller.go:
-			// pod.Labels[sandboxLabel] = nameHash
-			// The Sandbox status doesn't have PodName field directly globally?
-			// Actually sandbox_types.go doesn't show it.
-			// But the Sandbox controller creates a pod with name = sandbox.Name usually.
-			// If adopted, the pod name is preserved.
-			// The Sandbox object might have `metrics.SandboxPodNameAnnotation` if we look at `sandboxclaim_controller.go`?
-			// `sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name`
-
-			// We need to import "sigs.k8s.io/agent-sandbox/controllers" to get the constant?
-			// Or just use the string "agents.x-k8s.io/sandbox-pod-name"
-
-			podName := sandbox.Annotations["agents.x-k8s.io/sandbox-pod-name"]
-			if podName != "" {
-				pod := &corev1.Pod{}
-				if err := tc.ClusterClient.Get(tc.Context(), types.NamespacedName{Name: podName, Namespace: namespace}, pod); err == nil {
-					// Timestamps relative to startTime
-					metrics.PodCreated.Set(maxDuration(0, pod.CreationTimestamp.Time.Sub(startTime)))
-
-					for _, cond := range pod.Status.Conditions {
-						if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionTrue {
-							metrics.PodScheduled.Set(maxDuration(0, cond.LastTransitionTime.Time.Sub(startTime)))
-						}
-						if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-							metrics.PodReady.Set(maxDuration(0, cond.LastTransitionTime.Time.Sub(startTime)))
-						}
-					}
-					if pod.Status.Phase == corev1.PodRunning {
-						// There isn't a single transition time for "Phase" in status root,
-						// but usually PodReady covers it.
-						// We can use PodReady as proxy or just skip explicit PodRunning if difficult.
-						// chromesandbox_test.go watches for Phase change. We only have snapshot.
-						// We'll skip PodRunning if we can't get it easily from timestamps.
-					}
-				}
-			}
-		}
-	}
 
 	return metrics
 }

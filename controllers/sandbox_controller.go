@@ -537,9 +537,17 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
 	var allErrors error
+	log := log.FromContext(ctx)
+
+	// Determine the pod name to look up
+	podName := sandbox.Name
+	if name := sandbox.Annotations[SandboxPodNameAnnotation]; name != "" {
+		podName = name
+		log.Info("Using tracked pod name from sandbox annotation", "podName", podName)
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
+			Name:      podName,
 			Namespace: sandbox.Namespace,
 		},
 	}

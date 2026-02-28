@@ -20,7 +20,7 @@ steps:
     Method: PodStartupLatency # Warning: this only measures the downstream Pod latency, not the end-to-end Sandbox lifecycle
     Params:
       action: start
-      labelSelector: "app=agent-sandbox-load-test"
+      labelSelector: "group=agent-sandbox-load-test"
 - name: Create Sandboxes
   phases:
   - namespaceRange: {min: 1, max: {{$namespaces}}}
@@ -29,13 +29,15 @@ steps:
     objectBundle:
     - basename: agent-env
       objectTemplatePath: "cluster-loader-sandbox.yaml"
+      templateFillMap:
+        Group: agent-sandbox-load-test
 - name: Wait for Sandboxes to be Ready
   measurements:
   - Identifier: WaitForSandboxes
     Method: WaitForRunningPods
     Params:
       action: start
-      labelSelector: "app=agent-sandbox-load-test"
+      labelSelector: "group=agent-sandbox-load-test"
       desiredPodCount: {{MultiplyInt $replicas $namespaces}}
 - name: Gather Results
   measurements:
@@ -43,7 +45,7 @@ steps:
     Method: PodStartupLatency
     Params:
       action: gather
-      labelSelector: "app=agent-sandbox-load-test"
+      labelSelector: "group=agent-sandbox-load-test"
 - name: Delete Sandboxes
   phases:
   - namespaceRange: {min: 1, max: {{$namespaces}}}

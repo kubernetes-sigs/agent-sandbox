@@ -1,0 +1,77 @@
+{{$rampUpQps := DefaultParam .CL2_RAMP_UP_QPS 10}}
+{{$rampDownQps := DefaultParam .CL2_RAMP_DOWN_QPS 50}}
+{{$replicas := DefaultParam .CL2_REPLICAS 100}} # Keep increasing this to find the max.
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+name: high-volume-test
+automanagedNamespaces: {{$namespaces}}
+
+tuningSets:
+- name: RampUp
+  qpsLoad:
+    qps: {{$rampUpQps}}
+- name: RampDown
+  qpsLoad:
+    qps: {{$rampDownQps}}
+
+steps:
+# 1. Start Metric Measurement
+- name: Start Metric Measurement
+  measurements:
+  - identifier: SchedulingThroughput
+    method: SchedulingThroughput
+    params:
+      action: start
+  # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
+  # once agent_sandbox_creation_latency_ms metrics are available to measure 
+  # end-to-end controller overhead.
+  - identifier: SandboxStartupLatency
+    method: PodStartupLatency # Warning: this only measures the downstream Pod latency, not the end-to-end Sandbox lifecycle
+    params:
+      action: start
+      labelSelector: "group=linear-rampup"
+
+# 2. Increase the Load with Linear Ramp Up with a steady qps of {{$rampUpQps}} / sec.
+- name: Linear Ramp Up
+  phases:
+  - name: Scale Up
+    namespaceRange: {min: 1, max: {{$namespaces}}}
+    tuningSet: RampUp
+    replicasPerNamespace: {{$replicas}}
+    objectBundle:
+    - basename: agent-sandbox
+      identifier: "linear-rampup"
+      objectTemplatePath: ../cluster-loader-sandbox.yaml
+      templateFillMap:
+        Group: linear-rampup
+    waits:
+    - type: Running
+      labelSelector: "group=linear-rampup"
+
+- name: Wait for Prometheus Scrape
+  measurements:
+  - identifier: Wait
+    method: Sleep
+    params:
+      duration: 20s
+
+# 3. Gather Measurement
+- name: Gather Latency Measurement
+  measurements:
+  - identifier: SchedulingThroughput
+    method: SchedulingThroughput
+    params:
+      action: gather
+  - identifier: SandboxStartupLatency
+    method: PodStartupLatency
+    params:
+      action: gather
+
+# 4. Delete Sandboxes to keep the cluster clean
+- name: Cleanup Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: RampDown
+    objectBundle:
+    - basename: agent-sandbox
+      objectTemplatePath: ../cluster-loader-sandbox.yaml

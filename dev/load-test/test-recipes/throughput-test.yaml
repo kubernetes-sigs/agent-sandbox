@@ -1,0 +1,102 @@
+{{$qps := DefaultParam .CL2_THROUGHPUT_QPS 200}} # Keep increasing this to find the max. 
+{{$quickDeleteQps := DefaultParam .CL2_QUICK_DELETE_QPS 100}}
+{{$replicas := DefaultParam .CL2_REPLICAS 12000}}
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+name: throughput-test
+namespace:
+  number: {{$namespaces}}
+  prefix: throughput-test-ns
+  deleteAutomanagedNamespaces: true
+
+tuningSets:
+- name: ConstantRate
+  qpsLoad:
+    qps: {{$qps}}
+- name: QuickFinalDeletion
+  qpsLoad:
+    qps: {{$quickDeleteQps}}
+
+steps:
+- name: Start Throughput Monitor
+  measurements:
+  - Identifier: SchedulingThroughput
+    Method: SchedulingThroughput
+    Params:
+      action: start
+  - Identifier: ReadyPerSecond
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      # Query: We sum the rate of pods entering 'Running' phase.
+      # We use a 5m window to smooth out scraping intervals.
+      query: sum(kube_pod_status_phase{phase="Running", namespace=~"throughput-test-ns-.*"})[5m])
+      metricName: "Throughput"
+      metricVersion: "v1"
+      unit: "pods/s"
+  # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
+  # once agent_sandbox_creation_latency_ms metrics are available to measure 
+  # end-to-end controller overhead.
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: start
+      labelSelector: "group=throughput-test"
+
+
+- name: Create Workload
+  phases:
+  - namespaceRange:
+      min: 1
+      max: {{$namespaces}}
+    replicasPerNamespace: {{$replicas}} # Create high enough number
+    tuningSet: ConstantRate
+    objectBundle:
+    - basename: agent-pod
+      objectTemplatePath: "../cluster-loader-sandbox.yaml"
+      templateFillMap:
+        Group: throughput-test
+
+- name: Wait for all pods to be Running before gathering results
+  measurements:
+  - Identifier: WaitForRunning
+    Method: WaitForRunningPods
+    Params:
+      action: start
+      labelSelector: "group=throughput-test"
+      desiredPodCount: {{MultiplyInt $replicas $namespaces}}
+      timeout: 60m
+
+- name: Wait for Prometheus Scrape
+  measurements:
+  - Identifier: Wait
+    Method: Sleep
+    Params:
+      duration: 30s
+
+- name: Gather Throughput Results
+  measurements:
+  - Identifier: SchedulingThroughput
+    Method: SchedulingThroughput
+    Params:
+      action: gather
+  - Identifier: ReadyPerSecond
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
+      labelSelector: "group=throughput-test"
+
+- name: Delete Sandboxes
+  phases:
+  - namespaceRange:
+      min: 1
+      max: {{$namespaces}}
+    replicasPerNamespace: 0
+    tuningSet: QuickFinalDeletion
+    objectBundle:
+    - basename: agent-pod
+      objectTemplatePath: "../cluster-loader-sandbox.yaml"
+      

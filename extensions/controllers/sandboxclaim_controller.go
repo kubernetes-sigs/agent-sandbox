@@ -451,6 +451,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		automount := false
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
+	// Default RuntimeClassName to "gvisor" if not specified to ensure secure isolation.
+	// If the template specifies a runtime (e.g. "kata"), we respect it.
+	if sandbox.Spec.PodTemplate.Spec.RuntimeClassName == nil || *sandbox.Spec.PodTemplate.Spec.RuntimeClassName == "" {
+		gvisor := "gvisor"
+		sandbox.Spec.PodTemplate.Spec.RuntimeClassName = &gvisor
+	}
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 	}

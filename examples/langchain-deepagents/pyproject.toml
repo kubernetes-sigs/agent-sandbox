@@ -1,0 +1,30 @@
+[project]
+name = "langchain-deepagents-example"
+version = "0.1.0"
+description = "LangChain DeepAgents example with agent-sandbox backend"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-agent-sandbox",
+    "deepagents>=0.3.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["langchain-anthropic>=0.3.0"]
+openai = ["langchain-openai>=0.3.0"]
+google = ["langchain-google-genai>=2.0.0"]
+all = [
+    "langchain-anthropic>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+]
+test = ["pytest>=7.0"]
+
+[tool.uv.sources]
+langchain-agent-sandbox = { path = "../../clients/python/langchain-agent-sandbox", editable = true }
+k8s-agent-sandbox = { path = "../../clients/python/agentic-sandbox-client", editable = true }
+
+[dependency-groups]
+dev = [
+    "langchain-anthropic>=0.3.0",
+    "pytest>=7.0",
+]

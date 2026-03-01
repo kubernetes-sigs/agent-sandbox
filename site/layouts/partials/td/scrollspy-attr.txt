@@ -1,0 +1,20 @@
+{{/*
+
+Ensure that the value of `data-bs-target` is a selector to an element that will
+always exist, otherwise ScrollSpy will scan the full page body, and this can
+cause problems -- see
+https://github.com/google/docsy/issues/2328#issuecomment-3538869206.
+
+*/ -}}
+
+{{ if not (.Param "ui.scrollSpy.disable") -}}
+  {{ $rootMargin := .Param "ui.scrollSpy.rootMargin" | default "0px 0px -10%" -}}
+  {{/* Note that we tried `data-bs-smooth-scroll="true"`, but it breaks browser URL updates.
+       For details, see https://github.com/google/docsy/pull/2291 */ -}}
+  {{ $attr := slice
+      ` data-bs-spy="scroll"`
+      ` data-bs-target=".td-toc"`
+      (printf ` data-bs-root-margin="%s"` $rootMargin)
+  -}}
+  {{ delimit $attr "" -}}
+{{ end -}}

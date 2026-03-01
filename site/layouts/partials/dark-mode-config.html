@@ -1,0 +1,51 @@
+{{/* Helper partial to get dark mode configuration with backward compatibility */ -}}
+
+{{/* Initialize to config defaults */}}
+{{ $darkModeConfig := dict "enable" false "showMenu" false -}}
+{{ $ui := site.Params.ui -}}
+{{ $menuConfig := $ui.showLightDarkModeMenu -}}
+
+{{ if eq $menuConfig "enable-only (experimental)" -}}
+  {{ warnidf "experimental-dark-mode-config" (printf "%s %s %s"
+    "Site config 'params.ui.showLightDarkModeMenu' is using 'enable-only (experimental)' mode."
+    "For details, see "
+    "https://www.docsy.dev/docs/content/lookandfeel/#lightdark-mode-menu"
+  ) -}}
+  {{ $darkModeConfig = dict "enable" true "showMenu" false -}}
+{{ else if $menuConfig -}}
+  {{ $darkModeConfig = dict "enable" true "showMenu" true -}}
+{{/* else not $menuConfig,
+  fallthrough and use defaults */ -}}
+{{ end -}}
+
+
+{{/* The code below is unreachable atm. Keep it here for future reference. */}}
+{{/* Skip-start ================================================================= */}}
+{{ if false -}}
+{{ $paramUiDarkMode := $ui.darkMode -}}
+
+{{/* Check for deprecated showLightDarkModeMenu */ -}}
+{{ if ne $menuConfig nil -}}
+  {{ warnidf "deprecated-showLightDarkModeMenu" (printf
+    "%s %s %s"
+    "Site config 'params.ui.showLightDarkModeMenu' is deprecated:"
+    "use 'params.ui.darkMode.showMenu' or 'params.ui.darkMode.enable'. For details, see"
+    "https://www.docsy.dev/docs/content/lookandfeel/#lightdark-mode-menu"
+  ) -}}
+{{ else if eq $paramUiDarkMode true -}}
+  {{/* Shorthand */ -}}
+  {{ $darkModeConfig = dict "enable" true "showMenu" true -}}
+{{ else if $paramUiDarkMode -}}
+  {{/* Use new configuration structure */ -}}
+  {{ $showMenu := $paramUiDarkMode.showMenu -}}
+  {{ $enable := $paramUiDarkMode.enable -}}
+  {{/* showMenu implies enable when not explicitly disabled */ -}}
+  {{ if and $showMenu (ne $enable false) -}}
+    {{ $enable = true -}}
+  {{ end -}}
+  {{ $darkModeConfig = dict "enable" $enable "showMenu" $showMenu -}}
+{{ end -}}
+{{ end -}}
+{{/* Skip-end ================================================================= */}}
+
+{{ return $darkModeConfig -}}

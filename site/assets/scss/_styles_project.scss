@@ -17,12 +17,31 @@ footer {
 }
 
 .td-overlay--dark::after {
-  background-color: rgba(33, 61, 122, 0.6);
+  background-color: #000000;
+  background-image: radial-gradient(
+      circle at 25% -50px,
+      #8800d6 0%,
+      transparent 55%
+    ),
+    radial-gradient(circle at 75% -40px, #cd0663 0%, transparent 55%),
+    radial-gradient(circle at 50% -30px, #af0eae 0%, transparent 30%);;
+
+  /* Ensure full coverage */
+  min-height: 100vh;
+  width: 100%;
+  background-repeat: no-repeat;
 }
+
+
 
 #main_navbar {
   justify-content: end;
   padding-right: 16px;
+}
+
+.navbar-bg-onscroll {
+  background-color: $black !important;
+  opacity: inherit;
 }
 
 .row > * {
@@ -38,9 +57,10 @@ footer {
 // --------------------------------------------------
 .td-navbar {
   min-height: auto;
+  background-color: $dark;
 
   .navbar-brand {
-    margin: 0;
+    margin: 0 1rem;
     padding: 0;
 
     .text-uppercase {
@@ -70,11 +90,31 @@ footer {
 
   .navbar-nav {
     @include media-breakpoint-down(md) {
-      font-size: .875rem;
+      font-size: 0.875rem;
       .dropdown {
         min-width: inherit;
       }
     }
+  }
+}
+
+.td-section {
+  background-color: $black;
+  background-image: radial-gradient(
+      circle at 25% -40%,
+      #3c005f 0%,
+      transparent 45%
+    ),
+    radial-gradient(circle at 75% -40%, #5e0032 0%, transparent 45%);
+  color: $white;
+
+  .navbar {
+    background-color: transparent;
+  }
+
+  .navbar-bg-onscroll {
+    background-color: $black !important;
+    opacity: inherit;
   }
 }
 
@@ -92,13 +132,12 @@ footer {
 
 .td-sidebar-toc {
   @supports (position: sticky) {
-      position: sticky;
-      top: 60px;
-      height: calc(100vh - 120px);
-      overflow-y: auto;
+    position: sticky;
+    top: 60px;
+    height: calc(100vh - 120px);
+    overflow-y: auto;
   }
 }
-
 
 // --------------------------------------------------
 // 404 page
@@ -169,47 +208,320 @@ figcaption {
   }
 }
 
-nav.foldable-nav .ul-1 .with-child>label:hover:before {
+nav.foldable-nav .ul-1 .with-child > label:hover:before {
   transform: none;
 }
 
-nav.foldable-nav .ul-1 .with-child>input:checked~label:hover:before {
+nav.foldable-nav .ul-1 .with-child > input:checked ~ label:hover:before {
   transform: rotate(90deg) !important;
 }
 
 div.feature-state-notice {
-    background-color: #daeaf9;
-    border-radius: 0.75rem;
-    padding: 1rem;
-    margin-bottom: 1em;
+  background-color: #daeaf9;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 1em;
 
-    font-size: 1.2em;
+  font-size: 1.2em;
 
-    > .feature-state-name::before {
-      content: 'ⓘ  ';
-      color: #326ce5; // Kubernetes blue
-    }
-    > .feature-state-name {
-      display: inline-block;
-      font-size: 0.95em;
-      font-weight: bold;
-      color: #000;
-    }
-
-    code {
-      color: #000;
-      font-size: 1em;
-      background-color: #daeaf9;
-    }
-
-    margin-right: 2em;
-    max-width: 80%;
-
-    &.feature-deprecated {
-      > .feature-state-name::before {
-        color: #ed6a5a;
-      }
-
-      background-color: #fbe1de;
-    }
+  > .feature-state-name::before {
+    content: "ⓘ  ";
+    color: #326ce5; // Kubernetes blue
   }
+  > .feature-state-name {
+    display: inline-block;
+    font-size: 0.95em;
+    font-weight: bold;
+    color: #000;
+  }
+
+  code {
+    color: #000;
+    font-size: 1em;
+    background-color: #daeaf9;
+  }
+
+  margin-right: 2em;
+  max-width: 80%;
+
+  &.feature-deprecated {
+    > .feature-state-name::before {
+      color: #ed6a5a;
+    }
+
+    background-color: #fbe1de;
+  }
+}
+
+.mx-auto > .container {
+  display: flex;
+  flex-direction: row;
+}
+
+.link-card {
+  all: unset;
+  flex: 1 1 0;
+  border: 1px solid;
+  border-radius: 2rem;
+  padding: 4rem;
+  margin: 2rem;
+}
+
+@media only screen and (max-width: 800px) {
+  .mx-auto > .container {
+    flex-direction: column;
+  }
+
+  .link-card {
+    all: unset;
+    flex: 1 1 0;
+    border: 1px solid;
+    border-radius: 2rem;
+    padding: 2rem;
+    margin: 1rem;
+  }
+}
+
+.link-card:hover {
+  cursor: pointer;
+}
+
+.link-card > .title {
+  font-size: 2rem;
+  font-weight: 400;
+}
+
+.link-card > .subtitle {
+  font-size: 1rem;
+  font-weight: 100;
+}
+
+.info-container {
+  padding-top: 4rem;
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  gap: 2rem;
+}
+
+@media only screen and (max-width: 800px) {
+  .info-container {
+    padding-top: 2rem;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 2rem;
+  }
+}
+
+.info-card {
+  flex: 1 1 0;
+  gap: 2rem;
+}
+
+.info-card > .title {
+  font-size: 2.5rem;
+  font-weight: 400;
+}
+
+.info-card > .description {
+  font-size: 1.5rem;
+  font-weight: 100;
+}
+
+
+.video-card {
+  height: 400px;
+  border: 1px solid;
+  border-radius: 50px;
+  margin: 4rem 2rem;
+  justify-content: center;
+  align-items: center;
+}
+
+.custom-gradient {
+  /* We stack two gradients on top of a black background.
+        1. Purple starting at Top-Left, fading out.
+        2. Red starting at Top-Right, fading out.
+        The bottom naturally remains black where the gradients fade to transparent.
+    */
+  background-color: #000000;
+  background-image: radial-gradient(
+      circle at top left,
+      #5d0193 0%,
+      transparent 65%
+    ),
+    radial-gradient(circle at top right, #aa014c 0%, transparent 65%);
+
+  /* Ensure full coverage */
+  min-height: 100vh;
+  width: 100%;
+  background-repeat: no-repeat;
+}
+
+.section-index .entry {
+  border: 1px solid;
+  border-radius: 2rem;
+  margin: 1rem 0;
+  padding: 2rem;
+}
+
+@media (min-width: 768px) {
+    .td-section .td-navbar {
+        position: static;
+        top: 0;
+        width: 100%;
+    }
+}
+
+@media (min-width: 768px) {
+    .td-section .td-404 main, .td-section .td-main main {
+        padding-top: 1rem;
+    }
+}
+
+.td-section .col-12 {
+    flex: 0 0 auto;
+    padding: 0 2rem;
+    width: 100%;
+}
+
+@media (min-width: 768px) {
+    .td-section .ps-md-5 {
+        padding-left: 8rem !important;
+        padding-right: 8rem !important;
+    }
+}
+
+@media (min-width: 1200px) {
+    .td-section .col-xl-8 {
+        padding-left: 16rem !important;
+        padding-right: 16rem !important;
+    }
+}
+
+.td-content p code {
+  color: gold;
+}
+
+.td-content .highlight pre {
+    margin: 0;
+    background-color: #111 !important;
+    padding: 2rem 1rem;
+    border-radius: 1rem;
+    border: solid #222;
+}
+
+.td-content pre > code {
+    background-color: inherit !important;
+    padding: 0;
+    margin: 0;
+    font-size: 100%;
+    text-shadow: none;
+    word-break: normal;
+    white-space: pre;
+    border: 0;
+    color: gold;
+}
+
+.language-css .token.string, .style .token.string, .token.entity, .token.operator, .token.url {
+    color: #9a6e3a;
+    background: inherit !important;
+}
+
+.td-content p code, .td-content li > code, .td-content table code {
+    color: gold;
+    padding: 0.2em 0.4em;
+    margin: 0;
+    font-size: 85%;
+    word-break: normal;
+    background-color: #111;
+    border-radius: 0.375rem;
+}
+
+.td-page-meta__lastmod {
+  color: #fff !important;
+  padding-bottom: 2rem;
+}
+
+.td-page-meta__lastmod a {
+  color: #fff !important;
+  text-decoration: underline;
+}
+
+.section-index .simple-list-item {
+  padding-bottom: 1rem;
+}
+
+.section-index .simple-list .simple-list-item .title a {
+  color: #bc3fff;
+  text-decoration: underline;
+}
+
+.section-index .simple-list-item .description {
+  font-size: 1.5rem;
+  font-weight: 100;
+}
+
+.section-index .simple-list-item .description a {
+  color: #eee;
+  text-decoration: underline;
+}
+
+.td-content a {
+  color: #bc3fff;
+  text-decoration: underline;
+}
+
+.section-index .list {
+  margin-top: 4rem;
+  display: grid;
+  align-items: stretch;
+  grid-template-columns: 1fr;
+  gap: 3rem;
+}
+
+@media (min-width: 1200px) {
+  .section-index .list {
+    margin-top: 4rem;
+    display: grid;
+    align-items: stretch;
+    grid-template-columns: 1fr 1fr;
+    gap: 3rem;
+  }
+}
+
+.section-index .list .entry {
+  padding: 4rem 3rem 6rem;
+  margin: 0;
+}
+
+.section-index .list .entry a {
+  text-decoration: none;
+}
+
+.section-index .list .entry .title {
+  color: #bc3fff;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.section-index .list .entry .description {
+  color: #eee;
+  font-size: 2rem;
+}
+
+
+@media (min-width: 768px) {
+  .section-index .list .entry .title {
+    color: #bc3fff;
+    font-size: 2rem;
+    font-weight: 700;
+  }
+
+  .section-index .list .entry .description {
+    color: #eee;
+    font-size: 3.5rem;
+  }
+
+}

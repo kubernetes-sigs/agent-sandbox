@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"reflect"
 	"sort"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -381,11 +383,10 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		return nil, nil
 	}
 
-	// Sort pods using podutils.ByLogging to select the best available pod.
-	sort.Sort(podutils.ByLogging(candidates))
-
-	// Get the first available pod
-	pod := candidates[0]
+	// Instead of deterministic sorting which causes thundering herd conflicts when scaling,
+	// we randomly select a candidate.
+	randomIndex := rand.Intn(len(candidates))
+	pod := candidates[randomIndex]
 	log.Info("Adopting pod from warm pool", "pod", pod.Name)
 
 	// Remove the pool labels
@@ -543,6 +544,7 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&sandboxv1alpha1.Sandbox{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 300}).
 		Complete(r)
 }
 

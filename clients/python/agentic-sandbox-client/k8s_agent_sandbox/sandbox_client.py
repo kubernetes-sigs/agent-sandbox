@@ -72,6 +72,181 @@ class FileEntry(BaseModel):
     mod_time: float # Last modification time of the file. (POSIX timestamp)
 
 
+class CoreExecution:
+    """
+    Handles execution of commands within the sandbox.
+    """
+    def __init__(self, sandbox: "Sandbox"):
+        self.sandbox = sandbox
+
+    @property
+    def tracer(self):
+        return self.sandbox.tracer
+
+    @property
+    def trace_service_name(self):
+        return self.sandbox.trace_service_name
+
+    @trace_span("run")
+    def run(self, command: str, timeout: int = 60) -> ExecutionResult:
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.command", command)
+
+        payload = {"command": command}
+        response = self.sandbox._request(
+            "POST", "execute", json=payload, timeout=timeout)
+
+        response_data = response.json()
+        result = ExecutionResult(**response_data)
+
+        if span.is_recording():
+            span.set_attribute("sandbox.exit_code", result.exit_code)
+        return result
+
+
+class Filesystem:
+    """
+    Handles file operations within the sandbox.
+    """
+    def __init__(self, sandbox: "Sandbox"):
+        self.sandbox = sandbox
+
+    @property
+    def tracer(self):
+        return self.sandbox.tracer
+
+    @property
+    def trace_service_name(self):
+        return self.sandbox.trace_service_name
+
+    @trace_span("write")
+    def write(self, path: str, content: bytes | str, timeout: int = 60):
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+            span.set_attribute("sandbox.file.size", len(content))
+
+        if isinstance(content, str):
+            content = content.encode('utf-8')
+
+        filename = os.path.basename(path)
+        files_payload = {'file': (filename, content)}
+        self.sandbox._request("POST", "upload",
+                      files=files_payload, timeout=timeout)
+        logging.info(f"File '{filename}' uploaded successfully.")
+
+    @trace_span("read")
+    def read(self, path: str, timeout: int = 60) -> bytes:
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+
+        encoded_path = urllib.parse.quote(path, safe='')
+        response = self.sandbox._request(
+            "GET", f"download/{encoded_path}", timeout=timeout)
+        content = response.content
+
+        if span.is_recording():
+            span.set_attribute("sandbox.file.size", len(content))
+
+        return content
+
+    @trace_span("list")
+    def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        encoded_path = urllib.parse.quote(path, safe='')
+        response = self.sandbox._request("GET", f"list/{encoded_path}", timeout=timeout)
+
+        entries = response.json()
+        if not entries:
+            return []
+
+        file_entries = [FileEntry(**e) for e in entries]
+
+        if span.is_recording():
+            span.set_attribute("sandbox.file.count", len(file_entries))
+        return file_entries
+
+    @trace_span("exists")
+    def exists(self, path: str, timeout: int = 60) -> bool:
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        encoded_path = urllib.parse.quote(path, safe='')
+        response = self.sandbox._request("GET", f"exists/{encoded_path}", timeout=timeout)
+        exists = response.json().get("exists", False)
+        if span.is_recording():
+            span.set_attribute("sandbox.file.exists", exists)
+        return exists
+
+
+class Sandbox:
+    """
+    A persistent handle to a Sandbox resource.
+    """
+    def __init__(
+        self,
+        sandbox_id: str,
+        base_url: str,
+        namespace: str = "default",
+        server_port: int = 8888,
+        enable_tracing: bool = False,
+        trace_service_name: str = "sandbox-client",
+    ):
+        self.id = sandbox_id
+        self.base_url = base_url
+        self.namespace = namespace
+        self.server_port = server_port
+
+        self.trace_service_name = trace_service_name
+        self.tracing_manager = None
+        self.tracer = None
+        if enable_tracing:
+            if not OPENTELEMETRY_AVAILABLE:
+                logging.error(
+                    "OpenTelemetry not installed; skipping tracer initialization.")
+            else:
+                initialize_tracer(service_name=trace_service_name)
+                self.tracing_manager = TracerManager(
+                    service_name=trace_service_name)
+                self.tracer = self.tracing_manager.tracer
+
+        # HTTP session with retries
+        self.session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=0.5,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "POST", "PUT", "DELETE"]
+        )
+        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+
+        self.core = CoreExecution(self)
+        self.files = Filesystem(self)
+
+    def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+        url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+
+        headers = kwargs.get("headers", {})
+        headers["X-Sandbox-ID"] = self.id
+        headers["X-Sandbox-Namespace"] = self.namespace
+        headers["X-Sandbox-Port"] = str(self.server_port)
+        kwargs["headers"] = headers
+
+        try:
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request to gateway router failed: {e}")
+            raise RuntimeError(
+                f"Failed to communicate with the sandbox via the gateway at {url}.") from e
+
+
 class SandboxClient:
     """
     A client for creating and interacting with a stateful Sandbox via a router.

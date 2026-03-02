@@ -1,0 +1,6 @@
+# Run by config/default. CRD bases are generated into config/crd/bases by go generate.
+resources:
+- bases/agents.x-k8s.io_sandboxes.yaml
+- bases/extensions.agents.x-k8s.io_sandboxclaims.yaml
+- bases/extensions.agents.x-k8s.io_sandboxtemplates.yaml
+- bases/extensions.agents.x-k8s.io_sandboxwarmpools.yaml

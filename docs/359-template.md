@@ -19,7 +19,26 @@ Traditional Python SDKs favor the Context Manager pattern `(with Sandbox() as sb
 
 ### API Specification
 
-The SDK architecture is divided into "Engines" to ensure the single-responsibility principle.
+The SDK architecture is divided into three tiers: the Entry Client, the Resource Handle, and the specialized Engines.
+
+#### The EntryPoint (`SandboxClient`)
+
+The `SandboxClient` handles global configuration and acts as a factory for sandboxes. It encapsulates the connection to the control plane.
+
+```python
+class SandboxClient:
+    """Entry point for the SDK. Manages configuration and sandbox creation."""
+    def __init__(self,router_dns: str):
+        self.router_dns = router_dns
+
+    def create_sandbox(self, template: str, namespace: str = "default") -> Sandbox:
+        """Provisions a new sandbox and returns a Resource Handle."""
+        return Sandbox("sandbox_id", self.router_dns, self)
+
+    def get_sandbox(self, sandbox_id: str) -> Sandbox:
+        """Re-attaches to an existing sandbox by ID."""
+        return Sandbox(sandbox_id, self.router_dns, self)
+```
 
 #### The Core Handle (Sandbox)
 
@@ -33,28 +52,32 @@ class Sandbox:
         self.commands = CoreExecution(sandbox_id, router_dns)
         self.files = Filesystem(sandbox_id, router_dns)
 
+    def status(self):
+        """Fetches the current lifecycle state from the manager."""
+        return self._helper.status(self.id)
+        
     def suspend(self):
         """Hibernates the environment; saves memory/disk to CSI snapshots."""
-        return self._manager.suspend(self.id)
+        return self._helper.suspend(self.id)
 
     def resume(self):
         """Wakes the environment; rehydrates from the last snapshot."""
-        return self._manager.resume(self.id)
+        return self._helper.resume(self.id)
 
     def terminate(self):
         """Permanent deletion of all infrastructure and state."""
-        return self._manager.terminate(self.id)
+        return self._helper.terminate(self.id)
 ```
 
 #### Specialized Engines
 
-Engines talk to the Sandbox Router via a stable DNS, using the X-Sandbox-Id header to maintain session persistence.
+Engines talk to the Sandbox Router via a stable DNS, using the `X-Sandbox-Id` header to maintain session persistence.
 
-**CoreExecution (sbx.core)**: Handles run_code and run_cmd.
+*CoreExecution (sbx.core)*: Handles stateless and stateful `run_code` and `run_cmd`.
 
-**FileSystem (sbx.files)**: Handles read, write, and list operations.
+*FileSystem (sbx.files)*: Handles read, write, and list operations on files.
 
-**ProcessSystem (sbx.process)**: Handles the creation and killing of processes inside a Sandbox. 
+*ProcessSystem (sbx.process)*: Handles the creation and killing of processes inside a Sandbox. 
 
 #### Developer Experience (The "Fluent" API)
 

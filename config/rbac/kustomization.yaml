@@ -2,3 +2,5 @@
 resources:
 - rbac.generated.yaml
 - extensions-rbac.generated.yaml
+- service_account.yaml
+- role_binding.yaml

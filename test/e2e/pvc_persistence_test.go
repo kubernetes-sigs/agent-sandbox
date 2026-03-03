@@ -84,9 +84,9 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Reason:             "DependenciesReady",
-					Status:             "True",
-					Type:               "Ready",
+					Reason: "DependenciesReady",
+					Status: "True",
+					Type:   "Ready",
 				},
 			},
 		}),
@@ -125,9 +125,9 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 			LabelSelector: "",
 			Conditions: []metav1.Condition{
 				{
-					Reason:             "DependenciesReady",
-					Status:             "True",
-					Type:               "Ready",
+					Reason: "DependenciesReady",
+					Status: "True",
+					Type:   "Ready",
 				},
 			},
 		}),
@@ -167,9 +167,9 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Reason:             "DependenciesReady",
-					Status:             "True",
-					Type:               "Ready",
+					Reason: "DependenciesReady",
+					Status: "True",
+					Type:   "Ready",
 				},
 			},
 		}),

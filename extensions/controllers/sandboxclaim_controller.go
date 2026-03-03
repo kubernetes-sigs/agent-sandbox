@@ -36,8 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -263,7 +262,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 		if errors.Is(err, ErrTemplateNotFound) {
 			reason = "TemplateNotFound"
 			return metav1.Condition{
-				Type:               string(sandboxv1alpha1.SandboxConditionReady),
+				Type:               string(v1alpha1.SandboxConditionReady),
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            fmt.Sprintf("SandboxTemplate %q not found", claim.Spec.TemplateRef.Name),
@@ -271,7 +270,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 			}
 		}
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            "Error seen: " + err.Error(),
@@ -281,7 +280,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 
 	if isClaimExpired {
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             extensionsv1alpha1.ClaimExpiredReason,
 			Message:            "Claim expired. Sandbox resources deleted.",
@@ -292,7 +291,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	if sandbox == nil {
 		// Only handle genuine missing sandbox here (expired case is handled above)
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             "SandboxMissing",
 			Message:            "Sandbox does not exist",
@@ -303,9 +302,9 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	// Check if Core Controller marked it as Expired
 	if isSandboxExpired(sandbox) {
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
-			Reason:             sandboxv1alpha1.SandboxReasonExpired,
+			Reason:             v1alpha1.SandboxReasonExpired,
 			Message:            "Underlying Sandbox resource has expired independently of the Claim.",
 			ObservedGeneration: claim.Generation,
 		}
@@ -313,13 +312,13 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 
 	// Forward the condition from Sandbox Status
 	for _, condition := range sandbox.Status.Conditions {
-		if condition.Type == string(sandboxv1alpha1.SandboxConditionReady) {
+		if condition.Type == string(v1alpha1.SandboxConditionReady) {
 			return condition
 		}
 	}
 
 	return metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionReady),
+		Type:               string(v1alpha1.SandboxConditionReady),
 		Status:             metav1.ConditionFalse,
 		Reason:             "SandboxNotReady",
 		Message:            "Sandbox is not ready",
@@ -542,7 +541,7 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
-		Owns(&sandboxv1alpha1.Sandbox{}).
+		Owns(&v1alpha1.Sandbox{}).
 		Complete(r)
 }
 
@@ -617,8 +616,8 @@ func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
 // hasExpiredCondition Helper to check if conditions list contains the expired reason
 func hasExpiredCondition(conditions []metav1.Condition) bool {
 	for _, cond := range conditions {
-		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) {
-			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == sandboxv1alpha1.SandboxReasonExpired {
+		if cond.Type == string(v1alpha1.SandboxConditionReady) {
+			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == v1alpha1.SandboxReasonExpired {
 				return true
 			}
 		}

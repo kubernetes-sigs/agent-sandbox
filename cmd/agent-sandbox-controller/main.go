@@ -89,7 +89,7 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 
 	// Initialize Tracing Provider
-	var instrumenter asmetrics.Instrumenter = asmetrics.NewNoOp()
+	var instrumenter = asmetrics.NewNoOp()
 	if enableTracing {
 		var cleanup func()
 		var err error

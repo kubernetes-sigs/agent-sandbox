@@ -731,13 +731,11 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 		expectSandboxCreate bool
 	}{
 		{
-			name: "adopts oldest pod from warm pool",
+			name: "adopts pod from warm pool",
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolPod("pool-pod-1", metav1.Time{Time: metav1.Now().Add(-3600)}, true), // oldest
-				createWarmPoolPod("pool-pod-2", metav1.Time{Time: metav1.Now().Add(-1800)}, true),
-				createWarmPoolPod("pool-pod-3", metav1.Now(), true),
+				createWarmPoolPod("pool-pod-1", metav1.Now(), true),
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "pool-pod-1",
@@ -788,16 +786,14 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			expectSandboxCreate: true,
 		},
 		{
-			name: "prioritizes ready pods",
+			name: "adopts a pod (even if not ready)",
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolPod("not-ready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
-				createWarmPoolPod("middle-ready", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
-				createWarmPoolPod("young-ready", metav1.Now(), true),
+				createWarmPoolPod("not-ready", metav1.Now(), false),
 			},
 			expectPodAdoption:   true,
-			expectedAdoptedPod:  "middle-ready",
+			expectedAdoptedPod:  "not-ready",
 			expectSandboxCreate: true,
 		},
 	}

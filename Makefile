@@ -105,6 +105,7 @@ clean:
 	rm -rf bin/manager
 
 IMG ?= agent-sandbox-controller:latest
+IGNORE_NOT_FOUND ?= false
 
 ##@ Build Dependencies
 
@@ -166,6 +167,27 @@ mv $(1) $(1)-$(3) ;\
 ln -sf $(1)-$(3) $(1)
 endef
 
+##@ Deployment
+
+.PHONY: install
+install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
+
+.PHONY: uninstall
+uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(IGNORE_NOT_FOUND) -f -
+
+.PHONY: deploy
+# `EXTENSIONS=true make deploy` to deploy with Extensions enabled (adds --extensions), matching deploy-kind.
+deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG) \
+	$(if $(filter true,$(EXTENSIONS)),&& $(KUSTOMIZE) edit add patch --path extensions-args.patch.yaml,)
+	$(KUSTOMIZE) build config/default
+	$(if $(filter true,$(EXTENSIONS)),cd config/manager && $(KUSTOMIZE) edit remove patch --path extensions-args.patch.yaml,)
+
+.PHONY: undeploy
+undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(IGNORE_NOT_FOUND) -f -
 
 # VERSION defines the project version for the bundle.
 # Update this value when you upgrade the version of your project.

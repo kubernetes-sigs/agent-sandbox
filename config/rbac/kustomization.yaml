@@ -4,3 +4,4 @@ resources:
 - extensions-rbac.generated.yaml
 - service_account.yaml
 - role_binding.yaml
+- extensions_role_binding.yaml

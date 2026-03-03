@@ -17,11 +17,11 @@ Traditional Python SDKs favor the Context Manager pattern `(with Sandbox() as sb
 5. **Non linear Logic**: Agents often manage multiple sandboxes simultaneously (e.g., a "Researcher" sandbox and a "Coder" sandbox). Nesting `with` blocks for multiple long-lived resources leads to unreadable code and complex error-handling logic.
 
 
-### API Specification
+### 3. API Specification
 
 The SDK architecture is divided into three tiers: the Entry Client, the Resource Handle, and the specialized Engines.
 
-#### The EntryPoint (`SandboxClient`)
+#### 3.1 The EntryPoint (`SandboxClient`)
 
 The `SandboxClient` handles global configuration and acts as a factory for sandboxes. It encapsulates the connection to the control plane.
 
@@ -40,7 +40,7 @@ class SandboxClient:
         return Sandbox(sandbox_id, self.router_dns, self)
 ```
 
-#### The Core Handle (Sandbox)
+#### 3.2 The Core Handle (Sandbox)
 
 The root object manages the state of the resource and holds references to specialized engines.
 
@@ -69,7 +69,7 @@ class Sandbox:
         return self._helper.terminate(self.id)
 ```
 
-#### Specialized Engines
+#### 3.3 Specialized Engines
 
 Engines talk to the Sandbox Router via a stable DNS, using the `X-Sandbox-Id` header to maintain session persistence.
 
@@ -79,7 +79,7 @@ Engines talk to the Sandbox Router via a stable DNS, using the `X-Sandbox-Id` he
 
 *ProcessSystem (sbx.process)*: Handles the creation and killing of processes inside a Sandbox. 
 
-#### Developer Experience (The "Fluent" API)
+#### 3.4 Developer Experience (The "Fluent" API)
 
 The final result is a library that feels like a native extension of the Agent's brain:
 
@@ -101,3 +101,17 @@ sbx.suspend()
 old_sbx = client.get_sandbox("sbx_123")
 old_sbx.resume()
 ```
+
+### 4. Proof Of Concept
+
+https://github.com/kubernetes-sigs/agent-sandbox/pull/365
+
+1. Implemented the changes proposed above. The session to router is initiated as part of Sandbox instance creation.
+2. Updated the test client to support the resource handle way of sandbox creation.
+
+### 5. Scalability
+
+1. In future, if we want to manage the creation and management
+of the Sandboxes via a custom Sandbox manager, we can easily
+integrate that in the `Sandbox` resource handle. 
+2. Sandbox Manager POC: https://github.com/SHRUTI6991/agent-sandbox-initial-playing/tree/two-clients/clients/python/agentic-sandbox-client/sandbox-manager. 

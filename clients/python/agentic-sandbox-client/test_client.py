@@ -61,7 +61,7 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
         print(f"Sandbox created with ID: {sandbox.id}")
 
         print("\n--- Testing Command Execution ---")
-        command_to_run = "echo 'Hello from the sandbox!'"
+        command_to_run = "echo 'Hello from the sandbox shruti!'"
         print(f"Executing command: '{command_to_run}'")
 
         result = sandbox.core.run(command_to_run)
@@ -71,7 +71,7 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
         print(f"Exit Code: {result.exit_code}")
 
         assert result.exit_code == 0
-        assert result.stdout.strip() == "Hello from the sandbox!"
+        assert result.stdout.strip() == "Hello from the sandbox shruti!"
 
         print("\n--- Command Execution Test Passed! ---")
 
@@ -160,6 +160,22 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
         # Restore original method
         sandbox._request = original_request
         print("--- Pydantic Validation Tests Passed ---")
+
+        # Test get_sandbox
+        print("\n--- Testing get_sandbox ---")
+        reattached_sandbox = client.get_sandbox(sandbox.id, namespace=namespace)
+        print(f"Re-attached to sandbox: {reattached_sandbox.id}")
+
+        # Verify it is a separate session/object
+        assert sandbox is not reattached_sandbox, "Expected different Sandbox objects"
+        assert sandbox.session is not reattached_sandbox.session, "Expected different requests.Session objects"
+
+        reattached_result = reattached_sandbox.core.run("echo 'Re-attached'")
+        print(f"Re-attached execution result: {reattached_result.stdout.strip()}")
+        assert reattached_result.exit_code == 0
+        assert reattached_result.stdout.strip() == "Re-attached"
+        reattached_sandbox.close()
+        print("--- get_sandbox Test Passed ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")

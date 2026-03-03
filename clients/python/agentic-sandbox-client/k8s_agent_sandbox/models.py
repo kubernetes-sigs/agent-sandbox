@@ -30,15 +30,15 @@ class FileEntry(BaseModel):
 
 class SandboxRouterConfig(BaseModel):
     """Configuration for connecting to and executing in a Sandbox."""
-    gateway_name: str | None = None
-    gateway_namespace: str = "default"
-    api_url: str | None = None
-    server_port: int = 8888
-    gateway_ready_timeout: int = 180
-    port_forward_ready_timeout: int = 30
+    gateway_name: str | None = None  # Name of the Gateway resource (if using Gateway API).
+    gateway_namespace: str = "default"  # Namespace where the Gateway resource resides.
+    api_url: str | None = None  # Direct URL to the router (overrides discovery).
+    server_port: int = 8888  # Port the sandbox container listens on.
+    gateway_ready_timeout: int = 180  # Timeout in seconds to wait for Gateway IP.
+    port_forward_ready_timeout: int = 30  # Timeout in seconds to wait for port-forward to be ready.
 
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
-    enable_tracing: bool = False
-    trace_service_name: str = "sandbox-client"
+    enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.
+    trace_service_name: str = "sandbox-client"  # Service name used for traces.
     

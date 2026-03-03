@@ -38,12 +38,16 @@ class Sandbox:
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
     ):
+        # Sandbox ID and Namespace instantiation
         self.id = sandbox_id
         self.namespace = namespace
+        
+        # Router initialization
         self.router_config = router_config or SandboxRouterConfig()
-        self.tracer_config = tracer_config or SandboxTracerConfig()
         self.base_url = self.router_config.api_url
-
+        
+        # Tracer initialization
+        self.tracer_config = tracer_config or SandboxTracerConfig()
         self.trace_service_name = self.tracer_config.trace_service_name
         self.tracing_manager = None
         self.tracer = None
@@ -57,7 +61,7 @@ class Sandbox:
                     service_name=self.trace_service_name)
                 self.tracer = self.tracing_manager.tracer
 
-        # HTTP session with retries
+        # The creation of Sandbox starts a session with resuable connection (pooling)
         self.session = requests.Session()
         retries = Retry(
             total=5,
@@ -68,13 +72,16 @@ class Sandbox:
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
+        # Close the port forward on program termination
         self.port_forward_process: subprocess.Popen | None = None
         atexit.register(self.close)
-
-        self.k8s_helper = k8s_helper or K8sHelper()
-
+    
+        # Initialisation of namespaced engines
         self.core = CoreExecution(self)
         self.files = Filesystem(self)
+        
+        # Sandbox Management downstream dependency
+        self.k8s_helper = k8s_helper or K8sHelper()
 
     def close(self):
         """Clean up resources like port-forwarding processes."""

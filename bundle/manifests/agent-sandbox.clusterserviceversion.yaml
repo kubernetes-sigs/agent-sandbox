@@ -1,0 +1,254 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+    createdAt: "2026-03-03T09:20:11Z"
+    operators.operatorframework.io/builder: operator-sdk-v1.42.0
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+  name: agent-sandbox.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - kind: SandboxClaim
+      name: sandboxclaims.extensions.agents.x-k8s.io
+      version: v1alpha1
+    - description: Sandbox is the Schema for the sandboxes API
+      displayName: Sandbox
+      kind: Sandbox
+      name: sandboxes.agents.x-k8s.io
+      version: v1alpha1
+    - kind: SandboxTemplate
+      name: sandboxtemplates.extensions.agents.x-k8s.io
+      version: v1alpha1
+    - kind: SandboxWarmPool
+      name: sandboxwarmpools.extensions.agents.x-k8s.io
+      version: v1alpha1
+  description: Operator to manage the lifecycle of Agent Sandbox
+  displayName: Agent Sandbox Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - persistentvolumeclaims
+          - pods
+          - services
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - agents.x-k8s.io
+          resources:
+          - sandboxes
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - agents.x-k8s.io
+          resources:
+          - sandboxes/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - create
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - agents.x-k8s.io
+          resources:
+          - sandboxes
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - extensions.agents.x-k8s.io
+          resources:
+          - sandboxclaims
+          - sandboxwarmpools
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - extensions.agents.x-k8s.io
+          resources:
+          - sandboxclaims/status
+          - sandboxwarmpools/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - extensions.agents.x-k8s.io
+          resources:
+          - sandboxtemplates
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - networking.k8s.io
+          resources:
+          - networkpolicies
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        serviceAccountName: agent-sandbox-controller
+      deployments:
+      - label:
+          app: agent-sandbox-controller
+          app.kubernetes.io/managed-by: kustomize
+          app.kubernetes.io/name: agent-sandbox-operator
+          control-plane: agent-sandbox-controller
+        name: agent-sandbox-controller
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: agent-sandbox-controller
+              app.kubernetes.io/name: agent-sandbox-operator
+              control-plane: agent-sandbox-controller
+          strategy: {}
+          template:
+            metadata:
+              annotations:
+                kubectl.kubernetes.io/default-container: agent-sandbox-controller
+              labels:
+                app: agent-sandbox-controller
+                app.kubernetes.io/name: agent-sandbox-operator
+                control-plane: agent-sandbox-controller
+            spec:
+              containers:
+              - args:
+                - --leader-elect=true
+                - --extensions
+                image: agent-sandbox-controller:latest
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8081
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                name: agent-sandbox-controller
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: 8081
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 128Mi
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              serviceAccountName: agent-sandbox-controller
+              terminationGracePeriodSeconds: 10
+    strategy: deployment
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - agent-sandbox
+  - sandbox
+  - isolation
+  links:
+  - name: Agent Sandbox
+    url: https://github.com/kubernetes-sigs/agent-sandbox
+  maintainers:
+  - email: eesposit@redhat.com
+    name: Emanuele Giuseppe Esposito
+  maturity: alpha
+  provider:
+    name: Kubernetes SIG Apps
+    url: https://github.com/kubernetes-sigs
+  version: 0.0.0

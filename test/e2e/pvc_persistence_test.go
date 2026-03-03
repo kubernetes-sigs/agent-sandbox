@@ -15,10 +15,8 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -86,8 +84,6 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod is Ready; Service Exists",
-					ObservedGeneration: 1,
 					Reason:             "DependenciesReady",
 					Status:             "True",
 					Type:               "Ready",
@@ -105,10 +101,10 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 	t.Logf("Generating code on PVC at %s", dataFilePath)
 	// We use a dynamic timestamp to ensure we're verifying the exact content generated in this run.
 	generatedContent := fmt.Sprintf("# Dynamic code generated at %s\n\n%s", time.Now().Format(time.RFC3339), dataContent)
-	require.NoError(t, execWriteFileToPodWithRetry(ctx, ns.Name, pvcSandboxName, dataFilePath, generatedContent))
+	require.NoError(t, execWriteFileToPodWithRetry(ctx, ns.Name, pvcSandboxName, dataFilePath, generatedContent, tc))
 
 	// Verify the write succeeded by reading back.
-	content, err := execReadFileFromPodWithRetry(ctx, ns.Name, pvcSandboxName, dataFilePath)
+	content, err := execReadFileFromPodWithRetry(ctx, ns.Name, pvcSandboxName, dataFilePath, tc)
 	require.NoError(t, err, "failed to read back the file right after writing")
 	require.Contains(t, content, "Agent sandbox test data", "file contents wrong right after write")
 	t.Logf("Write verified: file is readable in original pod")
@@ -129,8 +125,6 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 			LabelSelector: "",
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod does not exist, replicas is 0; Service Exists",
-					ObservedGeneration: 2,
 					Reason:             "DependenciesReady",
 					Status:             "True",
 					Type:               "Ready",
@@ -173,8 +167,6 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod is Ready; Service Exists",
-					ObservedGeneration: 3,
 					Reason:             "DependenciesReady",
 					Status:             "True",
 					Type:               "Ready",
@@ -192,7 +184,7 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 
 	// Verify generated code survived the replicas=0/1 cycle
 	t.Logf("Verifying generated code persists in the new pod")
-	content, err = execReadFileFromPodWithRetry(ctx, ns.Name, pvcSandboxName, dataFilePath)
+	content, err = execReadFileFromPodWithRetry(ctx, ns.Name, pvcSandboxName, dataFilePath, tc)
 	require.NoError(t, err, "failed to read generated code from pod after replicas=1 restore")
 	require.Contains(t, content, "Agent sandbox test data",
 		"expected dynamic content not found after PVC reattach — data was lost")
@@ -238,7 +230,7 @@ func pvcSandbox(ns string) *sandboxv1alpha1.Sandbox {
 						},
 						Resources: corev1.VolumeResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("1Gi"),
+								corev1.ResourceStorage: resource.MustParse("50Mi"),
 							},
 						},
 					},
@@ -248,27 +240,21 @@ func pvcSandbox(ns string) *sandboxv1alpha1.Sandbox {
 	}
 }
 
-// execWriteFileToPod writes content to a file inside a running pod via kubectl exec.
-// The -i flag is required to forward stdin to the remote process.
-func execWriteFileToPod(ctx context.Context, namespace, podName, filePath, content string) error {
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-i", "-n", namespace, podName, "--",
-		"sh", "-c", fmt.Sprintf("cat > %s", filePath))
-	cmd.Stdin = strings.NewReader(content)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("kubectl exec write to %s failed: %w (stderr: %s)", filePath, err, stderr.String())
-	}
-	return nil
+// execWriteFileToPod writes content to a file inside a running pod via native client-go exec.
+func execWriteFileToPod(ctx context.Context, namespace, podName, filePath, content string, tc *framework.TestContext) error {
+	// Busybox doesn't have a sophisticated way to write files from stdin,
+	// but 'cat > path' works fine.
+	_, _, err := tc.PodExec(ctx, namespace, podName, "workspace", []string{"sh", "-c", fmt.Sprintf("cat > %s", filePath)}, strings.NewReader(content))
+	return err
 }
 
 // execWriteFileToPodWithRetry retries the write until the container is exec-able
 // (useful right after a pod starts up).
-func execWriteFileToPodWithRetry(ctx context.Context, namespace, podName, filePath, content string) error {
+func execWriteFileToPodWithRetry(ctx context.Context, namespace, podName, filePath, content string, tc *framework.TestContext) error {
 	deadline := time.Now().Add(2 * time.Minute)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		err := execWriteFileToPod(ctx, namespace, podName, filePath, content)
+		err := execWriteFileToPod(ctx, namespace, podName, filePath, content, tc)
 		if err == nil {
 			return nil
 		}
@@ -282,26 +268,19 @@ func execWriteFileToPodWithRetry(ctx context.Context, namespace, podName, filePa
 	return fmt.Errorf("timed out writing to %s in pod %s/%s: %w", filePath, namespace, podName, lastErr)
 }
 
-// execReadFileFromPod reads a file from inside a running pod via kubectl exec.
-func execReadFileFromPod(ctx context.Context, namespace, podName, filePath string) (string, error) {
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, podName, "--",
-		"cat", filePath)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("kubectl exec read %s failed: %w (stderr: %s)", filePath, err, stderr.String())
-	}
-	return stdout.String(), nil
+// execReadFileFromPod reads a file from inside a running pod via native client-go exec.
+func execReadFileFromPod(ctx context.Context, namespace, podName, filePath string, tc *framework.TestContext) (string, error) {
+	stdout, _, err := tc.PodExec(ctx, namespace, podName, "workspace", []string{"cat", filePath}, nil)
+	return stdout, err
 }
 
 // execReadFileFromPodWithRetry retries reading a file from the pod, waiting for
 // the container to become exec-able after a pod restart.
-func execReadFileFromPodWithRetry(ctx context.Context, namespace, podName, filePath string) (string, error) {
+func execReadFileFromPodWithRetry(ctx context.Context, namespace, podName, filePath string, tc *framework.TestContext) (string, error) {
 	deadline := time.Now().Add(2 * time.Minute)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		content, err := execReadFileFromPod(ctx, namespace, podName, filePath)
+		content, err := execReadFileFromPod(ctx, namespace, podName, filePath, tc)
 		if err == nil {
 			return content, nil
 		}

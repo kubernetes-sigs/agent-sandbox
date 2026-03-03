@@ -24,6 +24,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/agent-sandbox/controllers"
@@ -107,6 +108,11 @@ func NewTestContext(t T) *TestContext {
 		t.Fatalf("building HTTP client for rest config: %v", err)
 	}
 
+	clientset, err := kubernetes.NewForConfigAndClient(restConfig, httpClient)
+	if err != nil {
+		t.Fatalf("building kubernetes clientset: %v", err)
+	}
+
 	client, err := client.New(restConfig, client.Options{
 		Scheme:     controllers.Scheme,
 		HTTPClient: httpClient,
@@ -129,6 +135,8 @@ func NewTestContext(t T) *TestContext {
 		T:             t,
 		client:        client,
 		dynamicClient: dynamicClient,
+		clientset:     clientset,
+		restConfig:    restConfig,
 		scheme:        controllers.Scheme,
 		watchSet:      watchSet,
 	}

@@ -1,8 +1,8 @@
 # Agentic Sandbox Client Python
 
 This Python client provides a simple, high-level interface for creating and interacting with
-sandboxes managed by the Agent Sandbox controller. It's designed to be used as a context manager,
-ensuring that sandbox resources are properly created and cleaned up.
+sandboxes managed by the Agent Sandbox controller. It uses a **Resource Handle** pattern,
+allowing for persistent connections to stateful environments.
 
 It supports a **scalable, cloud-native architecture** using Kubernetes Gateways and a specialized
 Router, while maintaining a convenient **Developer Mode** for local testing.
@@ -108,14 +108,22 @@ discovers the Gateway.
 
 ```python
 from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxRouterConfig
 
-# Connect via the GKE Gateway
-with SandboxClient(
-    template_name="python-sandbox-template",
-    gateway_name="external-http-gateway",  # Name of the Gateway resource
-    namespace="default"
-) as sandbox:
-    print(sandbox.run("echo 'Hello from Cloud!'").stdout)
+# Configure connection via the GKE Gateway
+config = SandboxRouterConfig(
+    gateway_name="external-http-gateway",
+    gateway_namespace="default"
+)
+
+client = SandboxClient(config=config)
+
+# Create and use the sandbox
+sandbox = client.create_sandbox("python-sandbox-template", namespace="default")
+try:
+    print(sandbox.core.run("echo 'Hello from Cloud!'").stdout)
+finally:
+    sandbox.terminate()
 ```
 
 ### 2. Developer Mode (Local Tunnel)
@@ -126,41 +134,14 @@ secure tunnel to the Router Service using `kubectl`.
 ```python
 from k8s_agent_sandbox import SandboxClient
 
-# Automatically tunnels to svc/sandbox-router-svc
-with SandboxClient(
-    template_name="python-sandbox-template",
-    namespace="default"
-) as sandbox:
-    print(sandbox.run("echo 'Hello from Local!'").stdout)
-```
+# Default config uses local port-forwarding (Developer Mode)
+client = SandboxClient()
 
-### 3. Advanced / Internal Mode
-
-Use `api_url` to bypass discovery entirely. Useful for:
-
-- **Internal Agents:** Running inside the cluster (connect via K8s DNS).
-- **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.example.com`).
-
-```python
-with SandboxClient(
-    template_name="python-sandbox-template",
-    # Connect directly to a URL
-    api_url="http://sandbox-router-svc.default.svc.cluster.local:8080",
-    namespace="default"
-) as sandbox:
-    sandbox.run("ls -la")
-```
-
-### 4. Custom Ports
-
-If your sandbox runtime listens on a port other than 8888 (e.g., a Node.js app on 3000), specify `server_port`.
-
-```python
-with SandboxClient(
-    template_name="node-sandbox-template",
-    server_port=3000
-) as sandbox:
-    # ...
+sandbox = client.create_sandbox("python-sandbox-template", namespace="default")
+try:
+    print(sandbox.core.run("echo 'Hello from Local!'").stdout)
+finally:
+    sandbox.terminate()
 ```
 
 ## Testing

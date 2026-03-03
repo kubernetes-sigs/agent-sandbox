@@ -17,9 +17,8 @@ import asyncio
 from unittest.mock import MagicMock
 from pydantic import ValidationError
 from k8s_agent_sandbox import SandboxClient
-from k8s_agent_sandbox.sandbox_client import ExecutionResult, FileEntry
-
-POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
+from k8s_agent_sandbox.models import SandboxRouterConfig, SandboxTracerConfig, ExecutionResult, FileEntry
+from k8s_agent_sandbox.sandbox import Sandbox
 
 
 async def main(template_name: str, gateway_name: str | None, api_url: str | None, namespace: str,
@@ -38,136 +37,137 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
     else:
         print("Mode: Local Port-Forward fallback")
 
+    # Create Config objects
+    router_config = SandboxRouterConfig(
+        gateway_name=gateway_name,
+        api_url=api_url,
+        server_port=server_port,
+    )
+    
+    tracer_config = SandboxTracerConfig(
+        enable_tracing=enable_tracing,
+        trace_service_name="sandbox-client-test"
+    )
+
+    client = SandboxClient(
+        config=router_config,
+        tracer_config=tracer_config
+    )
+
+    sandbox: Sandbox | None = None
     try:
-        # Initialize Client with Keyword Arguments for safety
-        with SandboxClient(
-            template_name=template_name,
-            namespace=namespace,
-            gateway_name=gateway_name,
-            api_url=api_url,
-            server_port=server_port,
-            enable_tracing=enable_tracing
-        ) as sandbox:
+        print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
+        sandbox = client.create_sandbox(template_name, namespace=namespace)
+        print(f"Sandbox created with ID: {sandbox.id}")
 
-            print("\n--- Testing Pod Name Discovery ---")
-            assert sandbox.annotations is not None, "Sandbox annotations were not stored on the client"
+        print("\n--- Testing Command Execution ---")
+        command_to_run = "echo 'Hello from the sandbox!'"
+        print(f"Executing command: '{command_to_run}'")
 
-            pod_name_annotation = sandbox.annotations.get(POD_NAME_ANNOTATION)
+        result = sandbox.core.run(command_to_run)
 
-            if pod_name_annotation:
-                print(f"Found pod name from annotation: {pod_name_annotation}")
-                assert sandbox.pod_name == pod_name_annotation, f"Expected pod_name to be '{pod_name_annotation}', but got '{sandbox.pod_name}'"
-                print("--- Pod Name Discovery Test Passed (Annotation) ---")
-            else:
-                print("Pod name annotation not found, falling back to sandbox name.")
-                assert sandbox.pod_name == sandbox.sandbox_name, f"Expected pod_name to be '{sandbox.sandbox_name}', but got '{sandbox.pod_name}'"
-                print("--- Pod Name Discovery Test Passed (Fallback) ---")
+        print(f"Stdout: {result.stdout.strip()}")
+        print(f"Stderr: {result.stderr.strip()}")
+        print(f"Exit Code: {result.exit_code}")
 
-            print("\n--- Testing Command Execution ---")
-            command_to_run = "echo 'Hello from the sandbox!'"
-            print(f"Executing command: '{command_to_run}'")
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "Hello from the sandbox!"
 
-            result = sandbox.run(command_to_run)
+        print("\n--- Command Execution Test Passed! ---")
 
-            print(f"Stdout: {result.stdout.strip()}")
-            print(f"Stderr: {result.stderr.strip()}")
-            print(f"Exit Code: {result.exit_code}")
+        # Test file operations
+        print("\n--- Testing File Operations ---")
+        file_content = "This is a test file."
+        file_path = "test.txt"
 
-            assert result.exit_code == 0
-            assert result.stdout.strip() == "Hello from the sandbox!"
+        print(f"Writing content to '{file_path}'...")
+        sandbox.files.write(file_path, file_content)
 
-            print("\n--- Command Execution Test Passed! ---")
+        print(f"Reading content from '{file_path}'...")
+        read_content = sandbox.files.read(file_path).decode('utf-8')
 
-            # Test file operations
-            print("\n--- Testing File Operations ---")
-            file_content = "This is a test file."
-            file_path = "test.txt"
+        print(f"Read content: '{read_content}'")
+        assert read_content == file_content
+        
+        print("--- File Operations Test Passed! ---")
 
-            print(f"Writing content to '{file_path}'...")
-            sandbox.write(file_path, file_content)
+        # Test list and exists
+        print("\n--- Testing List and Exists ---")
+        print(f"Checking if '{file_path}' exists...")
+        exists = sandbox.files.exists(file_path)
+        assert exists is True, f"Expected '{file_path}' to exist"
 
-            print(f"Reading content from '{file_path}'...")
-            read_content = sandbox.read(file_path).decode('utf-8')
+        print("Checking if 'non_existent_file.txt' exists...")
+        not_exists = sandbox.files.exists("non_existent_file.txt")
+        assert not_exists is False, "Expected 'non_existent_file.txt' to not exist"
 
-            print(f"Read content: '{read_content}'")
-            assert read_content == file_content
-            
-            print("--- File Operations Test Passed! ---")
+        print("Listing files in '.' ...")
+        files = sandbox.files.list(".")
+        print(f"Files found: {[f.name for f in files]}")
 
-            # Test list and exists
-            print("\n--- Testing List and Exists ---")
-            print(f"Checking if '{file_path}' exists...")
-            exists = sandbox.exists(file_path)
-            assert exists is True, f"Expected '{file_path}' to exist"
+        found = any(f.name == file_path for f in files)
+        assert found is True, f"Expected '{file_path}' to be in the file list"
 
-            print("Checking if 'non_existent_file.txt' exists...")
-            not_exists = sandbox.exists("non_existent_file.txt")
-            assert not_exists is False, "Expected 'non_existent_file.txt' to not exist"
+        file_entry = next(f for f in files if f.name == file_path)
+        assert file_entry.size == len(file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
+        print("--- List and Exists Test Passed! ---")
 
-            print("Listing files in '.' ...")
-            files = sandbox.list(".")
-            print(f"Files found: {[f.name for f in files]}")
+        # Test introspection commands
+        print("\n--- Testing Pod Introspection ---")
 
-            found = any(f.name == file_path for f in files)
-            assert found is True, f"Expected '{file_path}' to be in the file list"
+        print("\n--- Listing files in /app ---")
+        list_files_result = sandbox.core.run("ls -la /app")
+        print(list_files_result.stdout)
 
-            file_entry = next(f for f in files if f.name == file_path)
-            assert file_entry.size == len(file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
-            print("--- List and Exists Test Passed! ---")
+        print("\n--- Printing environment variables ---")
+        env_result = sandbox.core.run("env")
+        print(env_result.stdout)
 
-            # Test introspection commands
-            print("\n--- Testing Pod Introspection ---")
+        print("--- Introspection Tests Finished ---")
+        
+        print("\n--- Testing Pydantic Validation ---")
+        
+        # Test: ExecutionResult defaults (partial response)
+        original_request = sandbox._request
+        
+        mock_response = MagicMock()
+        mock_response.json.return_value = {} # Empty response
+        sandbox._request = MagicMock(return_value=mock_response)
+        
+        print("Testing ExecutionResult defaults with empty response...")
+        # This should not raise error because of defaults
+        res = sandbox.core.run("echo test") 
+        assert res.exit_code == -1
+        assert res.stdout == ""
+        assert isinstance(res, ExecutionResult)
+        print("ExecutionResult defaults verified.")
 
-            print("\n--- Listing files in /app ---")
-            list_files_result = sandbox.run("ls -la /app")
-            print(list_files_result.stdout)
-
-            print("\n--- Printing environment variables ---")
-            env_result = sandbox.run("env")
-            print(env_result.stdout)
-
-            print("--- Introspection Tests Finished ---")
-            
-            print("\n--- Testing Pydantic Validation ---")
-            
-            # Test: ExecutionResult defaults (partial response)
-            original_request = sandbox._request
-            
-            mock_response = MagicMock()
-            mock_response.json.return_value = {} # Empty response
-            sandbox._request = MagicMock(return_value=mock_response)
-            
-            print("Testing ExecutionResult defaults with empty response...")
-            # This should not raise error because of defaults
-            res = sandbox.run("echo test") 
-            assert res.exit_code == -1
-            assert res.stdout == ""
-            assert isinstance(res, ExecutionResult)
-            print("ExecutionResult defaults verified.")
-
-            # Test: FileEntry validation (invalid type)
-            mock_response.json.return_value = [{
-                "name": "bad_file",
-                "size": 100,
-                "type": "invalid_type", # Invalid literal
-                "mod_time": 12345.6
-            }]
-            
-            print("Testing FileEntry validation with invalid type...")
-            try:
-                sandbox.list(".")
-                raise AssertionError("ValidationError not raised for invalid FileEntry type")
-            except ValidationError as e:
-                print(f"Caught expected ValidationError: {e}")
-            
-            # Restore original method
-            sandbox._request = original_request
-            print("--- Pydantic Validation Tests Passed ---")
+        # Test: FileEntry validation (invalid type)
+        mock_response.json.return_value = [{
+            "name": "bad_file",
+            "size": 100,
+            "type": "invalid_type", # Invalid literal
+            "mod_time": 12345.6
+        }]
+        
+        print("Testing FileEntry validation with invalid type...")
+        try:
+            sandbox.files.list(".")
+            raise AssertionError("ValidationError not raised for invalid FileEntry type")
+        except ValidationError as e:
+            print(f"Caught expected ValidationError: {e}")
+        
+        # Restore original method
+        sandbox._request = original_request
+        print("--- Pydantic Validation Tests Passed ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")
-        # The __exit__ method of the Sandbox class will handle cleanup.
     finally:
+        if sandbox:
+            print("Terminating sandbox...")
+            sandbox.terminate()
+            
         print("\n--- Sandbox Client Test Finished ---")
 
 if __name__ == "__main__":

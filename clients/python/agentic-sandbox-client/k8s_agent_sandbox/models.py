@@ -27,3 +27,18 @@ class FileEntry(BaseModel):
     size: int  # Size of the file in bytes.
     type: Literal["file", "directory"]  # Type of the entry (file or directory).
     mod_time: float # Last modification time of the file. (POSIX timestamp)
+
+class SandboxRouterConfig(BaseModel):
+    """Configuration for connecting to and executing in a Sandbox."""
+    gateway_name: str | None = None
+    gateway_namespace: str = "default"
+    api_url: str | None = None
+    server_port: int = 8888
+    gateway_ready_timeout: int = 180
+    port_forward_ready_timeout: int = 30
+
+class SandboxTracerConfig(BaseModel):
+    """Configuration for tracer level information"""
+    enable_tracing: bool = False
+    trace_service_name: str = "sandbox-client"
+    

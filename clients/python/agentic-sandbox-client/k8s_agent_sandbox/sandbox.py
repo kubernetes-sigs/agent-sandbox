@@ -14,20 +14,17 @@
 
 import logging
 import requests
-from kubernetes import client, config
+import socket
+import subprocess
+import time
+import atexit
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from .trace_manager import initialize_tracer, TracerManager, OPENTELEMETRY_AVAILABLE
+from .trace_manager import initialize_tracer, TracerManager, OPENTELEMETRY_AVAILABLE, trace_span, trace
 from .core_execution import CoreExecution
 from .filesystem import Filesystem
-
-CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
-CLAIM_API_VERSION = "v1alpha1"
-CLAIM_PLURAL_NAME = "sandboxclaims"
-
-SANDBOX_API_GROUP = "agents.x-k8s.io"
-SANDBOX_API_VERSION = "v1alpha1"
-SANDBOX_PLURAL_NAME = "sandboxes"
+from .models import SandboxRouterConfig, SandboxTracerConfig
+from .k8s_helper import K8sHelper
 
 class Sandbox:
     """
@@ -36,28 +33,28 @@ class Sandbox:
     def __init__(
         self,
         sandbox_id: str,
-        base_url: str,
         namespace: str = "default",
-        server_port: int = 8888,
-        enable_tracing: bool = False,
-        trace_service_name: str = "sandbox-client",
+        router_config: SandboxRouterConfig | None = None,
+        tracer_config: SandboxTracerConfig | None = None,
+        k8s_helper: K8sHelper | None = None,
     ):
         self.id = sandbox_id
-        self.base_url = base_url
         self.namespace = namespace
-        self.server_port = server_port
+        self.router_config = router_config or SandboxRouterConfig()
+        self.tracer_config = tracer_config or SandboxTracerConfig()
+        self.base_url = self.router_config.api_url
 
-        self.trace_service_name = trace_service_name
+        self.trace_service_name = self.tracer_config.trace_service_name
         self.tracing_manager = None
         self.tracer = None
-        if enable_tracing:
+        if self.tracer_config.enable_tracing:
             if not OPENTELEMETRY_AVAILABLE:
                 logging.error(
                     "OpenTelemetry not installed; skipping tracer initialization.")
             else:
-                initialize_tracer(service_name=trace_service_name)
+                initialize_tracer(service_name=self.trace_service_name)
                 self.tracing_manager = TracerManager(
-                    service_name=trace_service_name)
+                    service_name=self.trace_service_name)
                 self.tracer = self.tracing_manager.tracer
 
         # HTTP session with retries
@@ -71,22 +68,109 @@ class Sandbox:
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
-        try:
-            config.load_incluster_config()
-        except config.ConfigException:
-            config.load_kube_config()
-        self.custom_objects_api = client.CustomObjectsApi()
+        self.port_forward_process: subprocess.Popen | None = None
+        atexit.register(self.close)
+
+        self.k8s_helper = k8s_helper or K8sHelper()
 
         self.core = CoreExecution(self)
         self.files = Filesystem(self)
 
+    def close(self):
+        """Clean up resources like port-forwarding processes."""
+        if self.port_forward_process:
+            try:
+                logging.info(f"Stopping port-forwarding for Sandbox {self.id}...")
+                self.port_forward_process.terminate()
+                try:
+                    self.port_forward_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.port_forward_process.kill()
+            except Exception as e:
+                logging.error(f"Failed to stop port-forwarding: {e}")
+            finally:
+                self.port_forward_process = None
+
+    def _get_free_port(self):
+        """Finds a free port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+
+    def _start_and_wait_for_port_forward(self):
+        """Starts 'kubectl port-forward' to the Router Service."""
+        local_port = self._get_free_port()
+        router_svc = "svc/sandbox-router-svc"
+
+        logging.info(
+            f"Starting tunnel for Sandbox {self.id}: localhost:{local_port} -> {router_svc}:8080...")
+
+        self.port_forward_process = subprocess.Popen(
+            [
+                "kubectl", "port-forward",
+                router_svc,
+                f"{local_port}:8080",
+                "-n", self.namespace
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+
+        logging.info("Waiting for port-forwarding to be ready...")
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < self.router_config.port_forward_ready_timeout:
+            if self.port_forward_process.poll() is not None:
+                _, stderr = self.port_forward_process.communicate()
+                raise RuntimeError(
+                    f"Tunnel crashed: {stderr.decode(errors='ignore')}")
+
+            try:
+                with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
+                    self.base_url = f"http://127.0.0.1:{local_port}"
+                    logging.info(f"Tunnel ready at {self.base_url}")
+                    time.sleep(0.5)
+                    return
+            except (socket.timeout, ConnectionRefusedError):
+                time.sleep(0.5)
+
+        raise TimeoutError("Failed to establish tunnel to Router Service.")
+
+    def _wait_for_gateway_ip(self):
+        """Waits for the Gateway to be assigned an external IP."""
+        ip_address = self.k8s_helper.wait_for_gateway_ip(
+            self.router_config.gateway_name,
+            self.router_config.gateway_namespace,
+            self.router_config.gateway_ready_timeout
+        )
+        self.base_url = f"http://{ip_address}"
+
+    def _ensure_connection(self):
+        """Ensures that the base_url is resolved (via Gateway or Port Forward)."""
+        if self.base_url:
+            return
+
+        if self.router_config.gateway_name:
+            self._wait_for_gateway_ip()
+        else:
+            self._start_and_wait_for_port_forward()
+
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+        self._ensure_connection()
+
+        # Check if port-forward died silently
+        if self.port_forward_process and self.port_forward_process.poll() is not None:
+            _, stderr = self.port_forward_process.communicate()
+            raise RuntimeError(
+                f"Kubectl Port-Forward crashed BEFORE request!\n"
+                f"Stderr: {stderr.decode(errors='ignore')}"
+            )
+
         url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.get("headers", {})
         headers["X-Sandbox-ID"] = self.id
         headers["X-Sandbox-Namespace"] = self.namespace
-        headers["X-Sandbox-Port"] = str(self.server_port)
+        headers["X-Sandbox-Port"] = str(self.router_config.server_port)
         kwargs["headers"] = headers
 
         try:
@@ -94,37 +178,18 @@ class Sandbox:
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
+            # Check if port-forward died DURING request
+            if self.port_forward_process and self.port_forward_process.poll() is not None:
+                _, stderr = self.port_forward_process.communicate()
+                raise RuntimeError(
+                    f"Kubectl Port-Forward crashed DURING request!\n"
+                    f"Stderr: {stderr.decode(errors='ignore')}"
+                ) from e
+
             logging.error(f"Request to gateway router failed: {e}")
             raise RuntimeError(
                 f"Failed to communicate with the sandbox via the gateway at {url}.") from e
 
-    def status(self):
-        """Fetches the current lifecycle state from the manager."""
-        try:
-            resource = self.custom_objects_api.get_namespaced_custom_object(
-                group=SANDBOX_API_GROUP,
-                version=SANDBOX_API_VERSION,
-                namespace=self.namespace,
-                plural=SANDBOX_PLURAL_NAME,
-                name=self.id
-            )
-            return resource.get("status", {})
-        except client.ApiException as e:
-            logging.error(f"Error getting status for Sandbox {self.id}: {e}")
-            raise
-
     def terminate(self):
         """Permanent deletion of all infrastructure and state."""
-        try:
-            self.custom_objects_api.delete_namespaced_custom_object(
-                group=CLAIM_API_GROUP,
-                version=CLAIM_API_VERSION,
-                namespace=self.namespace,
-                plural=CLAIM_PLURAL_NAME,
-                name=self.id
-            )
-            logging.info(f"Terminated SandboxClaim: {self.id}")
-        except client.ApiException as e:
-            if e.status != 404:
-                logging.error(f"Error terminating sandbox {self.id}: {e}")
-                raise
+        self.k8s_helper.delete_sandbox_claim(self.id, self.namespace)

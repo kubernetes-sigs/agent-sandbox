@@ -43,8 +43,8 @@ func newTestScheme() *runtime.Scheme {
 }
 
 func computeTemplateSpecHash(template *extensionsv1alpha1.SandboxTemplate) string {
-	specJson, _ := json.Marshal(template.Spec)
-	return sandboxcontrollers.NameHash(string(specJson))
+	specJSON, _ := json.Marshal(template.Spec)
+	return sandboxcontrollers.NameHash(string(specJSON))
 }
 
 func createPod(name, namespace, poolNameHash, templateHash string) *corev1.Pod {
@@ -665,7 +665,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 	err = r.List(ctx, pods, client.InNamespace(poolNamespace))
 	require.NoError(t, err)
 	require.Len(t, pods.Items, 1)
-	
+
 	require.Equal(t, "image-v2", pods.Items[0].Spec.Containers[0].Image, "Pod should have updated image after template update")
 	t.Log("Verified: Pod has updated image after template update")
 }

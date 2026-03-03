@@ -39,8 +39,8 @@ import (
 )
 
 const (
-	poolLabel              = "agents.x-k8s.io/pool"
-	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
+	poolLabel               = "agents.x-k8s.io/pool"
+	sandboxTemplateRefHash  = "agents.x-k8s.io/sandbox-template-ref-hash"
 	sandboxTemplateSpecHash = "agents.x-k8s.io/sandbox-template-spec-hash"
 )
 
@@ -318,11 +318,11 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 }
 
 func (r *SandboxWarmPoolReconciler) computeTemplateSpecHash(template *extensionsv1alpha1.SandboxTemplate) string {
-	specJson, err := json.Marshal(template.Spec)
+	specJSON, err := json.Marshal(template.Spec)
 	if err != nil {
 		return ""
 	}
-	return sandboxcontrollers.NameHash(string(specJson))
+	return sandboxcontrollers.NameHash(string(specJSON))
 }
 
 func (r *SandboxWarmPoolReconciler) isPodStale(pod *corev1.Pod, currentHash string) bool {

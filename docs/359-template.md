@@ -8,7 +8,7 @@ Traditional Python SDKs favor the Context Manager pattern `(with Sandbox() as sb
 
 1. **Identity Stability**: The Sandbox object represents a stable identity (`sandbox_id`). Whether the underlying Pod is running, suspended, or resuming, the developer interacts with the same object.
 
-2. **Orchestration vs. Execution**: By abstracting the object, we can separate the Management Path (lifecycle changes) from the Execution Path (running code). Although, we do provide `api_url` to connect to the sandbox, it is not a very good API model. 
+2. **Orchestration vs. Execution**: By abstracting the object, we can separate the Management Path (lifecycle changes) from the Execution Path (running code). Although, we do provide `api_url` to connect to the sandbox with the current `with` API model, it is not very intuitive for the customer. 
 
 3. **Capability Discovery**: Dot-notation namespacing (e.g., `sbx.files`, `sbx.process`) allows the SDK to grow in functionality without bloating the root object.
 
@@ -53,11 +53,11 @@ class Sandbox:
         self.files = Filesystem(sandbox_id, router_dns)
 
     def status(self):
-        """Fetches the current lifecycle state from the manager."""
-        return self._helper.status(self.id)
+        """Fetches the current lifecycle state from the helper."""
+        return self._helper.status(self.id) # This helper internally calls the K8 APIs. 
         
     def suspend(self):
-        """Hibernates the environment; saves memory/disk to CSI snapshots."""
+        """Hibernates the environment; saves memory/files to Storage."""
         return self._helper.suspend(self.id)
 
     def resume(self):

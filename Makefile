@@ -98,3 +98,32 @@ toc-update:
 .PHONY: toc-verify
 toc-verify:
 	./dev/tools/verify-toc
+
+# --- Config / Kustomize / operator-sdk bundle ---
+# All generated k8s manifests live under config/ (CRDs in config/crd/bases, RBAC in config/rbac).
+# Bundle for OLM with: make bundle [VERSION=x.y.z]
+
+KUSTOMIZE ?= kustomize
+KUBECTL ?= kubectl
+IMG ?= controller:latest
+
+# VERSION for the OLM bundle (e.g. make bundle VERSION=0.1.0)
+VERSION ?= 0.0.0
+IMAGE_TAG_BASE ?= agent-sandbox
+BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
+BUNDLE_GEN_FLAGS ?= -q --overwrite --version $(VERSION)
+
+.PHONY: manifests
+manifests: ## Generate CRDs and RBAC into config/crd/bases and config/rbac (via codegen.go).
+	go generate ./codegen.go
+
+.PHONY: bundle
+bundle: manifests ## Generate OLM bundle (operator-sdk + kustomize). Overwrites config/manifests/bases/*.clusterserviceversion.yaml.
+	operator-sdk generate kustomize manifests -q
+	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	$(KUSTOMIZE) build config/manifests | operator-sdk generate bundle $(BUNDLE_GEN_FLAGS)
+	operator-sdk bundle validate ./bundle
+
+.PHONY: bundle-build
+bundle-build: ## Build the bundle image (requires bundle.Dockerfile).
+	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .

@@ -903,7 +903,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 		{
 			name: "records success on first ready transition",
 			claim: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "ok", CreationTimestamp: pastTime},
+				ObjectMeta: metav1.ObjectMeta{Name: "new-ready", CreationTimestamp: pastTime},
 				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
 				Status: extensionsv1alpha1.SandboxClaimStatus{
 					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
@@ -915,7 +915,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 		{
 			name: "ignores ready condition = false",
 			claim: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "ok", CreationTimestamp: pastTime},
+				ObjectMeta: metav1.ObjectMeta{Name: "not-ready", CreationTimestamp: pastTime},
 				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
 				Status: extensionsv1alpha1.SandboxClaimStatus{
 					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse}},
@@ -925,23 +925,9 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			expectedObservations: 0,
 		},
 		{
-			name: "ignores success if already recorded via annotation",
+			name: "ignores success if status was already ready in previous loop",
 			claim: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        "already-recorded",
-					Annotations: map[string]string{sandboxcontrollers.SandboxClaimMetricRecorded: "true"},
-				},
-				Status: extensionsv1alpha1.SandboxClaimStatus{
-					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
-				},
-			},
-			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
-			expectedObservations: 0,
-		},
-		{
-			name: "ignores success if status was already ready in previous loop (race condition fix)",
-			claim: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "race", CreationTimestamp: pastTime},
+				ObjectMeta: metav1.ObjectMeta{Name: "already-ready", CreationTimestamp: pastTime},
 				Status: extensionsv1alpha1.SandboxClaimStatus{
 					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
 				},
@@ -952,9 +938,9 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			expectedObservations: 0,
 		},
 		{
-			name: "uses unknown launch type when sandbox is nil during failure",
+			name: "uses unknown launch type when sandbox is nil",
 			claim: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "unknown-fail", CreationTimestamp: pastTime},
+				ObjectMeta: metav1.ObjectMeta{Name: "unknown", CreationTimestamp: pastTime},
 				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
 				Status: extensionsv1alpha1.SandboxClaimStatus{
 					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Unknown"}},
@@ -972,12 +958,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			asmetrics.ClaimStartupLatency.Reset()
 			r := &SandboxClaimReconciler{}
 
-			recorded := r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox)
-
-			expectRecorded := tc.expectedObservations > 0
-			if recorded != expectRecorded {
-				t.Errorf("expected recorded to be %v, got %v", expectRecorded, recorded)
-			}
+			r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)

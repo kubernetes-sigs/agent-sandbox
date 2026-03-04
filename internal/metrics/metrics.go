@@ -49,7 +49,7 @@ func init() {
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.
-func RecordClaimStartupLatency(startTime time.Time, launchType, status, templateName string) {
+func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
-	ClaimStartupLatency.WithLabelValues(launchType, status, templateName).Observe(duration)
+	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
 }

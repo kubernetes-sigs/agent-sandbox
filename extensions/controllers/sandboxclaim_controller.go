@@ -147,18 +147,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errors.Join(reconcileErr, updateErr)
 	}
 
-	// Record metric for creation latency, and add annotation to the claim to
-	// prevent this metric from being recorded more than once.
-	if r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox) {
-		patch := client.MergeFrom(claim.DeepCopy())
-		if claim.Annotations == nil {
-			claim.Annotations = make(map[string]string)
-		}
-		claim.Annotations[sandboxcontrollers.SandboxClaimMetricRecorded] = "true"
-		if err := r.Patch(ctx, claim, patch); err != nil {
-			return ctrl.Result{}, errors.Join(reconcileErr, err)
-		}
-	}
+	r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -622,29 +611,22 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 }
 
 // recordCreationLatencyMetric detects and records transitions to Ready state.
-// Annotation SandboxClaimMetricRecorded guards the metric against being recorded more than once.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1alpha1.SandboxClaim,
 	oldStatus *extensionsv1alpha1.SandboxClaimStatus,
 	sandbox *sandboxv1alpha1.Sandbox,
-) bool {
-
-	// Prevent multiple recordings (e.g., successful creation and then later expiration).
-	if claim.Annotations[sandboxcontrollers.SandboxClaimMetricRecorded] == "true" {
-		return false
-	}
+) {
 
 	newStatus := &claim.Status
 	newReady := meta.FindStatusCondition(newStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
 	if newReady == nil || newReady.Status == metav1.ConditionFalse {
-		return false
+		return
 	}
 
-	// Account for the race condition where this is not the first time we have seen Ready status, but
-	// the annotation flag is not yet being read.
+	// Do not record creation metric if we have already seen the ready state.
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
 	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
-		return false
+		return
 	}
 
 	launchType := asmetrics.LaunchTypeCold
@@ -656,12 +638,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		launchType = asmetrics.LaunchTypeWarm
 	}
 
-	latency := float64(time.Since(claim.CreationTimestamp.Time).Milliseconds())
-	asmetrics.ClaimStartupLatency.WithLabelValues(
-		launchType,
-		claim.Spec.TemplateRef.Name,
-	).Observe(latency)
-	return true
+	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller

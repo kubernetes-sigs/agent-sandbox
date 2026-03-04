@@ -336,13 +336,14 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 }
 
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
-func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
+func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, currentTemplateHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
 	// List all pods with the podTemplateHashLabel matching the hash
 	podList := &corev1.PodList{}
 	labelSelector := labels.SelectorFromSet(labels.Set{
 		sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
+		sandboxTemplateHash:    currentTemplateHash,
 	})
 
 	if err := r.List(ctx, podList, &client.ListOptions{
@@ -462,7 +463,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	// Before creating the sandbox, try to adopt a pod from the warm pool
-	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
+	currentTemplateHash := computeTemplateHash(template)
+	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox, currentTemplateHash)
 	if adoptErr != nil {
 		logger.Error(adoptErr, "Failed to adopt pod from warm pool")
 		return nil, adoptErr

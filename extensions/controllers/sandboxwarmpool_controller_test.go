@@ -16,7 +16,6 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -42,19 +41,14 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func computeTemplateSpecHash(template *extensionsv1alpha1.SandboxTemplate) string {
-	specJSON, _ := json.Marshal(template.Spec)
-	return sandboxcontrollers.NameHash(string(specJSON))
-}
-
 func createPod(name, namespace, poolNameHash, templateHash string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				poolLabel:               poolNameHash,
-				sandboxTemplateSpecHash: templateHash,
+				poolLabel:           poolNameHash,
+				sandboxTemplateHash: templateHash,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -102,7 +96,7 @@ func TestReconcilePool(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateSpecHash(template)
+	templateHash := computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -207,7 +201,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateSpecHash(template)
+	templateHash := computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -491,7 +485,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateSpecHash(template)
+	templateHash := computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -668,4 +662,57 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 
 	require.Equal(t, "image-v2", pods.Items[0].Spec.Containers[0].Image, "Pod should have updated image after template update")
 	t.Log("Verified: Pod has updated image after template update")
+}
+
+func TestFindWarmPoolsForTemplate(t *testing.T) {
+	namespace := "default"
+	templateName := "test-template"
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: namespace,
+		},
+	}
+
+	wp1 := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-1",
+			Namespace: namespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	wp2 := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-2",
+			Namespace: namespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: "other-template",
+			},
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(newTestScheme()).
+			WithIndex(&extensionsv1alpha1.SandboxWarmPool{}, templateRefField, func(rawObj client.Object) []string {
+				wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)
+				return []string{wp.Spec.TemplateRef.Name}
+			}).
+			WithRuntimeObjects(wp1, wp2).
+			Build(),
+	}
+
+	requests := r.findWarmPoolsForTemplate(context.Background(), template)
+
+	require.Len(t, requests, 1)
+	require.Equal(t, "pool-1", requests[0].Name)
+	require.Equal(t, namespace, requests[0].Namespace)
 }

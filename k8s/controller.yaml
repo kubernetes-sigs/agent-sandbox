@@ -42,8 +42,9 @@ spec:
   selector:
     app: agent-sandbox-controller
   ports:
-  - port: 80
-    targetPort: 8080
+  - name: metrics
+    port: 8080
+    targetPort: metrics
     protocol: TCP
 
 ---
@@ -71,3 +72,10 @@ spec:
         image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # placeholder value, replaced by deployment scripts
         args:
         - --leader-elect=true
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        - name: healthz
+          containerPort: 8081
+          protocol: TCP

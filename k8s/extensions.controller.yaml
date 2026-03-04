@@ -23,3 +23,10 @@ spec:
         args:
         - "--leader-elect=true"
         - "--extensions"
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        - name: healthz
+          containerPort: 8081
+          protocol: TCP

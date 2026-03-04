@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,12 +46,55 @@ const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
 	sandboxControllerFieldOwner = "sandbox-controller"
+
+	// ControllerName is the name used for the event recorder
+	ControllerName = "sandbox-controller"
+
+	// WarmPoolPVCAnnotation marks PVCs created by the warm pool controller.
+	// Only PVCs with this annotation will be adopted by the sandbox controller.
+	WarmPoolPVCAnnotation = "agents.x-k8s.io/warm-pool-pvc"
+
+	// WarmPoolPodNameAnnotation stores the pod name a PVC was created for.
+	// Used for reliable orphan detection and PVC-pod association.
+	WarmPoolPodNameAnnotation = "agents.x-k8s.io/warm-pool-pod-name"
+
+	// Event reasons
+	reasonPVCAdopted       = "PVCAdopted"
+	reasonAdoptedBySandbox = "AdoptedBySandbox"
 )
 
-var (
-	// Scheme for use by sandbox controllers. Registers required types for client.
-	Scheme = runtime.NewScheme()
-)
+// MergeVolumeClaimVolumes merges PVC-backed volumes into an existing volume
+// list, replacing any volumes with matching names. This follows StatefulSet
+// semantics where volumeClaimTemplate volumes take priority.
+func MergeVolumeClaimVolumes(existing []corev1.Volume, pvcVolumes []corev1.Volume) []corev1.Volume {
+	if len(pvcVolumes) == 0 {
+		return existing
+	}
+	vctNames := make(map[string]struct{}, len(pvcVolumes))
+	for _, v := range pvcVolumes {
+		vctNames[v.Name] = struct{}{}
+	}
+	filtered := make([]corev1.Volume, 0, len(existing))
+	for _, v := range existing {
+		if _, ok := vctNames[v.Name]; !ok {
+			filtered = append(filtered, v)
+		}
+	}
+	return append(filtered, pvcVolumes...)
+}
+
+// pvcNameSuffix returns the suffix to use for PVC names.
+// If the sandbox adopted a pod from a warm pool, use the original pod name
+// to match the existing PVC names. Otherwise use the sandbox name.
+func pvcNameSuffix(sandbox *sandboxv1alpha1.Sandbox) string {
+	if adoptedPodName, ok := sandbox.Annotations[SandboxPodNameAnnotation]; ok && adoptedPodName != "" {
+		return adoptedPodName
+	}
+	return sandbox.Name
+}
+
+// Scheme for use by sandbox controllers. Registers required types for client.
+var Scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
@@ -60,8 +104,9 @@ func init() {
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Tracer asmetrics.Instrumenter
+	Scheme   *runtime.Scheme
+	Tracer   asmetrics.Instrumenter
+	Recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -70,6 +115,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -167,7 +213,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	var allErrors error
 
-	// Reconcile PVCs
+	// Reconcile PVCs from volumeClaimTemplates
 	err := r.reconcilePVCs(ctx, sandbox)
 	allErrors = errors.Join(allErrors, err)
 
@@ -180,6 +226,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	} else {
 		sandbox.Status.Replicas = 1
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+
+		// Adopt any orphaned PVCs that the pod uses (e.g., from warm pool adoption).
+		// This ensures PVCs are owned by the sandbox and cleaned up on deletion.
+		err = r.adoptPodPVCs(ctx, sandbox, pod)
+		allErrors = errors.Join(allErrors, err)
 	}
 
 	// Reconcile Service
@@ -375,8 +426,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, fmt.Errorf("Pod Get Failed: %w", err)
 		}
 		if podNameAnnotationExists {
-			log.Error(err, "Pod not found")
-			return nil, fmt.Errorf("Pod in Annotation Get Failed: %w", err)
+			log.Info("Pod from annotation not found, will recreate with same name",
+				"podName", trackedPodName, "namespace", sandbox.Namespace, "sandbox", sandbox.Name)
 		}
 		pod = nil
 	}
@@ -442,7 +493,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	// 3. PATH: Create new Pod
-	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
+	// Use annotated name (for warm pool) or sandbox name
+	newPodName := sandbox.Name
+	if trackedPodName != "" {
+		newPodName = trackedPodName
+	}
+
+	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", newPodName)
 	labels := map[string]string{
 		sandboxLabel: nameHash,
 	}
@@ -456,9 +513,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 
+	// Build PVC volumes from volumeClaimTemplates
+	pvcSuffix := pvcNameSuffix(sandbox)
+	var pvcVolumes []corev1.Volume
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
-		pvcName := pvcTemplate.Name + "-" + sandbox.Name
-		mutatedSpec.Volumes = append(mutatedSpec.Volumes, corev1.Volume{
+		pvcName := pvcTemplate.Name + "-" + pvcSuffix
+		pvcVolumes = append(pvcVolumes, corev1.Volume{
 			Name: pvcTemplate.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -467,9 +527,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			},
 		})
 	}
+	mutatedSpec.Volumes = MergeVolumeClaimVolumes(mutatedSpec.Volumes, pvcVolumes)
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        sandbox.Name,
+			Name:        newPodName,
 			Namespace:   sandbox.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
@@ -481,6 +542,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			log.Info("Pod already exists, fetching existing pod",
+				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			existingPod := &corev1.Pod{}
+			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
+				return nil, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
+			}
+			return existingPod, nil
+		}
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
@@ -502,9 +572,11 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePVCs", nil)
 	defer end()
 
+	// Use the appropriate suffix for PVC names (adopted pod name or sandbox name)
+	pvcSuffix := pvcNameSuffix(sandbox)
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
-		pvcName := pvcTemplate.Name + "-" + sandbox.Name
+		pvcName := pvcTemplate.Name + "-" + pvcSuffix
 		err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc)
 		if err == nil {
 			continue
@@ -534,12 +606,87 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 	return nil
 }
 
+// adoptPodPVCs adopts orphaned PVCs that the pod uses.
+// This is needed when a pod is adopted from a warm pool - the PVCs were released
+// from the warm pool's ownership and need to be claimed by the sandbox so they
+// are properly cleaned up when the sandbox is deleted.
+func (r *SandboxReconciler) adoptPodPVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, pod *corev1.Pod) error {
+	log := log.FromContext(ctx)
+
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+
+		pvcName := volume.PersistentVolumeClaim.ClaimName
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc); err != nil {
+			if k8serrors.IsNotFound(err) {
+				// PVC doesn't exist - this is fine, reconcilePVCs will create it if needed
+				continue
+			}
+			return fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
+		}
+
+		// Only adopt PVCs that came from the warm pool to avoid stealing
+		// pre-existing shared PVCs that users may have created manually
+		if pvc.Annotations[WarmPoolPVCAnnotation] != "true" {
+			log.Info("PVC not from warm pool, skipping adoption", "pvc", pvcName)
+			continue
+		}
+
+		// Check if PVC already has an owner
+		if controllerRef := metav1.GetControllerOf(pvc); controllerRef != nil {
+			if controllerRef.UID == sandbox.UID {
+				continue
+			}
+			// Allow taking over from warm pool (crash recovery: transferPVCOwnership
+			// in the sandboxclaim controller didn't complete)
+			if controllerRef.Kind != "SandboxWarmPool" {
+				log.Info("PVC already owned by another controller, skipping adoption",
+					"pvc", pvcName,
+					"owner", controllerRef.Name,
+					"ownerKind", controllerRef.Kind)
+				continue
+			}
+			// Remove the warm pool owner ref before setting sandbox as owner
+			var filteredOwnerRefs []metav1.OwnerReference
+			for _, ref := range pvc.OwnerReferences {
+				if ref.Kind != "SandboxWarmPool" {
+					filteredOwnerRefs = append(filteredOwnerRefs, ref)
+				}
+			}
+			pvc.OwnerReferences = filteredOwnerRefs
+		}
+
+		log.Info("Adopting PVC", "pvc", pvcName, "sandbox", sandbox.Name)
+		if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+			return fmt.Errorf("failed to set controller reference for PVC %s: %w", pvcName, err)
+		}
+		if err := r.Update(ctx, pvc); err != nil {
+			return fmt.Errorf("failed to update PVC %s: %w", pvcName, err)
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(sandbox, corev1.EventTypeNormal, reasonPVCAdopted, "Adopted PVC %s", pvcName)
+			r.Recorder.Eventf(pvc, corev1.EventTypeNormal, reasonAdoptedBySandbox, "Ownership transferred to Sandbox %s", sandbox.Name)
+		}
+		log.Info("Successfully adopted PVC", "pvc", pvcName, "sandbox", sandbox.Name)
+	}
+
+	return nil
+}
+
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
 	var allErrors error
+	podName := sandbox.Name
+	if trackedPodName, ok := sandbox.Annotations[SandboxPodNameAnnotation]; ok && trackedPodName != "" {
+		podName = trackedPodName
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
+			Name:      podName,
 			Namespace: sandbox.Namespace,
 		},
 	}
@@ -600,7 +747,7 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) 
 	remainingTime := time.Until(expiryTime)
 
 	// TODO(barney-s): Do we need a inverse exponential backoff here ?
-	//requeueAfter := max(remainingTime/2, 2*time.Second)
+	// requeueAfter := max(remainingTime/2, 2*time.Second)
 
 	// Requeue at expiry time or in 2 seconds whichever is later
 	requeueAfter := max(remainingTime, 2*time.Second)

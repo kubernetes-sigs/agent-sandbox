@@ -1,0 +1,10 @@
+title: Agent Sandbox Python SDK Refactor From Context Manager to Resource Handle
+kep-number: 174
+authors:
+  - "@SHRUTI6991"
+status: implementable
+creation-date: 2026-03-03
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

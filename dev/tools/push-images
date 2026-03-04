@@ -38,7 +38,7 @@ def create_buildx_builder_if_not_exists():
     subprocess.run(["docker", "buildx", "use", builder_name], check=True)
 
 
-def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path):
+def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path, image_tag):
     platforms = "linux/amd64,linux/arm64"
     build_cmd = [
         "docker",
@@ -49,7 +49,7 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
     ]
     if args.docker_build_output_type == "registry":
         build_cmd.append("--platform=" + platforms)
-    image_name = utils.get_full_image_name(args, service_name)
+    image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
     build_cmd.extend(["-t", image_name])
     for tag in args.extra_image_tags:  # additional image tags
         extra_tag = utils.get_full_image_name(args, service_name, tag=tag)
@@ -63,8 +63,8 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
     print(f"pushed image {image_name}")
 
 
-def load_kind_image(cluster_name, service_name, srcdir):
-    image_name = utils.get_full_image_name(args, service_name)
+def load_kind_image(args, cluster_name, service_name, srcdir, image_tag):
+    image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
     build_cmd = [
         "kind",
         "load",
@@ -77,14 +77,15 @@ def load_kind_image(cluster_name, service_name, srcdir):
     print(f"loaded image {image_name} into kind cluster {args.kind_cluster_name}")
 
 
-def build_and_push_image(args, service_name, srcdir, dockerfile_path):
-    build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path)
+def build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag):
+    build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path, image_tag)
     if args.kind_cluster_name:
-        load_kind_image(args.kind_cluster_name, service_name, srcdir)
+        load_kind_image(args, args.kind_cluster_name, service_name, srcdir, image_tag)
 
 
 def main(args):
     """Builds and pushes all discovered Docker images."""
+    image_tag = args.image_tag or utils.get_image_tag()
     excluded_dirs = {"bin", "dev", "docs", "k8s", "site",
                      "temp", "tests", "tmp", ".venv"}
 
@@ -113,7 +114,7 @@ def main(args):
             print(f"create Docker buildx builder for {service_name}")
             create_buildx_builder_if_not_exists()
             print(f"building image for {service_name}")
-            build_and_push_image(args, service_name, context_dir, dockerfile_path)
+            build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
             # TODO: Handle duplicate service names in different paths
 
 
@@ -140,6 +141,11 @@ if __name__ == "__main__":
                         dest="controller_only",
                         action="store_true",
                         help="Only build and push the agent-sandbox-controller image.")
+    parser.add_argument("--image-tag",
+                        dest="image_tag",
+                        help="Image tag for this build. If not set, a default tag is generated based on date and git commit",
+                        type=str,
+                        default=os.getenv("IMAGE_TAG"))
     args = parser.parse_args()
 
     if args.kind_cluster_name:

@@ -786,14 +786,13 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			expectSandboxCreate: true,
 		},
 		{
-			name: "adopts a pod (even if not ready)",
+			name: "does not adopt a pod if it is not fully ready",
 			existingObjects: []client.Object{
 				template,
 				claim,
 				createWarmPoolPod("not-ready", metav1.Now(), false),
 			},
-			expectPodAdoption:   true,
-			expectedAdoptedPod:  "not-ready",
+			expectPodAdoption:   false,
 			expectSandboxCreate: true,
 		},
 	}
@@ -868,9 +867,14 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 					t.Errorf("expected pod to have legacy label %q with value %q, but got %q", sandboxLabel, expectedLegacyHash, val)
 				}
 
-				// 4. Verify OwnerReference is nil
-				if len(adoptedPod.OwnerReferences) != 0 {
-					t.Errorf("expected adopted pod owner references to be cleared, got %v", adoptedPod.OwnerReferences)
+				// 4. Verify OwnerReference points to SandboxClaim
+				if len(adoptedPod.OwnerReferences) != 1 {
+					t.Errorf("expected adopted pod to have exactly 1 owner reference, got %v", adoptedPod.OwnerReferences)
+				} else {
+					ref := adoptedPod.OwnerReferences[0]
+					if ref.Kind != "SandboxClaim" || ref.Name != claim.Name || ref.UID != claim.UID {
+						t.Errorf("expected owner reference to indicate SandboxClaim %s, got %v", claim.Name, ref)
+					}
 				}
 
 			} else if tc.expectSandboxCreate {

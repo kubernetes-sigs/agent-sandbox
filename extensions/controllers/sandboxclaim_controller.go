@@ -374,6 +374,15 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 			continue
 		}
 
+		// Skip pods that are not fully warmed up
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+
+		if !isPodReady(pod) {
+			continue
+		}
+
 		candidates = append(candidates, pod)
 	}
 
@@ -392,8 +401,21 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	delete(pod.Labels, poolLabel)
 	delete(pod.Labels, sandboxTemplateRefHash)
 
-	// Remove existing owner references (from SandboxWarmPool)
-	pod.OwnerReferences = nil
+	// Remove existing SandboxWarmPool owner reference and tie to SandboxClaim
+	var newOwners []metav1.OwnerReference
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind != "SandboxWarmPool" {
+			newOwners = append(newOwners, ref)
+		}
+	}
+	// Tie lifecycle to the SandboxClaim to prevent pod leaks if Sandbox creation fails later
+	newOwners = append(newOwners, metav1.OwnerReference{
+		APIVersion: extensionsv1alpha1.GroupVersion.String(),
+		Kind:       "SandboxClaim",
+		Name:       claim.Name,
+		UID:        claim.UID,
+	})
+	pod.OwnerReferences = newOwners
 
 	nameHash := sandboxcontrollers.NameHash(claim.Name)
 	if pod.Labels == nil {
@@ -408,6 +430,10 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
+		if k8errors.IsConflict(err) {
+			log.Info("Collision while adopting pod, another worker took it. Requeueing.", "pod", pod.Name)
+			return nil, err
+		}
 		log.Error(err, "Failed to update adopted pod")
 		return nil, err
 	}
@@ -622,6 +648,16 @@ func hasExpiredCondition(conditions []metav1.Condition) bool {
 			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == sandboxv1alpha1.SandboxReasonExpired {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isPodReady checks if the Pod has condition PodReady = True
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+			return true
 		}
 	}
 	return false

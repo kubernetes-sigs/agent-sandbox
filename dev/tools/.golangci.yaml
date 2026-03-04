@@ -1,10 +1,14 @@
 version: "2"
 linters:
   enable:
-    - misspell
+    - govet
     - revive
+    - staticcheck
     - unconvert
     - unparam
+    - misspell
+    - errcheck
+    - ineffassign
   exclusions:
     generated: lax
     presets:

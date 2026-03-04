@@ -539,11 +539,11 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&sandboxv1alpha1.Sandbox{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 300}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }
 

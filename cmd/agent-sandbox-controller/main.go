@@ -55,6 +55,9 @@ func main() {
 	var enablePprofDebug bool
 	var pprofBlockProfileRate int
 	var pprofMutexProfileFraction int
+	var kubeAPIQPS int
+	var kubeAPIBurst int
+	var concurrentWorkers int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -74,6 +77,9 @@ func main() {
 	flag.IntVar(&pprofMutexProfileFraction, "pprof-mutex-profile-fraction", 10,
 		"Mutex contention sampling rate for /debug/pprof/mutex when --enable-pprof-debug is set. "+
 			"<=0 disables; 1 samples all events; N>1 samples ~1/N events (e.g. 10 ~= 1/10, 100 ~= 1/100).")
+	flag.IntVar(&kubeAPIQPS, "kube-api-qps", 20, "QPS limit for kube API client")
+	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 30, "Burst limit for kube API client")
+	flag.IntVar(&concurrentWorkers, "concurrent-workers", 10, "Max concurrent reconciles for the controllers")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -151,8 +157,8 @@ func main() {
 	}
 
 	restConfig := ctrl.GetConfigOrDie()
-	restConfig.QPS = 1000
-	restConfig.Burst = 2000
+	restConfig.QPS = float32(kubeAPIQPS)
+	restConfig.Burst = kubeAPIBurst
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                  scheme,
@@ -171,7 +177,7 @@ func main() {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Tracer: instrumenter,
-	}).SetupWithManager(mgr); err != nil {
+	}).SetupWithManager(mgr, concurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
 	}
@@ -182,14 +188,14 @@ func main() {
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
 			Tracer:   instrumenter,
-		}).SetupWithManager(mgr); err != nil {
+		}).SetupWithManager(mgr, concurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
 		}
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
 			Client: mgr.GetClient(),
-		}).SetupWithManager(mgr); err != nil {
+		}).SetupWithManager(mgr, concurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)
 		}

@@ -615,7 +615,7 @@ func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{
@@ -632,6 +632,6 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&sandboxv1alpha1.Sandbox{}).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 300}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }

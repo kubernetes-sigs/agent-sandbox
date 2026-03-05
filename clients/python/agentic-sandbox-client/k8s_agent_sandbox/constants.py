@@ -32,4 +32,4 @@ PODSNAPSHOT_AGENT = "pod-snapshot-agent"
 
 PODSNAPSHOT_API_GROUP = "podsnapshot.gke.io"
 PODSNAPSHOT_API_VERSION = "v1alpha1"
-PODSNAPSHOT_API_KIND = "PodSnapshotManualTrigger"
+PODSNAPSHOT_API_KIND = "PodSnapshot"

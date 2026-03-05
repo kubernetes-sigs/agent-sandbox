@@ -68,7 +68,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         # Create client without patching super, as it's tested separately
         with patch.object(
-            PodSnapshotSandboxClient, "snapshot_controller_ready", return_value=True
+            PodSnapshotSandboxClient, "_check_snapshot_crd_installed", return_value=True
         ):
             self.client = PodSnapshotSandboxClient("test-template")
 
@@ -85,33 +85,16 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             "k8s_agent_sandbox.sandbox_client.SandboxClient.__init__", return_value=None
         ) as mock_super:
             with patch.object(
-                PodSnapshotSandboxClient, "snapshot_controller_ready", return_value=True
+                PodSnapshotSandboxClient, "_check_snapshot_crd_installed", return_value=True
             ):
                 client = PodSnapshotSandboxClient("test-template")
             mock_super.assert_called_once_with("test-template", server_port=8080)
         self.assertFalse(client.controller_ready)
-        self.assertEqual(client.podsnapshot_timeout, 180)
         logging.info("Finished test_init.")
 
-    def test_snapshot_controller_ready_success(self):
-        """Test snapshot_controller_ready success scenarios (Direct & CRD Fallback)."""
-        logging.info("TEST: Direct Managed Success")
-        mock_v1 = self.client.core_v1_api
-        mock_pod_agent = MagicMock()
-        mock_pod_agent.metadata.name = PODSNAPSHOT_AGENT
-        mock_pod_agent.status.phase = "Running"
-        mock_pods = MagicMock()
-        mock_pods.items = [mock_pod_agent]
-        mock_v1.list_namespaced_pod.return_value = mock_pods
-
-        self.client.controller_ready = False
-        self.assertTrue(self.client.snapshot_controller_ready())
-        mock_v1.list_namespaced_pod.assert_called_with(
-            PODSNAPSHOT_NAMESPACE_MANAGED, label_selector=f"app={PODSNAPSHOT_AGENT}"
-        )
-
-        logging.info("TEST: CRD Fallback Success")
-        mock_v1.list_namespaced_pod.side_effect = ApiException(status=403)
+    def test_check_snapshot_crd_installed_success(self):
+        """Test _check_snapshot_crd_installed success scenarios (Check CRD Existence)."""
+        logging.info("TEST: CRD Existence Success")
         mock_resource_list = MagicMock()
         mock_resource = MagicMock()
         mock_resource.kind = PODSNAPSHOT_API_KIND
@@ -121,35 +104,20 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         )
 
         self.client.controller_ready = False
-        self.assertTrue(self.client.snapshot_controller_ready())
+        self.assertTrue(self.client._check_snapshot_crd_installed())
         self.client.custom_objects_api.get_api_resources.assert_called_with(
             group=PODSNAPSHOT_API_GROUP, version=PODSNAPSHOT_API_VERSION
         )
 
-    def test_snapshot_controller_ready_failures(self):
-        """Test snapshot_controller_ready failure scenarios."""
-        mock_v1 = self.client.core_v1_api
+    def test_check_snapshot_crd_installed_failures(self):
+        """Test _check_snapshot_crd_installed failure scenarios."""
 
-        # 1. Pod missing (Not Ready)
-        mock_v1.list_namespaced_pod.side_effect = None
-        mock_pods = MagicMock()
-        mock_pods.items = []
-        mock_v1.list_namespaced_pod.return_value = mock_pods
-        self.client.controller_ready = False
-        self.assertFalse(self.client.snapshot_controller_ready())
-
-        # 2. 404 on Pod List
-        mock_v1.list_namespaced_pod.side_effect = ApiException(status=404)
-        self.client.controller_ready = False
-        self.assertFalse(self.client.snapshot_controller_ready())
-
-        # 3. Forbidden (403) + No CRDs found
-        mock_v1.list_namespaced_pod.side_effect = ApiException(status=403)
+        # 1. No CRDs found
         self.client.custom_objects_api.get_api_resources.return_value = None
         self.client.controller_ready = False
-        self.assertFalse(self.client.snapshot_controller_ready())
+        self.assertFalse(self.client._check_snapshot_crd_installed())
 
-        # 4. Forbidden (403) + CRD Kind mismatch
+        # 2. CRD Kind mismatch
         mock_resource_list = MagicMock()
         mock_resource = MagicMock()
         mock_resource.kind = "SomeOtherKind"
@@ -158,40 +126,39 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             mock_resource_list
         )
         self.client.controller_ready = False
-        self.assertFalse(self.client.snapshot_controller_ready())
+        self.assertFalse(self.client._check_snapshot_crd_installed())
 
-        # 5. Forbidden (403) + 404 on CRD check
+        # 3. 404 on CRD check
         self.client.custom_objects_api.get_api_resources.side_effect = ApiException(
             status=404
         )
         self.client.controller_ready = False
-        self.assertFalse(self.client.snapshot_controller_ready())
+        self.assertFalse(self.client._check_snapshot_crd_installed())
 
-    def test_snapshot_controller_ready_exceptions(self):
-        """Test API exceptions during snapshot readiness checks."""
-        mock_v1 = self.client.core_v1_api
-
-        # 1. 500 on Pod List
-        mock_v1.list_namespaced_pod.side_effect = ApiException(status=500)
+        # 4. 403 on CRD check
+        self.client.custom_objects_api.get_api_resources.side_effect = ApiException(
+            status=403
+        )
         self.client.controller_ready = False
-        with self.assertRaises(ApiException):
-            self.client.snapshot_controller_ready()
+        self.assertFalse(self.client._check_snapshot_crd_installed())
 
-        # 2. 403 on Pod List + 500 on CRD Check
-        mock_v1.list_namespaced_pod.side_effect = ApiException(status=403)
+    def test_check_snapshot_crd_installed_exceptions(self):
+        """Test API exceptions during snapshot readiness checks."""
+
+        # 1. 500 on CRD Check
         self.client.custom_objects_api.get_api_resources.side_effect = ApiException(
             status=500
         )
         self.client.controller_ready = False
         with self.assertRaises(ApiException):
-            self.client.snapshot_controller_ready()
+            self.client._check_snapshot_crd_installed()
 
     def test_enter_exit(self):
         """Test context manager __enter__ implementation."""
         # Success path
         self.client.controller_ready = False
         with patch.object(
-            self.client, "snapshot_controller_ready", return_value=True
+            self.client, "_check_snapshot_crd_installed", return_value=True
         ) as mock_ready:
             with patch(
                 "k8s_agent_sandbox.sandbox_client.SandboxClient.__enter__"
@@ -202,11 +169,25 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
                 mock_super_enter.assert_called_once()
                 self.assertTrue(self.client.controller_ready)
 
-        # Failure path
+        # Failure path: Controller not ready (return False)
+        self.client.controller_ready = False
+        with patch.object(
+            self.client, "_check_snapshot_crd_installed", return_value=False
+        ) as mock_ready:
+            with patch.object(self.client, "__exit__") as mock_exit:
+                with self.assertRaises(RuntimeError) as context:
+                    self.client.__enter__()
+                self.assertIn(
+                    "Pod Snapshot Controller is not ready",
+                    str(context.exception),
+                )
+                mock_exit.assert_called_once_with(None, None, None)
+
+        # Failure path: Exception during check
         self.client.controller_ready = False
         with patch.object(
             self.client,
-            "snapshot_controller_ready",
+            "_check_snapshot_crd_installed",
             side_effect=ValueError("Test error"),
         ) as mock_ready:
             with patch.object(self.client, "__exit__") as mock_exit:
@@ -226,13 +207,12 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             self.client.__exit__(ValueError, exc_val, None)
             mock_super_exit.assert_called_once_with(ValueError, exc_val, None)
 
-    def test_snapshot_controller_already_ready(self):
+    def test_check_snapshot_crd_installed_already_ready(self):
         """Test early return if snapshot controller is already ready."""
         self.client.controller_ready = True
-        mock_v1 = self.client.core_v1_api
-        result = self.client.snapshot_controller_ready()
+        result = self.client._check_snapshot_crd_installed()
         self.assertTrue(result)
-        mock_v1.list_namespaced_pod.assert_not_called()
+        self.client.custom_objects_api.get_api_resources.assert_not_called()
 
 
 if __name__ == "__main__":

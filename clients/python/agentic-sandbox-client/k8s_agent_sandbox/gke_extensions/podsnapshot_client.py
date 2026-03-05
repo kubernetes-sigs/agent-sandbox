@@ -35,19 +35,22 @@ class PodSnapshotSandboxClient(SandboxClient):
     def __init__(
         self,
         template_name: str,
-        podsnapshot_timeout: int = 180,
         server_port: int = 8080,
         **kwargs,
     ):
         super().__init__(template_name, server_port=server_port, **kwargs)
 
         self.controller_ready = False
-        self.podsnapshot_timeout = podsnapshot_timeout
         self.core_v1_api = client.CoreV1Api()
 
     def __enter__(self) -> "PodSnapshotSandboxClient":
         try:
-            self.controller_ready = self.snapshot_controller_ready()
+            self.controller_ready = self._check_snapshot_crd_installed()
+            if not self.controller_ready:
+                raise RuntimeError(
+                    "Pod Snapshot Controller is not ready. "
+                    "Ensure the PodSnapshotManualTrigger CRD is installed and the controller is running."
+                )
             super().__enter__()
             return self
         except Exception as e:
@@ -57,61 +60,33 @@ class PodSnapshotSandboxClient(SandboxClient):
                 f"with the Pod Snapshot Controller enabled. Error details: {e}"
             ) from e
 
-    def snapshot_controller_ready(self) -> bool:
+    def _check_snapshot_crd_installed(self) -> bool:
         """
-        Checks if the snapshot agent pods are running in a GKE-managed pod snapshot cluster.
-        Falls back to checking CRD existence if pod listing is forbidden.
+        Checks if the PodSnapshot CRD is installed in the cluster.
         """
 
         if self.controller_ready:
             return True
 
-        def check_crd_installed() -> bool:
-            try:
-                # Check directly if the API resource exists using CustomObjectsApi
-                resource_list = self.custom_objects_api.get_api_resources(
-                    group=PODSNAPSHOT_API_GROUP,
-                    version=PODSNAPSHOT_API_VERSION,
-                )
+        try:
+            # Check if the API resource exists using CustomObjectsApi
+            resource_list = self.custom_objects_api.get_api_resources(
+                group=PODSNAPSHOT_API_GROUP,
+                version=PODSNAPSHOT_API_VERSION,
+            )
 
-                if not resource_list or not resource_list.resources:
-                    return False
-
-                for resource in resource_list.resources:
-                    if resource.kind == PODSNAPSHOT_API_KIND:
-                        return True
+            if not resource_list or not resource_list.resources:
                 return False
-            except ApiException as e:
-                # If discovery fails with 403/404, we assume not ready/accessible
-                if e.status == 403 or e.status == 404:
-                    return False
-                raise
 
-        def check_pod_running(namespace: str, label_selector: str) -> bool:
-            try:
-                pods = self.core_v1_api.list_namespaced_pod(
-                    namespace, label_selector=label_selector
-                )
-                for pod in pods.items:
-                    if pod.status.phase == "Running":
-                        return True
+            for resource in resource_list.resources:
+                if resource.kind == PODSNAPSHOT_API_KIND:
+                    return True
+            return False
+        except ApiException as e:
+            # If discovery fails with 403/404, we assume not ready/accessible
+            if e.status == 403 or e.status == 404:
                 return False
-            except ApiException as e:
-                if e.status == 403:
-                    logger.info(
-                        f"Permission denied listing pods in {namespace}. Checking CRD existence."
-                    )
-                    return check_crd_installed()
-                # If discovery fails with 404, we assume not ready/accessible
-                if e.status == 404:
-                    return False
-                raise
-
-        # Check managed: requires only agent in gke-managed-pod-snapshots
-        if check_pod_running(PODSNAPSHOT_NAMESPACE_MANAGED, f"app={PODSNAPSHOT_AGENT}"):
-            return True
-
-        return False
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """

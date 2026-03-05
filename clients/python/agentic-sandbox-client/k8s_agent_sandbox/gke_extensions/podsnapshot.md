@@ -14,8 +14,7 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
 
 *   **`PodSnapshotSandboxClient(template_name: str, podsnapshot_timeout: int = 180, server_port: int = 8080, ...)`**:
     *   Initializes the client with optional podsnapshot timeout and server port.
-*   **`snapshot_controller_ready(self) -> bool`**:
-    *   Checks if the snapshot agent (GKE managed) is running and ready.
+
 *   **`__exit__(self)`**:
     *   Cleans up the `SandboxClaim` resources.
 

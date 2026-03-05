@@ -1,0 +1,50 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+  name: agent-sandbox.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: Sandbox is the Schema for the sandboxes API
+      displayName: Sandbox
+      kind: Sandbox
+      name: sandboxes.agents.x-k8s.io
+      version: v1alpha1
+  description: Operator to manage the lifecycle of Agent Sandbox
+  displayName: Agent Sandbox Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      deployments: null
+    strategy: ""
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - agent-sandbox
+  - sandbox
+  - isolation
+  links:
+  - name: Agent Sandbox
+    url: https://github.com/kubernetes-sigs/agent-sandbox
+  maintainers:
+  - email: eesposit@redhat.com
+    name: Emanuele Giuseppe Esposito
+  maturity: alpha
+  provider:
+    name: Kubernetes SIG Apps
+    url: https://github.com/kubernetes-sigs
+  version: 0.0.0

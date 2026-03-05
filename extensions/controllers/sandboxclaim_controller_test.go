@@ -106,7 +106,16 @@ func TestSandboxClaimReconcile(t *testing.T) {
 
 	uncontrolledSandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default"},
-		Spec:       sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{Spec: template.Spec.PodTemplate.Spec}},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						sandboxTemplateLabel: sandboxcontrollers.NameHash("test-template"),
+					},
+				},
+				Spec: template.Spec.PodTemplate.Spec,
+			},
+		},
 	}
 
 	controlledSandbox := &sandboxv1alpha1.Sandbox{
@@ -116,7 +125,21 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
 			}},
 		},
-		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{Spec: template.Spec.PodTemplate.Spec}},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						sandboxTemplateLabel: sandboxcontrollers.NameHash("test-template"),
+					},
+				},
+				Spec: template.Spec.PodTemplate.Spec,
+			},
+		},
+	}
+
+	controlledSandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
+	controlledSandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
+		Nameservers: []string{"8.8.8.8", "1.1.1.1"},
 	}
 
 	controlledSandboxWithDefault := controlledSandbox.DeepCopy()
@@ -148,6 +171,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
 		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
 		expectedSpec.AutomountServiceAccountToken = ptr.To(false)
+
+		expectedSpec.DNSPolicy = corev1.DNSNone
+		expectedSpec.DNSConfig = &corev1.PodDNSConfig{
+			Nameservers: []string{"8.8.8.8", "1.1.1.1"},
+		}
 		if diff := cmp.Diff(&sandbox.Spec.PodTemplate.Spec, expectedSpec); diff != "" {
 			t.Errorf("unexpected sandbox spec:\n%s", diff)
 		}
@@ -171,70 +199,77 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		validateSandbox       func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
 	}{
 		{
-			name:             "sandbox is created when a claim is made",
-			claimToReconcile: claim,
-			existingObjects:  []client.Object{template},
-			expectSandbox:    true,
+			name:                "sandbox is created when a claim is made",
+			claimToReconcile:    claim,
+			existingObjects:     []client.Object{template},
+			expectSandbox:       true,
+			expectNetworkPolicy: true, // Now defaults to True
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
-			name:             "sandbox is created with automount token enabled",
-			claimToReconcile: claimForAutomount,
-			existingObjects:  []client.Object{templateWithAutomount},
-			expectSandbox:    true,
+			name:                "sandbox is created with automount token enabled",
+			claimToReconcile:    claimForAutomount,
+			existingObjects:     []client.Object{templateWithAutomount},
+			expectSandbox:       true,
+			expectNetworkPolicy: true, // Now defaults to True
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 			validateSandbox: validateSandboxAutomountTrue,
 		},
 		{
-			name:             "sandbox is not created when template is not found",
-			claimToReconcile: claim,
-			existingObjects:  []client.Object{},
-			expectSandbox:    false,
-			expectError:      false,
+			name:                "sandbox is not created when template is not found",
+			claimToReconcile:    claim,
+			existingObjects:     []client.Object{},
+			expectSandbox:       false,
+			expectError:         false,
+			expectNetworkPolicy: false, // No template, no policy
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "TemplateNotFound", Message: `SandboxTemplate "test-template" not found`,
 			},
 		},
 		{
-			name:             "sandbox exists but is not controlled by claim",
-			claimToReconcile: claim,
-			existingObjects:  []client.Object{template, uncontrolledSandbox},
-			expectSandbox:    true,
-			expectError:      true,
+			name:                "sandbox exists but is not controlled by claim",
+			claimToReconcile:    claim,
+			existingObjects:     []client.Object{template, uncontrolledSandbox},
+			expectSandbox:       true,
+			expectError:         true,
+			expectNetworkPolicy: true, // Attempted creation
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: sandbox \"test-claim\" is not controlled by claim \"test-claim\". Please use a different claim name or delete the sandbox manually",
 			},
 		},
 		{
-			name:             "sandbox exists and is controlled by claim",
-			claimToReconcile: claim,
-			existingObjects:  []client.Object{template, controlledSandboxWithDefault},
-			expectSandbox:    true,
+			name:                "sandbox exists and is controlled by claim",
+			claimToReconcile:    claim,
+			existingObjects:     []client.Object{template, controlledSandboxWithDefault},
+			expectSandbox:       true,
+			expectNetworkPolicy: true, // Now defaults to True
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
-			name:             "sandbox exists but template is not found",
-			claimToReconcile: claim,
-			existingObjects:  []client.Object{readySandbox},
-			expectSandbox:    true,
+			name:                "sandbox exists but template is not found",
+			claimToReconcile:    claim,
+			existingObjects:     []client.Object{readySandbox},
+			expectSandbox:       true,
+			expectNetworkPolicy: false, // Reconcile aborts before policy logic
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
-			name:             "sandbox is ready",
-			claimToReconcile: claim,
-			existingObjects:  []client.Object{template, readySandbox},
-			expectSandbox:    true,
+			name:                "sandbox is ready",
+			claimToReconcile:    claim,
+			existingObjects:     []client.Object{template, readySandbox},
+			expectSandbox:       true,
+			expectNetworkPolicy: true,
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
@@ -253,15 +288,20 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
-				// 1. Check Owner Reference
-				if diff := cmp.Diff(np.OwnerReferences[0].UID, types.UID("claim-np-uid")); diff != "" {
-					t.Errorf("unexpected owner ref:\n%s", diff)
+				// 1. Check Owner Reference (Must be Template, not Claim)
+				if np.OwnerReferences[0].Kind != "SandboxTemplate" {
+					t.Errorf("expected owner ref to be SandboxTemplate, got %s", np.OwnerReferences[0].Kind)
 				}
-				// 2. Check Pod Selector (TARGETS UID)
-				expectedUID := string(types.UID("claim-np-uid"))
-				if diff := cmp.Diff(np.Spec.PodSelector.MatchLabels[extensionsv1alpha1.SandboxIDLabel], expectedUID); diff != "" {
+				if np.OwnerReferences[0].Name != "test-template-with-np" {
+					t.Errorf("expected owner ref name to be test-template-with-np, got %s", np.OwnerReferences[0].Name)
+				}
+
+				// 2. Check Pod Selector (TARGETS TEMPLATE HASH)
+				expectedHash := sandboxcontrollers.NameHash("test-template-with-np")
+				if diff := cmp.Diff(np.Spec.PodSelector.MatchLabels[sandboxTemplateLabel], expectedHash); diff != "" {
 					t.Errorf("unexpected pod selector:\n%s", diff)
 				}
+
 				// 3. Check Ingress Rule Translation
 				if len(np.Spec.Ingress) != 1 {
 					t.Errorf("expected 1 ingress rule, got %d", len(np.Spec.Ingress))
@@ -282,16 +322,101 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "sandbox created with network policy disabled",
+			name: "Scenario A: Creates Default Secure Policy (Strict Isolation) when template has none",
 			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-claim-np-disabled", Namespace: "default", UID: "claim-np-disabled-uid"},
-				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-np-disabled"}},
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-default-np", Namespace: "default", UID: "uid-default-np"},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
 			},
-			existingObjects:     []client.Object{templateWithNPDisabled},
+			existingObjects:     []client.Object{template},
 			expectSandbox:       true,
-			expectNetworkPolicy: false,
+			expectNetworkPolicy: true,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+				Type:    string(sandboxv1alpha1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  "SandboxNotReady",
+				Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				// Verify DNS Bypass is successfully injected
+				if sandbox.Spec.PodTemplate.Spec.DNSPolicy != corev1.DNSNone {
+					t.Errorf("Expected DNSPolicy to be 'None', got %q", sandbox.Spec.PodTemplate.Spec.DNSPolicy)
+				}
+				if sandbox.Spec.PodTemplate.Spec.DNSConfig == nil || len(sandbox.Spec.PodTemplate.Spec.DNSConfig.Nameservers) != 2 {
+					t.Fatalf("Expected injected DNSConfig with 2 public nameservers")
+				}
+				if sandbox.Spec.PodTemplate.Spec.DNSConfig.Nameservers[0] != "8.8.8.8" {
+					t.Errorf("Expected first nameserver to be 8.8.8.8, got %q", sandbox.Spec.PodTemplate.Spec.DNSConfig.Nameservers[0])
+				}
+			},
+			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
+				// 1. Verify PolicyTypes
+				if len(np.Spec.PolicyTypes) != 2 {
+					t.Errorf("Expected 2 PolicyTypes (Ingress, Egress), got %d", len(np.Spec.PolicyTypes))
+				}
+
+				// 2. Verify Ingress has exactly 1 rule (Allow Router)
+				if len(np.Spec.Ingress) != 1 {
+					t.Errorf("Expected Default Policy to have 1 Ingress rule (Allow Router), got %d", len(np.Spec.Ingress))
+				}
+
+				ingressRule := np.Spec.Ingress[0]
+				if len(ingressRule.From) != 1 {
+					t.Fatal("Expected exactly 1 'From' peer for Ingress")
+				}
+
+				// Verify it selects the Router
+				routerSelector := ingressRule.From[0].PodSelector
+				if routerSelector == nil || routerSelector.MatchLabels["app"] != "sandbox-router" {
+					t.Errorf("Security Risk: Ingress rule does not target 'app: sandbox-router'. Got: %v", routerSelector)
+				}
+
+				// 3. Verify Egress has exactly 1 rule (Strict Public Internet, No DNS)
+				if len(np.Spec.Egress) != 1 {
+					t.Fatalf("Expected 1 Egress rule (IP Block), got %d", len(np.Spec.Egress))
+				}
+
+				// --- Rule 1: Public Internet Restriction (Block Private IPs) ---
+				ipBlockRule := np.Spec.Egress[0]
+
+				// Verify Destination blocks internal traffic
+				if len(ipBlockRule.To) != 2 {
+					t.Fatalf("Expected IPBlock rule to have 2 'To' peers (IPv4/IPv6), got %d", len(ipBlockRule.To))
+				}
+
+				// Verify IPv4 Block
+				ipv4Block := ipBlockRule.To[0].IPBlock
+				if ipv4Block == nil || ipv4Block.CIDR != "0.0.0.0/0" {
+					t.Errorf("Expected IPv4 0.0.0.0/0 IPBlock")
+				}
+				expectedIPv4Exceptions := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"}
+				if diff := cmp.Diff(expectedIPv4Exceptions, ipv4Block.Except); diff != "" {
+					t.Errorf("Unexpected IPv4 IPBlock exceptions (-want +got):\n%s", diff)
+				}
+
+				// Verify IPv6 Block
+				ipv6Block := ipBlockRule.To[1].IPBlock
+				if ipv6Block == nil || ipv6Block.CIDR != "::/0" {
+					t.Errorf("Expected IPv6 ::/0 IPBlock")
+				}
+				expectedIPv6Exceptions := []string{"fc00::/7"}
+				if diff := cmp.Diff(expectedIPv6Exceptions, ipv6Block.Except); diff != "" {
+					t.Errorf("Unexpected IPv6 IPBlock exceptions (-want +got):\n%s", diff)
+				}
+
+				// Verify Ports are NOT restricted (Allow all ports to Public Internet)
+				if len(ipBlockRule.Ports) != 0 {
+					t.Errorf("IPBlock rule should allow all ports to public internet. Got %d port restrictions", len(ipBlockRule.Ports))
+				}
+
+				// 4. Verify PodSelector uses the backward-compatible label
+				expectedLabelKey := "agents.x-k8s.io/sandbox-template-ref-hash"
+				if np.Spec.PodSelector.MatchLabels == nil {
+					t.Fatal("Expected PodSelector MatchLabels to be initialized")
+				}
+
+				if _, ok := np.Spec.PodSelector.MatchLabels[expectedLabelKey]; !ok {
+					t.Errorf("Security Risk: NetworkPolicy is missing the backward-compatible label %q. Got: %v", expectedLabelKey, np.Spec.PodSelector.MatchLabels)
+				}
 			},
 		},
 		{
@@ -303,8 +428,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				},
 				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
 			},
-			existingObjects: []client.Object{template},
-			expectSandbox:   true,
+			existingObjects:     []client.Object{template},
+			expectSandbox:       true,
+			expectNetworkPolicy: true, // Now defaults to True
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
@@ -356,13 +482,22 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				t.Fatalf("expected sandbox to not exist, but got err: %v", err)
 			}
 
+			if tc.expectSandbox {
+				// Verify the controller injected the template hash label so the NP can find the pod
+				expectedHash := sandboxcontrollers.NameHash(claimToUse.Spec.TemplateRef.Name)
+				if val, exists := sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateLabel]; !exists || val != expectedHash {
+					t.Errorf("expected Sandbox PodTemplate to have label '%s' with value %q, got %q", sandboxTemplateLabel, expectedHash, val)
+				}
+			}
+
 			if tc.validateSandbox != nil {
 				tc.validateSandbox(t, &sandbox, template)
 			}
 
 			// Validate Network Policy
 			var np networkingv1.NetworkPolicy
-			npName := types.NamespacedName{Name: req.Name + "-network-policy", Namespace: req.Namespace}
+			// Name is derived from Template, not Claim
+			npName := types.NamespacedName{Name: claimToUse.Spec.TemplateRef.Name + "-network-policy", Namespace: req.Namespace}
 			err = client.Get(context.Background(), npName, &np)
 			if tc.expectNetworkPolicy && err != nil {
 				t.Fatalf("get network policy: (%v)", err)
@@ -652,8 +787,8 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				Namespace:         "default",
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
-					poolLabel:              poolNameHash,
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					poolLabel:            poolNameHash,
+					sandboxTemplateLabel: sandboxcontrollers.NameHash("test-template"),
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -691,7 +826,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				Name:      name,
 				Namespace: "default",
 				Labels: map[string]string{
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					sandboxTemplateLabel: sandboxcontrollers.NameHash("test-template"),
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -856,9 +991,6 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				if _, exists := adoptedPod.Labels[poolLabel]; exists {
 					t.Errorf("expected pool label to be removed from adopted pod")
 				}
-				if _, exists := adoptedPod.Labels[sandboxTemplateRefHash]; exists {
-					t.Errorf("expected sandbox template ref label to be removed from adopted pod")
-				}
 
 				// 2. Verify Security Label (UID) was added
 				expectedUID := string(types.UID("claim-uid")) // MATCHES CLAIM UID
@@ -875,6 +1007,12 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				// 4. Verify OwnerReference is nil
 				if len(adoptedPod.OwnerReferences) != 0 {
 					t.Errorf("expected adopted pod owner references to be cleared, got %v", adoptedPod.OwnerReferences)
+				}
+
+				// 5. Verify Template Label Persists (Security Check)
+				expectedTemplateHash := sandboxcontrollers.NameHash("test-template")
+				if val, exists := adoptedPod.Labels[sandboxTemplateLabel]; !exists || val != expectedTemplateHash {
+					t.Errorf("Security Risk: Expected pod to retain template label %q for NetworkPolicy, but it was missing or incorrect. Got: %q", sandboxTemplateLabel, val)
 				}
 
 			} else if tc.expectSandboxCreate {

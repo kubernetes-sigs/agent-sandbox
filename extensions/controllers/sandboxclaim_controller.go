@@ -614,17 +614,17 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1alpha1.SandboxClaim,
 	oldStatus *extensionsv1alpha1.SandboxClaimStatus,
-	sandbox *sandboxv1alpha1.Sandbox,
+	sandbox *v1alpha1.Sandbox,
 ) {
 
 	newStatus := &claim.Status
-	newReady := meta.FindStatusCondition(newStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
-	if newReady == nil || newReady.Status == metav1.ConditionFalse {
+	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1alpha1.SandboxConditionReady))
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
 		return
 	}
 
 	// Do not record creation metric if we have already seen the ready state.
-	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1alpha1.SandboxConditionReady))
 	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
 		return
 	}
@@ -638,6 +638,8 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		launchType = asmetrics.LaunchTypeWarm
 	}
 
+	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
+	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 }
 

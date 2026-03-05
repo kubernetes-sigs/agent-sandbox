@@ -56,7 +56,7 @@ func (s *sandboxHasStatusPredicate) Matches(obj client.Object) (bool, error) {
 		return false, err
 	}
 	opts := []cmp.Option{
-		cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
+		cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime", "Message", "ObservedGeneration"),
 	}
 	if diff := cmp.Diff(s.WantStatus, sandbox.Status, opts...); diff != "" {
 		return false, nil

@@ -20,8 +20,6 @@ from k8s_agent_sandbox.gke_extensions.podsnapshot_client import (
     PodSnapshotSandboxClient,
 )
 from k8s_agent_sandbox.constants import (
-    PODSNAPSHOT_NAMESPACE_MANAGED,
-    PODSNAPSHOT_AGENT,
     PODSNAPSHOT_API_KIND,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
@@ -31,35 +29,14 @@ from kubernetes.client import ApiException
 
 from kubernetes import config
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-
-def load_kubernetes_config():
-    """Loads Kubernetes configuration, prioritizing kubeconfig and falling back to an environment variable."""
-    try:
-        config.load_kube_config()
-        logging.info("Kubernetes config loaded from kubeconfig file.")
-    except config.ConfigException:
-        logging.info(
-            "Kubeconfig file not found, attempting to load from environment variable."
-        )
-        try:
-            config.load_kube_config(config_file=os.getenv("KUBECONFIG_FILE"))
-            logging.info(
-                "Kubernetes config loaded from KUBECONFIG_FILE environment variable."
-            )
-        except Exception as e:
-            logging.error(f"Could not load Kubernetes config: {e}", exc_info=True)
-            raise
+logger = logging.getLogger(__name__)
 
 
 class TestPodSnapshotSandboxClient(unittest.TestCase):
 
     @patch("kubernetes.config")
     def setUp(self, mock_config):
-        logging.info("Setting up TestPodSnapshotSandboxClient...")
+        logger.info("Setting up TestPodSnapshotSandboxClient...")
         # Mock kubernetes config loading
         mock_config.load_incluster_config.side_effect = config.ConfigException(
             "Not in cluster"
@@ -76,25 +53,27 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.client.custom_objects_api = MagicMock()
         self.client.core_v1_api = MagicMock()
 
-        logging.info("Finished setting up TestPodSnapshotSandboxClient.")
+        logger.info("Finished setting up TestPodSnapshotSandboxClient.")
 
     def test_init(self):
         """Test initialization of PodSnapshotSandboxClient."""
-        logging.info("Starting test_init...")
+        logger.info("Starting test_init...")
         with patch(
             "k8s_agent_sandbox.sandbox_client.SandboxClient.__init__", return_value=None
         ) as mock_super:
             with patch.object(
-                PodSnapshotSandboxClient, "_check_snapshot_crd_installed", return_value=True
+                PodSnapshotSandboxClient,
+                "_check_snapshot_crd_installed",
+                return_value=True,
             ):
                 client = PodSnapshotSandboxClient("test-template")
-            mock_super.assert_called_once_with("test-template", server_port=8080)
-        self.assertFalse(client.controller_ready)
-        logging.info("Finished test_init.")
+            mock_super.assert_called_once_with("test-template", server_port=8888)
+        self.assertFalse(client.snapshot_crd_installed)
+        logger.info("Finished test_init.")
 
     def test_check_snapshot_crd_installed_success(self):
         """Test _check_snapshot_crd_installed success scenarios (Check CRD Existence)."""
-        logging.info("TEST: CRD Existence Success")
+        logger.info("TEST: CRD Existence Success")
         mock_resource_list = MagicMock()
         mock_resource = MagicMock()
         mock_resource.kind = PODSNAPSHOT_API_KIND
@@ -103,7 +82,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             mock_resource_list
         )
 
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         self.assertTrue(self.client._check_snapshot_crd_installed())
         self.client.custom_objects_api.get_api_resources.assert_called_with(
             group=PODSNAPSHOT_API_GROUP, version=PODSNAPSHOT_API_VERSION
@@ -114,7 +93,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         # 1. No CRDs found
         self.client.custom_objects_api.get_api_resources.return_value = None
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         self.assertFalse(self.client._check_snapshot_crd_installed())
 
         # 2. CRD Kind mismatch
@@ -125,21 +104,21 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.client.custom_objects_api.get_api_resources.return_value = (
             mock_resource_list
         )
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         self.assertFalse(self.client._check_snapshot_crd_installed())
 
         # 3. 404 on CRD check
         self.client.custom_objects_api.get_api_resources.side_effect = ApiException(
             status=404
         )
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         self.assertFalse(self.client._check_snapshot_crd_installed())
 
         # 4. 403 on CRD check
         self.client.custom_objects_api.get_api_resources.side_effect = ApiException(
             status=403
         )
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         self.assertFalse(self.client._check_snapshot_crd_installed())
 
     def test_check_snapshot_crd_installed_exceptions(self):
@@ -149,14 +128,14 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.client.custom_objects_api.get_api_resources.side_effect = ApiException(
             status=500
         )
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         with self.assertRaises(ApiException):
             self.client._check_snapshot_crd_installed()
 
     def test_enter_exit(self):
         """Test context manager __enter__ implementation."""
         # Success path
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         with patch.object(
             self.client, "_check_snapshot_crd_installed", return_value=True
         ) as mock_ready:
@@ -167,10 +146,10 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
                 self.assertEqual(result, self.client)
                 mock_ready.assert_called_once()
                 mock_super_enter.assert_called_once()
-                self.assertTrue(self.client.controller_ready)
+                self.assertTrue(self.client.snapshot_crd_installed)
 
         # Failure path: Controller not ready (return False)
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         with patch.object(
             self.client, "_check_snapshot_crd_installed", return_value=False
         ) as mock_ready:
@@ -184,7 +163,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
                 mock_exit.assert_called_once_with(None, None, None)
 
         # Failure path: Exception during check
-        self.client.controller_ready = False
+        self.client.snapshot_crd_installed = False
         with patch.object(
             self.client,
             "_check_snapshot_crd_installed",
@@ -209,7 +188,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
     def test_check_snapshot_crd_installed_already_ready(self):
         """Test early return if snapshot controller is already ready."""
-        self.client.controller_ready = True
+        self.client.snapshot_crd_installed = True
         result = self.client._check_snapshot_crd_installed()
         self.assertTrue(result)
         self.client.custom_objects_api.get_api_resources.assert_not_called()

@@ -17,8 +17,6 @@ from kubernetes import client
 from kubernetes.client import ApiException
 from ..sandbox_client import SandboxClient
 from ..constants import (
-    PODSNAPSHOT_NAMESPACE_MANAGED,
-    PODSNAPSHOT_AGENT,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
     PODSNAPSHOT_API_KIND,
@@ -29,27 +27,29 @@ logger = logging.getLogger(__name__)
 
 class PodSnapshotSandboxClient(SandboxClient):
     """
-    A specialized Sandbox client for interacting with the gke pod snapshot controller.
+    A specialized Sandbox client for interacting with the GKE Pod Snapshot Controller.
+
+    TODO: This class enables users to take a snapshot of their sandbox and restore from the taken snapshot.
     """
 
     def __init__(
         self,
         template_name: str,
-        server_port: int = 8080,
+        server_port: int = 8888,
         **kwargs,
     ):
         super().__init__(template_name, server_port=server_port, **kwargs)
 
-        self.controller_ready = False
+        self.snapshot_crd_installed = False
         self.core_v1_api = client.CoreV1Api()
 
     def __enter__(self) -> "PodSnapshotSandboxClient":
         try:
-            self.controller_ready = self._check_snapshot_crd_installed()
-            if not self.controller_ready:
+            self.snapshot_crd_installed = self._check_snapshot_crd_installed()
+            if not self.snapshot_crd_installed:
                 raise RuntimeError(
                     "Pod Snapshot Controller is not ready. "
-                    "Ensure the PodSnapshotManualTrigger CRD is installed and the controller is running."
+                    "Ensure the PodSnapshot CRD is installed."
                 )
             super().__enter__()
             return self
@@ -65,7 +65,7 @@ class PodSnapshotSandboxClient(SandboxClient):
         Checks if the PodSnapshot CRD is installed in the cluster.
         """
 
-        if self.controller_ready:
+        if self.snapshot_crd_installed:
             return True
 
         try:

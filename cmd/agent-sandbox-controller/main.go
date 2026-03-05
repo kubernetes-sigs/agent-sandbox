@@ -195,7 +195,7 @@ func main() {
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
 			Client: mgr.GetClient(),
-		}).SetupWithManager(mgr); err != nil {
+		}).SetupWithManager(mgr, concurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)
 		}

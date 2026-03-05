@@ -79,7 +79,7 @@ func main() {
 			"<=0 disables; 1 samples all events; N>1 samples ~1/N events (e.g. 10 ~= 1/10, 100 ~= 1/100).")
 	flag.IntVar(&kubeAPIQPS, "kube-api-qps", 20, "QPS limit for kube API client")
 	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 30, "Burst limit for kube API client")
-	flag.IntVar(&concurrentWorkers, "concurrent-workers", 10, "Max concurrent reconciles for the controllers")
+	flag.IntVar(&concurrentWorkers, "concurrent-workers", 1, "Max concurrent reconciles for the controllers")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -195,7 +195,7 @@ func main() {
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
 			Client: mgr.GetClient(),
-		}).SetupWithManager(mgr, concurrentWorkers); err != nil {
+		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)
 		}

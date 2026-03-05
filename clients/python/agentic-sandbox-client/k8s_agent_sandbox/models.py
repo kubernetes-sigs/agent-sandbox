@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal
+from typing import Literal, Union
 from pydantic import BaseModel
 
 class ExecutionResult(BaseModel):
@@ -28,14 +28,24 @@ class FileEntry(BaseModel):
     type: Literal["file", "directory"]  # Type of the entry (file or directory).
     mod_time: float # Last modification time of the file. (POSIX timestamp)
 
-class SandboxRouterConfig(BaseModel):
-    """Configuration for connecting to and executing in a Sandbox."""
-    gateway_name: str | None = None  # Name of the Gateway resource (if using Gateway API).
-    gateway_namespace: str = "default"  # Namespace where the Gateway resource resides.
-    api_url: str | None = None  # Direct URL to the router (overrides discovery).
+class SandboxDirectConnectionConfig(BaseModel):
+    """Configuration for connecting directly to a Sandbox URL."""
+    api_url: str  # Direct URL to the router.
     server_port: int = 8888  # Port the sandbox container listens on.
+
+class SandboxGatewayConnectionConfig(BaseModel):
+    """Configuration for connecting via Kubernetes Gateway API."""
+    gateway_name: str  # Name of the Gateway resource.
+    gateway_namespace: str = "default"  # Namespace where the Gateway resource resides.
     gateway_ready_timeout: int = 180  # Timeout in seconds to wait for Gateway IP.
+    server_port: int = 8888  # Port the sandbox container listens on.
+
+class SandboxLocalTunnelConnectionConfig(BaseModel):
+    """Configuration for connecting via kubectl port-forward."""
     port_forward_ready_timeout: int = 30  # Timeout in seconds to wait for port-forward to be ready.
+    server_port: int = 8888  # Port the sandbox container listens on.
+
+SandboxConnectionConfig = Union[SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, SandboxLocalTunnelConnectionConfig]
 
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""

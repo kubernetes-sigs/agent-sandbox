@@ -24,6 +24,10 @@ import json
 import logging
 import threading
 from contextlib import nullcontext
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import SandboxTracerConfig
 
 # If optional dependency OpenTelemetry is not installed, define a complete set of mock objects
 # to prevent runtime errors.
@@ -227,3 +231,18 @@ class TracerManager:
         carrier = {}
         self.propagator.inject(carrier)
         return json.dumps(carrier) if carrier else ""
+
+def create_tracer_manager(config: "SandboxTracerConfig"):
+    """
+    Creates and initializes a TracerManager based on the provided configuration.
+    """
+    if not config.enable_tracing:
+        return None, None
+
+    if not OPENTELEMETRY_AVAILABLE:
+        logging.error("OpenTelemetry not installed; skipping tracer initialization.")
+        return None, None
+
+    initialize_tracer(service_name=config.trace_service_name)
+    manager = TracerManager(service_name=config.trace_service_name)
+    return manager, manager.tracer

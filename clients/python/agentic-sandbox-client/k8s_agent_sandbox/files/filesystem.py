@@ -15,27 +15,19 @@
 import logging
 import os
 import urllib.parse
-from typing import List, TYPE_CHECKING
-from .models import FileEntry
-from .trace_manager import trace_span, trace
-
-if TYPE_CHECKING:
-    from .sandbox import Sandbox
+from typing import List
+from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.models import FileEntry
+from k8s_agent_sandbox.trace_manager import trace_span, trace
 
 class Filesystem:
     """
     Handles file operations within the sandbox.
     """
-    def __init__(self, sandbox: "Sandbox"):
-        self.sandbox = sandbox
-
-    @property
-    def tracer(self):
-        return self.sandbox.tracer
-
-    @property
-    def trace_service_name(self):
-        return self.sandbox.trace_service_name
+    def __init__(self, connector: SandboxConnector, tracer, trace_service_name: str):
+        self.connector = connector
+        self.tracer = tracer
+        self.trace_service_name = trace_service_name
 
     @trace_span("write")
     def write(self, path: str, content: bytes | str, timeout: int = 60):
@@ -49,7 +41,7 @@ class Filesystem:
 
         filename = os.path.basename(path)
         files_payload = {'file': (filename, content)}
-        self.sandbox._request("POST", "upload",
+        self.connector.send_request("POST", "upload",
                       files=files_payload, timeout=timeout)
         logging.info(f"File '{filename}' uploaded successfully.")
 
@@ -60,7 +52,7 @@ class Filesystem:
             span.set_attribute("sandbox.file.path", path)
 
         encoded_path = urllib.parse.quote(path, safe='')
-        response = self.sandbox._request(
+        response = self.connector.send_request(
             "GET", f"download/{encoded_path}", timeout=timeout)
         content = response.content
 
@@ -75,7 +67,7 @@ class Filesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         encoded_path = urllib.parse.quote(path, safe='')
-        response = self.sandbox._request("GET", f"list/{encoded_path}", timeout=timeout)
+        response = self.connector.send_request("GET", f"list/{encoded_path}", timeout=timeout)
 
         entries = response.json()
         if not entries:
@@ -93,7 +85,7 @@ class Filesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         encoded_path = urllib.parse.quote(path, safe='')
-        response = self.sandbox._request("GET", f"exists/{encoded_path}", timeout=timeout)
+        response = self.connector.send_request("GET", f"exists/{encoded_path}", timeout=timeout)
         exists = response.json().get("exists", False)
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)

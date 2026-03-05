@@ -13,26 +13,18 @@
 # limitations under the License.
 
 from typing import TYPE_CHECKING
-from .models import ExecutionResult
-from .trace_manager import trace_span, trace
-
-if TYPE_CHECKING:
-    from .sandbox import Sandbox
+from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.models import ExecutionResult
+from k8s_agent_sandbox.trace_manager import trace_span, trace
 
 class CoreExecution:
     """
     Handles execution of commands within the sandbox.
     """
-    def __init__(self, sandbox: "Sandbox"):
-        self.sandbox = sandbox
-
-    @property
-    def tracer(self):
-        return self.sandbox.tracer
-
-    @property
-    def trace_service_name(self):
-        return self.sandbox.trace_service_name
+    def __init__(self, connector: SandboxConnector, tracer, trace_service_name: str):
+        self.connector = connector
+        self.tracer = tracer
+        self.trace_service_name = trace_service_name
 
     @trace_span("run")
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
@@ -41,7 +33,7 @@ class CoreExecution:
             span.set_attribute("sandbox.command", command)
 
         payload = {"command": command}
-        response = self.sandbox._request(
+        response = self.connector.send_request(
             "POST", "execute", json=payload, timeout=timeout)
 
         response_data = response.json()

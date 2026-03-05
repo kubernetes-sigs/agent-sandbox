@@ -23,18 +23,20 @@ import sys
 import subprocess
 import atexit
 import logging
-from typing import List, Literal
+from typing import List, Literal, Dict
 from pydantic import BaseModel
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
-    initialize_tracer, TracerManager, trace_span, trace, OPENTELEMETRY_AVAILABLE
+    create_tracer_manager, trace_span, trace
 )
 from .sandbox import Sandbox
-from .models import SandboxRouterConfig, SandboxTracerConfig
+from .models import (
+    SandboxConnectionConfig, 
+    SandboxLocalTunnelConnectionConfig, 
+    SandboxTracerConfig
+)
 from .k8s_helper import K8sHelper
-
-POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -42,59 +44,116 @@ logging.basicConfig(level=logging.INFO,
 
 class SandboxClient:
     """
-    A client for creating and interacting with a stateful Sandbox via a router.
+    A registry-based client for managing Sandbox lifecycles.
+    Tracks all active handles to ensure flat code structure and safe cleanup.
     """
 
     def __init__(
         self,
-        config: SandboxRouterConfig | None = None,
+        connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         sandbox_ready_timeout: int = 180,
     ):
-        self.config = config or SandboxRouterConfig()
-        self.tracer_config = tracer_config or SandboxTracerConfig()
+        # Sandbox related configuration
         self.sandbox_ready_timeout = sandbox_ready_timeout
-        self.tracing_manager = None
-        self.tracer = None
+        self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
         
-        if self.tracer_config.enable_tracing:
-            if not OPENTELEMETRY_AVAILABLE:
-                logging.error(
-                    "OpenTelemetry not installed; skipping tracer initialization.")
-            else:
-                initialize_tracer(service_name=self.tracer_config.trace_service_name)
-                self.tracing_manager = TracerManager(
-                    service_name=self.tracer_config.trace_service_name)
-                self.tracer = self.tracing_manager.tracer
+        # Tracer configuration
+        self.tracer_config = tracer_config or SandboxTracerConfig()
+        self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
+        # Downstream Kubernetes Configuration
         self.k8s_helper = K8sHelper()
+        
+        # Tracks all the active connections to the Sandbox
+        self._active_connection_sandboxes: Dict[str, Sandbox] = {}
+        
+        # Register global cleanup for all tracked sandboxes
+        atexit.register(self.delete_all)
+
 
     def create_sandbox(self, template: str, namespace: str = "default") -> Sandbox:
-        """Provisions a new sandbox and returns a Resource Handle."""
-        target_namespace = namespace
+        """Provisions new infra and returns a tracked Sandbox handle."""
         claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
+        
+        try:
+            self._create_claim(claim_name, template, namespace)
+            self._wait_for_sandbox_ready(claim_name, namespace)
+        except Exception:
+            # If creation or waiting fails, ensure we don't leave an orphaned claim
+            self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
+            raise
 
-        self._create_claim(claim_name, template, target_namespace)
-        self._wait_for_sandbox_ready(claim_name, target_namespace)
-
-        return Sandbox(
+        sandbox = Sandbox(
             sandbox_id=claim_name,
-            namespace=target_namespace,
-            router_config=self.config,
+            namespace=namespace,
+            connection_config=self.connection_config,
             tracer_config=self.tracer_config,
             k8s_helper=self.k8s_helper
         )
+        
+        self._active_connection_sandboxes[claim_name] = sandbox
+        return sandbox
 
     def get_sandbox(self, sandbox_id: str, namespace: str = "default") -> Sandbox:
-        """Re-attaches to an existing sandbox by ID."""
-        return Sandbox(
+        """
+        Retrieves an existing sandbox handle. 
+        If the handle is closed or missing, it re-attaches to the infrastructure.
+        """
+        existing = self._active_connection_sandboxes.get(sandbox_id)
+
+        # If it's already in the registry and active, return the existing object
+        if existing and existing.is_active:
+            return existing
+
+        # Check if the sandbox actually exists in Kubernetes
+        if not self.k8s_helper.get_sandbox(sandbox_id, namespace):
+            self._active_connection_sandboxes.pop(sandbox_id, None)
+            raise RuntimeError(f"Sandbox '{sandbox_id}' not found in namespace '{namespace}'")
+
+        # Re-attach: Create a fresh handle for the existing ID
+        new_handle = Sandbox(
             sandbox_id=sandbox_id,
             namespace=namespace,
-            router_config=self.config,
+            connection_config=self.connection_config,
             tracer_config=self.tracer_config,
             k8s_helper=self.k8s_helper
         )
+        
+        self._active_connection_sandboxes[sandbox_id] = new_handle
+        return new_handle
 
+    def delete_sandbox(self, sandbox_id: str, namespace: str = "default"):
+        """Stops the client side connection and deletes the Kubernetes resources."""
+        sandbox = self._active_connection_sandboxes.get(sandbox_id)
+        if sandbox:
+            sandbox.terminate()
+            self._active_connection_sandboxes.pop(sandbox_id, None)
+        else:
+            # If not in registry, attempt a blind delete via K8s helper
+            self.k8s_helper.delete_sandbox_claim(sandbox_id, namespace)
+    
+    def list_active_sandboxes(self) -> List[str]:
+        """Returns a list of all Sandbox IDs currently managed by this client."""
+        # We only return IDs that are still active/initialized
+        return [sb_id for sb_id, obj in self._active_connection_sandboxes.items() if obj.is_active]
+    
+    def delete_all(self):
+        """
+        Cleanup all tracked sandboxes, respecting their individual namespaces.
+        Triggered automatically on script exit via atexit.
+        """
+        # We iterate over items to get access to the sandbox object's metadata
+        for sb_id, sandbox in list(self._active_connection_sandboxes.items()):
+            try:
+                # We pass the specific namespace stored in the Sandbox handle
+                self.delete_sandbox(sb_id, namespace=sandbox.namespace)
+            except Exception as e:
+                # We use sandbox.namespace in the log for better debugging
+                logging.error(
+                    f"Cleanup failed for {sb_id} in namespace {sandbox.namespace}: {e}"
+                )
+    
     @trace_span("create_claim")
     def _create_claim(self, claim_name: str, template_name: str, namespace: str):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""

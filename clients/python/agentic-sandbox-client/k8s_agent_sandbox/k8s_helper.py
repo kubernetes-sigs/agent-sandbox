@@ -102,6 +102,21 @@ class K8sHelper:
                 logging.error(f"Error terminating sandbox {name}: {e}")
                 raise
 
+    def get_sandbox(self, name: str, namespace: str):
+        """Gets a Sandbox custom resource."""
+        try:
+            return self.custom_objects_api.get_namespaced_custom_object(
+                group=SANDBOX_API_GROUP,
+                version=SANDBOX_API_VERSION,
+                namespace=namespace,
+                plural=SANDBOX_PLURAL_NAME,
+                name=name
+            )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")

@@ -116,7 +116,10 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if r.Recorder != nil {
 			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Deleting Claim (ShutdownPolicy=Delete)")
 		}
-		if err := r.Delete(ctx, claim); err != nil {
+		// Important!! We use foreground progation to make sure the claim stays present in etcd until the sandbox and pod
+		// have been stopped and deleted. The pod may important cleanup logic, so it's useful to be able to query the
+		// claim to determine if the sandbox has already stopped(claim is gone) or is still stopping(claim present with deletion timestamp set).
+		if err := r.Delete(ctx, claim, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil

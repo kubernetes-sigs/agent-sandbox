@@ -67,7 +67,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
                 return_value=True,
             ):
                 client = PodSnapshotSandboxClient("test-template")
-            mock_super.assert_called_once_with("test-template", server_port=8888)
+            mock_super.assert_called_once_with("test-template")
         self.assertFalse(client.snapshot_crd_installed)
         logger.info("Finished test_init.")
 

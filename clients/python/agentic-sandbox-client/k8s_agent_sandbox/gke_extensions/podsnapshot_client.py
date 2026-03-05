@@ -35,10 +35,9 @@ class PodSnapshotSandboxClient(SandboxClient):
     def __init__(
         self,
         template_name: str,
-        server_port: int = 8888,
         **kwargs,
     ):
-        super().__init__(template_name, server_port=server_port, **kwargs)
+        super().__init__(template_name, **kwargs)
 
         self.snapshot_crd_installed = False
         self.core_v1_api = client.CoreV1Api()

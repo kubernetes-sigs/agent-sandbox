@@ -48,7 +48,9 @@ def main(
             server_port=server_port,
         ) as sandbox:
             print("\n======= Testing Pod Snapshot Extension =======")
-            assert sandbox.controller_ready == True, "Sandbox controller is not ready."
+            assert (
+                sandbox.snapshot_crd_installed == True
+            ), "Pod Snapshot CRD is not installed."
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")
@@ -63,19 +65,6 @@ if __name__ == "__main__":
         "--template-name",
         default="python-sandbox-template",
         help="The name of the sandbox template to use for the test.",
-    )
-
-    # Default is None to allow testing the Port-Forward fallback
-    parser.add_argument(
-        "--gateway-name",
-        default=None,
-        help="The name of the Gateway resource. If omitted, defaults to local port-forward mode.",
-    )
-
-    parser.add_argument(
-        "--gateway-namespace",
-        default=None,
-        help="The namespace of the Gateway resource. If omitted, defaults to local port-forward mode.",
     )
 
     parser.add_argument(

@@ -12,7 +12,7 @@ A specialized Sandbox client for interacting with the gke pod snapshot controlle
 
 ### Key Features:
 
-*   **`PodSnapshotSandboxClient(template_name: str, namespace: str = "default", server_port: int = 8888, ...)`**:
+*   **`PodSnapshotSandboxClient(template_name: str, ...)`**:
     *   Initializes the client with optional server port.
 
 *   **`__exit__(self)`**:

@@ -499,6 +499,15 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	podCondition := "not_ready"
 	if adoptedPod != nil {
 		launchType = asmetrics.LaunchTypeWarm
+
+		// Fetch the latest pod status to ensure accuracy
+		latestPod := &corev1.Pod{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(adoptedPod), latestPod); err == nil {
+			adoptedPod = latestPod
+		} else {
+			logger.Error(err, "Failed to fetch latest pod status for metric recording", "pod", adoptedPod.Name)
+		}
+
 		for _, cond := range adoptedPod.Status.Conditions {
 			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
 				podCondition = "ready"

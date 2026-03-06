@@ -113,8 +113,8 @@ func main() {
 	}
 	// Warning if the total number of workers exceeds the kube API burst limit
 	if kubeAPIQPS > 0 && totalWorkers > kubeAPIBurst {
-		setupLog.Info("Warning: Total concurrent workers exceeds the kube API burst limit. Workers may experience client-side throttling.", 
-			"totalWorkers", totalWorkers, 
+		setupLog.Info("Warning: Total concurrent workers exceeds the kube API burst limit. Workers may experience client-side throttling.",
+			"totalWorkers", totalWorkers,
 			"kubeAPIBurst", kubeAPIBurst,
 		)
 	}

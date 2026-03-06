@@ -9,7 +9,7 @@ Router, while maintaining a convenient **Developer Mode** for local testing.
 
 ## Architecture
 
-The client operates in two modes:
+The client operates in three modes:
 
 1.  **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
     -> Router Service -> Sandbox Pod. This supports high-scale deployments.

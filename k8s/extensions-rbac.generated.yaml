@@ -63,7 +63,9 @@ rules:
 - apiGroups:
   - extensions.agents.x-k8s.io
   resources:
+  - sandboxclaims/finalizers
   - sandboxclaims/status
+  - sandboxwarmpools/finalizers
   - sandboxwarmpools/status
   verbs:
   - get

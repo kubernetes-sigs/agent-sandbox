@@ -137,7 +137,7 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 			Namespace: ns.Name,
 		}
 
-		framework.MustWatch(t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *corev1.Pod) (bool, error) {
+		framework.MustWatch(t.Context(), t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *corev1.Pod) (bool, error) {
 			t.Logf("Pod event %s %s/%s", event.Type, obj.Namespace, obj.Name)
 
 			if lastValue != nil {
@@ -173,7 +173,7 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 			Namespace: ns.Name,
 		}
 
-		framework.MustWatch(t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *sandboxv1alpha1.Sandbox) (bool, error) {
+		framework.MustWatch(t.Context(), t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *sandboxv1alpha1.Sandbox) (bool, error) {
 			t.Logf("Sandbox event %s %s/%s", event.Type, obj.Namespace, obj.Name)
 
 			if lastValue != nil {

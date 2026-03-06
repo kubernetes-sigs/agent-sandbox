@@ -15,17 +15,23 @@
 package framework
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,6 +71,7 @@ type TestContext struct {
 	T
 	*ClusterClient
 	artifactsDir string
+	restConfig   *rest.Config
 }
 
 // ArtifactsDir returns the directory where test artifacts should be written.
@@ -101,6 +108,7 @@ func NewTestContext(t T) *TestContext {
 	if err != nil {
 		t.Fatal(err)
 	}
+	th.restConfig = restConfig
 
 	httpClient, err := rest.HTTPClientFor(restConfig)
 	if err != nil {
@@ -155,5 +163,70 @@ func (th *TestContext) beforeEach() error {
 //nolint:unparam // remove nolint once this is implemented
 func (th *TestContext) afterEach() error {
 	th.Helper()
-	return nil // currently no-op, add functionality as needed
+	if th.Failed() {
+		th.dumpControllerLogs()
+	}
+	return nil
+}
+
+// dumpControllerLogs fetches and logs the agent-sandbox-controller logs
+// to help diagnose test failures.
+func (th *TestContext) dumpControllerLogs() {
+	th.Helper()
+
+	clientset, err := kubernetes.NewForConfig(th.restConfig)
+	if err != nil {
+		th.Logf("failed to create clientset for controller logs: %v", err)
+		return
+	}
+
+	pods, err := clientset.CoreV1().Pods("agent-sandbox-system").List(
+		context.Background(),
+		metav1.ListOptions{LabelSelector: "app=agent-sandbox-controller"},
+	)
+	if err != nil {
+		th.Logf("failed to list controller pods: %v", err)
+		return
+	}
+
+	for _, pod := range pods.Items {
+		// Write full logs to artifacts file
+		fullReq := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{})
+		fullStream, err := fullReq.Stream(context.Background())
+		if err != nil {
+			th.Logf("failed to get logs for pod %s: %v", pod.Name, err)
+			continue
+		}
+		var fullBuf bytes.Buffer
+		if _, err := fullBuf.ReadFrom(fullStream); err != nil {
+			fullStream.Close()
+			th.Logf("failed to read logs for pod %s: %v", pod.Name, err)
+			continue
+		}
+		fullStream.Close()
+
+		logFile := filepath.Join(th.artifactsDir, fmt.Sprintf("controller-%s.log", pod.Name))
+		if err := os.WriteFile(logFile, fullBuf.Bytes(), 0o644); err != nil {
+			th.Logf("failed to write controller logs to %s: %v", logFile, err)
+		}
+
+		// Print last 42 lines to test output (following k8s e2e convention)
+		tailReq := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+			TailLines: ptr.To(int64(42)),
+		})
+		tailStream, err := tailReq.Stream(context.Background())
+		if err != nil {
+			th.Logf("failed to get tail logs for pod %s: %v", pod.Name, err)
+			continue
+		}
+		var tailBuf bytes.Buffer
+		if _, err := tailBuf.ReadFrom(tailStream); err != nil {
+			tailStream.Close()
+			th.Logf("failed to read tail logs for pod %s: %v", pod.Name, err)
+			continue
+		}
+		tailStream.Close()
+
+		th.Logf("=== Controller logs (last 42 lines) from %s (full logs: %s) ===\n%s", pod.Name, logFile, tailBuf.String())
+	}
 }

@@ -33,6 +33,7 @@ import (
 	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -45,6 +46,7 @@ import (
 // TODO: These constants should be imported from the main controller package Issue #216
 const (
 	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	poolNameNone = "none"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -59,6 +61,7 @@ type SandboxClaimReconciler struct {
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
@@ -338,7 +341,7 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 }
 
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
-func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
+func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, string, error) {
 	log := log.FromContext(ctx)
 
 	// List all pods with the podTemplateHashLabel matching the hash
@@ -352,7 +355,7 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		Namespace:     claim.Namespace,
 	}); err != nil {
 		log.Error(err, "Failed to list pods from warm pool")
-		return nil, err
+		return nil, poolNameNone, err
 	}
 
 	// Filter pods and create a slice of pointers for sorting
@@ -379,7 +382,7 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	if len(candidates) == 0 {
 		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
-		return nil, nil
+		return nil, poolNameNone, nil
 	}
 
 	// Sort pods using podutils.ByLogging to select the best available pod.
@@ -387,7 +390,12 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	// Get the first available pod
 	pod := candidates[0]
-	log.Info("Adopting pod from warm pool", "pod", pod.Name)
+	poolName := poolNameNone
+	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
+		poolName = controllerRef.Name
+	}
+
+	log.Info("Adopting pod from warm pool", "pod", pod.Name, "pool", poolName)
 
 	// Remove the pool labels
 	delete(pod.Labels, poolLabel)
@@ -410,11 +418,11 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
 		log.Error(err, "Failed to update adopted pod")
-		return nil, err
+		return nil, poolNameNone, err
 	}
 
 	log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
-	return pod, nil
+	return pod, poolName, nil
 }
 
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
@@ -464,7 +472,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	// Before creating the sandbox, try to adopt a pod from the warm pool
-	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
+	adoptedPod, poolName, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
 	if adoptErr != nil {
 		logger.Error(adoptErr, "Failed to adopt pod from warm pool")
 		return nil, adoptErr
@@ -489,6 +497,28 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	if r.Recorder != nil {
 		r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxProvisioned", fmt.Sprintf("Created Sandbox %q", sandbox.Name))
 	}
+
+	launchType := asmetrics.LaunchTypeCold
+	podCondition := "not_ready"
+	if adoptedPod != nil {
+		launchType = asmetrics.LaunchTypeWarm
+
+		// Fetch the latest pod status to ensure accuracy
+		latestPod := &corev1.Pod{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(adoptedPod), latestPod); err == nil {
+			adoptedPod = latestPod
+		} else {
+			logger.Error(err, "Failed to fetch latest pod status for metric recording", "pod", adoptedPod.Name)
+		}
+
+		for _, cond := range adoptedPod.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				podCondition = "ready"
+				break
+			}
+		}
+	}
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, claim.Spec.TemplateRef.Name, launchType, poolName, podCondition)
 
 	return sandbox, nil
 }
@@ -540,10 +570,11 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&v1alpha1.Sandbox{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }
 

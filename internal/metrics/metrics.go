@@ -42,15 +42,36 @@ var (
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
+
+	// SandboxClaimCreationTotal calculates the total number of SandboxClaims created.
+	// Labels:
+	// - namespace: the namespace of the claim
+	// - sandbox_template: the SandboxTemplateRef
+	// - launch_type: "warm", "cold", "unknown"
+	// - warmpool_name: the name of the warm pool (if applicable)
+	// - pod_condition: "ready", "not_ready"
+	SandboxClaimCreationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_claim_creation_total",
+			Help: "Total number of SandboxClaims created, labeled by namespace, sandbox template, launch type, warmpool name, and pod condition.",
+		},
+		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition"},
+	)
 )
 
 // Init registers custom metrics with the global controller-runtime registry.
 func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
+	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.
 func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
 	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+}
+
+// RecordSandboxClaimCreation increments the total count of created sandbox claims.
+func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition string) {
+	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition).Inc()
 }

@@ -1,0 +1,162 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: secure-sandbox-policy
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:   ["agents.x-k8s.io"]
+      apiVersions: ["v1alpha1"]
+      operations:  ["CREATE", "UPDATE"]
+      resources:   ["sandboxes"]
+  
+  # Define a variable to check ALL container types: containers, initContainers, and ephemeralContainers.
+  variables:
+    - name: allContainers
+      expression: >-
+        object.spec.podTemplate.spec.containers +
+        (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : []) +
+        (has(object.spec.podTemplate.spec.ephemeralContainers) ? object.spec.podTemplate.spec.ephemeralContainers : [])
+
+  validations:
+    # 1. Runtime Isolation
+    # All sandboxes must use gVisor to prevent container escape.
+    - expression: "has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'gvisor'"
+      message: "Security Violation: All Sandboxes must use 'runtimeClassName: gvisor'"
+
+    # 2. Network Isolation (Metadata Server Protection)
+    # Host networking allows access to 169.254.169.254 (Node Metadata). This must be blocked.
+    - expression: "!has(object.spec.podTemplate.spec.hostNetwork) || object.spec.podTemplate.spec.hostNetwork == false"
+      message: "Security Violation: 'hostNetwork: true' is strictly prohibited. Sandboxes must be isolated from the node network."
+
+    # 3. Identity Isolation (K8s API Access)
+    # Sandboxes must not mount K8s ServiceAccount tokens to prevent API abuse.
+    - expression: "has(object.spec.podTemplate.spec.automountServiceAccountToken) && object.spec.podTemplate.spec.automountServiceAccountToken == false"
+      message: "Security Violation: 'automountServiceAccountToken' must be explicitly set to 'false'. Sandbox workloads are not permitted to access the K8s API."
+
+    # 4. Privilege Escalation Prevention
+    # Privileged containers break isolation boundaries.
+    - expression: >-
+        variables.allContainers.all(c, 
+           !has(c.securityContext) || 
+           !has(c.securityContext.privileged) ||
+           c.securityContext.privileged == false
+        )
+      message: "Security Violation: Privileged containers are not allowed (checked in containers, initContainers, and ephemeralContainers)."
+
+    # 5. Capabilities Hardening (Defense in Depth)
+    # Drop ALL capabilities.
+    - expression: >-
+        variables.allContainers.all(c, 
+           has(c.securityContext) &&
+           has(c.securityContext.capabilities) &&
+           has(c.securityContext.capabilities.drop) &&
+           'ALL' in c.securityContext.capabilities.drop
+        )
+      message: "Security Violation: All containers must explicitly drop 'ALL' capabilities in securityContext."
+
+    # 6. DoS Protection (Resource Limits)
+    # Prevent noisy neighbors by enforcing memory/cpu limits.
+    - expression: >-
+        variables.allContainers.all(c, 
+           has(c.resources) && 
+           has(c.resources.limits) && 
+           has(c.resources.limits.memory) && 
+           has(c.resources.limits.cpu)
+        )
+      message: "Security Violation: All containers must define resource limits (cpu and memory) to prevent DoS."
+
+    # 7. Root User Restriction
+    # Containers must not run as root. Checks Pod-level inheritance and Container-level overrides.
+    - expression: >-
+        variables.allContainers.all(c, 
+          (has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot == true) ||
+          ((!has(c.securityContext) || !has(c.securityContext.runAsNonRoot)) && 
+           has(object.spec.podTemplate.spec.securityContext) && 
+           has(object.spec.podTemplate.spec.securityContext.runAsNonRoot) && 
+           object.spec.podTemplate.spec.securityContext.runAsNonRoot == true)
+        )
+      message: "Security Violation: Pods or Containers must set 'runAsNonRoot: true', and containers cannot override it to false."
+
+    # 8. Identity Isolation (Projected Volumes)
+    # Blocks manual mounting of ServiceAccount tokens, ClusterTrustBundles, and PodCertificates.
+    - expression: >-
+        !has(object.spec.podTemplate.spec.volumes) ||
+        !object.spec.podTemplate.spec.volumes.exists(v, 
+           has(v.projected) && 
+           has(v.projected.sources) && 
+           v.projected.sources.exists(s, has(s.serviceAccountToken) || has(s.clusterTrustBundle) || has(s.podCertificate))
+        )
+      message: "Security Violation: Projected Service Account Tokens, ClusterTrustBundles, and PodCertificates are prohibited."
+
+    # 9. Filesystem Isolation (HostPath)
+    # HostPath volumes allow attackers to access the underlying node filesystem.
+    - expression: >-
+        !has(object.spec.podTemplate.spec.volumes) ||
+        !object.spec.podTemplate.spec.volumes.exists(v, has(v.hostPath))
+      message: "Security Violation: HostPath volumes are strictly prohibited. You cannot mount host directories."
+    
+    # 10. Capabilities Hardening (No Adds)
+    # Prevent adding dangerous capabilities back after dropping them.
+    - expression: >-
+        variables.allContainers.all(c, 
+           !has(c.securityContext) ||
+           !has(c.securityContext.capabilities) ||
+           !has(c.securityContext.capabilities.add) ||
+           size(c.securityContext.capabilities.add) == 0
+        )
+      message: "Security Violation: Capabilities.add must be empty. You cannot add capabilities."
+    
+    # 11. Process & IPC Isolation
+    # Prevent sharing PID/IPC namespaces with the host.
+    - expression: >-
+        (!has(object.spec.podTemplate.spec.hostPID) || object.spec.podTemplate.spec.hostPID == false) && 
+        (!has(object.spec.podTemplate.spec.hostIPC) || object.spec.podTemplate.spec.hostIPC == false)
+      message: "Security Violation: 'hostPID' and 'hostIPC' must be false."
+
+    # 12. Network Isolation (HostPort)
+    # Binding to a host port allows bypassing network policy and claiming node resources.
+    - expression: >-
+        variables.allContainers.all(c, 
+          !has(c.ports) || 
+          c.ports.all(p, !has(p.hostPort))
+        )
+      message: "Security Violation: 'hostPort' usage is prohibited."
+
+    # 13. Kernel Hardening (Sysctls)
+    # Prevent modifying kernel parameters.
+    - expression: >-
+        !has(object.spec.podTemplate.spec.securityContext) ||
+        !has(object.spec.podTemplate.spec.securityContext.sysctls) ||
+        size(object.spec.podTemplate.spec.securityContext.sysctls) == 0
+      message: "Security Violation: Custom 'sysctls' are prohibited."
+
+    # 14. Filesystem Hardening (ProcMount)
+    # Prevent unmasking /proc paths (which could leak host info).
+    - expression: >-
+        variables.allContainers.all(c, 
+           !has(c.securityContext) ||
+           !has(c.securityContext.procMount) ||
+           c.securityContext.procMount == 'Default'
+        )
+      message: "Security Violation: 'procMount' must be 'Default' (Unmasked is prohibited)."
+
+    # 15. GKE Scheduling (Node Selector)
+    # Ensure the workload lands on a node capable of running gVisor.
+    - expression: >-
+        has(object.spec.podTemplate.spec.nodeSelector) && 
+        'sandbox.gke.io/runtime' in object.spec.podTemplate.spec.nodeSelector && 
+        object.spec.podTemplate.spec.nodeSelector['sandbox.gke.io/runtime'] == 'gvisor'
+      message: "Scheduling Violation: Sandboxes must be scheduled on gVisor nodes (nodeSelector 'sandbox.gke.io/runtime: gvisor')."
+
+    # 16. GKE Scheduling (Tolerations)
+    # Ensure the workload can tolerate the gVisor taint.
+    - expression: >-
+         has(object.spec.podTemplate.spec.tolerations) &&
+         object.spec.podTemplate.spec.tolerations.exists(t, 
+           t.key == 'sandbox.gke.io/runtime' && 
+           t.value == 'gvisor' && 
+           t.effect == 'NoSchedule'
+         )
+      message: "Scheduling Violation: Sandboxes must tolerate the gVisor taint ('sandbox.gke.io/runtime=gvisor:NoSchedule')."

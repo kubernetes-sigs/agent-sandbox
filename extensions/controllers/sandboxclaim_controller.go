@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"reflect"
 	"sort"
 	"time"
@@ -30,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/kubectl/pkg/util/podutils"
+	_ "k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -375,6 +376,15 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 			continue
 		}
 
+		// Skip pods that are not fully warmed up
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+
+		if !isPodReady(pod) {
+			continue
+		}
+
 		candidates = append(candidates, pod)
 	}
 
@@ -383,19 +393,31 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		return nil, nil
 	}
 
-	// Sort pods using podutils.ByLogging to select the best available pod.
-	sort.Sort(podutils.ByLogging(candidates))
-
-	// Get the first available pod
-	pod := candidates[0]
+	// Instead of deterministic sorting which causes thundering herd conflicts when scaling,
+	// we randomly select a candidate.
+	randomIndex := rand.Intn(len(candidates))
+	pod := candidates[randomIndex]
 	log.Info("Adopting pod from warm pool", "pod", pod.Name)
 
 	// Remove the pool labels
 	delete(pod.Labels, poolLabel)
 	delete(pod.Labels, sandboxTemplateRefHash)
 
-	// Remove existing owner references (from SandboxWarmPool)
-	pod.OwnerReferences = nil
+	// Remove existing SandboxWarmPool owner reference and tie to SandboxClaim
+	var newOwners []metav1.OwnerReference
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind != "SandboxWarmPool" {
+			newOwners = append(newOwners, ref)
+		}
+	}
+	// Tie lifecycle to the SandboxClaim to prevent pod leaks if Sandbox creation fails later
+	newOwners = append(newOwners, metav1.OwnerReference{
+		APIVersion: extensionsv1alpha1.GroupVersion.String(),
+		Kind:       "SandboxClaim",
+		Name:       claim.Name,
+		UID:        claim.UID,
+	})
+	pod.OwnerReferences = newOwners
 
 	nameHash := sandboxcontrollers.NameHash(claim.Name)
 	if pod.Labels == nil {
@@ -410,6 +432,10 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
+		if k8errors.IsConflict(err) {
+			log.Info("Collision while adopting pod, another worker took it. Requeueing.", "pod", pod.Name)
+			return nil, err
+		}
 		log.Error(err, "Failed to update adopted pod")
 		return nil, err
 	}
@@ -657,6 +683,16 @@ func hasExpiredCondition(conditions []metav1.Condition) bool {
 			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == v1alpha1.SandboxReasonExpired {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isPodReady checks if the Pod has condition PodReady = True
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+			return true
 		}
 	}
 	return false

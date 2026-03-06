@@ -732,16 +732,48 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 		expectSandboxCreate bool
 	}{
 		{
-			name: "adopts oldest pod from warm pool",
+			// This test covers the new random selection of pods functionality
+			// by verifying a basic single-pod adoption still works with the rand.Intn logic.
+			name: "adopts pod from warm pool",
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolPod("pool-pod-1", metav1.Time{Time: metav1.Now().Add(-3600)}, true), // oldest
-				createWarmPoolPod("pool-pod-2", metav1.Time{Time: metav1.Now().Add(-1800)}, true),
-				createWarmPoolPod("pool-pod-3", metav1.Now(), true),
+				createWarmPoolPod("pool-pod-1", metav1.Now(), true),
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "pool-pod-1",
+			expectSandboxCreate: true,
+		},
+		{
+			// This test covers the new random selection of pods functionality
+			// by providing multiple identical valid candidates and ensuring the controller
+			// successfully randomly selects and adopts exactly one of them without conflict.
+			name: "adopts from multiple ready pods (random selection)",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createWarmPoolPod("pool-pod-1", metav1.Now(), true),
+				createWarmPoolPod("pool-pod-2", metav1.Now(), true),
+				createWarmPoolPod("pool-pod-3", metav1.Now(), true),
+			},
+			expectPodAdoption:   true,
+			expectedAdoptedPod:  "", // Discovered dynamically via Sandbox annotation
+			expectSandboxCreate: true,
+		},
+		{
+			// This test covers the new random selection of pods functionality
+			// by verifying that the candidate slice passed to the randomizer is strictly
+			// filtered to exclude any PodPending or unready pods, ensuring it only randomly picks a fully ready pod.
+			name: "filters unready and pending pods and only assigns the fully-ready pod",
+			existingObjects: func() []client.Object {
+				pendingPod := createWarmPoolPod("pending-pod", metav1.Now(), false)
+				pendingPod.Status.Phase = corev1.PodPending
+				unreadyPod := createWarmPoolPod("running-unready", metav1.Now(), false)
+				readyPod := createWarmPoolPod("running-ready", metav1.Now(), true)
+				return []client.Object{template, claim, pendingPod, unreadyPod, readyPod}
+			}(),
+			expectPodAdoption:   true,
+			expectedAdoptedPod:  "running-ready",
 			expectSandboxCreate: true,
 		},
 		{
@@ -789,16 +821,16 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			expectSandboxCreate: true,
 		},
 		{
-			name: "prioritizes ready pods",
+			// This test covers the new random selection of pods functionality
+			// by explicitly ensuring that if the filtered candidate list is empty
+			// (because the pod is not fully ready), the randomizer is bypassed and no adoption occurs.
+			name: "does not adopt a pod if it is not fully ready",
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolPod("not-ready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
-				createWarmPoolPod("middle-ready", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
-				createWarmPoolPod("young-ready", metav1.Now(), true),
+				createWarmPoolPod("not-ready", metav1.Now(), false),
 			},
-			expectPodAdoption:   true,
-			expectedAdoptedPod:  "middle-ready",
+			expectPodAdoption:   false,
 			expectSandboxCreate: true,
 		},
 	}
@@ -843,14 +875,22 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			}
 
 			if tc.expectPodAdoption {
+				adoptedPodName := tc.expectedAdoptedPod
+				if adoptedPodName == "" {
+					adoptedPodName = sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation]
+					if adoptedPodName == "" {
+						t.Fatalf("expected sandbox to have pod name annotation, but it was empty")
+					}
+				}
+
 				// Verify the adopted pod has correct labels and owner reference
 				var adoptedPod corev1.Pod
 				err = client.Get(ctx, types.NamespacedName{
-					Name:      tc.expectedAdoptedPod,
+					Name:      adoptedPodName,
 					Namespace: "default",
 				}, &adoptedPod)
 				if err != nil {
-					t.Fatalf("failed to get adopted pod: %v", err)
+					t.Fatalf("failed to get adopted pod '%s': %v", adoptedPodName, err)
 				}
 
 				// 1. Verify pool labels were removed
@@ -873,9 +913,14 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 					t.Errorf("expected pod to have legacy label %q with value %q, but got %q", sandboxLabel, expectedLegacyHash, val)
 				}
 
-				// 4. Verify OwnerReference is nil
-				if len(adoptedPod.OwnerReferences) != 0 {
-					t.Errorf("expected adopted pod owner references to be cleared, got %v", adoptedPod.OwnerReferences)
+				// 4. Verify OwnerReference points to SandboxClaim
+				if len(adoptedPod.OwnerReferences) != 1 {
+					t.Errorf("expected adopted pod to have exactly 1 owner reference, got %v", adoptedPod.OwnerReferences)
+				} else {
+					ref := adoptedPod.OwnerReferences[0]
+					if ref.Kind != "SandboxClaim" || ref.Name != claim.Name || ref.UID != claim.UID {
+						t.Errorf("expected owner reference to indicate SandboxClaim %s, got %v", claim.Name, ref)
+					}
 				}
 
 			} else if tc.expectSandboxCreate {

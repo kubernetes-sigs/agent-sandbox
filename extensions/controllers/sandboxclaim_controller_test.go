@@ -1058,6 +1058,55 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 			t.Errorf("expected metric count 1, got %v", val)
 		}
 	})
+
+	t.Run("Warm Start Not Ready", func(t *testing.T) {
+		asmetrics.SandboxClaimCreationTotal.Reset()
+
+		// Create a warm pool pod that is NOT ready
+		poolNameHash := sandboxcontrollers.NameHash("test-pool")
+		warmPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "warm-pod-not-ready",
+				Namespace: "default",
+				Labels: map[string]string{
+					poolLabel:              poolNameHash,
+					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       "test-pool",
+						UID:        "pool-uid",
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}},
+			Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}},
+		}
+
+		scheme := newScheme(t)
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim, warmPod).WithStatusSubresource(claim).Build()
+		reconciler := &SandboxClaimReconciler{
+			Client:   client,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+		_, err := reconciler.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify metric
+		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("test-template", asmetrics.LaunchTypeWarm, "test-pool", "not_ready"))
+		if val != 1 {
+			t.Errorf("expected metric count 1, got %v", val)
+		}
+	})
 }
 
 func newScheme(t *testing.T) *runtime.Scheme {

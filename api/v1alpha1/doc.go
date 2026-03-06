@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+<<<<<<< HEAD
 // Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API group
 //
 // +groupName=agents.x-k8s.io
+=======
+>>>>>>> 554ee5e (ran dev/tools/fix-boilerplate)
 package v1alpha1

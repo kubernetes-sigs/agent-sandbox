@@ -4,18 +4,24 @@ This directory contains the Python client extension for interacting with the Age
 
 ## `podsnapshot_client.py`
 
-This file defines the `PodSnapshotSandboxClient` class, which extend the base `SandboxClient` to provide snapshot capabilities.
+This file defines the `PodSnapshotSandboxClient` class, which extends the base `SandboxClient` to provide snapshot capabilities.
 
 ### `PodSnapshotSandboxClient`
 
-A specialized Sandbox client for interacting with the gke pod snapshot controller.
+A specialized Sandbox client for interacting with the GKE Pod Snapshot Controller.
 
 ### Key Features:
 
-*   **`PodSnapshotSandboxClient(template_name: str, ...)`**:
-    *   Initializes the client with optional server port.
-
+*   **`PodSnapshotSandboxClient(template_name: str, podsnapshot_timeout: int = 180, ...)`**:
+    *   Initializes the client with optional podsnapshot timeout.
+*   **`snapshot(self, trigger_name: str) -> SnapshotResponse`**:
+    *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
+    *   The `trigger_name` is suffixed with a timestamp and unique hash.
+    *   Waits for the snapshot to be processed.
+    *   The Pod Snapshot Controller creates a `PodSnapshot` resource automatically.
+    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
 *   **`__exit__(self)`**:
+    *   Cleans up the `PodSnapshotManualTrigger` resources.
     *   Cleans up the `SandboxClaim` resources.
 
 ## `test_podsnapshot_extension.py`
@@ -24,8 +30,10 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
 
 ### Test Phases:
 
-1.  **Phase 1: Starting Counter Sandbox**:
+1.  **Phase 1: Starting Counter Sandbox & Snapshotting**:
     *   Starts a sandbox with a counter application.
+    *   Takes a snapshot (`test-snapshot-10`) after ~10 seconds.
+    *   Takes a snapshot (`test-snapshot-20`) after ~20 seconds.
 
 ### Prerequisites
 

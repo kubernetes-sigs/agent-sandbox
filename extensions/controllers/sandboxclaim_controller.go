@@ -525,6 +525,21 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
+
+	// Check if a previously adopted sandbox is recorded in claim status (name differs from claim name)
+	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
+		sandbox := &v1alpha1.Sandbox{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
+			if metav1.IsControlledBy(sandbox, claim) {
+				logger.Info("found existing adopted sandbox from status", "name", statusName)
+				return sandbox, nil
+			}
+		} else if !k8errors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
+		}
+	}
+
+	// Try name-based lookup (sandbox created by createSandbox uses claim.Name)
 	sandbox := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: claim.Namespace,

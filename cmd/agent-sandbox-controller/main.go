@@ -55,6 +55,11 @@ func main() {
 	var enablePprofDebug bool
 	var pprofBlockProfileRate int
 	var pprofMutexProfileFraction int
+	var kubeAPIQPS int
+	var kubeAPIBurst int
+	var sandboxConcurrentWorkers int
+	var sandboxClaimConcurrentWorkers int
+	var sandboxWarmPoolConcurrentWorkers int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -74,13 +79,46 @@ func main() {
 	flag.IntVar(&pprofMutexProfileFraction, "pprof-mutex-profile-fraction", 10,
 		"Mutex contention sampling rate for /debug/pprof/mutex when --enable-pprof-debug is set. "+
 			"<=0 disables; 1 samples all events; N>1 samples ~1/N events (e.g. 10 ~= 1/10, 100 ~= 1/100).")
+	flag.IntVar(&kubeAPIQPS, "kube-api-qps", -1, "QPS limit for kube API client")
+	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "Burst limit for kube API client")
+	flag.IntVar(&sandboxConcurrentWorkers, "sandbox-concurrent-workers", 1, "Max concurrent reconciles for the Sandbox controller")
+	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 1, "Max concurrent reconciles for the SandboxClaim controller")
+	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	// Validate flags after parsing
+	// Validation checks for concurrency flags
+	if sandboxConcurrentWorkers <= 0 || sandboxClaimConcurrentWorkers <= 0 || sandboxWarmPoolConcurrentWorkers <= 0 {
+		setupLog.Error(nil, "concurrent workers must be greater than 0")
+		os.Exit(1)
+	}
+	// A logical maximum (too much will create unnecessary load on the API server)
+	totalWorkers := sandboxConcurrentWorkers + sandboxClaimConcurrentWorkers + sandboxWarmPoolConcurrentWorkers
+	if totalWorkers > 1000 {
+		setupLog.Error(nil, "total concurrent workers cannot exceed 1000 to prevent resource exhaustion", "total", totalWorkers)
+		os.Exit(1)
+	}
+
+	if kubeAPIQPS == 0 || kubeAPIQPS < -1 {
+		setupLog.Error(nil, "kube-api-qps must be greater than 0, or -1 for no rate limiting")
+		os.Exit(1)
+	}
+
+	if kubeAPIBurst <= 0 {
+		setupLog.Error(nil, "kube-api-burst must be greater than 0")
+		os.Exit(1)
+	}
+	// Warning if the total number of workers exceeds the kube API burst limit
+	if kubeAPIQPS > 0 && totalWorkers > kubeAPIBurst {
+		setupLog.Info("Warning: Total concurrent workers exceeds the kube API burst limit. Workers may experience client-side throttling.",
+			"totalWorkers", totalWorkers,
+			"kubeAPIBurst", kubeAPIBurst,
+		)
+	}
+
 	if enableLeaderElection && leaderElectionNamespace == "" {
 		setupLog.V(1).Info("leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty; attempting auto-detection")
 	}
@@ -150,7 +188,11 @@ func main() {
 		}
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	restConfig.QPS = float32(kubeAPIQPS)
+	restConfig.Burst = kubeAPIBurst
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsOpts,
 		HealthProbeBindAddress:  probeAddr,
@@ -167,7 +209,7 @@ func main() {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Tracer: instrumenter,
-	}).SetupWithManager(mgr); err != nil {
+	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
 	}
@@ -178,14 +220,14 @@ func main() {
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
 			Tracer:   instrumenter,
-		}).SetupWithManager(mgr); err != nil {
+		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
 		}
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
 			Client: mgr.GetClient(),
-		}).SetupWithManager(mgr); err != nil {
+		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)
 		}

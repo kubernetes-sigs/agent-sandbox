@@ -48,6 +48,10 @@ To interact with the agent-sandbox programmatically, you can use the Python SDK.
 
 For detailed installation and usage instructions, please refer to the [Python SDK README](clients/python/agentic-sandbox-client/README.md).
 
+## Configuration
+
+For advanced scale and concurrency tuning (e.g., API QPS and worker counts), please see the [Configuration Guide](docs/configuration.md).
+
 ## Getting Started
 
 Once you have installed the controller, you can create a simple Sandbox by applying the following YAML to your cluster:

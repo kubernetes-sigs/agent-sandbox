@@ -216,7 +216,7 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 
 	// Get latest pod object to get node name
 	var latestPod corev1.Pod
-	if err := t.ClusterClient.Get(ctx, types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}, &latestPod); err != nil {
+	if err := t.Get(ctx, types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}, &latestPod); err != nil {
 		t.Fatalf("failed to get latest pod object: %v", err)
 	}
 	nodeName := latestPod.Spec.NodeName

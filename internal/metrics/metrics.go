@@ -16,6 +16,7 @@
 package metrics
 
 import (
+<<<<<<< HEAD
 	"strings"
 	"time"
 
@@ -24,13 +25,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+=======
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+>>>>>>> 78e023b7da00c3b35df177bf068c0281159d6ed6
 )
 
 const (
 	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+<<<<<<< HEAD
 	PodStatusReady    = "ready"   // PodStatusReady indicates the pod is ready (calculated from conditions).
+=======
+>>>>>>> 78e023b7da00c3b35df177bf068c0281159d6ed6
 )
 
 var (
@@ -47,6 +57,7 @@ var (
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
+<<<<<<< HEAD
 	// WarmPoolSize is a gauge metric that monitors the point-in-time status of the warmpool.
 	WarmPoolSize = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -55,12 +66,17 @@ var (
 		},
 		[]string{"pod_status", "warmpool_name", "sandbox_template"},
 	)
+=======
+>>>>>>> 78e023b7da00c3b35df177bf068c0281159d6ed6
 )
 
 // Init registers custom metrics with the global controller-runtime registry.
 func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
+<<<<<<< HEAD
 	metrics.Registry.MustRegister(WarmPoolSize)
+=======
+>>>>>>> 78e023b7da00c3b35df177bf068c0281159d6ed6
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.
@@ -68,6 +84,7 @@ func RecordClaimStartupLatency(startTime time.Time, launchType, templateName str
 	duration := float64(time.Since(startTime).Milliseconds())
 	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
 }
+<<<<<<< HEAD
 
 // UpdateWarmPoolMetrics calculates and updates the WarmPoolSize metric based on the provided pods.
 func UpdateWarmPoolMetrics(wp *extensionsv1alpha1.SandboxWarmPool, pods []corev1.Pod) {
@@ -126,3 +143,5 @@ func DeleteWarmPoolMetrics(wpName, templateName string) {
 		WarmPoolSize.DeleteLabelValues(status, wpName, templateName)
 	}
 }
+=======
+>>>>>>> 78e023b7da00c3b35df177bf068c0281159d6ed6

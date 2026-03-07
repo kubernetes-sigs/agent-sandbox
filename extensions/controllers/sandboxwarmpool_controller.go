@@ -22,7 +22,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -68,6 +67,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Handle deletion
 	if !warmPool.DeletionTimestamp.IsZero() {
+<<<<<<< HEAD
 		if controllerutil.ContainsFinalizer(warmPool, metricsFinalizer) {
 			log.Info("Cleaning up metrics for SandboxWarmPool")
 			asmetrics.DeleteWarmPoolMetrics(warmPool.Name, warmPool.Spec.TemplateRef.Name)
@@ -77,6 +77,8 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				return ctrl.Result{}, err
 			}
 		}
+=======
+>>>>>>> 78e023b7da00c3b35df177bf068c0281159d6ed6
 		log.Info("SandboxWarmPool is being deleted")
 		return ctrl.Result{}, nil
 	}
@@ -134,7 +136,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	for _, pod := range podList.Items {
 		// Skip pods that are being deleted
-		if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+		if !pod.DeletionTimestamp.IsZero() {
 			continue
 		}
 
@@ -285,7 +287,11 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Scheme()); err != nil {
+<<<<<<< HEAD
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+=======
+		return fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+>>>>>>> 78e023b7da00c3b35df177bf068c0281159d6ed6
 	}
 
 	// Create the Pod
@@ -324,7 +330,7 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 		},
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(template), template); err != nil {
-		if !k8errors.IsNotFound(err) {
+		if !k8serrors.IsNotFound(err) {
 			err = fmt.Errorf("failed to get sandbox template %q: %w", warmPool.Spec.TemplateRef.Name, err)
 		}
 		return nil, err

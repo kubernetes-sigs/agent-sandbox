@@ -564,6 +564,19 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return sandbox, nil
 	}
 
+	// Check if any sandbox is already owned by this claim (catches the race where
+	// the Owns() watch triggers a re-reconcile before the claim status is updated).
+	ownedList := &v1alpha1.SandboxList{}
+	if err := r.List(ctx, ownedList, client.InNamespace(claim.Namespace)); err != nil {
+		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
+	}
+	for i := range ownedList.Items {
+		if metav1.IsControlledBy(&ownedList.Items[i], claim) && ownedList.Items[i].DeletionTimestamp.IsZero() {
+			logger.Info("found existing owned sandbox", "name", ownedList.Items[i].Name)
+			return &ownedList.Items[i], nil
+		}
+	}
+
 	// Try to adopt a pre-allocated Sandbox from the warm pool first (single reconcile cycle)
 	adopted, adoptErr := r.tryAdoptSandboxFromPool(ctx, claim)
 	if adoptErr != nil {

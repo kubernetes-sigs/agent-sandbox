@@ -42,6 +42,14 @@ docker build -t $SANDBOX_ROUTER_IMG .
 docker push $SANDBOX_ROUTER_IMG
 ```
 
+## Configuration
+
+The router can be configured using the following environment variables:
+
+| Variable | Description | Default |
+|---|---|---|
+| `PROXY_TIMEOUT_SECONDS` | Timeout in seconds for proxied requests to sandbox pods. Increase this for long-running operations (e.g., code execution, model inference). | `180` (3 minutes) |
+
 ## Deployment
 
 ### Deploy the Sandbox Router

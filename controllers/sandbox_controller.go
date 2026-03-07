@@ -115,7 +115,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID
+	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
 	tc := r.Tracer.GetTraceContext(ctx)
 	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
 		patch := client.MergeFrom(sandbox.DeepCopy())
@@ -127,8 +127,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Return to ensure the next loop uses the persisted ID
-		return ctrl.Result{}, nil
+		// Continue reconciliation in the same cycle instead of returning
 	}
 
 	if sandbox.Spec.Replicas == nil {

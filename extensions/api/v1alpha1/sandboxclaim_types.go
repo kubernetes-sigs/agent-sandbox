@@ -89,6 +89,10 @@ type SandboxStatus struct {
 	// SandboxName is the name of the Sandbox created from this claim
 	// +optional
 	Name string `json:"Name,omitempty"`
+
+	// PodIP is the IP address of the sandbox pod, for direct connectivity.
+	// +optional
+	PodIP string `json:"podIP,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -26,7 +26,6 @@ import (
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -351,44 +350,32 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(ctx context.Context, claim 
 func (r *SandboxClaimReconciler) tryAdoptSandboxFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	log := log.FromContext(ctx)
 
-	// List all Sandbox CRs with the template ref hash matching the claim's template
+	// List warm pool sandboxes matching the claim's template.
 	sandboxList := &v1alpha1.SandboxList{}
-	// We need sandboxes that have BOTH the template ref hash AND the warm pool label.
-	// Since we can't do "exists" with SelectorFromSet, list by template ref and filter.
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
-	})
-
-	if err := r.List(ctx, sandboxList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     claim.Namespace,
-	}); err != nil {
+	if err := r.List(ctx, sandboxList,
+		client.InNamespace(claim.Namespace),
+		client.MatchingLabels{sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)},
+	); err != nil {
 		log.Error(err, "Failed to list sandboxes from warm pool")
 		return nil, err
 	}
 
-	// Filter to only warm pool sandboxes that are ready
+	// Filter to warm pool sandboxes that are eligible for adoption.
 	var candidates []*v1alpha1.Sandbox
 	for i := range sandboxList.Items {
 		sb := &sandboxList.Items[i]
 
-		// Must have the warm pool label
 		if _, ok := sb.Labels[warmPoolSandboxLabel]; !ok {
 			continue
 		}
-
-		// Skip sandboxes being deleted
 		if !sb.DeletionTimestamp.IsZero() {
 			continue
 		}
-
-		// Skip sandboxes not owned by a SandboxWarmPool
 		controllerRef := metav1.GetControllerOf(sb)
 		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 			continue
 		}
 
-		// Prefer ready sandboxes
 		candidates = append(candidates, sb)
 	}
 
@@ -414,10 +401,8 @@ func (r *SandboxClaimReconciler) tryAdoptSandboxFromPool(ctx context.Context, cl
 	delete(adopted.Labels, warmPoolSandboxLabel)
 	delete(adopted.Labels, sandboxTemplateRefHash)
 
-	// Remove existing owner references (from SandboxWarmPool)
+	// Transfer ownership from SandboxWarmPool to SandboxClaim
 	adopted.OwnerReferences = nil
-
-	// Set the claim as controller owner
 	if err := controllerutil.SetControllerReference(claim, adopted, r.Scheme); err != nil {
 		return nil, fmt.Errorf("failed to set controller reference on adopted sandbox: %w", err)
 	}
@@ -436,6 +421,8 @@ func (r *SandboxClaimReconciler) tryAdoptSandboxFromPool(ctx context.Context, cl
 	}
 	adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 
+	// Update uses optimistic concurrency (resourceVersion) so concurrent
+	// claims racing to adopt the same sandbox will conflict and retry.
 	if err := r.Update(ctx, adopted); err != nil {
 		log.Error(err, "Failed to update adopted sandbox")
 		return nil, err
@@ -576,8 +563,10 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return sandbox, nil
 	}
 
-	// Check if any sandbox is already owned by this claim (catches the race where
-	// the Owns() watch triggers a re-reconcile before the claim status is updated).
+	// Check if any sandbox is already owned by this claim. This catches the race
+	// where the Owns() watch triggers a re-reconcile before the claim status is
+	// updated — the ownership change IS persisted (it's what triggers the watch).
+	// This queries the informer cache (not the API server), so it's fast.
 	ownedList := &v1alpha1.SandboxList{}
 	if err := r.List(ctx, ownedList, client.InNamespace(claim.Namespace)); err != nil {
 		return nil, fmt.Errorf("failed to list sandboxes: %w", err)

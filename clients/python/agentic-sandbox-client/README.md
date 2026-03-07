@@ -180,3 +180,10 @@ python test_client.py --namespace default
 ```
 python test_client.py --gateway-name external-http-gateway
 ```
+
+## Integration with other frameworks
+
+The Agent Sandbox library currently supports integration with the following frameworks:
+
+* [Agent Development Kit (ADK)](docs/integrations/adk.md)
+* [Langchain](docs/integrations/langchain.md)

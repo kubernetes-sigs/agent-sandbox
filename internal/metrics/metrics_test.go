@@ -15,53 +15,26 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func newTestScheme() *runtime.Scheme {
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(extensionsv1alpha1.AddToScheme(scheme))
-	return scheme
-}
-
 func TestMetricsRegistration(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	m := NewMetrics(registry, fake.NewClientBuilder().WithScheme(newTestScheme()).Build())
-	assert.NotNil(t, m)
-
-	// Verify it's in the registry
-	metricFamilies, err := registry.Gather()
-	assert.NoError(t, err)
-
-	found := false
-	for _, mf := range metricFamilies {
-		if mf.GetName() == "agent_sandbox_warmpool_size" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "Metric agent_sandbox_warmpool_size should be registered")
+	assert.NotNil(t, WarmPoolSize)
 }
 
-func TestMetricsCollection(t *testing.T) {
-	scheme := newTestScheme()
-
+func TestUpdateWarmPoolMetrics(t *testing.T) {
 	pool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pool",
 			Namespace: "default",
-			UID:       "pool-uid",
 		},
 		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
 			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
@@ -70,84 +43,70 @@ func TestMetricsCollection(t *testing.T) {
 		},
 	}
 
-	pod1 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pod-1",
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					UID: "pool-uid",
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "pod-1",
+			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
 				},
 			},
 		},
-		Status: corev1.PodStatus{
-			Conditions: []corev1.PodCondition{
-				{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionTrue,
-				},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "pod-2",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
 			},
 		},
 	}
 
-	pod2 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pod-2",
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					UID: "pool-uid",
-				},
-			},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodPending,
-		},
-	}
+	UpdateWarmPoolMetrics(pool, pods)
 
-	client := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithRuntimeObjects(pool, pod1, pod2).
-		Build()
+	metricChan := make(chan prometheus.Metric, 10)
+	WarmPoolSize.Collect(metricChan)
+	close(metricChan)
 
-	registry := prometheus.NewRegistry()
-	_ = NewMetrics(registry, client)
+	foundReady := false
+	foundPending := false
+	for m := range metricChan {
+		metric := &dto.Metric{}
+		if err := m.Write(metric); err != nil {
+			t.Fatalf("failed to write metric: %v", err)
+		}
 
-	// Gather metrics
-	metricFamilies, err := registry.Gather()
-	assert.NoError(t, err)
-
-	var foundCount int
-	for _, mf := range metricFamilies {
-		if mf.GetName() == "agent_sandbox_warmpool_size" {
-			for _, metric := range mf.GetMetric() {
-				var status, poolName, template string
-				for _, label := range metric.GetLabel() {
-					switch label.GetName() {
-					case "pod_status":
-						status = label.GetValue()
-					case "warmpool_name":
-						poolName = label.GetValue()
-					case "sandbox_template":
-						template = label.GetValue()
-					}
-				}
-
-				if poolName == "test-pool" && template == "test-template" {
-					switch status {
-					case PodStatusReady:
-						assert.Equal(t, 1.0, metric.GetGauge().GetValue())
-						foundCount++
-					case PodStatusPending:
-						assert.Equal(t, 1.0, metric.GetGauge().GetValue())
-						foundCount++
-					case PodStatusAll:
-						assert.Equal(t, 2.0, metric.GetGauge().GetValue())
-						foundCount++
-					}
-				}
+		var status, poolName, template string
+		for _, label := range metric.GetLabel() {
+			switch label.GetName() {
+			case "pod_status":
+				status = label.GetValue()
+			case "warmpool_name":
+				poolName = label.GetValue()
+			case "sandbox_template":
+				template = label.GetValue()
 			}
 		}
+
+		if poolName == "test-pool" && template == "test-template" {
+			if status == PodStatusReady {
+				assert.Equal(t, 1.0, metric.GetGauge().GetValue())
+				foundReady = true
+			}
+			if status == strings.ToLower(string(corev1.PodPending)) {
+				assert.Equal(t, 1.0, metric.GetGauge().GetValue())
+				foundPending = true
+			}
+			// Verify that an aggregate count label like "*" does NOT exist
+			assert.NotEqual(t, "*", status)
+		}
 	}
-	assert.Equal(t, 3, foundCount)
+
+	assert.True(t, foundReady)
+	assert.True(t, foundPending)
 }

@@ -31,7 +31,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"sigs.k8s.io/agent-sandbox/controllers"
@@ -163,9 +162,6 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
-
-	// Initialize Metrics
-	asmetrics.NewMetrics(crmetrics.Registry, mgr.GetCache())
 
 	if err = (&controllers.SandboxReconciler{
 		Client: mgr.GetClient(),

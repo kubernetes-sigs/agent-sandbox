@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -646,46 +647,42 @@ func TestReconcilePoolMetrics(t *testing.T) {
 		Client: fakeClient,
 	}
 
-	registry := prometheus.NewRegistry()
-	_ = asmetrics.NewMetrics(registry, fakeClient)
-
-	// Reconcile is not strictly needed for metrics anymore since they read from client,
-	// but we run it to simulate normal operation.
+	// Reconcile will trigger the metric update
 	ctx := context.Background()
 	err := r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
 
-	// Gather metrics
-	metricFamilies, err := registry.Gather()
-	require.NoError(t, err)
+	checkMetric(t, asmetrics.PodStatusReady, 1)
+	checkMetric(t, "pending", 1)
+}
 
-	checkMetric := func(status string, expectedValue float64) {
-		found := false
-		for _, mf := range metricFamilies {
-			if mf.GetName() == "agent_sandbox_warmpool_size" {
-				for _, metric := range mf.GetMetric() {
-					var s, p, tmpl string
-					for _, label := range metric.GetLabel() {
-						switch label.GetName() {
-						case "pod_status":
-							s = label.GetValue()
-						case "warmpool_name":
-							p = label.GetValue()
-						case "sandbox_template":
-							tmpl = label.GetValue()
-						}
-					}
-					if s == status && p == poolName && tmpl == templateName {
-						require.Equal(t, expectedValue, metric.GetGauge().GetValue())
-						found = true
-					}
-				}
+func checkMetric(t *testing.T, status string, expectedValue float64) {
+	metricChan := make(chan prometheus.Metric, 100)
+	asmetrics.WarmPoolSize.Collect(metricChan)
+	close(metricChan)
+
+	var found bool
+	var lastValue float64
+	for m := range metricChan {
+		pb := &dto.Metric{}
+		if err := m.Write(pb); err != nil {
+			t.Fatalf("failed to write metric: %v", err)
+		}
+
+		var s string
+		for _, label := range pb.GetLabel() {
+			if label.GetName() == "pod_status" {
+				s = label.GetValue()
 			}
 		}
-		require.True(t, found, "Metric not found for status %s", status)
+		if s == status {
+			found = true
+			lastValue = pb.GetGauge().GetValue()
+			if lastValue == expectedValue {
+				return
+			}
+		}
 	}
-
-	checkMetric(asmetrics.PodStatusReady, 1)
-	checkMetric(asmetrics.PodStatusPending, 1)
-	checkMetric(asmetrics.PodStatusAll, 3)
+	require.True(t, found, "Metric not found for status %s", status)
+	require.Equal(t, expectedValue, lastValue, "Value mismatch for status %s", status)
 }

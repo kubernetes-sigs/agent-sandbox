@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+import os
+
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -23,7 +25,12 @@ app = FastAPI()
 # Configuration
 DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
-client = httpx.AsyncClient(timeout=180.0)
+DEFAULT_PROXY_TIMEOUT = 180.0
+
+proxy_timeout = float(os.environ.get("PROXY_TIMEOUT_SECONDS", DEFAULT_PROXY_TIMEOUT))
+client = httpx.AsyncClient(timeout=proxy_timeout)
+
+print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")
 
 
 @app.get("/healthz")

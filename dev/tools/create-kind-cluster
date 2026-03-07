@@ -15,10 +15,14 @@
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+
+DEFAULT_KUBERNETES_REF = "pull/136839/head"
+KUBERNETES_REPO = "https://github.com/kubernetes/kubernetes.git"
 
 
 def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
@@ -44,6 +48,63 @@ def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
     return config
 
 
+def ref_to_image_tag(kubernetes_ref):
+    """Generate a Docker image tag from a Kubernetes git ref."""
+    safe_ref = kubernetes_ref.replace('/', '-').replace(' ', '-')
+    return f"kindest/node:custom-{safe_ref}"
+
+
+def image_exists(image_tag):
+    """Check if a Docker image exists locally."""
+    result = subprocess.run(["docker", "image", "inspect", image_tag], capture_output=True)
+    return result.returncode == 0
+
+
+def ref_to_branch(kubernetes_ref):
+    """Generate a local branch name from a Kubernetes git ref."""
+    safe_ref = kubernetes_ref.replace('/', '-').replace(' ', '-')
+    return f"kind-build-{safe_ref}"
+
+
+def build_kind_node_image(kubernetes_ref, kubernetes_src=None, rebuild=False):
+    """Build a kind node image from a Kubernetes git ref. Returns the image tag."""
+    image_tag = ref_to_image_tag(kubernetes_ref)
+
+    if not rebuild and image_exists(image_tag):
+        print(f"Image '{image_tag}' already exists locally, skipping build (use --rebuild-image to force).")
+        return image_tag
+
+    branch = ref_to_branch(kubernetes_ref)
+    # The + prefix force-updates the local branch if it already exists
+    refspec = f"+{kubernetes_ref}:{branch}"
+
+    tmpdir = None
+    if kubernetes_src:
+        kube_root = kubernetes_src
+        print(f"Fetching {kubernetes_ref} in existing source tree {kube_root}...")
+        subprocess.run(["git", "-C", kube_root, "fetch", "origin", refspec], check=True)
+        subprocess.run(["git", "-C", kube_root, "checkout", branch], check=True)
+    else:
+        tmpdir = tempfile.mkdtemp(prefix="kubernetes-src-")
+        kube_root = tmpdir
+        print(f"Initializing Kubernetes clone in {kube_root}...")
+        subprocess.run(["git", "init", kube_root], check=True)
+        subprocess.run(["git", "-C", kube_root, "remote", "add", "origin", KUBERNETES_REPO], check=True)
+        print(f"Fetching ref {kubernetes_ref} from {KUBERNETES_REPO}...")
+        # shallow-since ensures git describe can find a recent tag (needed by kind to determine the k8s version)
+        subprocess.run(["git", "-C", kube_root, "fetch", "--shallow-since=6 months ago", "origin", refspec], check=True)
+        subprocess.run(["git", "-C", kube_root, "checkout", branch], check=True)
+
+    try:
+        print(f"Building kind node image '{image_tag}' (this will take several minutes)...")
+        subprocess.run(["kind", "build", "node-image", "--type", "source", kube_root, "--image", image_tag], check=True)
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return image_tag
+
+
 def main():
     parser = argparse.ArgumentParser(description="Create a kind cluster.")
     parser.add_argument("name", help="The name of the cluster.")
@@ -53,7 +114,19 @@ def main():
                         help="Containerd log level (default: debug). Set to empty string to skip.")
     parser.add_argument("--kubelet-verbosity", type=int, default=8,
                         help="Kubelet verbosity level (requires cluster creation, not applied to existing clusters).")
+    parser.add_argument("--kubernetes-ref", default=DEFAULT_KUBERNETES_REF,
+                        help=f"Git ref to build Kubernetes from (e.g., pull/136839/head or a commit SHA). "
+                             f"Set to empty string to use the default kind image. Default: {DEFAULT_KUBERNETES_REF}")
+    parser.add_argument("--kubernetes-src",
+                        help="Path to an existing Kubernetes source directory to use instead of cloning. "
+                             "Only used when --kubernetes-ref is set.")
+    parser.add_argument("--rebuild-image", action="store_true",
+                        help="Rebuild the kind node image even if it already exists locally.")
     args = parser.parse_args()
+
+    node_image = None
+    if args.kubernetes_ref:
+        node_image = build_kind_node_image(args.kubernetes_ref, args.kubernetes_src, rebuild=args.rebuild_image)
 
     clusters = subprocess.run(["kind", "get", "clusters"], capture_output=True, text=True).stdout.splitlines()
 
@@ -70,6 +143,8 @@ def main():
         print(f"Creating cluster '{args.name}'.")
 
         create_cmd = ["kind", "create", "cluster", "--name", args.name]
+        if node_image:
+            create_cmd.extend(["--image", node_image])
 
         # Create a temporary config file with kubelet verbosity and containerd settings
         config_content = create_kind_config(args.kubelet_verbosity, args.containerd_loglevel)

@@ -7,3 +7,7 @@ python-multipart
 pandas
 scikit-learn
 lightgbm
+
+# For executing code pesistently
+jupyter_client
+ipykernel

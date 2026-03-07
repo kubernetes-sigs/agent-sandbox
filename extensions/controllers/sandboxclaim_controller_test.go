@@ -641,8 +641,13 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 	// Create a warm pool with a SandboxWarmPool controller reference
 	warmPoolUID := types.UID("warmpool-uid-123")
 	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	templateHash := computeTemplateHash(template)
 
-	createWarmPoolPod := func(name string, creationTime metav1.Time, ready bool) *corev1.Pod {
+	createWarmPoolPodWithHash := func(name string, creationTime metav1.Time, ready bool, customHash string) *corev1.Pod {
+		h := templateHash
+		if customHash != "" {
+			h = customHash
+		}
 		conditionStatus := corev1.ConditionFalse
 		if ready {
 			conditionStatus = corev1.ConditionTrue
@@ -655,6 +660,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				Labels: map[string]string{
 					poolLabel:              poolNameHash,
 					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					sandboxTemplateHash:    h,
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -686,6 +692,10 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 		}
 	}
 
+	createWarmPoolPod := func(name string, creationTime metav1.Time, ready bool) *corev1.Pod {
+		return createWarmPoolPodWithHash(name, creationTime, ready, "")
+	}
+
 	createPodWithDifferentController := func(name string) *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -693,6 +703,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				Namespace: "default",
 				Labels: map[string]string{
 					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					sandboxTemplateHash:    templateHash,
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -799,6 +810,16 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "middle-ready",
+			expectSandboxCreate: true,
+		},
+		{
+			name: "skips stale pods (wrong template hash)",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createWarmPoolPodWithHash("stale-pod", metav1.Now(), true, "old-hash-value"),
+			},
+			expectPodAdoption:   false,
 			expectSandboxCreate: true,
 		},
 	}

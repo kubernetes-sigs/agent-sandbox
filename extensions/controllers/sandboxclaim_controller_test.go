@@ -1067,6 +1067,99 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 	}
 }
 
+// TestSandboxClaimNoReAdoption verifies that a second reconcile does not adopt another
+// sandbox from the warm pool when the claim already owns one.
+func TestSandboxClaimNoReAdoption(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+
+	// Claim that already adopted a sandbox (name recorded in status)
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+		Status: extensionsv1alpha1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1alpha1.SandboxStatus{Name: "adopted-sb"},
+		},
+	}
+
+	// The previously adopted sandbox (owned by claim, different name)
+	adoptedSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "adopted-sb", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim",
+				Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas:    ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+		},
+	}
+
+	// Another warm pool sandbox that should NOT be adopted
+	poolSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pool-sb-extra", Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas:    ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, adoptedSandbox, poolSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	ctx := context.Background()
+
+	_, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Verify the pool sandbox was NOT adopted (still has warm pool labels)
+	var extra sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {
+		t.Fatalf("failed to get pool sandbox: %v", err)
+	}
+	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("pool sandbox should still have warm pool label (should not have been adopted)")
+	}
+}
+
 func newScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {

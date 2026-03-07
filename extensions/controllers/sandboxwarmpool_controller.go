@@ -67,7 +67,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Handle deletion
-	if !warmPool.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !warmPool.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(warmPool, metricsFinalizer) {
 			log.Info("Cleaning up metrics for SandboxWarmPool")
 			asmetrics.DeleteWarmPoolMetrics(warmPool.Name, warmPool.Spec.TemplateRef.Name)
@@ -284,7 +284,7 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 	// pod.Labels[podNameLabel] = sandboxcontrollers.NameHash(pod.Name)
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
-	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {
+	if err := ctrl.SetControllerReference(warmPool, pod, r.Scheme()); err != nil {
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 

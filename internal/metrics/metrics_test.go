@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// nolint:revive
 package metrics
 
 import (
@@ -19,12 +20,35 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
+
+func TestClaimLatencyRecording(t *testing.T) {
+	testCases := []struct {
+		name       string
+		launchType string
+	}{
+		{"Warm", LaunchTypeWarm},
+		{"Cold", LaunchTypeCold},
+		{"Unknown", LaunchTypeUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ClaimStartupLatency.Reset()
+			ClaimStartupLatency.WithLabelValues(tc.launchType, "test-tmpl").Observe(1000)
+
+			if testutil.CollectAndCount(ClaimStartupLatency) != 1 {
+				t.Errorf("Expected 1 observation")
+			}
+		})
+	}
+}
 
 func TestMetricsRegistration(t *testing.T) {
 	assert.NotNil(t, WarmPoolSize)

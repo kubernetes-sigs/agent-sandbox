@@ -12,24 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// nolint:revive
 package metrics
 
 import (
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
-	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 const (
-	// PodStatusReady indicates the pod is ready (calculated from conditions).
-	PodStatusReady = "ready"
+	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
+	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
+	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+	PodStatusReady    = "ready"   // PodStatusReady indicates the pod is ready (calculated from conditions).
 )
 
 var (
+	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
+	// Labels:
+	// - launch_type: "warm", "cold", "unknown"
+	// - sandbox_template: the SandboxTemplateRef
+	ClaimStartupLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_claim_startup_latency_ms",
+			Help: "End-to-end latency from SandboxClaim creation to Pod Ready state in milliseconds.",
+			// Buckets for latency from 50ms to 4 minutes
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+		},
+		[]string{"launch_type", "sandbox_template"},
+	)
 	// WarmPoolSize is a gauge metric that monitors the point-in-time status of the warmpool.
 	WarmPoolSize = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -40,9 +57,16 @@ var (
 	)
 )
 
+// Init registers custom metrics with the global controller-runtime registry.
 func init() {
-	// Register custom metrics with the global prometheus registry
-	crmetrics.Registry.MustRegister(WarmPoolSize)
+	metrics.Registry.MustRegister(ClaimStartupLatency)
+	metrics.Registry.MustRegister(WarmPoolSize)
+}
+
+// RecordClaimStartupLatency records the duration since the provided start time.
+func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
+	duration := float64(time.Since(startTime).Milliseconds())
+	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
 }
 
 // UpdateWarmPoolMetrics calculates and updates the WarmPoolSize metric based on the provided pods.

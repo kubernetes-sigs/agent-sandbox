@@ -87,7 +87,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID
+	// Initialize trace ID for active resources missing an ID — inline patch,
+	// no early return, to avoid forcing a second reconcile cycle.
 	tc := r.Tracer.GetTraceContext(ctx)
 	if tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "") {
 		patch := client.MergeFrom(claim.DeepCopy())
@@ -98,7 +99,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.Patch(ctx, claim, patch); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
 	}
 
 	originalClaimStatus := claim.Status.DeepCopy()

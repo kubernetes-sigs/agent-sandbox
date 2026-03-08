@@ -16,3 +16,6 @@ clients/python/agentic-sandbox-client/VERSION
 tmp/
 temp/
 .tmp/
+
+# Git worktrees
+.worktrees/

@@ -78,6 +78,9 @@ def main(args):
     prereq_docs = []
     other_docs = []
 
+    image_prefix = utils.get_image_prefix(args)
+    image_tag = args.image_tag or utils.get_image_tag()
+
     for root, dirs, files in os.walk(manifests_path):
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
@@ -89,9 +92,7 @@ def main(args):
                 docs = list(yaml.safe_load_all(f))
 
             service_name = os.path.basename(root)
-            image_prefix = utils.get_image_prefix(args)
-            image_tag = utils.get_image_tag()
-
+            
             # Process each document in the file
             for doc in docs:
                 if not doc: continue
@@ -127,5 +128,10 @@ if __name__ == "__main__":
                         help="prefix for the image name. requires slash at the end if a path",
                         type=str,
                         default=os.getenv("IMAGE_PREFIX"))
+    parser.add_argument("--image-tag",
+                        dest="image_tag",
+                        help="Image tag for this build. If not set, a default tag is generated based on date and git commit",
+                        type=str,
+                        default=os.getenv("IMAGE_TAG"))
     args = parser.parse_args()
     main(args)

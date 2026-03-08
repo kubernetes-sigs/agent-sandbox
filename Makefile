@@ -44,6 +44,10 @@ test-unit:
 test-e2e:
 	./dev/ci/presubmits/test-e2e
 
+.PHONY: test-e2e-benchmarks
+test-e2e-benchmarks:
+	./dev/ci/presubmits/test-e2e --suite benchmarks
+
 .PHONY: lint-go
 lint-go:
 	./dev/tools/lint-go

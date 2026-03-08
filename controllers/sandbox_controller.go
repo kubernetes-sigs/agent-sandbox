@@ -101,7 +101,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	defer end()
 
 	// If the sandbox is being deleted, do nothing
-	if !sandbox.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !sandbox.DeletionTimestamp.IsZero() {
 		log.Info("Sandbox is being deleted")
 		return ctrl.Result{}, nil
 	}
@@ -286,7 +286,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
 		if !k8serrors.IsNotFound(err) {
 			log.Error(err, "Failed to get Service")
-			return nil, fmt.Errorf("Service Get Failed: %w", err)
+			return nil, fmt.Errorf("service get failed: %w", err)
 		}
 	} else {
 		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
@@ -372,11 +372,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			log.Error(err, "Failed to get Pod")
-			return nil, fmt.Errorf("Pod Get Failed: %w", err)
+			return nil, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
 			log.Error(err, "Pod not found")
-			return nil, fmt.Errorf("Pod in Annotation Get Failed: %w", err)
+			return nil, fmt.Errorf("pod in annotation get failed: %w", err)
 		}
 		pod = nil
 	}
@@ -384,7 +384,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// 1. PATH: Logic for deleting Pod when replicas is 0
 	if *sandbox.Spec.Replicas == 0 {
 		if pod != nil {
-			if pod.ObjectMeta.DeletionTimestamp.IsZero() {
+			if pod.DeletionTimestamp.IsZero() {
 				log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				if err := r.Delete(ctx, pod); err != nil {
 					return nil, fmt.Errorf("failed to delete pod: %w", err)

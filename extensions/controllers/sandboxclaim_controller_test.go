@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
@@ -884,6 +885,85 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 						t.Errorf("expected no pod name annotation but found one")
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestRecordCreationLatencyMetric(t *testing.T) {
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	testCases := []struct {
+		name                 string
+		claim                *extensionsv1alpha1.SandboxClaim
+		oldStatus            *extensionsv1alpha1.SandboxClaimStatus
+		sandbox              *sandboxv1alpha1.Sandbox
+		expectedObservations int
+	}{
+		{
+			name: "records success on first ready transition",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "new-ready", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations: 1,
+		},
+		{
+			name: "ignores ready condition = false",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "not-ready", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations: 0,
+		},
+		{
+			name: "ignores success if status was already ready in previous loop",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "already-ready", CreationTimestamp: pastTime},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus: &extensionsv1alpha1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+			expectedObservations: 0,
+		},
+		{
+			name: "uses unknown launch type when sandbox is nil",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "unknown", CreationTimestamp: pastTime},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Unknown"}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			sandbox:              nil,
+			expectedObservations: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset the metrics registry for a clean test
+			asmetrics.ClaimStartupLatency.Reset()
+			r := &SandboxClaimReconciler{}
+
+			r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox)
+
+			// Verify the metric was observed in the Prometheus registry
+			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
+			if count != tc.expectedObservations {
+				t.Errorf("expected %d observations, got %d", tc.expectedObservations, count)
 			}
 		})
 	}

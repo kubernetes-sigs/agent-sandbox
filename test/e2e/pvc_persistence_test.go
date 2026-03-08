@@ -1,4 +1,4 @@
-// Copyright 2026 The Kubernetes Authors.
+// Copyright The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -61,8 +61,11 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 	nameHash := NameHash(pvcSandboxName)
 
 	// Namespace
-	ns := &corev1.Namespace{}
-	ns.Name = fmt.Sprintf("pvc-persistence-test-%d", time.Now().UnixNano())
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("pvc-persistence-test-%d", time.Now().UnixNano()),
+		},
+	}
 	require.NoError(t, tc.CreateWithCleanup(ctx, ns))
 
 	// Sandbox with PVC
@@ -70,9 +73,12 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(ctx, sandboxObj))
 
 	pvcName := fmt.Sprintf("%s-%s", workspacesPVCTemplateName, pvcSandboxName)
-	pvc := &corev1.PersistentVolumeClaim{}
-	pvc.Name = pvcName
-	pvc.Namespace = ns.Name
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: ns.Name,
+		},
+	}
 
 	// Wait for sandbox to be ready with 1 replica
 	t.Logf("Waiting for sandbox to become ready (replicas=1)")
@@ -135,9 +141,12 @@ func TestPVCPersistenceAcrossReplicas(t *testing.T) {
 	t.Logf("Sandbox status shows replicas=0")
 
 	// Pod must be gone
-	pod := &corev1.Pod{}
-	pod.Name = pvcSandboxName
-	pod.Namespace = ns.Name
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcSandboxName,
+			Namespace: ns.Name,
+		},
+	}
 	require.NoError(t, tc.WaitForObjectNotFound(ctx, pod))
 	t.Logf("Pod deleted")
 

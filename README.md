@@ -29,32 +29,32 @@ The `extensions` module provides additional CRDs and controllers that build on t
 agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox custom resource, and the controller manages the underlying runtime resources.
 
 ### Architecture Diagram
-
-          +------+
-          | User |
-          +------+
-              |
-              | creates
-              v
-+------------------+
-| Sandbox CRD |
-+------------------+
-|
-| reconciled by
-v
-+--------------------+
-| Sandbox Controller |
-+--------------------+
-|
-v
-+-----------+
-| Sandbox |
-| Pod |
-+-----------+
-|
-v
-Sandbox Runtime Environment
-
+            +------+
+            | User |
+            +------+
+                |
+                | creates
+                v
+       +------------------+
+       |    Sandbox CRD   |
+       +------------------+
+                |
+                | reconciled by
+                v
+       +----------------------+
+       |  Sandbox Controller  |
+       +----------------------+
+                |
+                | creates
+                v
+         +---------------+
+         |   Sandbox     |
+         |      Pod      |
+         +---------------+
+                |
+                v
+    Sandbox Runtime Environment
+    
 ## Installation
 
 ### Core Components & Extensions

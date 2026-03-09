@@ -36,24 +36,24 @@ agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox 
               |
               | creates
               v
-      +------------------+
-      |   Sandbox CRD    |
-      +------------------+
-              |
-              | reconciled by
-              v
-      +------------------+
-      | Sandbox Controller|
-      +------------------+
-              |
-              v
-        +-----------+
-        | Sandbox   |
-        |   Pod     |
-        +-----------+
-              |
-              v
-    Sandbox Runtime Environment
++------------------+
+| Sandbox CRD |
++------------------+
+|
+| reconciled by
+v
++--------------------+
+| Sandbox Controller |
++--------------------+
+|
+v
++-----------+
+| Sandbox |
+| Pod |
++-----------+
+|
+v
+Sandbox Runtime Environment
 
 ## Installation
 

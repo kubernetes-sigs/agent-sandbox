@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import subprocess
+import sys
+
+from shared import utils
+
+PYTHON_TEST_SUITES = [
+    {
+        "name": "sandbox-router",
+        "dir": os.path.join("clients", "python", "agentic-sandbox-client", "sandbox-router"),
+        "requirements": "requirements.txt",
+    },
+    {
+        "name": "agentic-sandbox-client",
+        "dir": os.path.join("clients", "python", "agentic-sandbox-client"),
+        "tests": os.path.join("test", "unit"),
+        "install_self": True,
+    },
+]
+
+
+def run_go_tests(repo_root):
+    """ runs Go unit tests and returns the exit code """
+    go_list_cmd = ["go", "list", "./..."]
+    go_list_output = subprocess.check_output(go_list_cmd, cwd=repo_root, text=True)
+    packages = go_list_output.strip().split('\n')
+
+    filtered_packages = [pkg for pkg in packages if "test/e2e" not in pkg]
+
+    result = subprocess.run(utils.go_tool_args(
+        "gotestsum", f"--junitfile={repo_root}/bin/unit-junit.xml",
+        "--", *filtered_packages
+    ), cwd=repo_root)
+
+    return result.returncode
+
+
+def run_python_tests(repo_root):
+    """ runs Python unit tests in a temporary venv and returns the exit code """
+    returncode = 0
+
+    for suite in PYTHON_TEST_SUITES:
+        test_dir = os.path.join(repo_root, suite["dir"])
+        if not os.path.isdir(test_dir):
+            print(f"WARNING: Python test directory not found, skipping: {test_dir}")
+            continue
+
+        venv_dir = os.path.join(repo_root, "bin", f"python-venv-{suite['name']}")
+        venv_python = os.path.join(venv_dir, "bin", "python")
+        venv_pip = os.path.join(venv_dir, "bin", "pip")
+
+        print(f"\n=== Setting up Python venv for {suite['name']} tests ===")
+        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+
+        # Upgrade pip directly from public PyPI
+        subprocess.check_call([venv_pip, "install", "--quiet", "--upgrade", "pip", "--index-url", "https://pypi.org/simple"])
+
+        req_file = os.path.join(test_dir, suite.get("requirements", "requirements.txt"))
+        if os.path.isfile(req_file):
+            subprocess.check_call(
+                [venv_pip, "install", "-r", req_file, "--index-url", "https://pypi.org/simple"])
+
+        if suite.get("install_self"):
+            subprocess.check_call(
+                [venv_pip, "install", "-e", test_dir, "--index-url", "https://pypi.org/simple"])
+
+        subprocess.check_call(
+            [venv_pip, "install", "--quiet", "pytest", "--index-url", "https://pypi.org/simple"])
+
+        print(f"\n=== Running Python unit tests: {suite['name']} ===")
+        junit_file = os.path.join(
+            repo_root, "bin", f"python-{suite['name']}-junit.xml")
+
+        tests_path = test_dir
+        if "tests" in suite:
+            tests_path = os.path.join(repo_root, suite["tests"])
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{test_dir}:{env.get('PYTHONPATH', '')}"
+
+        result = subprocess.run([
+            venv_python, "-m", "pytest",
+            tests_path,
+            f"--junitxml={junit_file}",
+            "-v",
+        ], cwd=test_dir, env=env)
+
+        if result.returncode != 0:
+            returncode = result.returncode
+
+    return returncode
+
+
+def main():
+    """ invokes unit tests and outputs junit results files """
+    repo_root = utils.get_repo_root()
+
+    go_rc = run_go_tests(repo_root)
+    python_rc = run_python_tests(repo_root)
+
+    if go_rc != 0:
+        return go_rc
+    return python_rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -33,6 +33,7 @@ rules:
 - apiGroups:
   - agents.x-k8s.io
   resources:
+  - sandboxes/finalizers
   - sandboxes/status
   verbs:
   - get

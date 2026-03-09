@@ -32,6 +32,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from kubernetes import client, config, watch
 from pydantic import BaseModel
+from .models import ExecutionResult, FileEntry
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
@@ -48,21 +49,6 @@ from .constants import (
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     stream=sys.stdout)
-
-
-class ExecutionResult(BaseModel):
-    """A structured object for holding the result of a command execution."""
-    stdout: str = ""  # Standard output from the command.
-    stderr: str = ""  # Standard error from the command.
-    exit_code: int = -1  # Exit code of the command.
-    
-class FileEntry(BaseModel):
-    """Represents a file or directory entry in the sandbox."""
-    name: str # Name of the file.
-    size: int  # Size of the file in bytes.
-    type: Literal["file", "directory"]  # Type of the entry (file or directory).
-    mod_time: float # Last modification time of the file. (POSIX timestamp)
-
 
 class SandboxClient:
     """
@@ -511,4 +497,4 @@ class SandboxClient:
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)
         return exists
-    
+

@@ -12,13 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Integration test for PodSnapshotSandboxClient.
+"""
+
 import argparse
 import time
 from kubernetes import config
 from k8s_agent_sandbox.gke_extensions import PodSnapshotSandboxClient
-
-
 from k8s_agent_sandbox.gke_extensions.podsnapshot_client import SnapshotResponse
+
+
+WAIT_TIME_SECONDS = 10
 
 
 def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: str):
@@ -62,7 +67,6 @@ def main(
     except config.ConfigException:
         config.load_kube_config()
 
-    wait_time = 10
     first_snapshot_name = "test-snapshot-10"
     second_snapshot_name = "test-snapshot-20"
 
@@ -77,17 +81,17 @@ def main(
         ) as sandbox:
             print("\n======= Testing Pod Snapshot Extension =======")
             assert sandbox.snapshot_crd_installed, "Pod Snapshot CRD is not installed."
-            time.sleep(wait_time)
+            time.sleep(WAIT_TIME_SECONDS)
             print(
-                f"Creating first pod snapshot '{first_snapshot_name}' after {wait_time} seconds..."
+                f"Creating first pod snapshot '{first_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
             )
             snapshot_response = sandbox.snapshot(first_snapshot_name)
             test_snapshot_response(snapshot_response, first_snapshot_name)
 
-            time.sleep(wait_time)
+            time.sleep(WAIT_TIME_SECONDS)
 
             print(
-                f"\nCreating second pod snapshot '{second_snapshot_name}' after {wait_time} seconds..."
+                f"\nCreating second pod snapshot '{second_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
             )
             snapshot_response = sandbox.snapshot(second_snapshot_name)
             test_snapshot_response(snapshot_response, second_snapshot_name)

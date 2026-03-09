@@ -397,6 +397,150 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         mock_super_exit.assert_called_once_with(None, None, None)
         logging.info("Finished test_exit_cleanup.")
 
+    def test_snapshot_watch_failure_condition(self):
+        """Test snapshot failure when watch event reports 'False' status."""
+        logging.info("Starting test_snapshot_watch_failure_condition...")
+        self.client.pod_name = "test-pod"
+        self.client.snapshot_crd_installed = True
+
+        # Mock watch to return failure event
+        mock_watch = MagicMock()
+        with patch(
+            "k8s_agent_sandbox.gke_extensions.podsnapshot_client.watch.Watch"
+        ) as mock_watch_cls:
+            mock_watch_cls.return_value = mock_watch
+            failure_event = {
+                "type": "MODIFIED",
+                "object": {
+                    "status": {
+                        "conditions": [
+                            {
+                                "type": "Triggered",
+                                "status": "False",
+                                "reason": "Failed",
+                                "message": "Snapshot failed due to timeout",
+                            }
+                        ]
+                    }
+                },
+            }
+            mock_watch.stream.return_value = [failure_event]
+
+            # Mock create to return resource version
+            self.client.custom_objects_api.create_namespaced_custom_object.return_value = {
+                "metadata": {"resourceVersion": "100"}
+            }
+
+            result = self.client.snapshot("test-trigger-fail")
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error_code, 1)
+            self.assertIn(
+                "Snapshot failed. Condition: Snapshot failed due to timeout",
+                result.error_reason,
+            )
+        logging.info("Finished test_snapshot_watch_failure_condition.")
+
+    def test_snapshot_watch_error_event(self):
+        """Test snapshot failure on 'ERROR' event type."""
+        logging.info("Starting test_snapshot_watch_error_event...")
+        self.client.pod_name = "test-pod"
+        self.client.snapshot_crd_installed = True
+
+        mock_watch = MagicMock()
+        with patch(
+            "k8s_agent_sandbox.gke_extensions.podsnapshot_client.watch.Watch"
+        ) as mock_watch_cls:
+            mock_watch_cls.return_value = mock_watch
+            error_event = {
+                "type": "ERROR",
+                "object": {"code": 500, "message": "Internal Server Error"},
+            }
+            mock_watch.stream.return_value = [error_event]
+
+            self.client.custom_objects_api.create_namespaced_custom_object.return_value = {
+                "metadata": {"resourceVersion": "100"}
+            }
+
+            result = self.client.snapshot("test-trigger-error")
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error_code, 1)
+            self.assertIn("Snapshot watch error:", result.error_reason)
+        logging.info("Finished test_snapshot_watch_error_event.")
+
+    def test_snapshot_watch_deleted_event(self):
+        """Test snapshot failure on 'DELETED' event type."""
+        logging.info("Starting test_snapshot_watch_deleted_event...")
+        self.client.pod_name = "test-pod"
+        self.client.snapshot_crd_installed = True
+
+        mock_watch = MagicMock()
+        with patch(
+            "k8s_agent_sandbox.gke_extensions.podsnapshot_client.watch.Watch"
+        ) as mock_watch_cls:
+            mock_watch_cls.return_value = mock_watch
+            deleted_event = {"type": "DELETED", "object": {}}
+            mock_watch.stream.return_value = [deleted_event]
+
+            self.client.custom_objects_api.create_namespaced_custom_object.return_value = {
+                "metadata": {"resourceVersion": "100"}
+            }
+
+            result = self.client.snapshot("test-trigger-deleted")
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error_code, 1)
+            self.assertIn("was deleted", result.error_reason)
+        logging.info("Finished test_snapshot_watch_deleted_event.")
+
+    def test_snapshot_watch_generic_exception(self):
+        """Test snapshot failure on generic exception during watch."""
+        logging.info("Starting test_snapshot_watch_generic_exception...")
+        self.client.pod_name = "test-pod"
+        self.client.snapshot_crd_installed = True
+
+        mock_watch = MagicMock()
+        with patch(
+            "k8s_agent_sandbox.gke_extensions.podsnapshot_client.watch.Watch"
+        ) as mock_watch_cls:
+            mock_watch_cls.return_value = mock_watch
+            # Simulate generic exception
+            mock_watch.stream.side_effect = Exception("Something went wrong")
+
+            self.client.custom_objects_api.create_namespaced_custom_object.return_value = {
+                "metadata": {"resourceVersion": "100"}
+            }
+
+            result = self.client.snapshot("test-trigger-generic")
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error_code, 1)
+            self.assertIn("Unexpected error: Something went wrong", result.error_reason)
+        logging.info("Finished test_snapshot_watch_generic_exception.")
+
+    def test_snapshot_invalid_name_api_exception(self):
+        """Test snapshot failure when trigger name is invalid (ApiException)."""
+        logging.info("Starting test_snapshot_invalid_name_api_exception...")
+        self.client.pod_name = "test-pod"
+        self.client.snapshot_crd_installed = True
+
+        self.client.custom_objects_api.create_namespaced_custom_object.side_effect = ApiException(
+            status=400,
+            reason="BadRequest",
+            http_resp=MagicMock(
+                data='Invalid value: "Test_Trigger": must be a lowercase RFC 1123 subdomain'
+            ),
+        )
+
+        result = self.client.snapshot("Test_Trigger")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, 1)
+        self.assertIn("Failed to create PodSnapshotManualTrigger", result.error_reason)
+        self.assertIn("Invalid value", result.error_reason)
+        logging.info("Finished test_snapshot_invalid_name_api_exception.")
+
 
 if __name__ == "__main__":
     unittest.main()

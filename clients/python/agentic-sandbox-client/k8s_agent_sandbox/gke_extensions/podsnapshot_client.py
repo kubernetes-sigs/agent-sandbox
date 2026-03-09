@@ -137,6 +137,13 @@ class PodSnapshotSandboxClient(SandboxClient):
                     snapshot_uid=snapshot_uid,
                     snapshot_timestamp=snapshot_timestamp,
                 )
+            elif condition.get("status") == "False" and condition.get("reason") in [
+                "Failed",
+                "Error",
+            ]:
+                raise RuntimeError(
+                    f"Snapshot failed. Condition: {condition.get('message', 'Unknown error')}"
+                )
         raise ValueError("Snapshot is not yet complete.")
 
     def _wait_for_snapshot_to_be_completed(
@@ -176,6 +183,18 @@ class PodSnapshotSandboxClient(SandboxClient):
                     except ValueError:
                         # Continue watching if snapshot is not yet complete
                         continue
+                elif event["type"] == "ERROR":
+                    logger.error(
+                        f"Snapshot watch received error event: {event['object']}"
+                    )
+                    raise RuntimeError(f"Snapshot watch error: {event['object']}")
+                elif event["type"] == "DELETED":
+                    logger.error(
+                        f"Snapshot manual trigger '{trigger_name}' was deleted before completion."
+                    )
+                    raise RuntimeError(
+                        f"Snapshot manual trigger '{trigger_name}' was deleted."
+                    )
         except Exception as e:
             logger.error(f"Error watching snapshot: {e}")
             raise
@@ -264,6 +283,28 @@ class PodSnapshotSandboxClient(SandboxClient):
                 trigger_name=trigger_name,
                 snapshot_uid=None,
                 error_reason=f"Snapshot creation timed out: {e}",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+        except RuntimeError as e:
+            logger.exception(
+                f"Snapshot creation failed for trigger '{trigger_name}': {e}"
+            )
+            return SnapshotResponse(
+                success=False,
+                trigger_name=trigger_name,
+                snapshot_uid=None,
+                error_reason=f"Snapshot creation failed: {e}",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+        except Exception as e:
+            logger.exception(
+                f"Unexpected error during snapshot creation for trigger '{trigger_name}': {e}"
+            )
+            return SnapshotResponse(
+                success=False,
+                trigger_name=trigger_name,
+                snapshot_uid=None,
+                error_reason=f"Unexpected error: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 

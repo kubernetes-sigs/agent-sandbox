@@ -24,6 +24,37 @@ The `extensions` module provides additional CRDs and controllers that build on t
 *   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandbox Pods that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
+## Architecture
+
+agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox custom resource, and the controller manages the underlying runtime resources.
+
+### Architecture Diagram
+
+          +------+
+          | User |
+          +------+
+              |
+              | creates
+              v
+      +------------------+
+      |   Sandbox CRD    |
+      +------------------+
+              |
+              | reconciled by
+              v
+      +------------------+
+      | Sandbox Controller|
+      +------------------+
+              |
+              v
+        +-----------+
+        | Sandbox   |
+        |   Pod     |
+        +-----------+
+              |
+              v
+    Sandbox Runtime Environment
+
 ## Installation
 
 ### Core Components & Extensions

@@ -253,47 +253,68 @@ div.feature-state-notice {
   }
 }
 
+.td-cover-block,
+.td-content {
+  .display-1 {
+    font-size: clamp(1.6rem, 4vw, 3.6rem);
+  }
+
+  .display-6 {
+    font-size: clamp(0.8rem, 2vw, 1.4rem);
+  }
+}
+
 .mx-auto > .container {
   display: flex;
   flex-direction: row;
+  justify-content: center;
 }
 
 .link-card {
   all: unset;
-  flex: 1 1 0;
+  flex: 0 0 35%;
   border: 1px solid;
-  border-radius: 2rem;
-  padding: 4rem;
-  margin: 2rem;
+  border-radius: 1.25rem;
+  padding: 1.4rem 1.75rem;
+  margin: 0.7rem;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  display: block;
 }
 
 @media only screen and (max-width: 800px) {
   .mx-auto > .container {
     flex-direction: column;
+    justify-content: unset;
   }
 
   .link-card {
     all: unset;
     flex: 1 1 0;
     border: 1px solid;
-    border-radius: 2rem;
-    padding: 2rem;
-    margin: 1rem;
+    border-radius: 1.25rem;
+    padding: 1rem 1.4rem;
+    margin: 0.5rem;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    display: block;
   }
 }
 
 .link-card:hover {
   cursor: pointer;
+  background: rgba($primary, 0.2);
 }
 
 .link-card > .title {
-  font-size: 2rem;
-  font-weight: 400;
+  font-size: 1rem;
+  font-weight: 600;
 }
 
 .link-card > .subtitle {
-  font-size: 1rem;
-  font-weight: 100;
+  font-size: 0.76rem;
+  font-weight: 300;
+  opacity: 0.75;
 }
 
 .info-container {
@@ -319,13 +340,17 @@ div.feature-state-notice {
   gap: 2rem;
 }
 
+h1.text-center {
+  font-size: 1.75rem;
+}
+
 .info-card > .title {
-  font-size: 2.5rem;
+  font-size: 1.75rem;
   font-weight: 400;
 }
 
 .info-card > .description {
-  font-size: 1.5rem;
+  font-size: 1.05rem;
   font-weight: 100;
 }
 
@@ -363,7 +388,13 @@ div.feature-state-notice {
   border: 1px solid;
   border-radius: 2rem;
   margin: 1rem 0;
-  padding: 2rem;
+  padding: 1rem;
+  transition: background 0.2s ease;
+  cursor: pointer;
+}
+
+.section-index .entry:hover {
+  background: rgba($primary, 0.2);
 }
 
 @media (min-width: 768px) {
@@ -398,6 +429,19 @@ div.feature-state-notice {
         padding-left: 16rem !important;
         padding-right: 16rem !important;
     }
+}
+
+.td-content blockquote {
+  background: rgba($primary, 0.15);
+  border-left: 4px solid $primary;
+  border-radius: 0.25rem;
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+  color: #fff;
+
+  p {
+    margin: 0;
+  }
 }
 
 .td-content p code {
@@ -459,7 +503,7 @@ div.feature-state-notice {
 }
 
 .section-index .simple-list-item .description {
-  font-size: 1.5rem;
+  font-size: 1.05rem;
   font-weight: 100;
 }
 
@@ -492,7 +536,7 @@ div.feature-state-notice {
 }
 
 .section-index .list .entry {
-  padding: 4rem 3rem 6rem;
+  padding: 2rem 1.5rem 3rem;
   margin: 0;
 }
 
@@ -502,26 +546,26 @@ div.feature-state-notice {
 
 .section-index .list .entry .title {
   color: #bc3fff;
-  font-size: 1.5rem;
+  font-size: 0.84rem;
   font-weight: 700;
 }
 
 .section-index .list .entry .description {
   color: #eee;
-  font-size: 2rem;
+  font-size: 1.12rem;
 }
 
 
 @media (min-width: 768px) {
   .section-index .list .entry .title {
     color: #bc3fff;
-    font-size: 2rem;
+    font-size: 1.12rem;
     font-weight: 700;
   }
 
   .section-index .list .entry .description {
     color: #eee;
-    font-size: 3.5rem;
+    font-size: 1.96rem;
   }
 
 }

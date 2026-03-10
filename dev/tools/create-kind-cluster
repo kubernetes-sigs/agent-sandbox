@@ -30,6 +30,11 @@ def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
         - role: control-plane
           kubeadmConfigPatches:
           - |
+            kind: ClusterConfiguration
+            apiServer:
+              extraArgs:
+                enable-admission-plugins: "NodeRestriction,OwnerReferencesPermissionEnforcement"
+          - |
             kind: KubeletConfiguration
             logging:
               verbosity: {kubelet_verbosity}

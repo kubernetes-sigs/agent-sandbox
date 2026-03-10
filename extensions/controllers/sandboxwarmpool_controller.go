@@ -276,12 +276,24 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, warmPool); err != nil {
-		log.Error(err, "Failed to update SandboxWarmPool status")
+	patch := &extensionsv1alpha1.SandboxWarmPool{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: extensionsv1alpha1.GroupVersion.String(),
+			Kind:       "SandboxWarmPool",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      warmPool.Name,
+			Namespace: warmPool.Namespace,
+		},
+		Status: warmPool.Status,
+	}
+
+	// Send the Server-Side Apply request to update the status subresource
+	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil {
+		log.Error(err, "Failed to apply SandboxWarmPool status via SSA")
 		return err
 	}
 
-	log.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
 	return nil
 }
 

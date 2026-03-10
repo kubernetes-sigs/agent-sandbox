@@ -98,7 +98,8 @@ footer {
   }
 }
 
-.td-section {
+.td-section,
+.td-page {
   background-color: $black;
   background-image: radial-gradient(
       circle at 25% -40%,
@@ -106,6 +107,7 @@ footer {
       transparent 45%
     ),
     radial-gradient(circle at 75% -40%, #5e0032 0%, transparent 45%);
+  background-attachment: fixed;
   color: $white;
 
   .navbar {
@@ -120,6 +122,7 @@ footer {
 
 .td-sidebar {
   padding-bottom: 0.5rem;
+  border-right: 1px solid rgba(255, 255, 255, 0.15);
 
   .td-sidebar__inner {
     padding-top: 30px;
@@ -130,12 +133,47 @@ footer {
   }
 }
 
+// Fix sidebar nav link colors for dark background
+.td-sidebar-nav {
+  .td-sidebar-link__page:not(.active) {
+    color: rgba(255, 255, 255, 0.75) !important;
+  }
+
+  .td-sidebar-nav__section-title a:not(.active) {
+    color: rgba(255, 255, 255, 0.9) !important;
+  }
+
+  a:hover, a:focus {
+    color: #fff !important;
+  }
+
+  a.active,
+  a .td-sidebar-nav-active-item {
+    color: $primary !important;
+    font-weight: 700;
+  }
+
+  .td-sidebar-link.tree-root {
+    border-bottom-color: rgba(255, 255, 255, 0.15) !important;
+  }
+}
+
 .td-sidebar-toc {
+  border-left: none !important;
+
   @supports (position: sticky) {
     position: sticky;
     top: 60px;
     height: calc(100vh - 120px);
     overflow-y: auto;
+  }
+
+  a {
+    color: rgba(255, 255, 255, 0.65) !important;
+  }
+
+  a:hover, a:focus {
+    color: #fff !important;
   }
 }
 
@@ -403,7 +441,8 @@ h1.text-center {
 }
 
 @media (min-width: 768px) {
-    .td-section .td-navbar {
+    .td-section .td-navbar,
+    .td-page .td-navbar {
         position: static;
         top: 0;
         width: 100%;
@@ -411,30 +450,12 @@ h1.text-center {
 }
 
 @media (min-width: 768px) {
-    .td-section .td-404 main, .td-section .td-main main {
+    .td-section .td-404 main, .td-section .td-main main,
+    .td-page .td-404 main, .td-page .td-main main {
         padding-top: 1rem;
     }
 }
 
-.td-section .col-12 {
-    flex: 0 0 auto;
-    padding: 0 2rem;
-    width: 100%;
-}
-
-@media (min-width: 768px) {
-    .td-section .ps-md-5 {
-        padding-left: 8rem !important;
-        padding-right: 8rem !important;
-    }
-}
-
-@media (min-width: 1200px) {
-    .td-section .col-xl-8 {
-        padding-left: 16rem !important;
-        padding-right: 16rem !important;
-    }
-}
 
 .td-content blockquote {
   background: rgba($primary, 0.15);

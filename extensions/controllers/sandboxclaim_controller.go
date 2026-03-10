@@ -36,8 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -66,6 +65,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -146,6 +146,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
 		return ctrl.Result{}, errors.Join(reconcileErr, updateErr)
 	}
+
+	r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -262,7 +264,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 		if errors.Is(err, ErrTemplateNotFound) {
 			reason = "TemplateNotFound"
 			return metav1.Condition{
-				Type:               string(sandboxv1alpha1.SandboxConditionReady),
+				Type:               string(v1alpha1.SandboxConditionReady),
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            fmt.Sprintf("SandboxTemplate %q not found", claim.Spec.TemplateRef.Name),
@@ -270,7 +272,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 			}
 		}
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            "Error seen: " + err.Error(),
@@ -280,7 +282,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 
 	if isClaimExpired {
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             extensionsv1alpha1.ClaimExpiredReason,
 			Message:            "Claim expired. Sandbox resources deleted.",
@@ -291,7 +293,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	if sandbox == nil {
 		// Only handle genuine missing sandbox here (expired case is handled above)
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             "SandboxMissing",
 			Message:            "Sandbox does not exist",
@@ -302,9 +304,9 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	// Check if Core Controller marked it as Expired
 	if isSandboxExpired(sandbox) {
 		return metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
-			Reason:             sandboxv1alpha1.SandboxReasonExpired,
+			Reason:             v1alpha1.SandboxReasonExpired,
 			Message:            "Underlying Sandbox resource has expired independently of the Claim.",
 			ObservedGeneration: claim.Generation,
 		}
@@ -312,13 +314,13 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 
 	// Forward the condition from Sandbox Status
 	for _, condition := range sandbox.Status.Conditions {
-		if condition.Type == string(sandboxv1alpha1.SandboxConditionReady) {
+		if condition.Type == string(v1alpha1.SandboxConditionReady) {
 			return condition
 		}
 	}
 
 	return metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionReady),
+		Type:               string(v1alpha1.SandboxConditionReady),
 		Status:             metav1.ConditionFalse,
 		Reason:             "SandboxNotReady",
 		Message:            "Sandbox is not ready",
@@ -336,14 +338,13 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 }
 
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
-func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, currentTemplateHash string) (*corev1.Pod, error) {
+func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
 	// List all pods with the podTemplateHashLabel matching the hash
 	podList := &corev1.PodList{}
 	labelSelector := labels.SelectorFromSet(labels.Set{
 		sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
-		sandboxTemplateHash:    currentTemplateHash,
 	})
 
 	if err := r.List(ctx, podList, &client.ListOptions{
@@ -463,8 +464,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	// Before creating the sandbox, try to adopt a pod from the warm pool
-	currentTemplateHash := computeTemplateHash(template)
-	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox, currentTemplateHash)
+	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
 	if adoptErr != nil {
 		logger.Error(adoptErr, "Failed to adopt pod from warm pool")
 		return nil, adoptErr
@@ -543,7 +543,7 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
-		Owns(&sandboxv1alpha1.Sandbox{}).
+		Owns(&v1alpha1.Sandbox{}).
 		Complete(r)
 }
 
@@ -610,6 +610,39 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 	return nil
 }
 
+// recordCreationLatencyMetric detects and records transitions to Ready state.
+func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
+	claim *extensionsv1alpha1.SandboxClaim,
+	oldStatus *extensionsv1alpha1.SandboxClaimStatus,
+	sandbox *v1alpha1.Sandbox,
+) {
+
+	newStatus := &claim.Status
+	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1alpha1.SandboxConditionReady))
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		return
+	}
+
+	// Do not record creation metric if we have already seen the ready state.
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1alpha1.SandboxConditionReady))
+	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
+		return
+	}
+
+	launchType := asmetrics.LaunchTypeCold
+	// This is unlikely to happen; here for completeness only.
+	if sandbox == nil {
+		launchType = asmetrics.LaunchTypeUnknown
+	} else if sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "" {
+		// Existence of the SandboxPodNameAnnotation implies the pod was adopted from a warm pool.
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
+	// startup latency when the TemplateRef is updated.
+	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
+}
+
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller
 func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
 	return hasExpiredCondition(sandbox.Status.Conditions)
@@ -618,8 +651,8 @@ func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
 // hasExpiredCondition Helper to check if conditions list contains the expired reason
 func hasExpiredCondition(conditions []metav1.Condition) bool {
 	for _, cond := range conditions {
-		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) {
-			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == sandboxv1alpha1.SandboxReasonExpired {
+		if cond.Type == string(v1alpha1.SandboxConditionReady) {
+			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == v1alpha1.SandboxReasonExpired {
 				return true
 			}
 		}

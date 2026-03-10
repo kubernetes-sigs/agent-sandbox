@@ -506,7 +506,7 @@ func (cl *ClusterClient) validateAgentSandboxInstallation() error {
 		Name:      "agent-sandbox-controller",
 		Namespace: ns.Name,
 	}
-	ctrl := &appsv1.StatefulSet{}
+	ctrl := &appsv1.Deployment{}
 	ctrl.Name = ctrlNN.Name
 	ctrl.Namespace = ctrlNN.Namespace
 	cl.MustExist(ctrl)
@@ -538,7 +538,7 @@ func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedNa
 			cl.Errorf("failed to kill port-forward: %s", err)
 		}
 	}
-	cl.T.Cleanup(stopProcess)
+	cl.Cleanup(stopProcess)
 
 	go func() {
 		cl.Helper()
@@ -607,12 +607,12 @@ func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpo
 	warmpool := &unstructured.Unstructured{}
 	warmpool.SetGroupVersionKind(sandboxWarmpoolGVK)
 	if err := cl.client.Get(ctx, sandboxWarmpoolID, warmpool); err != nil {
-		cl.T.Fatalf("Failed to get SandboxWarmPool %s: %v", sandboxWarmpoolID, err)
+		cl.Fatalf("Failed to get SandboxWarmPool %s: %v", sandboxWarmpoolID, err)
 		return err
 	}
 
 	if err := cl.WaitForObject(ctx, warmpool, predicates.ReadyReplicasConditionIsTrue); err != nil {
-		cl.T.Fatalf("waiting for warmpool to be ready: %v", err)
+		cl.Fatalf("waiting for warmpool to be ready: %v", err)
 		return err
 	}
 	return nil

@@ -32,6 +32,19 @@ type SandboxWarmPoolSpec struct {
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// +kubebuilder:validation:Required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+
+	// +optional
+	UpdateStrategy SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
+}
+
+// SandboxWarmPoolUpdateStrategy defines the update strategy for the SandboxWarmPool.
+type SandboxWarmPoolUpdateStrategy struct {
+	// Recreate: Stale pods are deleted immediately to ensure the pool only contains fresh pods.
+	// OnDelete: Stale pods are only replaced when they are manually deleted or claimed.
+	// +kubebuilder:validation:Enum=Recreate;OnDelete
+	// +kubebuilder:default=Recreate
+	// +optional
+	Type string `json:"type,omitempty"`
 }
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool
@@ -45,6 +58,7 @@ type SandboxWarmPoolStatus struct {
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 }
 
+// +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas

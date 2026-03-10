@@ -62,7 +62,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Handle deletion
-	if !warmPool.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !warmPool.DeletionTimestamp.IsZero() {
 		log.Info("SandboxWarmPool is being deleted")
 		return ctrl.Result{}, nil
 	}
@@ -118,16 +118,40 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		log.Error(tmplErr, "Failed to get sandbox template", "templateRef", warmPool.Spec.TemplateRef.Name)
 	}
 
+	// Get the update strategy
+	updateStrategy := warmPool.Spec.UpdateStrategy.Type
+	if updateStrategy == "" {
+		updateStrategy = RecreateStrategy
+	}
+
 	for _, pod := range podList.Items {
 		// Skip pods that are being deleted
-		if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+		if !pod.DeletionTimestamp.IsZero() {
 			continue
 		}
 
 		// Get the controller owner reference
 		controllerRef := metav1.GetControllerOf(&pod)
+		isOrphan := controllerRef == nil
+		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
 
-		if controllerRef == nil {
+		// Ignore pods belonging to other controllers
+		if !isOrphan && !isControlledByPool {
+			log.Info("Ignoring pod with different controller", "pod", pod.Name, "controller", controllerRef.Name)
+			continue
+		}
+
+		// If the update strategy of the warmpool is recreate, check if it's stale
+		if updateStrategy == RecreateStrategy && tmplErr == nil && r.isPodStale(&pod, currentTemplateHash) {
+			log.Info("Deleting stale pod from pool", "pod", pod.Name)
+			if err := r.Delete(ctx, &pod); err != nil {
+				log.Error(err, "Failed to delete stale pod", "pod", pod.Name)
+				allErrors = errors.Join(allErrors, err)
+			}
+			continue
+		}
+
+		if isOrphan {
 			// Pod has no controller - adopt it
 			log.Info("Adopting orphaned pod", "pod", pod.Name)
 			if err := r.adoptPod(ctx, warmPool, &pod); err != nil {
@@ -135,25 +159,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				allErrors = errors.Join(allErrors, err)
 				continue
 			}
-			activePods = append(activePods, pod)
-		} else if controllerRef.UID == warmPool.UID {
-			// Pod belongs to this warmpool - check if it's stale
-			if tmplErr == nil && r.isPodStale(&pod, currentTemplateHash) {
-				log.Info("Deleting stale pod from pool", "pod", pod.Name)
-				if err := r.Delete(ctx, &pod); err != nil {
-					log.Error(err, "Failed to delete stale pod", "pod", pod.Name)
-					allErrors = errors.Join(allErrors, err)
-				}
-				continue
-			}
-			activePods = append(activePods, pod)
-		} else {
-			// Pod has a different controller - ignore it
-			log.Info("Ignoring pod with different controller",
-				"pod", pod.Name,
-				"controller", controllerRef.Name,
-				"controllerKind", controllerRef.Kind)
 		}
+		activePods = append(activePods, pod)
 	}
 
 	desiredReplicas := warmPool.Spec.Replicas
@@ -261,7 +268,7 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 	}
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
-	if err := ctrl.SetControllerReference(warmPool, pod, r.Client.Scheme()); err != nil {
+	if err := ctrl.SetControllerReference(warmPool, pod, r.Scheme()); err != nil {
 		return fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 
@@ -310,6 +317,7 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 	return template, nil
 }
 
+// isPodStale checks if the pod is stale based on the template hash
 func (r *SandboxWarmPoolReconciler) isPodStale(pod *corev1.Pod, currentTemplateHash string) bool {
 	podHash := pod.Labels[sandboxTemplateHash]
 	return currentTemplateHash != podHash

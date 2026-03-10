@@ -35,6 +35,10 @@ const (
 
 	// templateRefField is the field used for indexing SandboxWarmPools by their template reference name.
 	templateRefField = ".spec.templateRef.Name"
+
+	// SandboxWarmPool update strategies
+	RecreateStrategy = "Recreate"
+	OnDeleteStrategy = "OnDelete"
 )
 
 // computeTemplateHash computes a hash of the sandbox template spec and its name.

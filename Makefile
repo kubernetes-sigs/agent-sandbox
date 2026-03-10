@@ -19,7 +19,7 @@ deploy-kind:
 
 	@if [ "$(EXTENSIONS)" = "true" ]; then \
 		echo "🔧 Patching controller to enable extensions..."; \
-		kubectl patch statefulset agent-sandbox-controller \
+		kubectl patch deployment agent-sandbox-controller \
 			-n agent-sandbox-system \
 			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
 	fi
@@ -43,6 +43,10 @@ test-unit:
 .PHONY: test-e2e
 test-e2e:
 	./dev/ci/presubmits/test-e2e
+
+.PHONY: test-e2e-benchmarks
+test-e2e-benchmarks:
+	./dev/ci/presubmits/test-e2e --suite benchmarks
 
 .PHONY: lint-go
 lint-go:

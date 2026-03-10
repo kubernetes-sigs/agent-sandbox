@@ -65,37 +65,37 @@ func (lc *logCapturingT) writeToFile(format string, args ...any) {
 }
 
 func (lc *logCapturingT) Log(args ...any) {
-	lc.T.Helper()
+	lc.Helper()
 	lc.T.Log(args...)
 	lc.writeToFile("%s\n", fmt.Sprint(args...))
 }
 
 func (lc *logCapturingT) Logf(format string, args ...any) {
-	lc.T.Helper()
+	lc.Helper()
 	lc.T.Logf(format, args...)
 	lc.writeToFile(format+"\n", args...)
 }
 
 func (lc *logCapturingT) Error(args ...any) {
-	lc.T.Helper()
+	lc.Helper()
 	lc.T.Error(args...)
 	lc.writeToFile("ERROR: %s\n", fmt.Sprint(args...))
 }
 
 func (lc *logCapturingT) Errorf(format string, args ...any) {
-	lc.T.Helper()
+	lc.Helper()
 	lc.T.Errorf(format, args...)
 	lc.writeToFile("ERROR: "+format+"\n", args...)
 }
 
 func (lc *logCapturingT) Fatal(args ...any) {
-	lc.T.Helper()
+	lc.Helper()
 	lc.writeToFile("FATAL: %s\n", fmt.Sprint(args...))
 	lc.T.Fatal(args...)
 }
 
 func (lc *logCapturingT) Fatalf(format string, args ...any) {
-	lc.T.Helper()
+	lc.Helper()
 	lc.writeToFile("FATAL: "+format+"\n", args...)
 	lc.T.Fatalf(format, args...)
 }

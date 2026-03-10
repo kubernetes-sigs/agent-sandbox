@@ -90,6 +90,8 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
 	// Validation checks for concurrency flags
 	if sandboxConcurrentWorkers <= 0 || sandboxClaimConcurrentWorkers <= 0 || sandboxWarmPoolConcurrentWorkers <= 0 {
 		setupLog.Error(nil, "concurrent workers must be greater than 0")
@@ -122,7 +124,6 @@ func main() {
 		setupLog.V(1).Info("leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty; attempting auto-detection")
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	ctx := ctrl.SetupSignalHandler()
 
 	// Initialize Tracing Provider

@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -75,17 +77,28 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	oldStatus := warmPool.Status.DeepCopy()
 
 	// Reconcile the pool (create or delete Pods as needed)
-	if err := r.reconcilePool(ctx, warmPool); err != nil {
-		return ctrl.Result{}, err
-	}
+	reconcileErr := r.reconcilePool(ctx, warmPool)
 
 	// Update status if it has changed
 	if err := r.updateStatus(ctx, oldStatus, warmPool); err != nil {
-		log.Error(err, "Failed to update SandboxWarmPool status")
-		return ctrl.Result{}, err
+		reconcileErr = errors.Join(reconcileErr, err)
 	}
 
-	return ctrl.Result{}, nil
+	// Optimization 2: Fast retry with randomDelay for expected transient API errors during concurrent provisioning
+	// Because the WarmPool provisions pods concurrently in large batches, it is expected
+	// to occasionally hit APF rate limits (429) or transient conflicts (409).
+	// We intercept these specific API errors and apply a fast, randomDelay retry to avoid
+	// falling into the default controller-runtime exponential backoff queue (which can sleep up to 30s).
+	if reconcileErr != nil {
+		if k8serrors.IsTooManyRequests(reconcileErr) || k8serrors.IsConflict(reconcileErr) || k8serrors.IsServerTimeout(reconcileErr) {
+			randomDelay := time.Duration(rand.Intn(400)+100) * time.Millisecond
+			log.V(1).Info("Transient API error during concurrent provisioning, applying fast retry", "error", reconcileErr.Error())
+			return ctrl.Result{RequeueAfter: randomDelay}, nil
+		}
+	}
+
+	// All other unexpected errors fall through to the standard rate limiter
+	return ctrl.Result{}, reconcileErr
 }
 
 // reconcilePool ensures the correct number of pods exist in the pool

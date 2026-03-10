@@ -476,8 +476,8 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 func TestReconcilePoolReadyReplicas(t *testing.T) {
 	poolName := "test-pool"
-	poolNamespace := "default"
-	templateName := "test-template"
+	poolNamespace := "metrics-ns"
+	templateName := "test-template-metrics"
 	replicas := int32(3)
 
 	// Create a SandboxTemplate

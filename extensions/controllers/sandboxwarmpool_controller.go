@@ -339,7 +339,7 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxWarmPool{}).
 		Owns(&corev1.Pod{}).
-    WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Watches(
 			&extensionsv1alpha1.SandboxTemplate{},
 			handler.EnqueueRequestsFromMapFunc(r.findWarmPoolsForTemplate),

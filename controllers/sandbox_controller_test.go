@@ -79,6 +79,7 @@ func TestComputeReadyCondition(t *testing.T) {
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
+					PodIP: "10.0.0.1",
 					Conditions: []corev1.PodCondition{
 						{
 							Type:   corev1.PodReady,
@@ -89,6 +90,29 @@ func TestComputeReadyCondition(t *testing.T) {
 			},
 			expectedStatus: metav1.ConditionTrue,
 			expectedReason: "DependenciesReady",
+		},
+		{
+			name: "pod ready but no PodIP",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
+			err: nil,
+			svc: &corev1.Service{},
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   corev1.PodReady,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectedStatus: metav1.ConditionFalse,
+			expectedReason: "DependenciesNotReady",
 		},
 		{
 			name: "error",

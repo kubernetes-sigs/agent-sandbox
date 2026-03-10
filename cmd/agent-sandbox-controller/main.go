@@ -55,7 +55,7 @@ func main() {
 	var enablePprofDebug bool
 	var pprofBlockProfileRate int
 	var pprofMutexProfileFraction int
-	var kubeAPIQPS int
+	var kubeAPIQPS float64
 	var kubeAPIBurst int
 	var sandboxConcurrentWorkers int
 	var sandboxClaimConcurrentWorkers int
@@ -79,7 +79,7 @@ func main() {
 	flag.IntVar(&pprofMutexProfileFraction, "pprof-mutex-profile-fraction", 10,
 		"Mutex contention sampling rate for /debug/pprof/mutex when --enable-pprof-debug is set. "+
 			"<=0 disables; 1 samples all events; N>1 samples ~1/N events (e.g. 10 ~= 1/10, 100 ~= 1/100).")
-	flag.IntVar(&kubeAPIQPS, "kube-api-qps", -1, "QPS limit for kube API client")
+	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", -1.0, "QPS limit for kube API client (default is -1 no rate limit-unlimited)")
 	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "Burst limit for kube API client")
 	flag.IntVar(&sandboxConcurrentWorkers, "sandbox-concurrent-workers", 1, "Max concurrent reconciles for the Sandbox controller")
 	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 1, "Max concurrent reconciles for the SandboxClaim controller")
@@ -98,8 +98,7 @@ func main() {
 	// A logical maximum (too much will create unnecessary load on the API server)
 	totalWorkers := sandboxConcurrentWorkers + sandboxClaimConcurrentWorkers + sandboxWarmPoolConcurrentWorkers
 	if totalWorkers > 1000 {
-		setupLog.Error(nil, "total concurrent workers cannot exceed 1000 to prevent resource exhaustion", "total", totalWorkers)
-		os.Exit(1)
+		setupLog.Info("Warning: total concurrent workers exceeds 1000, which could lead to resource exhaustion", "total", totalWorkers)
 	}
 
 	if kubeAPIQPS == 0 || kubeAPIQPS < -1 {

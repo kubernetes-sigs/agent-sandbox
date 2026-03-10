@@ -219,10 +219,13 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 // adoptPod sets this warmpool as the owner of an orphaned pod
 func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, pod *corev1.Pod) error {
+	// Optimization: Use MergePatch instead of Update to eliminate "Object Modified" conflicts
+	// if the pod status changes during adoption.
+	patchBase := pod.DeepCopy()
 	if err := controllerutil.SetControllerReference(warmPool, pod, r.Scheme()); err != nil {
 		return err
 	}
-	return r.Update(ctx, pod)
+	return r.Patch(ctx, pod, client.MergeFrom(patchBase))
 }
 
 // createPoolPod creates a new pod for the warm pool

@@ -103,11 +103,6 @@ func main() {
 		setupLog.Info("Warning: total concurrent workers exceeds 1000, which could lead to resource exhaustion", "total", totalWorkers)
 	}
 
-	if kubeAPIQPS == 0 || kubeAPIQPS < -1 {
-		setupLog.Error(nil, "kube-api-qps must be greater than 0, or -1 for no rate limiting")
-		os.Exit(1)
-	}
-
 	if kubeAPIBurst <= 0 {
 		setupLog.Error(nil, "kube-api-burst must be greater than 0")
 		os.Exit(1)

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -324,7 +325,7 @@ func (r *SandboxWarmPoolReconciler) isPodStale(pod *corev1.Pod, currentTemplateH
 }
 
 // SetupWithManager sets up the controller with the Manager
-func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxWarmPool{}, templateRefField, func(rawObj client.Object) []string {
 		wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)
 		if wp.Spec.TemplateRef.Name == "" {
@@ -338,6 +339,7 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxWarmPool{}).
 		Owns(&corev1.Pod{}).
+    WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Watches(
 			&extensionsv1alpha1.SandboxTemplate{},
 			handler.EnqueueRequestsFromMapFunc(r.findWarmPoolsForTemplate),

@@ -15,7 +15,6 @@ import (
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers int) func() {
@@ -201,15 +200,7 @@ func TestParallelSandboxClaimsWithSufficientWarmPool(t *testing.T) {
 	poolObj.Spec.TemplateRef.Name = template.Name
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), poolObj))
 	
-	nameHash := NameHash(poolObj.Name)
-	p := []predicates.ObjectPredicate{
-		SandboxWarmPoolHasStatus(extensionsv1alpha1.SandboxWarmPoolStatus{
-			ReadyReplicas: 25,
-			Replicas:      25,
-		}),
-		predicates.HasLabel("agents.x-k8s.io/sandbox-name-hash", nameHash),
-	}
-	require.NoError(t, tc.WaitForObject(t.Context(), poolObj, p...))
+	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), types.NamespacedName{Name: poolObj.Name, Namespace: poolObj.Namespace}))
 
 	numClaims := 20
 	var wg sync.WaitGroup
@@ -273,15 +264,7 @@ func TestParallelSandboxClaimsWithInsufficientWarmPool(t *testing.T) {
 	poolObj.Spec.TemplateRef.Name = template.Name
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), poolObj))
 	
-	nameHash := NameHash(poolObj.Name)
-	p := []predicates.ObjectPredicate{
-		SandboxWarmPoolHasStatus(extensionsv1alpha1.SandboxWarmPoolStatus{
-			ReadyReplicas: 5,
-			Replicas:      5,
-		}),
-		predicates.HasLabel("agents.x-k8s.io/sandbox-name-hash", nameHash),
-	}
-	require.NoError(t, tc.WaitForObject(t.Context(), poolObj, p...))
+	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), types.NamespacedName{Name: poolObj.Name, Namespace: poolObj.Namespace}))
 
 	numClaims := 20
 	var wg sync.WaitGroup
@@ -314,29 +297,4 @@ func TestParallelSandboxClaimsWithInsufficientWarmPool(t *testing.T) {
 	}
 }
 
-type sandboxWarmPoolStatusPredicate struct {
-	status extensionsv1alpha1.SandboxWarmPoolStatus
-}
 
-func (p *sandboxWarmPoolStatusPredicate) Matches(obj client.Object) (bool, error) {
-	wp, ok := obj.(*extensionsv1alpha1.SandboxWarmPool)
-	if !ok {
-		return false, fmt.Errorf("expected SandboxWarmPool, got %T", obj)
-	}
-	if p.status.ReadyReplicas != 0 && wp.Status.ReadyReplicas != p.status.ReadyReplicas {
-		return false, nil
-	}
-	if p.status.Replicas != 0 && wp.Status.Replicas != p.status.Replicas {
-		return false, nil
-	}
-	return true, nil
-}
-
-func (p *sandboxWarmPoolStatusPredicate) String() string {
-	return fmt.Sprintf("SandboxWarmPoolStatusPredicate(ReadyReplicas: %d, Replicas: %d)", p.status.ReadyReplicas, p.status.Replicas)
-}
-
-// SandboxWarmPoolHasStatus returns an ObjectPredicate that checks if the SandboxWarmPool has the desired status.
-func SandboxWarmPoolHasStatus(status extensionsv1alpha1.SandboxWarmPoolStatus) predicates.ObjectPredicate {
-	return &sandboxWarmPoolStatusPredicate{status: status}
-}

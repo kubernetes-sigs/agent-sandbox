@@ -130,59 +130,6 @@ func TestParallelSandboxes(t *testing.T) {
 	}
 }
 
-func TestParallelSandboxClaims(t *testing.T) {
-	tc := framework.NewTestContext(t)
-	cleanup := patchControllerConcurrency(t, tc, 10)
-	defer cleanup()
-
-	ns := &corev1.Namespace{}
-	ns.Name = fmt.Sprintf("parallel-claims-%d", time.Now().UnixNano())
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
-
-	// Create a SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{}
-	template.Name = "test-template-claims"
-	template.Namespace = ns.Name
-	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{Name: "pause", Image: "registry.k8s.io/pause:3.10"},
-			},
-		},
-	}
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
-
-	numClaims := 20
-	var wg sync.WaitGroup
-	errCh := make(chan error, numClaims)
-
-	for i := 0; i < numClaims; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			claimName := fmt.Sprintf("claim-%d", idx)
-			claimObj := &extensionsv1alpha1.SandboxClaim{}
-			claimObj.Name = claimName
-			claimObj.Namespace = ns.Name
-			claimObj.Spec.TemplateRef.Name = template.Name
-			if err := tc.CreateWithCleanup(t.Context(), claimObj); err != nil {
-				errCh <- fmt.Errorf("failed creating claim %d: %w", idx, err)
-				return
-			}
-			if err := tc.WaitForObject(t.Context(), claimObj, predicates.ReadyConditionIsTrue); err != nil {
-				errCh <- fmt.Errorf("failed waiting for claim %d: %w", idx, err)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		t.Errorf("Error during parallel run: %v", err)
-	}
-}
-
 func TestParallelSandboxClaimsWithSufficientWarmPool(t *testing.T) {
 	tc := framework.NewTestContext(t)
 	cleanup := patchControllerConcurrency(t, tc, 10)

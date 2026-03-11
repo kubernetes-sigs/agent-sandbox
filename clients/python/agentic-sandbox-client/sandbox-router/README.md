@@ -75,3 +75,55 @@ provider you will need to modify the `gateway.yaml`.
 ```bash
 kubectl apply -f gateway.yaml
 ```
+
+## Testing
+
+### `test_sandbox_router.py`
+
+This file contains unit tests for the Sandbox Router. The tests use `pytest` with FastAPI's
+`TestClient` and mock the underlying `httpx` transport so that no live cluster is required.
+
+#### Test Classes:
+
+* **`TestHealthCheck`**: Verifies the `/healthz` endpoint returns a `200 OK` status.
+
+* **`TestProxyRequestValidation`**: Validates input sanitization for proxy requests.
+    * Missing `X-Sandbox-ID` header returns `400`.
+    * Invalid namespace format (e.g., containing spaces or special characters) returns `400`.
+    * Invalid (non-numeric) `X-Sandbox-Port` header returns `400`.
+    * Well-formed namespace values with hyphens pass validation.
+
+* **`TestProxyTimeout`**: Confirms timeout configuration behavior.
+    * Default timeout is `180` seconds.
+    * The `PROXY_TIMEOUT_SECONDS` environment variable overrides the default.
+    * Timeout reverts to the default when the environment variable is unset.
+
+* **`TestProxyRouting`**: Tests request forwarding logic.
+    * An unreachable sandbox returns `502 Bad Gateway`.
+    * The target URL is correctly constructed from `X-Sandbox-ID`, `X-Sandbox-Namespace`, and
+      `X-Sandbox-Port` headers using internal Kubernetes DNS
+      (`<id>.<namespace>.svc.cluster.local:<port>`).
+    * The original `Host` header is not forwarded to the sandbox.
+
+#### Prerequisites
+
+1.  **Python Virtual Environment**:
+
+    ```bash
+    python3 -m venv .venv
+    source .venv/bin/activate
+    ```
+
+2.  **Install Dependencies**:
+
+    ```bash
+    pip install -e ../
+    pip install -r requirements.txt
+    pip install pytest
+    ```
+
+#### Running Tests
+
+```bash
+pytest test_sandbox_router.py -v
+```

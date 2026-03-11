@@ -37,24 +37,35 @@ flowchart TB
 
     Claim[SandboxClaim]
     Template[SandboxTemplate]
-    CRD[Sandbox CRD]
+    Sandbox[Sandbox]
 
+    ClaimController[Claim Controller]
     Controller[Sandbox Controller]
 
     Pod[Sandbox Pod]
-
     Runtime[Sandbox Runtime Environment]
 
     WarmPool[SandboxWarmPool]
 
+    %% User paths
+    User -->|creates| Sandbox
     User -->|creates| Claim
-    Claim -->|uses| Template
-    Template -->|creates| CRD
-    CRD -->|reconciled by| Controller
-    Controller -->|creates| Pod
+
+    %% Claim workflow
+    Claim -->|references| Template
+    Claim -->|reconciled by| ClaimController
+    ClaimController -->|creates| Sandbox
+
+    %% Pod handling
+    ClaimController -->|adopts pod from| WarmPool
+    Sandbox -->|reconciled by| Controller
+    Controller -->|creates Pod if needed| Pod
+
+    %% Runtime
     Pod --> Runtime
 
-    WarmPool -->|pre-warms| Pod
+    %% Warm pool
+    WarmPool -->|pre-warmed pods| Pod
 ```
 
 ## Installation

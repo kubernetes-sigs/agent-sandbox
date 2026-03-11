@@ -27,7 +27,25 @@ DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
 DEFAULT_PROXY_TIMEOUT = 180.0
 
-proxy_timeout = float(os.environ.get("PROXY_TIMEOUT_SECONDS", DEFAULT_PROXY_TIMEOUT))
+
+def _get_proxy_timeout() -> float:
+    raw = os.environ.get("PROXY_TIMEOUT_SECONDS")
+    if raw is None:
+        return DEFAULT_PROXY_TIMEOUT
+    try:
+        value = float(raw)
+    except (ValueError, TypeError):
+        print(f"WARNING: Invalid PROXY_TIMEOUT_SECONDS='{raw}', "
+              f"falling back to {DEFAULT_PROXY_TIMEOUT}s")
+        return DEFAULT_PROXY_TIMEOUT
+    if value <= 0:
+        print(f"WARNING: PROXY_TIMEOUT_SECONDS must be positive, got {value}, "
+              f"falling back to {DEFAULT_PROXY_TIMEOUT}s")
+        return DEFAULT_PROXY_TIMEOUT
+    return value
+
+
+proxy_timeout = _get_proxy_timeout()
 client = httpx.AsyncClient(timeout=proxy_timeout)
 
 print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")

@@ -436,7 +436,12 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			}
 
 			allObjects := append(tc.existingObjects, claimToUse)
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
+			client := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithIndex(&corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc).
+				WithObjects(allObjects...).
+				WithStatusSubresource(claimToUse).
+				Build()
 
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
@@ -592,6 +597,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			scheme := newScheme(t)
 			sandbox := createSandbox(tc.claim.Name, tc.sandboxIsExpired)
 			client := fake.NewClientBuilder().WithScheme(scheme).
+				WithIndex(&corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc).
 				WithObjects(template, tc.claim, sandbox).
 				WithStatusSubresource(tc.claim).Build()
 
@@ -670,6 +676,7 @@ func TestSandboxProvisionEvent(t *testing.T) {
 
 	fakeRecorder := record.NewFakeRecorder(10)
 	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc).
 		WithObjects(claim, template).
 		WithStatusSubresource(claim).Build()
 
@@ -832,6 +839,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 		expectPodAdoption   bool
 		expectedAdoptedPod  string // name of the pod that should be adopted
 		expectSandboxCreate bool
+		simulateConflicts   int
 	}{
 		{
 			name: "adopts oldest pod from warm pool",
@@ -903,19 +911,40 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			expectedAdoptedPod:  "middle-ready",
 			expectSandboxCreate: true,
 		},
+		{
+			name: "retries on conflict when adopting pod",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createWarmPoolPod("pool-pod-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
+				createWarmPoolPod("pool-pod-2", metav1.Now(), true),
+			},
+			expectPodAdoption:   true,
+			expectedAdoptedPod:  "pool-pod-2",
+			expectSandboxCreate: true,
+			simulateConflicts:   1, // Fail update on the first pod, succeed on the second
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
-			client := fake.NewClientBuilder().
+			var c client.Client = fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithIndex(&corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc).
 				WithObjects(tc.existingObjects...).
 				WithStatusSubresource(claim).
 				Build()
 
+			if tc.simulateConflicts > 0 {
+				c = &conflictClient{
+					Client:       c,
+					maxConflicts: tc.simulateConflicts,
+				}
+			}
+
 			reconciler := &SandboxClaimReconciler{
-				Client:   client,
+				Client:   c,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
@@ -936,7 +965,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 
 			// Verify sandbox was created
 			var sandbox sandboxv1alpha1.Sandbox
-			err = client.Get(ctx, req.NamespacedName, &sandbox)
+			err = c.Get(ctx, req.NamespacedName, &sandbox)
 			if tc.expectSandboxCreate && err != nil {
 				t.Fatalf("expected sandbox to be created but got error: %v", err)
 			}
@@ -947,7 +976,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			if tc.expectPodAdoption {
 				// Verify the adopted pod has correct labels and owner reference
 				var adoptedPod corev1.Pod
-				err = client.Get(ctx, types.NamespacedName{
+				err = c.Get(ctx, types.NamespacedName{
 					Name:      tc.expectedAdoptedPod,
 					Namespace: "default",
 				}, &adoptedPod)
@@ -1094,7 +1123,12 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 	t.Run("Cold Start", func(t *testing.T) {
 		asmetrics.SandboxClaimCreationTotal.Reset()
 		scheme := newScheme(t)
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim).WithStatusSubresource(claim).Build()
+		client := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithIndex(&corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc).
+			WithObjects(template, claim).
+			WithStatusSubresource(claim).
+			Build()
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
@@ -1143,7 +1177,12 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		scheme := newScheme(t)
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim, warmPod).WithStatusSubresource(claim).Build()
+		client := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithIndex(&corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc).
+			WithObjects(template, claim, warmPod).
+			WithStatusSubresource(claim).
+			Build()
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
@@ -1192,7 +1231,12 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		scheme := newScheme(t)
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim, warmPod).WithStatusSubresource(claim).Build()
+		client := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithIndex(&corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc).
+			WithObjects(template, claim, warmPod).
+			WithStatusSubresource(claim).
+			Build()
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
@@ -1233,4 +1277,20 @@ func newScheme(t *testing.T) *runtime.Scheme {
 
 func ignoreTimestamp(_, _ metav1.Time) bool {
 	return true
+}
+
+type conflictClient struct {
+	client.Client
+	conflictCount int
+	maxConflicts  int
+}
+
+func (c *conflictClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if pod, ok := obj.(*corev1.Pod); ok {
+		if c.conflictCount < c.maxConflicts {
+			c.conflictCount++
+			return k8errors.NewConflict(corev1.Resource("pods"), pod.Name, fmt.Errorf("simulated conflict"))
+		}
+	}
+	return c.Client.Update(ctx, obj, opts...)
 }

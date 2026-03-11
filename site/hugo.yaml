@@ -138,7 +138,7 @@ module:
   - disableWatch: true
     source: ../
     target: assets/additional
-    includeFiles: ["CONTRIBUTING.md", "README.md", "docs_api.md"]
+    includeFiles: ["CONTRIBUTING.md", "README.md", "api.md"]
   - disableWatch: true
     source: ../examples
     target: assets/additional/examples

@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -286,20 +287,28 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 
 	testContext.MustWaitForObject(sandboxClaim, predicates.ReadyConditionIsTrue)
 
-	sandboxID := types.NamespacedName{
+	// Extract the adopted sandbox name from claim status
+	claim := &unstructured.Unstructured{}
+	claim.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "extensions.agents.x-k8s.io",
+		Version: "v1alpha1",
+		Kind:    "SandboxClaim",
+	})
+	require.NoError(testingT, testContext.Get(testingT.Context(), types.NamespacedName{
 		Namespace: ns.Name,
 		Name:      "python-sandbox-claim",
+	}, claim))
+	sandboxName, _, err := unstructured.NestedString(claim.Object, "status", "sandbox", "Name")
+	require.NoError(testingT, err)
+	require.NotEmpty(testingT, sandboxName, "claim status should have sandbox name")
+	testingT.Logf("DEBUG: Extracted SandboxName from claim status: sandboxName - %s", sandboxName)
+
+	sandboxID := types.NamespacedName{
+		Namespace: ns.Name,
+		Name:      sandboxName,
 	}
 
 	require.NoError(testingT, testContext.WaitForSandboxReady(testingT.Context(), sandboxID))
-
-	// Get the SandboxClaim to extract the sandbox name
-	sandbox, err := testContext.GetSandbox(ctx, sandboxID)
-	require.NoError(testingT, err)
-
-	sandboxName, _, err := unstructured.NestedString(sandbox.Object, "metadata", "annotations", "agents.x-k8s.io/pod-name")
-	require.NoError(testingT, err)
-	testingT.Logf("DEBUG: Extracted SandboxName from Sandbox: sandboxName - %s", sandboxName)
 
 	podID := types.NamespacedName{
 		Namespace: ns.Name,

@@ -29,11 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// TestWarmPoolSandboxWatcher verifies that Sandboxes created from WarmPools watch the right underlying pods.
 func TestWarmPoolSandboxWatcher(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
-	// Set up a namespace with unique name to avoid conflicts
 	ns := &corev1.Namespace{}
 	ns.Name = fmt.Sprintf("warmpool-watcher-test-%d", time.Now().UnixNano())
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
@@ -62,31 +60,38 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	warmPool.Spec.Replicas = 1
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
-	// Wait for warm pool to create a pod
-	var poolPodName string
+	// Wait for warm pool Sandbox to become ready
+	var poolSandboxName string
 	require.Eventually(t, func() bool {
-		podList := &corev1.PodList{}
-		if err := tc.List(t.Context(), podList, client.InNamespace(ns.Name)); err != nil {
+		sandboxList := &sandboxv1alpha1.SandboxList{}
+		if err := tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)); err != nil {
 			return false
 		}
-		for _, pod := range podList.Items {
-			if _, hasLabel := pod.Labels["agents.x-k8s.io/pool"]; hasLabel && pod.DeletionTimestamp.IsZero() {
-				poolPodName = pod.Name
-				return true
+		for _, sb := range sandboxList.Items {
+			if sb.DeletionTimestamp.IsZero() && metav1.IsControlledBy(&sb, warmPool) {
+				for _, cond := range sb.Status.Conditions {
+					if cond.Type == "Ready" && cond.Status == metav1.ConditionTrue {
+						poolSandboxName = sb.Name
+						return true
+					}
+				}
 			}
 		}
 		return false
-	}, 60*time.Second, 2*time.Second)
+	}, 60*time.Second, 2*time.Second, "warm pool sandbox should become ready")
 
-	// Create a SandboxClaim to adopt the pod
+	// Find the pod name from the pool sandbox
+	poolSandbox := &sandboxv1alpha1.Sandbox{}
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: poolSandboxName, Namespace: ns.Name}, poolSandbox))
+
+	// Create a SandboxClaim to adopt the warm pool sandbox
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	claim.Name = "test-claim"
 	claim.Namespace = ns.Name
 	claim.Spec.TemplateRef.Name = template.Name
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
-	// Wait for claim to create sandbox
-	var sandbox *sandboxv1alpha1.Sandbox
+	// Wait for claim to be ready with sandbox name in status
 	require.Eventually(t, func() bool {
 		if err := tc.Get(t.Context(), types.NamespacedName{Name: claim.Name, Namespace: ns.Name}, claim); err != nil {
 			return false
@@ -94,47 +99,42 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 		if claim.Status.SandboxStatus.Name == "" {
 			return false
 		}
-		sandbox = &sandboxv1alpha1.Sandbox{}
-		return tc.Get(t.Context(), types.NamespacedName{Name: claim.Status.SandboxStatus.Name, Namespace: ns.Name}, sandbox) == nil
-	}, 30*time.Second, 1*time.Second)
-
-	// Wait for pod to be adopted by sandbox
-	var adoptedPod *corev1.Pod
-	require.Eventually(t, func() bool {
-		adoptedPod = &corev1.Pod{}
-		if err := tc.Get(t.Context(), types.NamespacedName{Name: poolPodName, Namespace: ns.Name}, adoptedPod); err != nil {
-			return false
-		}
-		return metav1.IsControlledBy(adoptedPod, sandbox)
-	}, 30*time.Second, 1*time.Second)
-
-	// Wait for sandbox to become ready
-	require.Eventually(t, func() bool {
-		if err := tc.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: ns.Name}, sandbox); err != nil {
-			return false
-		}
-		for _, cond := range sandbox.Status.Conditions {
+		for _, cond := range claim.Status.Conditions {
 			if cond.Type == "Ready" && cond.Status == metav1.ConditionTrue {
 				return true
 			}
 		}
 		return false
-	}, 30*time.Second, 1*time.Second)
+	}, 30*time.Second, 1*time.Second, "claim should become ready")
 
-	// Delete the pod
+	// Verify the adopted sandbox is now owned by the claim
+	adoptedSandbox := &sandboxv1alpha1.Sandbox{}
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{
+		Name:      claim.Status.SandboxStatus.Name,
+		Namespace: ns.Name,
+	}, adoptedSandbox))
+	require.True(t, metav1.IsControlledBy(adoptedSandbox, claim), "adopted sandbox should be controlled by claim")
+
+	// Find the pod belonging to the adopted sandbox
+	podName := adoptedSandbox.Name
+	if ann, ok := adoptedSandbox.Annotations["agents.x-k8s.io/pod-name"]; ok && ann != "" {
+		podName = ann
+	}
+	adoptedPod := &corev1.Pod{}
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: ns.Name}, adoptedPod))
+
+	// Delete the pod and verify sandbox status updates
 	require.NoError(t, tc.Delete(t.Context(), adoptedPod))
 
-	// Verify sandbox status updates to reflect pod deletion.
-	// NOTE: This is the critical step that verifies that the Sandbox is watching the right pod.
 	require.Eventually(t, func() bool {
-		if err := tc.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: ns.Name}, sandbox); err != nil {
+		if err := tc.Get(t.Context(), types.NamespacedName{Name: adoptedSandbox.Name, Namespace: ns.Name}, adoptedSandbox); err != nil {
 			return false
 		}
-		for _, cond := range sandbox.Status.Conditions {
+		for _, cond := range adoptedSandbox.Status.Conditions {
 			if cond.Type == "Ready" && cond.Status != metav1.ConditionTrue {
 				return true
 			}
 		}
 		return false
-	}, 15*time.Second, 500*time.Millisecond)
+	}, 15*time.Second, 500*time.Millisecond, "sandbox should become not-ready after pod deletion")
 }

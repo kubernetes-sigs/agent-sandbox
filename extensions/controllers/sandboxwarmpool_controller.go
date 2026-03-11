@@ -37,8 +37,6 @@ import (
 )
 
 const (
-	// poolLabel is used by the claim controller's legacy pod-adoption path.
-	poolLabel              = "agents.x-k8s.io/pool"
 	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
 	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
 )

@@ -117,7 +117,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	var allErrors error
 
 	for _, sb := range sandboxList.Items {
-		if !sb.ObjectMeta.DeletionTimestamp.IsZero() {
+		if !sb.DeletionTimestamp.IsZero() {
 			continue
 		}
 

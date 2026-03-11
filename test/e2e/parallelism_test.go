@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,19 +44,22 @@ func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers
 			newArgs := []string{}
 			// Keep existing non-concurrency args
 			for _, arg := range c.Args {
-				if arg != fmt.Sprintf("--sandbox-concurrent-workers=%d", workers) &&
-					arg != fmt.Sprintf("--sandbox-claim-concurrent-workers=%d", workers) &&
-					arg != fmt.Sprintf("--sandbox-warm-pool-concurrent-workers=%d", workers) &&
-					arg != "--kube-api-qps=50" &&
-					arg != "--kube-api-burst=100" {
+				if !strings.HasPrefix(arg, "--sandbox-concurrent-workers=") &&
+					!strings.HasPrefix(arg, "--sandbox-claim-concurrent-workers=") &&
+					!strings.HasPrefix(arg, "--sandbox-warm-pool-concurrent-workers=") &&
+					!strings.HasPrefix(arg, "--kube-api-qps=") &&
+					!strings.HasPrefix(arg, "--kube-api-burst=") &&
+					arg != "--extensions" && arg != "--extensions=true" {
 					newArgs = append(newArgs, arg)
 				}
 			}
+			newArgs = append(newArgs, "--extensions")
 			newArgs = append(newArgs, fmt.Sprintf("--sandbox-concurrent-workers=%d", workers))
 			newArgs = append(newArgs, fmt.Sprintf("--sandbox-claim-concurrent-workers=%d", workers))
 			newArgs = append(newArgs, fmt.Sprintf("--sandbox-warm-pool-concurrent-workers=%d", workers))
 			newArgs = append(newArgs, "--kube-api-qps=50")
 			newArgs = append(newArgs, "--kube-api-burst=100")
+			
 			deployment.Spec.Template.Spec.Containers[i].Args = newArgs
 			break
 		}

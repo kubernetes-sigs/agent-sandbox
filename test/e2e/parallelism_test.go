@@ -59,7 +59,7 @@ func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers
 			newArgs = append(newArgs, fmt.Sprintf("--sandbox-warm-pool-concurrent-workers=%d", workers))
 			newArgs = append(newArgs, "--kube-api-qps=50")
 			newArgs = append(newArgs, "--kube-api-burst=100")
-			
+
 			deployment.Spec.Template.Spec.Containers[i].Args = newArgs
 			break
 		}

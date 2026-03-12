@@ -102,11 +102,11 @@ def main():
     """ invokes unit tests and outputs junit results files """
     repo_root = utils.get_repo_root()
 
-    # go_rc = run_go_tests(repo_root)
+    go_rc = run_go_tests(repo_root)
     python_rc = run_python_tests(repo_root)
 
-    # if go_rc != 0:
-    #     return go_rc
+    if go_rc != 0:
+        return go_rc
     return python_rc
 
 

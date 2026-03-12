@@ -61,6 +61,10 @@ def walk_object(obj, fn, field_path=""):
 def kubectl_apply_objects(docs, repo_root):
     """Helper to apply a list of k8s objects."""
     if not docs: return
+    for doc in docs:
+        kind = doc.get("kind", "Unknown")
+        name = doc.get("metadata", {}).get("name", "Unknown")
+        print(f"Applying {kind} {name}")
     string_stream = io.StringIO()
     yaml.dump_all(docs, string_stream)
     subprocess.run(["kubectl", "apply", "-f", "-"], cwd=repo_root, check=True, input=string_stream.getvalue(), text=True)

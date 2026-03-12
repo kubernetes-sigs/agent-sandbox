@@ -18,6 +18,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +30,7 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -473,8 +476,8 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 func TestReconcilePoolReadyReplicas(t *testing.T) {
 	poolName := "test-pool"
-	poolNamespace := "default"
-	templateName := "test-template"
+	poolNamespace := "metrics-ns"
+	templateName := "test-template-metrics"
 	replicas := int32(3)
 
 	// Create a SandboxTemplate
@@ -575,4 +578,111 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
 		})
 	}
+}
+
+func TestReconcilePoolMetrics(t *testing.T) {
+	poolName := "test-pool-metrics"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(3)
+
+	// Create a SandboxTemplate
+	template := createTemplate(templateName, poolNamespace)
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "pool-uid-metrics",
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	// Compute the pool name hash
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	// Create pods with owner reference for the collector
+	podReady := createPoolPod(poolName, poolNamespace, poolNameHash, "ready")
+	podReady.UID = "pod-ready-uid"
+	podReady.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+			Kind:       "SandboxWarmPool",
+			Name:       poolName,
+			UID:        "pool-uid-metrics",
+			Controller: boolPtr(true),
+		},
+	}
+	podReady.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionTrue,
+		},
+	}
+
+	podPending := createPoolPod(poolName, poolNamespace, poolNameHash, "pending")
+	podPending.UID = "pod-pending-uid"
+	podPending.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+			Kind:       "SandboxWarmPool",
+			Name:       poolName,
+			UID:        "pool-uid-metrics",
+			Controller: boolPtr(true),
+		},
+	}
+	podPending.Status.Phase = corev1.PodPending
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithRuntimeObjects(template, warmPool, podReady, podPending).
+		Build()
+
+	r := SandboxWarmPoolReconciler{
+		Client: fakeClient,
+	}
+
+	// Reconcile will trigger the metric update
+	ctx := context.Background()
+	err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	checkMetric(t, asmetrics.PodStatusReady, 1)
+	checkMetric(t, "pending", 1)
+}
+
+func checkMetric(t *testing.T, status string, expectedValue float64) {
+	metricChan := make(chan prometheus.Metric, 100)
+	asmetrics.WarmPoolSize.Collect(metricChan)
+	close(metricChan)
+
+	var found bool
+	var lastValue float64
+	for m := range metricChan {
+		pb := &dto.Metric{}
+		if err := m.Write(pb); err != nil {
+			t.Fatalf("failed to write metric: %v", err)
+		}
+
+		var s string
+		for _, label := range pb.GetLabel() {
+			if label.GetName() == "pod_status" {
+				s = label.GetValue()
+			}
+		}
+		if s == status {
+			found = true
+			lastValue = pb.GetGauge().GetValue()
+			if lastValue == expectedValue {
+				return
+			}
+		}
+	}
+	require.True(t, found, "Metric not found for status %s", status)
+	require.Equal(t, expectedValue, lastValue, "Value mismatch for status %s", status)
 }

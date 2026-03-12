@@ -33,11 +33,13 @@ import (
 
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 const (
 	poolLabel              = "agents.x-k8s.io/pool"
 	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
+	metricsFinalizer       = "metrics.agents.x-k8s.io/cleanup"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
@@ -67,8 +69,26 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Handle deletion
 	if !warmPool.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(warmPool, metricsFinalizer) {
+			log.Info("Cleaning up metrics for SandboxWarmPool")
+			asmetrics.DeleteWarmPoolMetrics(warmPool.Name, warmPool.Spec.TemplateRef.Name)
+			controllerutil.RemoveFinalizer(warmPool, metricsFinalizer)
+			if err := r.Update(ctx, warmPool); err != nil {
+				log.Error(err, "Failed to remove finalizer")
+				return ctrl.Result{}, err
+			}
+		}
 		log.Info("SandboxWarmPool is being deleted")
 		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer if it doesn't exist
+	if !controllerutil.ContainsFinalizer(warmPool, metricsFinalizer) {
+		controllerutil.AddFinalizer(warmPool, metricsFinalizer)
+		if err := r.Update(ctx, warmPool); err != nil {
+			log.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Save old status for comparison
@@ -173,9 +193,12 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		log.Info("Creating new pods", "count", podsToCreate)
 
 		for i := int32(0); i < podsToCreate; i++ {
-			if err := r.createPoolPod(ctx, warmPool, poolNameHash); err != nil {
+			pod, err := r.createPoolPod(ctx, warmPool, poolNameHash)
+			if err != nil {
 				log.Error(err, "Failed to create pod")
 				allErrors = errors.Join(allErrors, err)
+			} else if pod != nil {
+				activePods = append(activePods, *pod)
 			}
 		}
 	}
@@ -191,15 +214,24 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		})
 
 		// Delete the first N active pods from the sorted list (newest first)
-		for i := int32(0); i < podsToDelete && i < int32(len(activePods)); i++ {
-			pod := &activePods[i]
-
-			if err := r.Delete(ctx, pod); err != nil {
-				log.Error(err, "Failed to delete pod", "pod", pod.Name)
-				allErrors = errors.Join(allErrors, err)
+		var remainingPods []corev1.Pod
+		for i := 0; i < len(activePods); i++ {
+			if i < int(podsToDelete) {
+				pod := &activePods[i]
+				if err := r.Delete(ctx, pod); err != nil {
+					log.Error(err, "Failed to delete pod", "pod", pod.Name)
+					allErrors = errors.Join(allErrors, err)
+					remainingPods = append(remainingPods, *pod)
+				}
+			} else {
+				remainingPods = append(remainingPods, activePods[i])
 			}
 		}
+		activePods = remainingPods
 	}
+
+	// Update metrics at the very end with the final set of active pods
+	asmetrics.UpdateWarmPoolMetrics(warmPool, activePods)
 
 	return allErrors
 }
@@ -213,7 +245,7 @@ func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *exte
 }
 
 // createPoolPod creates a new pod for the warm pool
-func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) error {
+func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
 	// Create labels for the pod
@@ -226,7 +258,7 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 	var err error
 	if template, err = r.getTemplate(ctx, warmPool); err != nil {
 		log.Error(err, "Failed to get sandbox template for warm pool", "warmPoolName", warmPool.Name)
-		return err
+		return nil, err
 	}
 
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {
@@ -254,17 +286,17 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Scheme()); err != nil {
-		return fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 
 	// Create the Pod
 	if err := r.Create(ctx, pod); err != nil {
 		log.Error(err, "Failed to create pod")
-		return err
+		return nil, err
 	}
 
 	log.Info("Created new pool pod", "pod", pod.Name, "poolName", warmPool.Name, "poolNameHash", poolNameHash)
-	return nil
+	return pod, nil
 }
 
 // updateStatus updates the status of the SandboxWarmPool if it has changed

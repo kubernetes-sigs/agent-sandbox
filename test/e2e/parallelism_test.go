@@ -205,6 +205,8 @@ func TestParallelSandboxClaimsWithSufficientWarmPool(t *testing.T) {
 	}
 }
 
+// This test is to exercise the scenario where there are more claims than those available in the
+// warm pool and hence pod creation will have to happen in parallel.
 func TestParallelSandboxClaimsWithInsufficientWarmPool(t *testing.T) {
 	tc := framework.NewTestContext(t)
 	cleanup := patchControllerConcurrency(t, tc, 10)

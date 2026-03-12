@@ -1,0 +1,15 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: secure-sandbox-binding
+spec:
+  policyName: secure-sandbox-policy
+  validationActions: [Deny]
+  matchResources:
+    # Apply to all namespaces by default
+    # You can restrict this with namespaceSelector if needed for local dev
+    namespaceSelector:
+      matchExpressions:
+      - key: "kubernetes.io/metadata.name"
+        operator: NotIn
+        values: ["kube-system", "agents-system"] # Exclude system namespaces if necessary

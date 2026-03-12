@@ -13,22 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import subprocess
 import sys
 
 from shared import utils
 
+PYTHON_TEST_SUITES = [
+    {
+        "name": "sandbox-router",
+        "dir": os.path.join("clients", "python", "agentic-sandbox-client", "sandbox-router"),
+        "requirements": "requirements.txt",
+    },
+]
 
-def main():
-    """ invokes unit tests and outputs a junit results file """
-    repo_root = utils.get_repo_root()
-    # get the list of packages using go list ./...
+
+def run_go_tests(repo_root):
+    """ runs Go unit tests and returns the exit code """
     go_list_cmd = ["go", "list", "./..."]
     go_list_output = subprocess.check_output(go_list_cmd, cwd=repo_root, text=True)
     packages = go_list_output.strip().split('\n')
 
-    # Filter out the e2e packages
-    filtered_packages = [pkg for pkg in packages if not "test/e2e" in pkg]
+    filtered_packages = [pkg for pkg in packages if "test/e2e" not in pkg]
 
     result = subprocess.run(utils.go_tool_args(
         "gotestsum", f"--junitfile={repo_root}/bin/unit-junit.xml",
@@ -36,6 +42,59 @@ def main():
     ), cwd=repo_root)
 
     return result.returncode
+
+
+def run_python_tests(repo_root):
+    """ runs Python unit tests in a temporary venv and returns the exit code """
+    returncode = 0
+
+    for suite in PYTHON_TEST_SUITES:
+        test_dir = os.path.join(repo_root, suite["dir"])
+        if not os.path.isdir(test_dir):
+            print(f"WARNING: Python test directory not found, skipping: {test_dir}")
+            continue
+
+        venv_dir = os.path.join(repo_root, "bin", f"python-venv-{suite['name']}")
+        venv_python = os.path.join(venv_dir, "bin", "python")
+        venv_pip = os.path.join(venv_dir, "bin", "pip")
+
+        print(f"\n=== Setting up Python venv for {suite['name']} tests ===")
+        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+
+        req_file = os.path.join(test_dir, suite["requirements"])
+        if os.path.isfile(req_file):
+            subprocess.check_call(
+                [venv_pip, "install", "--quiet", "-r", req_file])
+
+        subprocess.check_call(
+            [venv_pip, "install", "--quiet", "pytest"])
+
+        print(f"\n=== Running Python unit tests: {suite['name']} ===")
+        junit_file = os.path.join(
+            repo_root, "bin", f"python-{suite['name']}-junit.xml")
+        result = subprocess.run([
+            venv_python, "-m", "pytest",
+            test_dir,
+            f"--junitxml={junit_file}",
+            "-v",
+        ], cwd=test_dir)
+
+        if result.returncode != 0:
+            returncode = result.returncode
+
+    return returncode
+
+
+def main():
+    """ invokes unit tests and outputs junit results files """
+    repo_root = utils.get_repo_root()
+
+    go_rc = run_go_tests(repo_root)
+    python_rc = run_python_tests(repo_root)
+
+    if go_rc != 0:
+        return go_rc
+    return python_rc
 
 
 if __name__ == "__main__":

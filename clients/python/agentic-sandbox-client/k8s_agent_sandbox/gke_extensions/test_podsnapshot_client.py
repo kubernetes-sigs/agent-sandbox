@@ -55,7 +55,9 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         logger.info("Finished setting up TestPodSnapshotSandboxClient.")
 
-    def test_init(self):
+    @patch("kubernetes.config.load_kube_config")
+    @patch("kubernetes.config.load_incluster_config")
+    def test_init(self, mock_load_incluster_config, mock_load_kube_config):
         """Test initialization of PodSnapshotSandboxClient."""
         logger.info("Starting test_init...")
         with patch(

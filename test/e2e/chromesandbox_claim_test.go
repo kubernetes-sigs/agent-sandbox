@@ -1,4 +1,4 @@
-// Copyright 2025 The Kubernetes Authors.
+// Copyright 2026 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -97,6 +98,12 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 		b.Fatalf("WarmPool failed to become ready: %v", err)
 	}
 	b.Logf("WarmPool is ready.")
+	var (
+		mu                   sync.Mutex
+		totalClaimCreatedSec float64
+		totalClaimReadySec   float64
+		totalClaims          int
+	)
 
 	// 5. Benchmark Loop
 	b.SetParallelism(parallelism)
@@ -104,16 +111,25 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			metrics := runChromeSandboxClaim(tc, ns.Name, template.Name)
+			metrics, err := runChromeSandboxClaim(tc, ns.Name, template.Name)
 
-			// Record metrics
-			b.ReportMetric(metrics.ClaimCreated.Seconds(), "claim-created-sec")
-			b.ReportMetric(metrics.ClaimReady.Seconds(), "claim-ready-sec")
+			if err == nil {
+				mu.Lock()
+				totalClaimCreatedSec += metrics.ClaimCreated.Seconds()
+				totalClaimReadySec += metrics.ClaimReady.Seconds()
+				totalClaims++
+				mu.Unlock()
+			}
 		}
 	})
+
+	if totalClaims > 0 {
+		b.ReportMetric(totalClaimCreatedSec/float64(totalClaims), "claim-created-sec/op")
+		b.ReportMetric(totalClaimReadySec/float64(totalClaims), "claim-ready-sec/op")
+	}
 }
 
-func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName string) *ChromeSandboxClaimMetrics {
+func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName string) (*ChromeSandboxClaimMetrics, error) {
 	metrics := &ChromeSandboxClaimMetrics{}
 
 	// Unique name for this claim
@@ -133,7 +149,7 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	// Use a background context for cleanup actions, but the test context for operations
 	if err := tc.ClusterClient.Create(tc.Context(), claim); err != nil {
 		tc.Logf("Failed to create claim %s: %v", claimName, err)
-		return metrics
+		return metrics, err
 	}
 	metrics.ClaimCreated.Set(time.Since(startTime))
 	tc.Logf("Created claim %s", claimName)
@@ -147,12 +163,12 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	// We use the common predicates
 	if err := tc.WaitForObject(tc.Context(), claim, predicates.ReadyConditionIsTrue); err != nil {
 		tc.Logf("Failed to wait for claim %s ready: %v", claimName, err)
-		return metrics
+		return metrics, err
 	}
 	metrics.ClaimReady.Set(time.Since(startTime))
 	tc.Logf("Claim %s is ready", claimName)
 
-	return metrics
+	return metrics, nil
 }
 
 var claimCounter int64

@@ -15,7 +15,6 @@
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -35,8 +34,7 @@ import (
 
 // ChromeSandboxClaimMetrics holds timing measurements for the chrome sandbox claim startup.
 type ChromeSandboxClaimMetrics struct {
-	ClaimCreated AtomicTimeDuration // Time for claim to be created
-	ClaimReady   AtomicTimeDuration // Time for claim to become ready
+	ClaimReady AtomicTimeDuration // Time for claim to become ready
 }
 
 // BenchmarkChromeSandboxClaimStartup measures the time for Chrome to start in a sandbox claim.
@@ -99,10 +97,9 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	}
 	b.Logf("WarmPool is ready.")
 	var (
-		mu                   sync.Mutex
-		totalClaimCreatedSec float64
-		totalClaimReadySec   float64
-		totalClaims          int
+		mu                 sync.Mutex
+		totalClaimReadySec float64
+		totalClaims        int
 	)
 
 	// 5. Benchmark Loop
@@ -115,7 +112,6 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 
 			if err == nil {
 				mu.Lock()
-				totalClaimCreatedSec += metrics.ClaimCreated.Seconds()
 				totalClaimReadySec += metrics.ClaimReady.Seconds()
 				totalClaims++
 				mu.Unlock()
@@ -124,7 +120,6 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	})
 
 	if totalClaims > 0 {
-		b.ReportMetric(totalClaimCreatedSec/float64(totalClaims), "claim-created-sec/op")
 		b.ReportMetric(totalClaimReadySec/float64(totalClaims), "claim-ready-sec/op")
 	}
 }
@@ -146,18 +141,9 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	startTime := time.Now()
 
 	// 1. Create Claim
-	// Use a background context for cleanup actions, but the test context for operations
-	if err := tc.ClusterClient.Create(tc.Context(), claim); err != nil {
-		tc.Logf("Failed to create claim %s: %v", claimName, err)
-		return metrics, err
-	}
-	metrics.ClaimCreated.Set(time.Since(startTime))
+	// This will automatically delete the claim at the end of the test.
+	tc.MustCreateWithCleanup(claim)
 	tc.Logf("Created claim %s", claimName)
-
-	// Ensure cleanup happens at the end of this function (not test end)
-	defer func() {
-		_ = tc.ClusterClient.Delete(context.Background(), claim)
-	}()
 
 	// 2. Wait for Claim Ready
 	// We use the common predicates

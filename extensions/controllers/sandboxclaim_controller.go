@@ -22,14 +22,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -68,7 +66,6 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
@@ -196,13 +193,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 	// Only attempt network policy reconciliation if template was found.
 	if templateErr == nil || k8errors.IsNotFound(templateErr) {
-		// This ensures the firewall is up before the pod starts.
-		if template != nil {
-			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-				return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
-			}
-		}
-
 		// Try getting sandbox even if template is not found
 		// It is possible that the template was deleted after the sandbox was created
 		sandbox, err := r.getOrCreateSandbox(ctx, claim, template)
@@ -599,122 +589,6 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		Complete(r)
 }
 
-// reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.
-func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
-	logger := log.FromContext(ctx)
-
-	if template == nil {
-		return fmt.Errorf("cannot reconcile network policy without a template")
-	}
-
-	npName := template.Name + "-network-policy"
-	npNamespace := claim.Namespace
-
-	// 1. Check the new string enum API field
-	management := template.Spec.NetworkPolicyManagement
-	if management == "" {
-		management = extensionsv1alpha1.NetworkPolicyManagementManaged // Default to Managed
-	}
-
-	// 2. Opt-Out: If they explicitly set it to Unmanaged, we do not manage any policy.
-	if management == extensionsv1alpha1.NetworkPolicyManagementUnmanaged {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      npName,
-				Namespace: npNamespace,
-			},
-		}
-		// Clean up any lingering policy if they just switched this template to Unmanaged
-		if err := r.Delete(ctx, existingNP); err != nil {
-			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
-				return err
-			}
-		} else {
-			logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
-		}
-		return nil
-	}
-
-	// 3. Construct the desired NetworkPolicy Spec
-	var desiredSpec networkingv1.NetworkPolicySpec
-	if template.Spec.NetworkPolicy == nil {
-		desiredSpec = buildDefaultNetworkPolicySpec(template.Name)
-	} else {
-		desiredSpec = networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					sandboxTemplateLabel: sandboxcontrollers.NameHash(template.Name),
-				},
-			},
-			PolicyTypes: []networkingv1.PolicyType{
-				networkingv1.PolicyTypeIngress,
-				networkingv1.PolicyTypeEgress,
-			},
-			Ingress: template.Spec.NetworkPolicy.Ingress,
-			Egress:  template.Spec.NetworkPolicy.Egress,
-		}
-	}
-
-	// 4. Check informer cache first
-	existingNP := &networkingv1.NetworkPolicy{}
-	err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
-
-	if err == nil {
-		// Policy exists: Check if it matches our desired state to handle template updates.
-		if equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {
-			// It matches perfectly. Skip updating to prevent 409 conflicts across thousands of claims.
-			return nil
-		}
-
-		existingNP.Spec = desiredSpec
-		if err := r.Update(ctx, existingNP); err != nil {
-			if k8errors.IsConflict(err) {
-				logger.Info("NetworkPolicy update conflict (likely another claim updating it simultaneously), will retry", "name", npName)
-				return err
-			}
-			logger.Error(err, "Failed to update NetworkPolicy")
-			return err
-		}
-		logger.Info("Successfully updated NetworkPolicy for template",
-			"NetworkPolicy.Name", npName,
-			"Template.Name", template.Name,
-		)
-		return nil
-	}
-
-	if !k8errors.IsNotFound(err) {
-		return fmt.Errorf("failed to get NetworkPolicy: %w", err)
-	}
-
-	// 5. Policy doesn't exist: Create it.
-	np := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      npName,
-			Namespace: npNamespace,
-		},
-		Spec: desiredSpec,
-	}
-
-	if err := controllerutil.SetControllerReference(template, np, r.Scheme); err != nil {
-		return err
-	}
-
-	// Attempt creation. Ignore AlreadyExists if another claim beat us to it.
-	if err := r.Create(ctx, np); err != nil {
-		if k8errors.IsAlreadyExists(err) {
-			logger.Info("NetworkPolicy already created by another claim, skipping")
-			return nil
-		}
-		logger.Error(err, "Failed to create NetworkPolicy for template")
-		return err
-	}
-
-	logger.Info("Successfully created NetworkPolicy for template", "NetworkPolicy.Name", npName,
-		"Template.Name", template.Name)
-	return nil
-}
-
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1alpha1.SandboxClaim,
@@ -746,65 +620,6 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
 	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
-}
-
-// buildDefaultNetworkPolicySpec generates the "Secure by Default" network policy.
-func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPolicySpec {
-	return networkingv1.NetworkPolicySpec{
-		PodSelector: metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				sandboxTemplateLabel: sandboxcontrollers.NameHash(templateName),
-			},
-		},
-		PolicyTypes: []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress,
-			networkingv1.PolicyTypeEgress,
-		},
-		// 1. INGRESS: Allow traffic only from the Sandbox Router
-		Ingress: []networkingv1.NetworkPolicyIngressRule{
-			{
-				From: []networkingv1.NetworkPolicyPeer{
-					{
-						PodSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"app": "sandbox-router",
-							},
-						},
-					},
-				},
-			},
-		},
-		// 2. EGRESS: Secure Default Configuration
-		Egress: []networkingv1.NetworkPolicyEgressRule{
-			// Public Internet Access (Strict Isolation)
-			// This rule allows all ports to PUBLIC IPs, but explicitly blocks private LAN ranges.
-			// NOTE: This intentionally blocks internal cluster DNS (CoreDNS) by default to prevent
-			// agents from probing for service discovery and leaking internal service names.
-			{
-				To: []networkingv1.NetworkPolicyPeer{
-					{
-						IPBlock: &networkingv1.IPBlock{
-							CIDR: "0.0.0.0/0",
-							Except: []string{
-								"10.0.0.0/8",     // Block Private Class A (Cluster/VPC Network)
-								"172.16.0.0/12",  // Block Private Class B
-								"192.168.0.0/16", // Block Private Class C
-								"169.254.0.0/16", // Block Link-Local (Metadata Server)
-							},
-						},
-					},
-					{
-						IPBlock: &networkingv1.IPBlock{
-							CIDR: "::/0", // IPv6 Catch-all
-							Except: []string{
-								"fc00::/7", // Block IPv6 Unique Local Addresses (Internal)
-							},
-						},
-					},
-				},
-			},
-		},
-	}
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller

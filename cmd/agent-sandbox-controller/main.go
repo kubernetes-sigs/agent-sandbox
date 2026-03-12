@@ -60,6 +60,7 @@ func main() {
 	var sandboxConcurrentWorkers int
 	var sandboxClaimConcurrentWorkers int
 	var sandboxWarmPoolConcurrentWorkers int
+	var sandboxTemplateConcurrentWorkers int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -84,6 +85,7 @@ func main() {
 	flag.IntVar(&sandboxConcurrentWorkers, "sandbox-concurrent-workers", 1, "Max concurrent reconciles for the Sandbox controller")
 	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 1, "Max concurrent reconciles for the SandboxClaim controller")
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
+	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -98,7 +100,7 @@ func main() {
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
-	totalWorkers := sandboxConcurrentWorkers + sandboxClaimConcurrentWorkers + sandboxWarmPoolConcurrentWorkers
+	totalWorkers := sandboxConcurrentWorkers + sandboxClaimConcurrentWorkers + sandboxWarmPoolConcurrentWorkers + sandboxTemplateConcurrentWorkers
 	if totalWorkers > 1000 {
 		setupLog.Info("Warning: total concurrent workers exceeds 1000, which could lead to resource exhaustion", "total", totalWorkers)
 	}
@@ -217,6 +219,16 @@ func main() {
 			Tracer:   instrumenter,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
+			os.Exit(1)
+		}
+
+		if err = (&extensionscontrollers.SandboxTemplateReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("sandboxtemplate-controller"),
+			Tracer:   instrumenter,
+		}).SetupWithManager(mgr, sandboxTemplateConcurrentWorkers); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "SandboxTemplate")
 			os.Exit(1)
 		}
 

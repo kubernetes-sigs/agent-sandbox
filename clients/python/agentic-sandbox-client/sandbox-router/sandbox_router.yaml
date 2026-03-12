@@ -40,6 +40,9 @@ spec:
       - name: router
         # IMPORTANT: Replace this with the full path to the router image you pushed.
         image: IMAGE_PLACEHOLDER
+        env:
+        - name: PROXY_TIMEOUT_SECONDS
+          value: "180"
         ports:
         - containerPort: 8080
         readinessProbe:

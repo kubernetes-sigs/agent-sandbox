@@ -76,7 +76,7 @@ func NewWatchSet(dynamicClient dynamic.Interface) *WatchSet {
 }
 
 // getOrCreateWatch returns an existing watch or creates a new one.
-func (ws *WatchSet) getOrCreateWatch(ctx context.Context, gvr schema.GroupVersionResource, namespace string) *ResourceWatch {
+func (ws *WatchSet) getOrCreateWatch(gvr schema.GroupVersionResource, namespace string) *ResourceWatch {
 	key := watchKey{gvr: gvr, namespace: namespace}
 
 	// Try read lock first
@@ -96,7 +96,6 @@ func (ws *WatchSet) getOrCreateWatch(ctx context.Context, gvr schema.GroupVersio
 		return rw
 	}
 
-	// ctx, cancel := context.WithCancel(context.Background())
 	rw = &ResourceWatch{
 		gvr:           gvr,
 		namespace:     namespace,
@@ -104,10 +103,12 @@ func (ws *WatchSet) getOrCreateWatch(ctx context.Context, gvr schema.GroupVersio
 		dynamicClient: ws.dynamicClient,
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	// Use context.Background so the watchLoop outlives the caller's context.
+	// The watchLoop is stopped explicitly via WatchSet.Close().
+	watchCtx, cancel := context.WithCancel(context.Background())
 	rw.cancelWatchLoop = cancel
 
-	go rw.watchLoop(ctx)
+	go rw.watchLoop(watchCtx)
 
 	ws.watches[key] = rw
 	return rw
@@ -116,12 +117,12 @@ func (ws *WatchSet) getOrCreateWatch(ctx context.Context, gvr schema.GroupVersio
 // Subscribe creates a subscription to events for a specific object key.
 // The key should be "namespace/name" for namespaced resources or just "name" for cluster-scoped.
 // Returns a Subscription that receives events matching the filter.
-func (ws *WatchSet) Subscribe(ctx context.Context, gvr schema.GroupVersionResource, filter WatchFilter) *Subscription {
+func (ws *WatchSet) Subscribe(gvr schema.GroupVersionResource, filter WatchFilter) *Subscription {
 	watchNamespace := ""
 	if filter.Namespace != "" {
 		watchNamespace = filter.Namespace
 	}
-	rw := ws.getOrCreateWatch(ctx, gvr, watchNamespace)
+	rw := ws.getOrCreateWatch(gvr, watchNamespace)
 	return rw.subscribe(filter)
 }
 

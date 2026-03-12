@@ -131,6 +131,7 @@ def main(args):
     env = os.environ.copy()
     env["IMAGE_TAG"] = utils.get_image_tag()
     env["IMAGE_PREFIX"] = utils.get_image_prefix(args)
+    env["PIP_EXTRA_INDEX_URL"] = os.environ.get("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple/")
 
     if not setup_python_sdk(repo_root, env):
         return 1

@@ -93,6 +93,13 @@ func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers
 			return tc.Update(t.Context(), &latest)
 		})
 		require.NoError(t, err, "failed to restore controller deployment")
+
+		// Wait for the restored pod to be ready
+		err = tc.WaitForObject(t.Context(), &originalDeployment, []predicates.ObjectPredicate{
+			predicates.ReadyReplicasConditionIsTrue,
+		}...)
+		require.NoError(t, err, "failed to wait for restored controller deployment")
+		time.Sleep(5 * time.Second) // Give the leader election time to settle
 	}
 }
 

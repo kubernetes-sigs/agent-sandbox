@@ -31,17 +31,22 @@ from kubernetes import config
 
 logger = logging.getLogger(__name__)
 
-
 class TestPodSnapshotSandboxClient(unittest.TestCase):
 
-    @patch("kubernetes.config")
-    def setUp(self, mock_config):
+    def setUp(self):
         logger.info("Setting up TestPodSnapshotSandboxClient...")
+
+        self.patcher1 = patch("kubernetes.config.load_incluster_config")
+        self.patcher2 = patch("kubernetes.config.load_kube_config")
+        
+        self.mock_load_incluster = self.patcher1.start()
+        self.mock_load_kube = self.patcher2.start()
+        
         # Mock kubernetes config loading
-        mock_config.load_incluster_config.side_effect = config.ConfigException(
+        self.mock_load_incluster.side_effect = config.ConfigException(
             "Not in cluster"
         )
-        mock_config.load_kube_config.return_value = None
+        self.mock_load_kube.return_value = None
 
         # Create client without patching super, as it's tested separately
         with patch.object(
@@ -55,9 +60,12 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         logger.info("Finished setting up TestPodSnapshotSandboxClient.")
 
-    @patch("kubernetes.config.load_kube_config")
-    @patch("kubernetes.config.load_incluster_config")
-    def test_init(self, mock_load_incluster_config, mock_load_kube_config):
+    def tearDown(self):
+        # Must stop patches started in setUp
+        self.patcher1.stop()
+        self.patcher2.stop()
+
+    def test_init(self):
         """Test initialization of PodSnapshotSandboxClient."""
         logger.info("Starting test_init...")
         with patch(

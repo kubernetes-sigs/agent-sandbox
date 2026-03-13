@@ -27,6 +27,7 @@ import (
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -48,15 +49,19 @@ const (
 	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
 
+// podAvailabilityField is a virtual index key used to track pods that are ready for adoption
+const podAvailabilityField = "status.isAvailable"
+
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
 // SandboxClaimReconciler reconciles a SandboxClaim object
 type SandboxClaimReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
-	Tracer   asmetrics.Instrumenter
+	Scheme                  *runtime.Scheme
+	Recorder                record.EventRecorder
+	Tracer                  asmetrics.Instrumenter
+	MaxConcurrentReconciles int
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -343,80 +348,73 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
-	// List all pods with the podTemplateHashLabel matching the hash
 	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
-	})
 
-	if err := r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     claim.Namespace,
-	}); err != nil {
-		log.Error(err, "Failed to list pods from warm pool")
+	// Filter by TemplateRef and "Available" pods
+	err := r.List(ctx, podList, &client.ListOptions{
+		Namespace: claim.Namespace,
+		LabelSelector: labels.SelectorFromSet(labels.Set{
+			sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
+		}),
+		FieldSelector: fields.OneTermEqualSelector(podAvailabilityField, "true"),
+	})
+	if err != nil || len(podList.Items) == 0 {
 		return nil, err
 	}
 
-	// Filter pods and create a slice of pointers for sorting
-	candidates := make([]*corev1.Pod, 0, len(podList.Items))
+	// Create a slice of pointers for sorting.
+	candidates := make([]*corev1.Pod, len(podList.Items))
 	for i := range podList.Items {
-		pod := &podList.Items[i]
-
-		// Skip pods that are being deleted
-		if !pod.DeletionTimestamp.IsZero() {
-			continue
-		}
-
-		// Skip pods that already have a different controller
-		if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
-			log.Info("Ignoring pod with different controller, but this shouldn't happen because this pod shouldn't have template ref label",
-				"pod", pod.Name,
-				"controller", controllerRef.Name,
-				"controllerKind", controllerRef.Kind)
-			continue
-		}
-
-		candidates = append(candidates, pod)
+		candidates[i] = &podList.Items[i]
 	}
-
-	if len(candidates) == 0 {
-		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
-		return nil, nil
-	}
-
-	// Sort pods using podutils.ByLogging to select the best available pod.
+	// Sort pods using podutils.ByLogging to select the "Best" available pod.
 	sort.Sort(podutils.ByLogging(candidates))
 
-	// Get the first available pod
-	pod := candidates[0]
-	log.Info("Adopting pod from warm pool", "pod", pod.Name)
+	// Determine the search range for collision avoidance.
+	n := len(candidates)
+	workerCount := r.MaxConcurrentReconciles
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	searchWindow := min(n, workerCount)
+	// Compute a starting index deterministic to this specific Claim UID.
+	hashValue := sandboxcontrollers.GetNumericHash(string(claim.UID))
+	startIndex := int(hashValue % uint32(searchWindow))
 
-	// Remove the pool labels
-	delete(pod.Labels, poolLabel)
-	delete(pod.Labels, sandboxTemplateRefHash)
+	// Iterate through the entire list starting from the hashed offset.
+	for i := range n {
+		currIndex := (startIndex + i) % n
+		pod := candidates[currIndex]
 
-	// Remove existing owner references (from SandboxWarmPool)
-	pod.OwnerReferences = nil
+		// Remove the pool labels
+		delete(pod.Labels, poolLabel)
+		delete(pod.Labels, sandboxTemplateRefHash)
 
-	nameHash := sandboxcontrollers.NameHash(claim.Name)
-	if pod.Labels == nil {
-		pod.Labels = make(map[string]string)
+		// Prepare pod for adoption
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+
+		// Remove existing owner references (from SandboxWarmPool)
+		pod.OwnerReferences = nil
+
+		// Add labels for the Sandbox and the specific Claim
+		pod.Labels[sandboxLabel] = sandboxcontrollers.NameHash(claim.Name)
+		pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+		// Attempt adoption. API Server handles the final atomic check via resourceVersion.
+		if err := r.Update(ctx, pod); err != nil {
+			if k8errors.IsConflict(err) {
+				// Another worker adopted this pod while we were processing; try next candidate.
+				continue
+			}
+			return nil, err
+		}
+
+		log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
+		return pod, nil
 	}
 
-	pod.Labels[sandboxLabel] = nameHash
-
-	// Label required by NetworkPolicy
-	// We add the new label with the Claim UID for unique targeting.
-	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
-
-	// Update the pod
-	if err := r.Update(ctx, pod); err != nil {
-		log.Error(err, "Failed to update adopted pod")
-		return nil, err
-	}
-
-	log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
-	return pod, nil
+	return nil, nil
 }
 
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
@@ -543,11 +541,31 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	r.MaxConcurrentReconciles = concurrentWorkers
+
+	// Register the indexer to track pods that are not deleting and have correct ownership
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, podAvailabilityField, podAvailabilityIndexFunc); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&v1alpha1.Sandbox{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
+}
+
+func podAvailabilityIndexFunc(rawObj client.Object) []string {
+	pod := rawObj.(*corev1.Pod)
+	if !pod.DeletionTimestamp.IsZero() {
+		return []string{"false"}
+	}
+
+	controllerRef := metav1.GetControllerOf(pod)
+	if controllerRef == nil || controllerRef.Kind != "SandboxWarmPool" {
+		return []string{"false"}
+	}
+	return []string{"true"}
 }
 
 // reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.

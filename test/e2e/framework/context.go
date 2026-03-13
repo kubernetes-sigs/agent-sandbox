@@ -115,6 +115,11 @@ func NewTestContext(t T) *TestContext {
 		t.Fatalf("building HTTP client for rest config: %v", err)
 	}
 
+	clientset, err := kubernetes.NewForConfigAndClient(restConfig, httpClient)
+	if err != nil {
+		t.Fatalf("building kubernetes clientset: %v", err)
+	}
+
 	client, err := client.New(restConfig, client.Options{
 		Scheme:     controllers.Scheme,
 		HTTPClient: httpClient,
@@ -137,6 +142,8 @@ func NewTestContext(t T) *TestContext {
 		T:             t,
 		client:        client,
 		dynamicClient: dynamicClient,
+		clientset:     clientset,
+		restConfig:    restConfig,
 		scheme:        controllers.Scheme,
 		watchSet:      watchSet,
 	}

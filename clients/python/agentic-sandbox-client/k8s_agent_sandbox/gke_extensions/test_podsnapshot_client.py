@@ -23,6 +23,7 @@ from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
+    PODSNAPSHOTMANUALTRIGGER_API_KIND,
 )
 
 from kubernetes.client import ApiException
@@ -234,11 +235,22 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 0)
-        self.assertTrue(result.success)
+        self.assertTrue(result.success, result.error_reason)
         self.assertIn("test-trigger", result.trigger_name)
 
         # Verify create call was made
-        self.client.custom_objects_api.create_namespaced_custom_object.assert_called_once()
+        self.client.custom_objects_api.create_namespaced_custom_object.assert_called_once_with(
+            group=PODSNAPSHOT_API_GROUP,
+            version=PODSNAPSHOT_API_VERSION,
+            namespace=self.client.namespace,
+            plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+            body={
+                "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
+                "kind": f"{PODSNAPSHOTMANUALTRIGGER_API_KIND}",
+                "metadata": {"name": result.trigger_name, "namespace": self.client.namespace},
+                "spec": {"targetPod": self.client.pod_name},
+            },
+        )
         # Verify watch was called with resource_version
         mock_watch.stream.assert_called_once()
         _, kwargs = mock_watch.stream.call_args
@@ -300,7 +312,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         result = self.client.snapshot("test-retry")
 
-        self.assertTrue(result.success)
+        self.assertTrue(result.success,result.error_reason)
         self.assertEqual(result.snapshot_uid, "snapshot-uid-retry")
         logging.info("Finished test_snapshot_processed_retry.")
 
@@ -312,7 +324,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 1)
-        self.assertFalse(result.success)
+        self.assertFalse(result.success, result.error_reason)
         self.assertIn("test-trigger", result.trigger_name)
         self.assertIn("Sandbox pod name not found", result.error_reason)
         logging.info("Finished test_snapshot_no_pod_name.")
@@ -329,7 +341,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         result = self.client.snapshot("test-trigger")
 
-        self.assertFalse(result.success)
+        self.assertFalse(result.success, result.error_reason)
         self.assertEqual(result.error_code, 1)
         self.assertIn("Failed to create PodSnapshotManualTrigger", result.error_reason)
         logging.info("Finished test_snapshot_creation_api_exception.")
@@ -357,7 +369,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         result = self.client.snapshot("test-trigger")
 
         self.assertEqual(result.error_code, 1)
-        self.assertFalse(result.success)
+        self.assertFalse(result.success, result.error_reason)
         self.assertIn("timed out", result.error_reason)
         logging.info("Finished test_snapshot_timeout.")
 
@@ -433,7 +445,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
             result = self.client.snapshot("test-trigger-fail")
 
-            self.assertFalse(result.success)
+            self.assertFalse(result.success, result.error_reason)
             self.assertEqual(result.error_code, 1)
             self.assertIn(
                 "Snapshot failed. Condition: Snapshot failed due to timeout",
@@ -464,7 +476,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
             result = self.client.snapshot("test-trigger-error")
 
-            self.assertFalse(result.success)
+            self.assertFalse(result.success, result.error_reason)
             self.assertEqual(result.error_code, 1)
             self.assertIn("Snapshot watch error:", result.error_reason)
         logging.info("Finished test_snapshot_watch_error_event.")
@@ -489,7 +501,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
             result = self.client.snapshot("test-trigger-deleted")
 
-            self.assertFalse(result.success)
+            self.assertFalse(result.success, result.error_reason)
             self.assertEqual(result.error_code, 1)
             self.assertIn("was deleted", result.error_reason)
         logging.info("Finished test_snapshot_watch_deleted_event.")
@@ -514,7 +526,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
             result = self.client.snapshot("test-trigger-generic")
 
-            self.assertFalse(result.success)
+            self.assertFalse(result.success, result.error_reason)
             self.assertEqual(result.error_code, 1)
             self.assertIn("Unexpected error: Something went wrong", result.error_reason)
         logging.info("Finished test_snapshot_watch_generic_exception.")
@@ -535,7 +547,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         result = self.client.snapshot("Test_Trigger")
 
-        self.assertFalse(result.success)
+        self.assertFalse(result.success, result.error_reason)
         self.assertEqual(result.error_code, 1)
         self.assertIn("Failed to create PodSnapshotManualTrigger", result.error_reason)
         self.assertIn("Invalid value", result.error_reason)

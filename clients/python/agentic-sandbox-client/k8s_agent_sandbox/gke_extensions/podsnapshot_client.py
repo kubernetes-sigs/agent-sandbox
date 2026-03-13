@@ -13,9 +13,8 @@
 # limitations under the License.
 
 import logging
-import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from dataclasses import dataclass
 from kubernetes import client, watch
@@ -50,6 +49,7 @@ class SnapshotResponse:
     success: bool
     trigger_name: str
     snapshot_uid: str
+    snapshot_timestamp: str
     error_reason: str
     error_code: int
 
@@ -124,14 +124,15 @@ class PodSnapshotSandboxClient(SandboxClient):
     def _parse_created_snapshot_info(self, obj: dict[str, Any]) -> SnapshotResult:
         """Parses the object to extract snapshot details."""
         status = obj.get("status", {})
-        conditions = status.get("conditions", [])
+        conditions = status.get("conditions") or []
         for condition in conditions:
             if (
                 condition.get("type") == "Triggered"
                 and condition.get("status") == "True"
                 and condition.get("reason") == "Complete"
             ):
-                snapshot_uid = status.get("snapshotCreated", {}).get("name")
+                snapshot_created = status.get("snapshotCreated") or {}
+                snapshot_uid = snapshot_created.get("name")
                 snapshot_timestamp = condition.get("lastTransitionTime")
                 return SnapshotResult(
                     snapshot_uid=snapshot_uid,
@@ -212,7 +213,7 @@ class PodSnapshotSandboxClient(SandboxClient):
         Returns:
             SnapshotResponse: The result of the operation.
         """
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         suffix = uuid.uuid4().hex[:8]
         trigger_name = f"{trigger_name}-{timestamp}-{suffix}"
 
@@ -221,6 +222,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 success=False,
                 trigger_name=trigger_name,
                 snapshot_uid=None,
+                snapshot_timestamp=None,
                 error_reason="Snapshot CRD is not installed. Ensure it is installed and running.",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
@@ -229,6 +231,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 success=False,
                 trigger_name=trigger_name,
                 snapshot_uid=None,
+                snapshot_timestamp=None,
                 error_reason="Sandbox pod name not found. Ensure sandbox is created.",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
@@ -260,6 +263,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 success=True,
                 trigger_name=trigger_name,
                 snapshot_uid=snapshot_result.snapshot_uid,
+                snapshot_timestamp=snapshot_result.snapshot_timestamp,
                 error_reason="",
                 error_code=SNAPSHOT_SUCCESS_CODE,
             )
@@ -271,6 +275,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 success=False,
                 trigger_name=trigger_name,
                 snapshot_uid=None,
+                snapshot_timestamp=None,
                 error_reason=f"Failed to create PodSnapshotManualTrigger: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
@@ -282,6 +287,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 success=False,
                 trigger_name=trigger_name,
                 snapshot_uid=None,
+                snapshot_timestamp=None,
                 error_reason=f"Snapshot creation timed out: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
@@ -293,6 +299,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 success=False,
                 trigger_name=trigger_name,
                 snapshot_uid=None,
+                snapshot_timestamp=None,
                 error_reason=f"Snapshot creation failed: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
@@ -304,6 +311,7 @@ class PodSnapshotSandboxClient(SandboxClient):
                 success=False,
                 trigger_name=trigger_name,
                 snapshot_uid=None,
+                snapshot_timestamp=None,
                 error_reason=f"Unexpected error: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )

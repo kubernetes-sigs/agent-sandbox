@@ -34,11 +34,6 @@ rules:
   - agents.x-k8s.io
   resources:
   - sandboxes/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - agents.x-k8s.io
-  resources:
   - sandboxes/status
   verbs:
   - get

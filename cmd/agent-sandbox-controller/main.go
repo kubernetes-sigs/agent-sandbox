@@ -217,6 +217,7 @@ func main() {
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
 			Tracer:   instrumenter,
+			PodQueue: extensionscontrollers.NewPodQueue(),
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)

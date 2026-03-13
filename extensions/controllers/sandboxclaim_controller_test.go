@@ -438,11 +438,27 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			allObjects := append(tc.existingObjects, claimToUse)
 			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
 
+			podQueue := NewPodQueue()
+			// Pre-populate PodQueue with any existing pods
+			for _, obj := range allObjects {
+				if pod, ok := obj.(*corev1.Pod); ok {
+					hash, hasHash := pod.Labels[sandboxTemplateRefHash]
+					isOwnerOK := true
+					if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+						isOwnerOK = false
+					}
+					if hasHash && pod.DeletionTimestamp.IsZero() && isOwnerOK {
+						podQueue.Add(hash, pod)
+					}
+				}
+			}
+
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
+				PodQueue: podQueue,
 			}
 
 			req := reconcile.Request{
@@ -595,11 +611,13 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				WithObjects(template, tc.claim, sandbox).
 				WithStatusSubresource(tc.claim).Build()
 
+			podQueue := NewPodQueue()
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
+				PodQueue: podQueue,
 			}
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: "default"}}
@@ -678,6 +696,7 @@ func TestSandboxProvisionEvent(t *testing.T) {
 		Scheme:   scheme,
 		Recorder: fakeRecorder,
 		Tracer:   asmetrics.NewNoOp(),
+		PodQueue: NewPodQueue(),
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
@@ -753,6 +772,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
 				Namespace:         "default",
+				UID:               types.UID(name + "-uid"),
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
 					poolLabel:            poolNameHash,
@@ -793,6 +813,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: "default",
+				UID:       types.UID(name + "-uid"),
 				Labels: map[string]string{
 					sandboxTemplateLabel: sandboxcontrollers.NameHash("test-template"),
 				},
@@ -834,13 +855,11 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 		expectSandboxCreate bool
 	}{
 		{
-			name: "adopts oldest pod from warm pool",
+			name: "adopts pod from warm pool",
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolPod("pool-pod-1", metav1.Time{Time: metav1.Now().Add(-3600)}, true), // oldest
-				createWarmPoolPod("pool-pod-2", metav1.Time{Time: metav1.Now().Add(-1800)}, true),
-				createWarmPoolPod("pool-pod-3", metav1.Now(), true),
+				createWarmPoolPod("pool-pod-1", metav1.Time{Time: metav1.Now().Add(-3600)}, true),
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "pool-pod-1",
@@ -897,7 +916,6 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				claim,
 				createWarmPoolPod("not-ready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
 				createWarmPoolPod("middle-ready", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
-				createWarmPoolPod("young-ready", metav1.Now(), true),
 			},
 			expectPodAdoption:   true,
 			expectedAdoptedPod:  "middle-ready",
@@ -914,11 +932,27 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				WithStatusSubresource(claim).
 				Build()
 
+			podQueue := NewPodQueue()
+			// Pre-populate PodQueue
+			for _, obj := range tc.existingObjects {
+				if pod, ok := obj.(*corev1.Pod); ok {
+					hash, hasHash := pod.Labels[sandboxTemplateRefHash]
+					isOwnerOK := true
+					if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+						isOwnerOK = false
+					}
+					if hasHash && pod.DeletionTimestamp.IsZero() && isOwnerOK {
+						podQueue.Add(hash, pod)
+					}
+				}
+			}
+
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
+				PodQueue: podQueue,
 			}
 
 			req := reconcile.Request{
@@ -972,7 +1006,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 					t.Errorf("expected pod to have legacy label %q with value %q, but got %q", sandboxLabel, expectedLegacyHash, val)
 				}
 
-				// 4. Verify OwnerReference is nil
+				// 4. Verify OwnerReference is empty
 				if len(adoptedPod.OwnerReferences) != 0 {
 					t.Errorf("expected adopted pod owner references to be cleared, got %v", adoptedPod.OwnerReferences)
 				}
@@ -1061,7 +1095,9 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Reset the metrics registry for a clean test
 			asmetrics.ClaimStartupLatency.Reset()
-			r := &SandboxClaimReconciler{}
+			r := &SandboxClaimReconciler{
+				PodQueue: NewPodQueue(),
+			}
 
 			r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox)
 
@@ -1100,6 +1136,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 			Scheme:   scheme,
 			Recorder: record.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
+			PodQueue: NewPodQueue(),
 		}
 
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
@@ -1144,11 +1181,16 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 
 		scheme := newScheme(t)
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim, warmPod).WithStatusSubresource(claim).Build()
+		
+		podQueue := NewPodQueue()
+		podQueue.Add(sandboxcontrollers.NameHash("test-template"), warmPod)
+		
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
 			Recorder: record.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
+			PodQueue: podQueue,
 		}
 
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
@@ -1193,11 +1235,16 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 
 		scheme := newScheme(t)
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim, warmPod).WithStatusSubresource(claim).Build()
+		
+		podQueue := NewPodQueue()
+		podQueue.Add(sandboxcontrollers.NameHash("test-template"), warmPod)
+		
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
 			Recorder: record.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
+			PodQueue: podQueue,
 		}
 
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}

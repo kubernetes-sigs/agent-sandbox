@@ -187,6 +187,8 @@ class SandboxClient:
             field_selector=f"metadata.name={self.claim_name}",
             timeout_seconds=self.sandbox_ready_timeout
         ):
+            if event is None:
+                continue
             if event["type"] in ["ADDED", "MODIFIED"]:
                 sandbox_object = event['object']
                 status = sandbox_object.get('status', {})
@@ -304,6 +306,8 @@ class SandboxClient:
             field_selector=f"metadata.name={self.gateway_name}",
             timeout_seconds=self.gateway_ready_timeout,
         ):
+            if event is None:
+                continue
             if event["type"] in ["ADDED", "MODIFIED"]:
                 gateway_object = event['object']
                 status = gateway_object.get('status', {})

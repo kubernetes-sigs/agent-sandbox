@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -36,16 +37,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlMetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
-	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
-	sandboxControllerFieldOwner = "sandbox-controller"
+	sandboxLabel                 = "agents.x-k8s.io/sandbox-name-hash"
+	SandboxPodNameAnnotation     = "agents.x-k8s.io/pod-name"
+	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
+	sandboxControllerFieldOwner  = "sandbox-controller"
+	metricsCollectTimeout        = 5 * time.Second
 )
 
 var (
@@ -615,6 +620,68 @@ func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 	return cond != nil && cond.Reason == sandboxv1alpha1.SandboxReasonExpired
 }
 
+// SandboxCollector is a custom Prometheus collector that dynamically fetches sandbox counts.
+type SandboxCollector struct {
+	client             client.Client
+	agentSandboxesDesc *prometheus.Desc
+}
+
+// NewSandboxCollector initializes a SandboxCollector.
+func NewSandboxCollector(c client.Client) *SandboxCollector {
+	return &SandboxCollector{
+		client:             c,
+		agentSandboxesDesc: asmetrics.AgentSandboxesDesc,
+	}
+}
+
+// Describe sends the metric descriptor to the channel.
+func (c *SandboxCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.agentSandboxesDesc
+}
+
+// Collect fetches sandboxes, calculates labels, and sends metrics to the channel.
+func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
+	var sandboxList sandboxv1alpha1.SandboxList
+	ctx, cancel := context.WithTimeout(context.Background(), metricsCollectTimeout)
+	defer cancel()
+	if err := c.client.List(ctx, &sandboxList); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list sandboxes for metrics collection")
+		return
+	}
+	counts := make(map[asmetrics.AgentSandboxesMetricKey]int)
+	for _, sandbox := range sandboxList.Items {
+		readyConditionStr := "false"
+		expiredStr := "false"
+		readyCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+		if readyCond != nil {
+			if readyCond.Status == metav1.ConditionTrue {
+				readyConditionStr = "true"
+			}
+			if readyCond.Reason == sandboxv1alpha1.SandboxReasonExpired || readyCond.Reason == extensionsv1alpha1.ClaimExpiredReason {
+				expiredStr = "true"
+			}
+		}
+		launchTypeStr := asmetrics.LaunchTypeCold
+		if _, ok := sandbox.Annotations[SandboxPodNameAnnotation]; ok && sandbox.Annotations[SandboxPodNameAnnotation] != "" {
+			launchTypeStr = asmetrics.LaunchTypeWarm
+		}
+		sandboxTemplateStr := "unknown"
+		if template, ok := sandbox.Annotations[SandboxTemplateRefAnnotation]; ok && template != "" {
+			sandboxTemplateStr = template
+		}
+		key := asmetrics.AgentSandboxesMetricKey{
+			ReadyCondition: readyConditionStr,
+			Expired:        expiredStr,
+			LaunchType:     launchTypeStr,
+			Template:       sandboxTemplateStr,
+		}
+		counts[key]++
+	}
+	for key, count := range counts {
+		ch <- asmetrics.NewAgentSandboxesConstMetric(count, key)
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
@@ -629,6 +696,10 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	if err != nil {
 		return err
 	}
+
+	// Register the custom Sandbox metric collector
+	ctrlMetrics.Registry.MustRegister(NewSandboxCollector(mgr.GetClient()))
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.Sandbox{}).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).

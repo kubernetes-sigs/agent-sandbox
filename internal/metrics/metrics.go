@@ -57,6 +57,19 @@ var (
 		},
 		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition"},
 	)
+
+	// AgentSandboxesDesc describes the agent_sandboxes metric point-in-time counts.
+	// Labels:
+	// - ready_condition: "true" | "false"
+	// - expired: "true" | "false"
+	// - launch_type: "warm" | "cold"
+	// - sandbox_template: sandboxTemplateRef
+	AgentSandboxesDesc = prometheus.NewDesc(
+		"agent_sandboxes",
+		"Monitor the point-in-time number of sandboxes in the cluster.",
+		[]string{"ready_condition", "expired", "launch_type", "sandbox_template"},
+		nil,
+	)
 )
 
 // Init registers custom metrics with the global controller-runtime registry.
@@ -74,4 +87,25 @@ func RecordClaimStartupLatency(startTime time.Time, launchType, templateName str
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.
 func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition string) {
 	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition).Inc()
+}
+
+// AgentSandboxesMetricKey is used to aggregate counts for identical Sandboxes metric label combinations.
+type AgentSandboxesMetricKey struct {
+	ReadyCondition string
+	Expired        string
+	LaunchType     string
+	Template       string
+}
+
+// NewAgentSandboxesConstMetric creates a new Prometheus ConstMetric for the agent_sandboxes gauge.
+func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) prometheus.Metric {
+	return prometheus.MustNewConstMetric(
+		AgentSandboxesDesc,
+		prometheus.GaugeValue,
+		float64(count),
+		key.ReadyCondition,
+		key.Expired,
+		key.LaunchType,
+		key.Template,
+	)
 }

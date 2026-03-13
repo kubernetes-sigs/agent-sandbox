@@ -32,21 +32,25 @@ from kubernetes import config
 
 logger = logging.getLogger(__name__)
 
+
 class TestPodSnapshotSandboxClient(unittest.TestCase):
 
     def setUp(self):
         logger.info("Setting up TestPodSnapshotSandboxClient...")
 
-        self.load_incluster_config_patcher = patch("kubernetes.config.load_incluster_config")
-        self.load_kube_config_patcher = patch("kubernetes.config.load_kube_config")
-        
-        self.mock_load_incluster = self.load_incluster_config_patcher.start()
-        self.mock_load_kube = self.load_kube_config_patcher.start()
-        
-        # Mock kubernetes config loading
-        self.mock_load_incluster.side_effect = config.ConfigException(
-            "Not in cluster"
+        self.load_incluster_config_patcher = patch(
+            "kubernetes.config.load_incluster_config"
         )
+        self.load_kube_config_patcher = patch("kubernetes.config.load_kube_config")
+
+        self.mock_load_incluster = self.load_incluster_config_patcher.start()
+        self.addCleanup(self.load_incluster_config_patcher.stop)
+
+        self.mock_load_kube = self.load_kube_config_patcher.start()
+        self.addCleanup(self.load_kube_config_patcher.stop)
+
+        # Mock kubernetes config loading
+        self.mock_load_incluster.side_effect = config.ConfigException("Not in cluster")
         self.mock_load_kube.return_value = None
 
         # Create client without patching super, as it's tested separately
@@ -60,11 +64,6 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.client.core_v1_api = MagicMock()
 
         logger.info("Finished setting up TestPodSnapshotSandboxClient.")
-
-    def tearDown(self):
-        # Must stop patches started in setUp
-        self.load_incluster_config_patcher.stop()
-        self.load_kube_config_patcher.stop()
 
     def test_init(self):
         """Test initialization of PodSnapshotSandboxClient."""
@@ -257,7 +256,10 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             body={
                 "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
                 "kind": f"{PODSNAPSHOTMANUALTRIGGER_API_KIND}",
-                "metadata": {"name": result.trigger_name, "namespace": self.client.namespace},
+                "metadata": {
+                    "name": result.trigger_name,
+                    "namespace": self.client.namespace,
+                },
                 "spec": {"targetPod": self.client.pod_name},
             },
         )
@@ -322,7 +324,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         result = self.client.snapshot("test-retry")
 
-        self.assertTrue(result.success,result.error_reason)
+        self.assertTrue(result.success, result.error_reason)
         self.assertEqual(result.snapshot_uid, "snapshot-uid-retry")
         logging.info("Finished test_snapshot_processed_retry.")
 

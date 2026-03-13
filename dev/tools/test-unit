@@ -25,6 +25,12 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("clients", "python", "agentic-sandbox-client", "sandbox-router"),
         "requirements": "requirements.txt",
     },
+    {
+        "name": "agentic-sandbox-client",
+        "dir": os.path.join("clients", "python", "agentic-sandbox-client"),
+        "tests": os.path.join("test", "unit"),
+        "install_self": True,
+    },
 ]
 
 
@@ -61,23 +67,38 @@ def run_python_tests(repo_root):
         print(f"\n=== Setting up Python venv for {suite['name']} tests ===")
         subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
 
-        req_file = os.path.join(test_dir, suite["requirements"])
+        # Upgrade pip directly from public PyPI
+        subprocess.check_call([venv_pip, "install", "--quiet", "--upgrade", "pip", "--index-url", "https://pypi.org/simple"])
+
+        req_file = os.path.join(test_dir, suite.get("requirements", "requirements.txt"))
         if os.path.isfile(req_file):
             subprocess.check_call(
-                [venv_pip, "install", "--quiet", "-r", req_file])
+                [venv_pip, "install", "-r", req_file, "--index-url", "https://pypi.org/simple"])
+
+        if suite.get("install_self"):
+            subprocess.check_call(
+                [venv_pip, "install", "-e", test_dir, "--index-url", "https://pypi.org/simple"])
 
         subprocess.check_call(
-            [venv_pip, "install", "--quiet", "pytest"])
+            [venv_pip, "install", "--quiet", "pytest", "--index-url", "https://pypi.org/simple"])
 
         print(f"\n=== Running Python unit tests: {suite['name']} ===")
         junit_file = os.path.join(
             repo_root, "bin", f"python-{suite['name']}-junit.xml")
+
+        tests_path = test_dir
+        if "tests" in suite:
+            tests_path = os.path.join(repo_root, suite["tests"])
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{test_dir}:{env.get('PYTHONPATH', '')}"
+
         result = subprocess.run([
             venv_python, "-m", "pytest",
-            test_dir,
+            tests_path,
             f"--junitxml={junit_file}",
             "-v",
-        ], cwd=test_dir)
+        ], cwd=test_dir, env=env)
 
         if result.returncode != 0:
             returncode = result.returncode

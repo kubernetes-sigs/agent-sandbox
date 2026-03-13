@@ -72,61 +72,47 @@ def kubectl_apply_objects(docs, repo_root):
 
 def main(args):
     repo_root = utils.get_repo_root()
-
-    manifests_path = os.path.join(repo_root, "k8s")
-
-    if not os.path.isdir(manifests_path):
-        print("k8s directory not found")
-        return
-
-    prereq_docs = []
-    other_docs = []
+    config_dir = os.path.join(repo_root, "config")
+    if not os.path.isdir(config_dir):
+        print("config/ directory not found (run: make manifests)")
+        return 1
 
     image_prefix = utils.get_image_prefix(args)
     image_tag = args.image_tag or utils.get_image_tag()
 
-    for root, dirs, files in os.walk(manifests_path):
-        for filename in files:
-            if not (filename.endswith(".yaml") or filename.endswith(".yml")):
-                continue
+    # Build manifests from config/default (kustomize). Ensures config/crd/bases and config/rbac are generated (make manifests).
+    result = subprocess.run(
+        ["kustomize", "build", "config/default"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("kustomize build config/default failed:", result.stderr)
+        return result.returncode
 
-            path = os.path.join(root, filename)
-            with open(path, "r") as f:
-                # Use safe_load_all for multi-document YAML files
-                docs = list(yaml.safe_load_all(f))
-
-            service_name = os.path.basename(root)
-            
-            # Process each document in the file
-            for doc in docs:
-                if not doc: continue
-
-                # Rule 1: CRDs need to be applied first
-                is_crd = doc.get("kind") == "CustomResourceDefinition"
-                if is_crd:
-                      prereq_docs.append(doc)
-                      continue
-
-                # Rule 2: Namespaces also need to be applied first
-                if doc.get("kind") == "Namespace":
-                      prereq_docs.append(doc)
-                      continue
-                
-                # Rule 3: Everything else (Deployments, StatefulSets, etc.)
-                # If we got here, it's a resource we want to apply.
-                find_and_replace_images(doc, service_name, image_prefix, image_tag)
-                other_docs.append(doc)
+    docs = list(yaml.safe_load_all(result.stdout))
+    prereq_docs = []
+    other_docs = []
+    for doc in docs:
+        if not doc:
+            continue
+        if doc.get("kind") == "CustomResourceDefinition" or doc.get("kind") == "Namespace":
+            prereq_docs.append(doc)
+        else:
+            find_and_replace_images(doc, "agent-sandbox-controller", image_prefix, image_tag)
+            other_docs.append(doc)
 
     print(f"Applying {len(prereq_docs)} prerequisite manifests (Namespace, CRDs)...")
     kubectl_apply_objects(prereq_docs, repo_root)
-
     print(f"Applying {len(other_docs)} other manifests...")
     kubectl_apply_objects(other_docs, repo_root)
     print("Deployment complete.")
+    return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Deploy manifests under k8s/ to Kubernetes cluster")
+    parser = argparse.ArgumentParser(description="Deploy manifests from config/default (kustomize) to Kubernetes cluster")
     parser.add_argument("--image-prefix",
                         dest="image_prefix",
                         help="prefix for the image name. requires slash at the end if a path",

@@ -41,12 +41,15 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func createPod(name, namespace, poolNameHash string) *corev1.Pod {
+func createPod(name, namespace, poolNameHash, templateHash string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			Labels:    map[string]string{poolLabel: poolNameHash},
+			Labels: map[string]string{
+				poolLabel:           poolNameHash,
+				sandboxTemplateHash: templateHash,
+			},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -59,9 +62,9 @@ func createPod(name, namespace, poolNameHash string) *corev1.Pod {
 	}
 }
 
-func createPoolPod(poolName, namespace, poolNameHash, suffix string) *corev1.Pod {
+func createPoolPod(poolName, namespace, poolNameHash, templateHash, suffix string) *corev1.Pod {
 	name := poolName + suffix
-	return createPod(name, namespace, poolNameHash)
+	return createPod(name, namespace, poolNameHash, templateHash)
 }
 
 func createTemplate(name, namespace string) *extensionsv1alpha1.SandboxTemplate {
@@ -93,11 +96,14 @@ func TestReconcilePool(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
+	r := SandboxWarmPoolReconciler{}
+	templateHash := r.computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      poolName,
 			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
 			Replicas: replicas,
@@ -124,7 +130,7 @@ func TestReconcilePool(t *testing.T) {
 			name: "creates additional pods when under-provisioned",
 			initialObjs: []runtime.Object{
 				template,
-				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "abc123"),
 			},
 			expectedReplicas: replicas,
 		},
@@ -132,10 +138,10 @@ func TestReconcilePool(t *testing.T) {
 			name: "deletes excess pods when over-provisioned",
 			initialObjs: []runtime.Object{
 				template,
-				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
-				createPoolPod(poolName, poolNamespace, poolNameHash, "def456"),
-				createPoolPod(poolName, poolNamespace, poolNameHash, "ghi789"),
-				createPoolPod(poolName, poolNamespace, poolNameHash, "jkl012"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "def456"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "ghi789"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "jkl012"),
 			},
 			expectedReplicas: replicas,
 		},
@@ -143,9 +149,9 @@ func TestReconcilePool(t *testing.T) {
 			name: "maintains correct replica count",
 			initialObjs: []runtime.Object{
 				template,
-				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
-				createPoolPod(poolName, poolNamespace, poolNameHash, "def456"),
-				createPoolPod(poolName, poolNamespace, poolNameHash, "ghi789"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "def456"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "ghi789"),
 			},
 			expectedReplicas: replicas,
 		},
@@ -196,6 +202,8 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
+	r := SandboxWarmPoolReconciler{}
+	templateHash := r.computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -215,7 +223,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 	poolNameHash := sandboxcontrollers.NameHash(poolName)
 
 	createPodWithOwner := func(name string, ownerUID string) *corev1.Pod {
-		pod := createPoolPod(poolName, poolNamespace, poolNameHash, name)
+		pod := createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, name)
 		if ownerUID != "" {
 			pod.OwnerReferences = []metav1.OwnerReference{
 				{
@@ -231,7 +239,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 	}
 
 	createPodWithDifferentController := func(name string) *corev1.Pod {
-		pod := createPoolPod(poolName, poolNamespace, poolNameHash, name)
+		pod := createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, name)
 		pod.OwnerReferences = []metav1.OwnerReference{
 			{
 				APIVersion: "apps/v1",
@@ -479,11 +487,14 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
+	r := SandboxWarmPoolReconciler{}
+	templateHash := r.computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      poolName,
 			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
 			Replicas: replicas,
@@ -497,7 +508,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	poolNameHash := sandboxcontrollers.NameHash(poolName)
 
 	createPodWithReadyCondition := func(suffix string, ready corev1.ConditionStatus) *corev1.Pod {
-		pod := createPoolPod(poolName, poolNamespace, poolNameHash, suffix)
+		pod := createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, suffix)
 		pod.Status.Conditions = []corev1.PodCondition{
 			{
 				Type:   corev1.PodReady,
@@ -546,8 +557,8 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			name: "pods with no ready condition",
 			initialPods: []runtime.Object{
 				template,
-				createPoolPod(poolName, poolNamespace, poolNameHash, "abc123"),
-				createPoolPod(poolName, poolNamespace, poolNameHash, "def456"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "abc123"),
+				createPoolPod(poolName, poolNamespace, poolNameHash, templateHash, "def456"),
 				createPodWithReadyCondition("ghi789", corev1.ConditionTrue),
 			},
 			expectedReadyReplicas: 1,
@@ -575,4 +586,170 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
 		})
 	}
+}
+
+func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(1)
+
+	testCases := []struct {
+		name                 string
+		strategy             extensionsv1alpha1.SandboxWarmPoolUpdateStrategyType
+		expectedUpdatedImage bool
+	}{
+		{
+			name:                 "Recreate strategy updates pod image",
+			strategy:             extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+			expectedUpdatedImage: true,
+		},
+		{
+			name:                 "OnDelete strategy retains original pod image",
+			strategy:             extensionsv1alpha1.OnDeleteSandboxWarmPoolUpdateStrategyType,
+			expectedUpdatedImage: false,
+		},
+		{
+			name:                 "Default strategy (empty string) behaves like Recreate and updates pod image",
+			strategy:             "",
+			expectedUpdatedImage: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create initial SandboxTemplate
+			template := &extensionsv1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: poolNamespace,
+				},
+				Spec: extensionsv1alpha1.SandboxTemplateSpec{
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "image-v1",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			warmPool := &extensionsv1alpha1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: poolNamespace,
+					UID:       "warmpool-uid-123",
+				},
+				Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+					Replicas: replicas,
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+						Name: templateName,
+					},
+					UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
+						Type: tc.strategy,
+					},
+				},
+			}
+
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(newTestScheme()).
+					WithRuntimeObjects(template, warmPool).
+					Build(),
+			}
+
+			ctx := context.Background()
+
+			// Initial reconciliation to create the pod
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Verify pod exists with initial image
+			pods := &corev1.PodList{}
+			err = r.List(ctx, pods, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 1)
+			require.Equal(t, "image-v1", pods.Items[0].Spec.Containers[0].Image)
+
+			// Update the SandboxTemplate content
+			updatedTemplate := template.DeepCopy()
+			updatedTemplate.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+			err = r.Update(ctx, updatedTemplate)
+			require.NoError(t, err)
+
+			// Reconcile again
+			err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Verify pod rollout
+			err = r.List(ctx, pods, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 1)
+
+			if tc.expectedUpdatedImage {
+				require.Equal(t, "image-v2", pods.Items[0].Spec.Containers[0].Image, "Pod should have updated image after template update")
+				t.Log("Verified: Pod has updated image after template update")
+			} else {
+				require.Equal(t, "image-v1", pods.Items[0].Spec.Containers[0].Image, "Pod should not have updated image after template update with OnDelete strategy")
+				t.Log("Verified: Pod has retained original image after template update")
+			}
+		})
+	}
+}
+
+func TestFindWarmPoolsForTemplate(t *testing.T) {
+	namespace := "default"
+	templateName := "test-template"
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: namespace,
+		},
+	}
+
+	wp1 := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-1",
+			Namespace: namespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	wp2 := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-2",
+			Namespace: namespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: "other-template",
+			},
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(newTestScheme()).
+			WithIndex(&extensionsv1alpha1.SandboxWarmPool{}, templateRefField, func(rawObj client.Object) []string {
+				wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)
+				return []string{wp.Spec.TemplateRef.Name}
+			}).
+			WithRuntimeObjects(wp1, wp2).
+			Build(),
+	}
+
+	requests := r.findWarmPoolsForTemplate(context.Background(), template)
+
+	require.Len(t, requests, 1)
+	require.Equal(t, "pool-1", requests[0].Name)
+	require.Equal(t, namespace, requests[0].Namespace)
 }

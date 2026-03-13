@@ -158,6 +158,7 @@ func TestReconcilePool(t *testing.T) {
 					WithScheme(newTestScheme()).
 					WithRuntimeObjects(tc.initialObjs...).
 					Build(),
+				MaxConcurrentWorkers: 1,
 			}
 
 			ctx := context.Background()
@@ -321,6 +322,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 					WithScheme(newTestScheme()).
 					WithRuntimeObjects(tc.initialObjs...).
 					Build(),
+				MaxConcurrentWorkers: 1,
 			}
 
 			ctx := context.Background()
@@ -433,6 +435,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				WithScheme(newTestScheme()).
 				WithRuntimeObjects(template).
 				Build(),
+			MaxConcurrentWorkers: 1,
 		}
 
 		// Calculate expected pool name hash
@@ -561,6 +564,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 					WithScheme(newTestScheme()).
 					WithRuntimeObjects(tc.initialPods...).
 					Build(),
+				MaxConcurrentWorkers: 1,
 			}
 
 			ctx := context.Background()

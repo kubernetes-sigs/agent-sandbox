@@ -18,8 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sort"
+	"time"
 
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -43,6 +46,7 @@ const (
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
 type SandboxWarmPoolReconciler struct {
 	client.Client
+	MaxConcurrentWorkers int
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
@@ -75,17 +79,28 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	oldStatus := warmPool.Status.DeepCopy()
 
 	// Reconcile the pool (create or delete Pods as needed)
-	if err := r.reconcilePool(ctx, warmPool); err != nil {
-		return ctrl.Result{}, err
-	}
+	reconcileErr := r.reconcilePool(ctx, warmPool)
 
 	// Update status if it has changed
 	if err := r.updateStatus(ctx, oldStatus, warmPool); err != nil {
-		log.Error(err, "Failed to update SandboxWarmPool status")
-		return ctrl.Result{}, err
+		reconcileErr = errors.Join(reconcileErr, err)
 	}
 
-	return ctrl.Result{}, nil
+	// Optimization 2: Fast retry with randomDelay for expected transient API errors during concurrent provisioning
+	// Because the WarmPool provisions pods concurrently in large batches, it is expected
+	// to occasionally hit APF rate limits (429) or transient conflicts (409).
+	// We intercept these specific API errors and apply a fast, randomDelay retry to avoid
+	// falling into the default controller-runtime exponential backoff queue (which can sleep up to 30s).
+	if reconcileErr != nil {
+		if k8serrors.IsTooManyRequests(reconcileErr) || k8serrors.IsConflict(reconcileErr) || k8serrors.IsServerTimeout(reconcileErr) {
+			randomDelay := time.Duration(rand.Intn(400)+100) * time.Millisecond
+			log.Info("Transient API error during concurrent provisioning, applying fast retry", "error", reconcileErr.Error())
+			return ctrl.Result{RequeueAfter: randomDelay}, nil
+		}
+	}
+
+	// All other unexpected errors fall through to the standard rate limiter
+	return ctrl.Result{}, reconcileErr
 }
 
 // reconcilePool ensures the correct number of pods exist in the pool
@@ -97,12 +112,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// List all pods with the pool label matching the warm pool name hash
 	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		poolLabel: poolNameHash,
-	})
-
 	if err := r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labelSelector,
+		LabelSelector: labels.SelectorFromSet(labels.Set{poolLabel: poolNameHash}),
 		Namespace:     warmPool.Namespace,
 	}); err != nil {
 		log.Error(err, "Failed to list pods")
@@ -110,36 +121,40 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 
 	// Filter pods by ownership and adopt orphans
-	var activePods []corev1.Pod
-	var allErrors error
+	var activePods []*corev1.Pod
+	var orphanedPods []*corev1.Pod
 
-	for _, pod := range podList.Items {
+	for i := range podList.Items {
 		// Skip pods that are being deleted
+		pod := &podList.Items[i]
 		if !pod.DeletionTimestamp.IsZero() {
 			continue
 		}
 
 		// Get the controller owner reference
-		controllerRef := metav1.GetControllerOf(&pod)
-
+		controllerRef := metav1.GetControllerOf(pod)
 		if controllerRef == nil {
-			// Pod has no controller - adopt it
-			log.Info("Adopting orphaned pod", "pod", pod.Name)
-			if err := r.adoptPod(ctx, warmPool, &pod); err != nil {
-				log.Error(err, "Failed to adopt pod", "pod", pod.Name)
-				allErrors = errors.Join(allErrors, err)
-				continue
-			}
-			activePods = append(activePods, pod)
+			orphanedPods = append(orphanedPods, pod)
 		} else if controllerRef.UID == warmPool.UID {
-			// Pod belongs to this warmpool - include it
 			activePods = append(activePods, pod)
-		} else {
-			// Pod has a different controller - ignore it
-			log.Info("Ignoring pod with different controller",
-				"pod", pod.Name,
-				"controller", controllerRef.Name,
-				"controllerKind", controllerRef.Kind)
+		}
+	}
+
+	var allErrors error
+
+	// Adopt orphans concurrently
+	if len(orphanedPods) > 0 {
+		var adoptEg errgroup.Group
+		adoptEg.SetLimit(r.MaxConcurrentWorkers)
+		for _, pod := range orphanedPods {
+			p := pod
+			adoptEg.Go(func() error {
+				return r.adoptPod(ctx, warmPool, p)
+			})
+			activePods = append(activePods, p)
+		}
+		if err := adoptEg.Wait(); err != nil {
+			allErrors = errors.Join(allErrors, err)
 		}
 	}
 
@@ -167,37 +182,64 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	warmPool.Status.ReadyReplicas = readyReplicas
 
-	// Create new pods if we need more
+	// Optimization: Provision pods concurrently to meet target replicas rapidly
 	if currentReplicas < desiredReplicas {
 		podsToCreate := desiredReplicas - currentReplicas
-		log.Info("Creating new pods", "count", podsToCreate)
+		log.Info("Creating new pods concurrently", "count", podsToCreate)
+
+		// fetch template once
+		template, err := r.getTemplate(ctx, warmPool)
+		if err != nil {
+			return errors.Join(allErrors, err)
+		}
+
+		var eg errgroup.Group
+		eg.SetLimit(r.MaxConcurrentWorkers) // Fire up to MaxConcurrentWorkers creation requests in parallel
 
 		for i := int32(0); i < podsToCreate; i++ {
-			if err := r.createPoolPod(ctx, warmPool, poolNameHash); err != nil {
-				log.Error(err, "Failed to create pod")
-				allErrors = errors.Join(allErrors, err)
-			}
+			eg.Go(func() error {
+				// Pass the template in so we don't fetch it 150 times
+				return r.createPoolPod(ctx, warmPool, poolNameHash, template)
+			})
+		}
+
+		if err := eg.Wait(); err != nil {
+			allErrors = errors.Join(allErrors, err)
 		}
 	}
 
-	// Delete excess pods if we have too many
+	// Optimization: Delete excess pods concurrently
 	if currentReplicas > desiredReplicas {
 		podsToDelete := currentReplicas - desiredReplicas
-		log.Info("Deleting excess pods", "count", podsToDelete)
+		log.Info("Deleting excess pods concurrently", "count", podsToDelete)
 
 		// Sort active pods by creation timestamp (newest first)
 		sort.Slice(activePods, func(i, j int) bool {
+			if activePods[i].CreationTimestamp.Equal(&activePods[j].CreationTimestamp) {
+				return activePods[i].Name < activePods[j].Name
+			}
 			return activePods[i].CreationTimestamp.After(activePods[j].CreationTimestamp.Time)
 		})
 
-		// Delete the first N active pods from the sorted list (newest first)
-		for i := int32(0); i < podsToDelete && i < int32(len(activePods)); i++ {
-			pod := &activePods[i]
+		var eg errgroup.Group
+		eg.SetLimit(r.MaxConcurrentWorkers)
 
-			if err := r.Delete(ctx, pod); err != nil {
-				log.Error(err, "Failed to delete pod", "pod", pod.Name)
-				allErrors = errors.Join(allErrors, err)
-			}
+		for i := int32(0); i < podsToDelete && i < int32(len(activePods)); i++ {
+			pod := activePods[i]
+
+			// Capture loop variable for the goroutine
+			p := pod
+			eg.Go(func() error {
+				if err := r.Delete(ctx, p); err != nil {
+					log.Error(err, "Failed to delete pod", "pod", p.Name)
+					return err
+				}
+				return nil
+			})
+		}
+
+		if err := eg.Wait(); err != nil {
+			allErrors = errors.Join(allErrors, err)
 		}
 	}
 
@@ -206,28 +248,23 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 // adoptPod sets this warmpool as the owner of an orphaned pod
 func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, pod *corev1.Pod) error {
+	// Use MergePatch instead of Update to eliminate "Object Modified" conflicts
+	// if the pod status changes during adoption.
+	patchBase := pod.DeepCopy()
 	if err := controllerutil.SetControllerReference(warmPool, pod, r.Scheme()); err != nil {
 		return err
 	}
-	return r.Update(ctx, pod)
+	return r.Patch(ctx, pod, client.MergeFrom(patchBase))
 }
 
 // createPoolPod creates a new pod for the warm pool
-func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) error {
+func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate) error {
 	log := log.FromContext(ctx)
 
 	// Create labels for the pod
 	podLabels := make(map[string]string)
 	podLabels[poolLabel] = poolNameHash
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
-
-	// Try getting template
-	var template *extensionsv1alpha1.SandboxTemplate
-	var err error
-	if template, err = r.getTemplate(ctx, warmPool); err != nil {
-		log.Error(err, "Failed to get sandbox template for warm pool", "warmPoolName", warmPool.Name)
-		return err
-	}
 
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {
 		podLabels[k] = v
@@ -249,8 +286,6 @@ func (r *SandboxWarmPoolReconciler) createPoolPod(ctx context.Context, warmPool 
 		},
 		Spec: template.Spec.PodTemplate.Spec,
 	}
-
-	// pod.Labels[podNameLabel] = sandboxcontrollers.NameHash(pod.Name)
 
 	// Set controller reference so the Pod is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, pod, r.Scheme()); err != nil {
@@ -276,12 +311,24 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, warmPool); err != nil {
-		log.Error(err, "Failed to update SandboxWarmPool status")
+	patch := &extensionsv1alpha1.SandboxWarmPool{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: extensionsv1alpha1.GroupVersion.String(),
+			Kind:       "SandboxWarmPool",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      warmPool.Name,
+			Namespace: warmPool.Namespace,
+		},
+		Status: warmPool.Status,
+	}
+
+	// Send the Server-Side Apply request to update the status subresource
+	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil {
+		log.Error(err, "Failed to apply SandboxWarmPool status via SSA")
 		return err
 	}
 
-	log.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
 	return nil
 }
 
@@ -304,6 +351,7 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 
 // SetupWithManager sets up the controller with the Manager
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	r.MaxConcurrentWorkers = concurrentWorkers
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxWarmPool{}).
 		Owns(&corev1.Pod{}).

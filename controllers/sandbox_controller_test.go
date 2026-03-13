@@ -309,7 +309,9 @@ func TestReconcile(t *testing.T) {
 				VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
 					{
 						EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
-							Name: "my-pvc",
+							Name:        "my-pvc",
+							Labels:      map[string]string{"custom-label": "label-val"},
+							Annotations: map[string]string{"custom-annotation": "anno-val"},
 						},
 						Spec: corev1.PersistentVolumeClaimSpec{
 							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -394,8 +396,13 @@ func TestReconcile(t *testing.T) {
 				// Verify PVC
 				&corev1.PersistentVolumeClaim{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:            "my-pvc-sandbox-name",
-						Namespace:       sandboxNs,
+						Name:      "my-pvc-sandbox-name",
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+							"custom-label":                      "label-val",
+						},
+						Annotations:     map[string]string{"custom-annotation": "anno-val"},
 						ResourceVersion: "1",
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -666,7 +673,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0))},
+					Replicas: ptr.To(int32(0)),
+				},
 			},
 			wantPod: nil,
 		},

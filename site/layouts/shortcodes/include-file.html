@@ -8,8 +8,18 @@
 {{- $pagePath := .Page.RelPermalink -}}
 {{- $sectionPath := replaceRE "/[^/]+/$" "/" $pagePath -}}
 
-{{/* Fix all relative README.md and INSTALL.md links */}}
-{{- $content = replaceRE `\]\((\./)?README\.md(#[^)]+)?\)` (printf "](%s$1)" (strings.TrimSuffix "/" $sectionPath)) $content -}}
-{{- $content = replaceRE `\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)` "](/docs/getting_started/$2)" $content -}}
+{{/* Load link replacement rules from data file */}}
+{{- $rules := .Site.Data.link_replacements.replacements -}}
+
+{{/* Apply each replacement rule */}}
+{{- range $rules -}}
+  {{- if .dynamic -}}
+    {{/* Dynamic replacement using current section path */}}
+    {{- $content = replaceRE .pattern (printf "](%s$1)" (strings.TrimSuffix "/" $sectionPath)) $content -}}
+  {{- else -}}
+    {{/* Static replacement from YAML */}}
+    {{- $content = replaceRE .pattern .replacement $content -}}
+  {{- end -}}
+{{- end -}}
 
 {{- $content | markdownify -}}

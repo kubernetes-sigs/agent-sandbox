@@ -4,5 +4,8 @@ linkTitle: "Composing Sandbox with Network Policies"
 weight: 2
 description: >
   This guide documents the complete setup Sandbox with Network Policies that runs locally on Kubernetes using Kind (Kubernetes in Docker) with the agent-sandbox controller.
+aliases:
+  - /docs/guides/composing-sandbox-nw-policies/
+  - /docs/guides/composing-sandbox-nw-policies
 ---
 {{% include-file file="additional/examples/composing-sandbox-nw-policies/README.md" %}}

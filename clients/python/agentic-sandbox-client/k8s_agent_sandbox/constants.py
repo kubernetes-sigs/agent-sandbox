@@ -29,4 +29,7 @@ POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
 PODSNAPSHOT_API_GROUP = "podsnapshot.gke.io"
 PODSNAPSHOT_API_VERSION = "v1alpha1"
+PODSNAPSHOT_PLURAL = "podsnapshots"
+PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
+PODSNAPSHOTMANUALTRIGGER_API_KIND = "PodSnapshotManualTrigger"
 PODSNAPSHOT_API_KIND = "PodSnapshot"

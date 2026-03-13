@@ -18,12 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +32,7 @@ import (
 	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -44,7 +44,9 @@ import (
 
 // TODO: These constants should be imported from the main controller package Issue #216
 const (
-	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel         = "agents.x-k8s.io/sandbox-name-hash"
+	poolNameNone         = "none"
+	sandboxTemplateLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -59,11 +61,11 @@ type SandboxClaimReconciler struct {
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
@@ -191,13 +193,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 	// Only attempt network policy reconciliation if template was found.
 	if templateErr == nil || k8errors.IsNotFound(templateErr) {
-		// This ensures the firewall is up before the pod starts.
-		if template != nil {
-			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-				return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
-			}
-		}
-
 		// Try getting sandbox even if template is not found
 		// It is possible that the template was deleted after the sandbox was created
 		sandbox, err := r.getOrCreateSandbox(ctx, claim, template)
@@ -246,7 +241,7 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 		return claim.Status.Conditions[i].Type < claim.Status.Conditions[j].Type
 	})
 
-	if reflect.DeepEqual(oldStatus, &claim.Status) {
+	if equality.Semantic.DeepEqual(oldStatus, &claim.Status) {
 		return nil
 	}
 
@@ -338,7 +333,7 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 }
 
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
-func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
+func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, string, error) {
 	log := log.FromContext(ctx)
 
 	// List all pods with the podTemplateHashLabel matching the hash
@@ -352,7 +347,7 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		Namespace:     claim.Namespace,
 	}); err != nil {
 		log.Error(err, "Failed to list pods from warm pool")
-		return nil, err
+		return nil, poolNameNone, err
 	}
 
 	// Filter pods and create a slice of pointers for sorting
@@ -379,7 +374,7 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	if len(candidates) == 0 {
 		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
-		return nil, nil
+		return nil, poolNameNone, nil
 	}
 
 	// Sort pods using podutils.ByLogging to select the best available pod.
@@ -387,11 +382,15 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 
 	// Get the first available pod
 	pod := candidates[0]
-	log.Info("Adopting pod from warm pool", "pod", pod.Name)
+	poolName := poolNameNone
+	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
+		poolName = controllerRef.Name
+	}
+
+	log.Info("Adopting pod from warm pool", "pod", pod.Name, "pool", poolName)
 
 	// Remove the pool labels
 	delete(pod.Labels, poolLabel)
-	delete(pod.Labels, sandboxTemplateRefHash)
 
 	// Remove existing owner references (from SandboxWarmPool)
 	pod.OwnerReferences = nil
@@ -406,15 +405,17 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Label required by NetworkPolicy
 	// We add the new label with the Claim UID for unique targeting.
 	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// Adopted pods must have the template hash label to ensure they are selected by the correct NetworkPolicy.
+	pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
 		log.Error(err, "Failed to update adopted pod")
-		return nil, err
+		return nil, poolNameNone, err
 	}
 
 	log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
-	return pod, nil
+	return pod, poolName, nil
 }
 
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
@@ -432,6 +433,11 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Name:      claim.Name,
 		},
 	}
+
+	// Determine if we are in "Secure By Default" mode
+	management := template.Spec.NetworkPolicyManagement
+	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
+	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
 
 	// Propagate the trace context annotation to the Sandbox resource
 	if sandbox.Annotations == nil {
@@ -452,10 +458,23 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		automount := false
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
+	// To prevent internal DNS enumeration while still allowing public domain resolution,
+	// we explicitly override the Pod's DNS config to use external public resolvers.
+	// We only inject this if using the strict "Secure by Default" policy. If the user
+	// provides custom rules or is Unmanaged, we leave DNS alone for air-gapped/proxy compatibility.
+	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
+		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
+		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
+			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
+		}
+	}
+
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// This handles the scenario where the Warm Pool is empty (or disabled), and you have to create a brand new Pod from scratch.
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(template.Name)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
@@ -464,7 +483,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	// Before creating the sandbox, try to adopt a pod from the warm pool
-	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
+	adoptedPod, poolName, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
 	if adoptErr != nil {
 		logger.Error(adoptErr, "Failed to adopt pod from warm pool")
 		return nil, adoptErr
@@ -489,6 +508,28 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	if r.Recorder != nil {
 		r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxProvisioned", fmt.Sprintf("Created Sandbox %q", sandbox.Name))
 	}
+
+	launchType := asmetrics.LaunchTypeCold
+	podCondition := "not_ready"
+	if adoptedPod != nil {
+		launchType = asmetrics.LaunchTypeWarm
+
+		// Fetch the latest pod status to ensure accuracy
+		latestPod := &corev1.Pod{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(adoptedPod), latestPod); err == nil {
+			adoptedPod = latestPod
+		} else {
+			logger.Error(err, "Failed to fetch latest pod status for metric recording", "pod", adoptedPod.Name)
+		}
+
+		for _, cond := range adoptedPod.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				podCondition = "ready"
+				break
+			}
+		}
+	}
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, claim.Spec.TemplateRef.Name, launchType, poolName, podCondition)
 
 	return sandbox, nil
 }
@@ -540,74 +581,12 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&v1alpha1.Sandbox{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
-}
-
-// reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.
-func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
-	logger := log.FromContext(ctx)
-
-	// 1. Cleanup Check: If missing, delete existing policy
-	if template == nil || template.Spec.NetworkPolicy == nil {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-network-policy",
-				Namespace: claim.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, existingNP); err != nil {
-			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
-				return err
-			}
-		} else {
-			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
-		}
-		return nil
-	}
-
-	np := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      claim.Name + "-network-policy",
-			Namespace: claim.Namespace,
-		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
-		np.Spec.PodSelector = metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
-			},
-		}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress,
-			networkingv1.PolicyTypeEgress,
-		}
-
-		templateNP := template.Spec.NetworkPolicy
-
-		if len(templateNP.Ingress) > 0 {
-			np.Spec.Ingress = templateNP.Ingress
-		}
-
-		if len(templateNP.Egress) > 0 {
-			np.Spec.Egress = templateNP.Egress
-		}
-
-		return controllerutil.SetControllerReference(claim, np, r.Scheme)
-	})
-
-	if err != nil {
-		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
-		return err
-	}
-
-	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
-	return nil
 }
 
 // recordCreationLatencyMetric detects and records transitions to Ready state.

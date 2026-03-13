@@ -51,6 +51,7 @@ rules:
   - extensions.agents.x-k8s.io
   resources:
   - sandboxclaims
+  - sandboxtemplates
   - sandboxwarmpools
   verbs:
   - create
@@ -63,20 +64,15 @@ rules:
 - apiGroups:
   - extensions.agents.x-k8s.io
   resources:
+  - sandboxclaims/finalizers
   - sandboxclaims/status
+  - sandboxtemplates/status
+  - sandboxwarmpools/finalizers
   - sandboxwarmpools/status
   verbs:
   - get
   - patch
   - update
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxtemplates
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - networking.k8s.io
   resources:

@@ -12,9 +12,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Integration test for PodSnapshotSandboxClient.
+"""
+
 import argparse
+import time
 from kubernetes import config
 from k8s_agent_sandbox.gke_extensions import PodSnapshotSandboxClient
+from k8s_agent_sandbox.gke_extensions.podsnapshot_client import SnapshotResponse
+
+
+WAIT_TIME_SECONDS = 10
+
+
+def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: str):
+    assert hasattr(
+        snapshot_response, "trigger_name"
+    ), "snapshot response missing 'trigger_name' attribute"
+
+    print(f"Trigger Name: {snapshot_response.trigger_name}")
+    print(f"Snapshot UID: {snapshot_response.snapshot_uid}")
+    print(f"Success: {snapshot_response.success}")
+    print(f"Error Code: {snapshot_response.error_code}")
+    print(f"Error Reason: {snapshot_response.error_reason}")
+
+    assert snapshot_response.trigger_name.startswith(
+        snapshot_name
+    ), f"Expected trigger name prefix '{snapshot_name}', but got '{snapshot_response.trigger_name}'"
+    assert (
+        snapshot_response.success
+    ), f"Expected success=True, but got False. Reason: {snapshot_response.error_reason}"
+    assert snapshot_response.error_code == 0
 
 
 def main(
@@ -38,6 +67,9 @@ def main(
     except config.ConfigException:
         config.load_kube_config()
 
+    first_snapshot_name = "test-snapshot-10"
+    second_snapshot_name = "test-snapshot-20"
+
     try:
         print("\n***** Phase 1: Starting Counter *****")
 
@@ -48,9 +80,25 @@ def main(
             server_port=server_port,
         ) as sandbox:
             print("\n======= Testing Pod Snapshot Extension =======")
-            assert (
-                sandbox.snapshot_crd_installed == True
-            ), "Pod Snapshot CRD is not installed."
+            assert sandbox.snapshot_crd_installed, "Pod Snapshot CRD is not installed."
+            time.sleep(WAIT_TIME_SECONDS)
+            print(
+                f"Creating first pod snapshot '{first_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+            )
+            snapshot_response = sandbox.snapshot(first_snapshot_name)
+            test_snapshot_response(snapshot_response, first_snapshot_name)
+
+            time.sleep(WAIT_TIME_SECONDS)
+
+            print(
+                f"\nCreating second pod snapshot '{second_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+            )
+            snapshot_response = sandbox.snapshot(second_snapshot_name)
+            test_snapshot_response(snapshot_response, second_snapshot_name)
+            recent_snapshot_uid = snapshot_response.snapshot_uid
+            print(f"Recent snapshot UID: {recent_snapshot_uid}")
+
+        print("--- Pod Snapshot Test Passed! ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")

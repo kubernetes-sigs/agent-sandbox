@@ -196,6 +196,12 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	if templateErr == nil || k8errors.IsNotFound(templateErr) {
 		// This ensures the firewall is up before the pod starts.
 		if template != nil {
+			// Set the template as an owner of the claim so ArgoCD can track the
+			// claim and its child resources (sandbox, pods) under the template.
+			if err := r.ensureClaimOwnerRef(ctx, claim, template); err != nil {
+				return nil, fmt.Errorf("failed to set owner reference on claim: %w", err)
+			}
+
 			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
 				return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
 			}
@@ -550,6 +556,23 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	return r.createSandbox(ctx, claim, template)
+}
+
+// ensureClaimOwnerRef sets the SandboxTemplate as a (non-controller) owner of the
+// SandboxClaim so that ArgoCD can display the claim and its child resources
+// (Sandbox, pods) as part of the template's resource tree.
+func (r *SandboxClaimReconciler) ensureClaimOwnerRef(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
+	for _, ref := range claim.OwnerReferences {
+		if ref.UID == template.UID {
+			return nil
+		}
+	}
+
+	patch := client.MergeFrom(claim.DeepCopy())
+	if err := controllerutil.SetOwnerReference(template, claim, r.Scheme); err != nil {
+		return err
+	}
+	return r.Patch(ctx, claim, patch)
 }
 
 func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*extensionsv1alpha1.SandboxTemplate, error) {

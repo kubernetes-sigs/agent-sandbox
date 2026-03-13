@@ -17,6 +17,7 @@ dependencies = [
     "kubernetes",
     "requests",
     "pydantic",
+    "prometheus-client",
 ]
 
 [project.urls]

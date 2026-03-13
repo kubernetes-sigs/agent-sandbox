@@ -54,6 +54,15 @@ class SnapshotResponse:
     error_code: int
 
 
+@dataclass
+class RestoreCheckResult:
+    """Result of a restore check operation."""
+
+    success: bool
+    error_reason: str
+    error_code: int
+
+
 class PodSnapshotSandboxClient(SandboxClient):
     """
     A specialized Sandbox client for interacting with the GKE Pod Snapshot Controller.
@@ -312,6 +321,80 @@ class PodSnapshotSandboxClient(SandboxClient):
                 trigger_name=trigger_name,
                 snapshot_uid=None,
                 snapshot_timestamp=None,
+                error_reason=f"Unexpected error: {e}",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+    def is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult:
+        """
+        Checks if the sandbox pod was restored from the specified snapshot.
+
+        This is verified by inspecting the 'PodRestored' condition in the pod status
+        and confirming that the condition's message contains the provided snapshot UID.
+
+        Returns:
+            RestoreCheckResult: The result of the restore check operation.
+        """
+        if not snapshot_uid:
+            return RestoreCheckResult(
+                success=False,
+                error_reason="Snapshot UID cannot be empty.",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+        if not self.pod_name:
+            logger.warning("Cannot check restore status: pod_name is unknown.")
+            return RestoreCheckResult(
+                success=False,
+                error_reason="Pod name not found. Ensure sandbox is created.",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+        try:
+            pod = self.core_v1_api.read_namespaced_pod(self.pod_name, self.namespace)
+
+            if not pod.status or not pod.status.conditions:
+                return RestoreCheckResult(
+                    success=False,
+                    error_reason="Pod status or conditions not found.",
+                    error_code=SNAPSHOT_ERROR_CODE,
+                )
+
+            for condition in pod.status.conditions:
+                if condition.type == "PodRestored" and condition.status == "True":
+                    # Check if Snapshot UID is present in the condition.message
+                    if condition.message and snapshot_uid in condition.message:
+                        return RestoreCheckResult(
+                            success=True,
+                            error_reason="",
+                            error_code=SNAPSHOT_SUCCESS_CODE,
+                        )
+                    else:
+                        return RestoreCheckResult(
+                            success=False,
+                            error_reason="Pod was not restored from the given snapshot",
+                            error_code=SNAPSHOT_ERROR_CODE,
+                        )
+
+            return RestoreCheckResult(
+                success=False,
+                error_reason="Pod was not restored from any snapshot",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+        except ApiException as e:
+            logger.error(f"Failed to check pod restore status: {e}")
+            return RestoreCheckResult(
+                success=False,
+                error_reason=f"Failed to check pod restore status: {e}",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+        except Exception as e:
+            logger.exception(
+                f"Unexpected error during restore check for snapshot UID '{snapshot_uid}': {e}"
+            )
+            return RestoreCheckResult(
+                success=False,
                 error_reason=f"Unexpected error: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )

@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -36,6 +37,20 @@ import (
 
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+)
+
+const (
+	// poolLabel is the label used to identify pods belonging to a warm pool.
+	poolLabel = "agents.x-k8s.io/pool"
+
+	// sandboxTemplateRefHash tracks the name-hash of the template used.
+	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
+
+	// sandboxTemplateHash tracks the specific version/content of the template.
+	sandboxTemplateHash = "agents.x-k8s.io/sandbox-template-hash"
+
+	// templateRefField is the field used for indexing SandboxWarmPools by their template reference name.
+	templateRefField = ".spec.templateRef.Name"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
@@ -106,63 +121,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		return err
 	}
 
-	// Filter pods by ownership and adopt orphans
-	var activePods []corev1.Pod
-	var allErrors error
-
 	// Fetch template and compute hash once to avoid repeated expensive operations
-	template, tmplErr := r.getTemplate(ctx, warmPool)
-	var currentTemplateHash string
-	if tmplErr == nil {
-		currentTemplateHash = computeTemplateHash(template)
-	} else {
-		log.Error(tmplErr, "Failed to get sandbox template", "templateRef", warmPool.Spec.TemplateRef.Name)
-	}
+	template, currentTemplateHash, tmplErr := r.fetchTemplateAndHash(ctx, warmPool)
 
-	// Get the update strategy
-	updateStrategy := warmPool.Spec.UpdateStrategy.Type
-	if updateStrategy == "" {
-		updateStrategy = RecreateStrategy
-	}
-
-	for _, pod := range podList.Items {
-		// Skip pods that are being deleted
-		if !pod.DeletionTimestamp.IsZero() {
-			continue
-		}
-
-		// Get the controller owner reference
-		controllerRef := metav1.GetControllerOf(&pod)
-		isOrphan := controllerRef == nil
-		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
-
-		// Ignore pods belonging to other controllers
-		if !isOrphan && !isControlledByPool {
-			log.Info("Ignoring pod with different controller", "pod", pod.Name, "controller", controllerRef.Name)
-			continue
-		}
-
-		// If the update strategy of the warmpool is recreate, check if it's stale
-		if updateStrategy == RecreateStrategy && tmplErr == nil && r.isPodStale(&pod, currentTemplateHash) {
-			log.Info("Deleting stale pod from pool", "pod", pod.Name)
-			if err := r.Delete(ctx, &pod); err != nil {
-				log.Error(err, "Failed to delete stale pod", "pod", pod.Name)
-				allErrors = errors.Join(allErrors, err)
-			}
-			continue
-		}
-
-		if isOrphan {
-			// Pod has no controller - adopt it
-			log.Info("Adopting orphaned pod", "pod", pod.Name)
-			if err := r.adoptPod(ctx, warmPool, &pod); err != nil {
-				log.Error(err, "Failed to adopt pod", "pod", pod.Name)
-				allErrors = errors.Join(allErrors, err)
-				continue
-			}
-		}
-		activePods = append(activePods, pod)
-	}
+	// Delete stale pods, filter pods by ownership and adopt orphans
+	activePods, allErrors := r.filterActivePods(ctx, warmPool, podList.Items, currentTemplateHash, tmplErr)
 
 	desiredReplicas := warmPool.Spec.Replicas
 	currentReplicas := int32(len(activePods))
@@ -235,6 +198,68 @@ func (r *SandboxWarmPoolReconciler) adoptPod(ctx context.Context, warmPool *exte
 		return err
 	}
 	return r.Update(ctx, pod)
+}
+
+// filterActivePods filters the list of pods, deleting stale ones and adopting orphans
+func (r *SandboxWarmPoolReconciler) filterActivePods(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, pods []corev1.Pod, currentTemplateHash string, tmplErr error) ([]corev1.Pod, error) {
+	log := log.FromContext(ctx)
+	var activePods []corev1.Pod
+	var allErrors error
+
+	updateStrategy := warmPool.Spec.UpdateStrategy.Type
+	if updateStrategy == "" {
+		updateStrategy = extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType
+	}
+
+	for _, pod := range pods {
+		if !pod.DeletionTimestamp.IsZero() {
+			continue
+		}
+
+		controllerRef := metav1.GetControllerOf(&pod)
+		isOrphan := controllerRef == nil
+		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
+
+		if !isOrphan && !isControlledByPool {
+			log.Info("Ignoring pod with different controller", "pod", pod.Name, "controller", controllerRef.Name)
+			continue
+		}
+
+		if updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType && tmplErr == nil && r.isPodStale(&pod, currentTemplateHash) {
+			log.Info("Deleting stale pod from pool", "pod", pod.Name)
+			if err := r.Delete(ctx, &pod); err != nil {
+				log.Error(err, "Failed to delete stale pod", "pod", pod.Name)
+				allErrors = errors.Join(allErrors, err)
+			}
+			continue
+		}
+
+		if isOrphan {
+			log.Info("Adopting orphaned pod", "pod", pod.Name)
+			if err := r.adoptPod(ctx, warmPool, &pod); err != nil {
+				log.Error(err, "Failed to adopt pod", "pod", pod.Name)
+				allErrors = errors.Join(allErrors, err)
+				continue
+			}
+		}
+
+		activePods = append(activePods, pod)
+	}
+
+	return activePods, allErrors
+}
+
+// fetchTemplateAndHash fetches the sandbox template and computes its hash.
+func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) (*extensionsv1alpha1.SandboxTemplate, string, error) {
+	log := log.FromContext(ctx)
+	template, tmplErr := r.getTemplate(ctx, warmPool)
+	var currentTemplateHash string
+	if tmplErr == nil {
+		currentTemplateHash = r.computeTemplateHash(template)
+	} else {
+		log.Error(tmplErr, "Failed to get sandbox template", "templateRef", warmPool.Spec.TemplateRef.Name)
+	}
+	return template, currentTemplateHash, tmplErr
 }
 
 // createPoolPod creates a new pod for the warm pool
@@ -322,6 +347,23 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 func (r *SandboxWarmPoolReconciler) isPodStale(pod *corev1.Pod, currentTemplateHash string) bool {
 	podHash := pod.Labels[sandboxTemplateHash]
 	return currentTemplateHash != podHash
+}
+
+// computeTemplateHash computes a hash of the sandbox template spec and its name.
+func (r *SandboxWarmPoolReconciler) computeTemplateHash(template *extensionsv1alpha1.SandboxTemplate) string {
+	// Include the name in the hash to differentiate templates with identical specs.
+	data := struct {
+		Name string                                 `json:"name"`
+		Spec extensionsv1alpha1.SandboxTemplateSpec `json:"spec"`
+	}{
+		Name: template.Name,
+		Spec: template.Spec,
+	}
+	specJSON, err := json.Marshal(data)
+	if err != nil {
+		return ""
+	}
+	return sandboxcontrollers.NameHash(string(specJSON))
 }
 
 // SetupWithManager sets up the controller with the Manager

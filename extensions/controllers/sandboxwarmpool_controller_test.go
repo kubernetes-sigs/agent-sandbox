@@ -96,7 +96,8 @@ func TestReconcilePool(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateHash(template)
+	r := SandboxWarmPoolReconciler{}
+	templateHash := r.computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -201,7 +202,8 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateHash(template)
+	r := SandboxWarmPoolReconciler{}
+	templateHash := r.computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -485,7 +487,8 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 
 	// Create a SandboxTemplate
 	template := createTemplate(templateName, poolNamespace)
-	templateHash := computeTemplateHash(template)
+	r := SandboxWarmPoolReconciler{}
+	templateHash := r.computeTemplateHash(template)
 
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -591,162 +594,111 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 	templateName := "test-template"
 	replicas := int32(1)
 
-	// Create initial SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      templateName,
-			Namespace: poolNamespace,
+	testCases := []struct {
+		name                 string
+		strategy             extensionsv1alpha1.SandboxWarmPoolUpdateStrategyType
+		expectedUpdatedImage bool
+	}{
+		{
+			name:                 "Recreate strategy updates pod image",
+			strategy:             extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+			expectedUpdatedImage: true,
 		},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "image-v1",
+		{
+			name:                 "OnDelete strategy retains original pod image",
+			strategy:             extensionsv1alpha1.OnDeleteSandboxWarmPoolUpdateStrategyType,
+			expectedUpdatedImage: false,
+		},
+		{
+			name:                 "Default strategy (empty string) behaves like Recreate and updates pod image",
+			strategy:             "",
+			expectedUpdatedImage: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create initial SandboxTemplate
+			template := &extensionsv1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: poolNamespace,
+				},
+				Spec: extensionsv1alpha1.SandboxTemplateSpec{
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "image-v1",
+								},
+							},
 						},
 					},
 				},
-			},
-		},
-	}
+			}
 
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      poolName,
-			Namespace: poolNamespace,
-			UID:       "warmpool-uid-123",
-		},
-		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
-			Replicas: replicas,
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
-				Name: templateName,
-			},
-			UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-				Type: RecreateStrategy,
-			},
-		},
-	}
-
-	r := SandboxWarmPoolReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(newTestScheme()).
-			WithRuntimeObjects(template, warmPool).
-			Build(),
-	}
-
-	ctx := context.Background()
-
-	// Initial reconciliation to create the pod
-	err := r.reconcilePool(ctx, warmPool)
-	require.NoError(t, err)
-
-	// Verify pod exists with initial image
-	pods := &corev1.PodList{}
-	err = r.List(ctx, pods, client.InNamespace(poolNamespace))
-	require.NoError(t, err)
-	require.Len(t, pods.Items, 1)
-	require.Equal(t, "image-v1", pods.Items[0].Spec.Containers[0].Image)
-
-	// Update the SandboxTemplate content
-	updatedTemplate := template.DeepCopy()
-	updatedTemplate.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
-	err = r.Update(ctx, updatedTemplate)
-	require.NoError(t, err)
-
-	// Reconcile again
-	err = r.reconcilePool(ctx, warmPool)
-	require.NoError(t, err)
-
-	// Verify pod rollout (Expectation: it should have image-v2)
-	err = r.List(ctx, pods, client.InNamespace(poolNamespace))
-	require.NoError(t, err)
-	require.Len(t, pods.Items, 1)
-
-	require.Equal(t, "image-v2", pods.Items[0].Spec.Containers[0].Image, "Pod should have updated image after template update")
-	t.Log("Verified: Pod has updated image after template update")
-}
-
-func TestReconcilePool_TemplateUpdateRollout_OnDelete(t *testing.T) {
-	poolName := "test-pool"
-	poolNamespace := "default"
-	templateName := "test-template"
-	replicas := int32(1)
-
-	// Create initial SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      templateName,
-			Namespace: poolNamespace,
-		},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "image-v1",
-						},
+			warmPool := &extensionsv1alpha1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: poolNamespace,
+					UID:       "warmpool-uid-123",
+				},
+				Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+					Replicas: replicas,
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+						Name: templateName,
+					},
+					UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
+						Type: tc.strategy,
 					},
 				},
-			},
-		},
+			}
+
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(newTestScheme()).
+					WithRuntimeObjects(template, warmPool).
+					Build(),
+			}
+
+			ctx := context.Background()
+
+			// Initial reconciliation to create the pod
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Verify pod exists with initial image
+			pods := &corev1.PodList{}
+			err = r.List(ctx, pods, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 1)
+			require.Equal(t, "image-v1", pods.Items[0].Spec.Containers[0].Image)
+
+			// Update the SandboxTemplate content
+			updatedTemplate := template.DeepCopy()
+			updatedTemplate.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+			err = r.Update(ctx, updatedTemplate)
+			require.NoError(t, err)
+
+			// Reconcile again
+			err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Verify pod rollout
+			err = r.List(ctx, pods, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 1)
+
+			if tc.expectedUpdatedImage {
+				require.Equal(t, "image-v2", pods.Items[0].Spec.Containers[0].Image, "Pod should have updated image after template update")
+				t.Log("Verified: Pod has updated image after template update")
+			} else {
+				require.Equal(t, "image-v1", pods.Items[0].Spec.Containers[0].Image, "Pod should not have updated image after template update with OnDelete strategy")
+				t.Log("Verified: Pod has retained original image after template update")
+			}
+		})
 	}
-
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      poolName,
-			Namespace: poolNamespace,
-			UID:       "warmpool-uid-123",
-		},
-		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
-			Replicas: replicas,
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
-				Name: templateName,
-			},
-			UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-				Type: OnDeleteStrategy,
-			},
-		},
-	}
-
-	r := SandboxWarmPoolReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(newTestScheme()).
-			WithRuntimeObjects(template, warmPool).
-			Build(),
-	}
-
-	ctx := context.Background()
-
-	// Initial reconciliation to create the pod
-	err := r.reconcilePool(ctx, warmPool)
-	require.NoError(t, err)
-
-	// Verify pod exists with initial image
-	pods := &corev1.PodList{}
-	err = r.List(ctx, pods, client.InNamespace(poolNamespace))
-	require.NoError(t, err)
-	require.Len(t, pods.Items, 1)
-	require.Equal(t, "image-v1", pods.Items[0].Spec.Containers[0].Image)
-
-	// Update the SandboxTemplate content
-	updatedTemplate := template.DeepCopy()
-	updatedTemplate.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
-	err = r.Update(ctx, updatedTemplate)
-	require.NoError(t, err)
-
-	// Reconcile again
-	err = r.reconcilePool(ctx, warmPool)
-	require.NoError(t, err)
-
-	// Verify pod rollout (Expectation: it should still have image-v1 because of OnDelete strategy)
-	err = r.List(ctx, pods, client.InNamespace(poolNamespace))
-	require.NoError(t, err)
-	require.Len(t, pods.Items, 1)
-
-	require.Equal(t, "image-v1", pods.Items[0].Spec.Containers[0].Image, "Pod should not have updated image after template update with OnDelete strategy")
-	t.Log("Verified: Pod has retained original image after template update with OnDelete strategy")
 }
 
 func TestFindWarmPoolsForTemplate(t *testing.T) {

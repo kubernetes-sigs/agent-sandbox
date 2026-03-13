@@ -111,6 +111,7 @@ class SandboxClient:
         self.claim_name: str | None = None
         self.sandbox_name: str | None = None
         self.pod_name: str | None = None
+        self.pod_ip: str | None = None
         self.annotations: dict | None = None
 
         try:
@@ -171,25 +172,25 @@ class SandboxClient:
 
     @trace_span("wait_for_sandbox_ready")
     def _wait_for_sandbox_ready(self):
-        """Waits for the Sandbox custom resource to have a 'Ready' status."""
+        """Waits for the SandboxClaim to have a 'Ready' status and optionally a pod IP."""
         if not self.claim_name:
             raise RuntimeError(
                 "Cannot wait for sandbox; a sandboxclaim has not been created.")
 
         w = watch.Watch()
-        logging.info("Watching for Sandbox to become ready...")
+        logging.info("Watching SandboxClaim for Ready status...")
         for event in w.stream(
             func=self.custom_objects_api.list_namespaced_custom_object,
             namespace=self.namespace,
-            group=SANDBOX_API_GROUP,
-            version=SANDBOX_API_VERSION,
-            plural=SANDBOX_PLURAL_NAME,
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            plural=CLAIM_PLURAL_NAME,
             field_selector=f"metadata.name={self.claim_name}",
             timeout_seconds=self.sandbox_ready_timeout
         ):
             if event["type"] in ["ADDED", "MODIFIED"]:
-                sandbox_object = event['object']
-                status = sandbox_object.get('status', {})
+                claim_object = event['object']
+                status = claim_object.get('status', {})
                 conditions = status.get('conditions', [])
                 is_ready = False
                 for cond in conditions:
@@ -198,24 +199,38 @@ class SandboxClient:
                         break
 
                 if is_ready:
-                    metadata = sandbox_object.get(
-                        "metadata", {})
-                    self.sandbox_name = metadata.get(
-                        "name")
-                    if not self.sandbox_name:
-                        raise RuntimeError(
-                            "Could not determine sandbox name from sandbox object.")
+                    sandbox_status = status.get('sandbox', {})
+                    self.sandbox_name = sandbox_status.get('Name') or self.claim_name
                     logging.info(f"Sandbox {self.sandbox_name} is ready.")
 
-                    self.annotations = sandbox_object.get(
-                        'metadata', {}).get('annotations', {})
-                    pod_name = self.annotations.get(POD_NAME_ANNOTATION)
-                    if pod_name:
-                        self.pod_name = pod_name
-                        logging.info(
-                            f"Found pod name from annotation: {self.pod_name}")
-                    else:
+                    # Check for pod IP in claim status (direct connectivity)
+                    pod_ip = sandbox_status.get('podIP')
+                    if pod_ip:
+                        self.pod_ip = pod_ip
+                        logging.info(f"Found pod IP from claim status: {self.pod_ip}")
+
+                    # Also look up the sandbox for pod name annotation
+                    try:
+                        sandbox_object = self.custom_objects_api.get_namespaced_custom_object(
+                            group=SANDBOX_API_GROUP,
+                            version=SANDBOX_API_VERSION,
+                            namespace=self.namespace,
+                            plural=SANDBOX_PLURAL_NAME,
+                            name=self.sandbox_name,
+                        )
+                        self.annotations = sandbox_object.get(
+                            'metadata', {}).get('annotations', {})
+                        pod_name = self.annotations.get(POD_NAME_ANNOTATION)
+                        if pod_name:
+                            self.pod_name = pod_name
+                            logging.info(
+                                f"Found pod name from annotation: {self.pod_name}")
+                        else:
+                            self.pod_name = self.sandbox_name
+                    except Exception:
                         self.pod_name = self.sandbox_name
+                        self.annotations = {}
+
                     w.stop()
                     return
 
@@ -339,12 +354,17 @@ class SandboxClient:
             # Case 1: API URL provided manually (DNS / Internal) -> Do nothing, just use it.
             logging.info(f"Using configured API URL: {self.base_url}")
 
+        elif self.pod_ip:
+            # Case 2: Pod IP available from claim status -> Direct connection (fastest)
+            self.base_url = f"http://{self.pod_ip}:{self.server_port}"
+            logging.info(f"Using direct pod IP connection: {self.base_url}")
+
         elif self.gateway_name:
-            # Case 2: Gateway Name provided -> Production Mode (Discovery)
+            # Case 3: Gateway Name provided -> Production Mode (Discovery)
             self._wait_for_gateway_ip()
 
         else:
-            # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)
+            # Case 4: No Gateway, No URL, No Pod IP -> Developer Mode (Port Forward to Router)
             self._start_and_wait_for_port_forward()
 
         return self

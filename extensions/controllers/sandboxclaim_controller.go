@@ -27,10 +27,8 @@ import (
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/kubectl/pkg/util/podutils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -41,11 +39,6 @@ import (
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
-)
-
-// TODO: These constants should be imported from the main controller package Issue #216
-const (
-	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -89,7 +82,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID
+	// Initialize trace ID for active resources missing an ID — inline patch,
+	// no early return, to avoid forcing a second reconcile cycle.
 	tc := r.Tracer.GetTraceContext(ctx)
 	if tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "") {
 		patch := client.MergeFrom(claim.DeepCopy())
@@ -100,7 +94,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.Patch(ctx, claim, patch); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
 	}
 
 	originalClaimStatus := claim.Status.DeepCopy()
@@ -137,7 +130,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Update Status & Events
-	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
+	r.computeAndSetStatus(ctx, claim, sandbox, reconcileErr, claimExpired)
 
 	if !hasExpiredCondition(originalClaimStatus.Conditions) && hasExpiredCondition(claim.Status.Conditions) {
 		if r.Recorder != nil {
@@ -183,35 +176,42 @@ func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1alpha1.Sandb
 
 // reconcileActive handles the creation and updates of running sandboxes.
 func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
-	// Try getting template
-	template, templateErr := r.getTemplate(ctx, claim)
+	logger := log.FromContext(ctx)
 
-	// If getting template failed with a real error (not just NotFound), fail fast.
+	// Fast path: try to find existing or adopt from warm pool before template lookup.
+	// Pass nil template — adoption and existing-sandbox lookup don't need it.
+	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
+	if err != nil {
+		return nil, err
+	}
+	if sandbox != nil {
+		// Found or adopted — reconcile network policy (best-effort, non-blocking).
+		// The warm pool already applied the template; network policy just needs
+		// the SandboxID label which was set during adoption.
+		template, _ := r.getTemplate(ctx, claim)
+		if template != nil {
+			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
+				logger.Error(npErr, "network policy reconcile failed after adoption (non-fatal)")
+			}
+		}
+		return sandbox, nil
+	}
+
+	// Cold path: no existing sandbox or warm pool candidate.
+	// Need template to create from scratch.
+	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr != nil && !k8errors.IsNotFound(templateErr) {
 		return nil, templateErr
 	}
-
-	// Only attempt network policy reconciliation if template was found.
-	if templateErr == nil || k8errors.IsNotFound(templateErr) {
-		// This ensures the firewall is up before the pod starts.
-		if template != nil {
-			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-				return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
-			}
-		}
-
-		// Try getting sandbox even if template is not found
-		// It is possible that the template was deleted after the sandbox was created
-		sandbox, err := r.getOrCreateSandbox(ctx, claim, template)
-
-		// Special Case: If we failed to create because template was missing, return that specific error
-		if sandbox == nil && err == nil && templateErr != nil {
-			return nil, ErrTemplateNotFound
-		}
-		return sandbox, err
+	if templateErr != nil {
+		return nil, ErrTemplateNotFound
 	}
 
-	return nil, templateErr
+	if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
+		return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
+	}
+
+	return r.createSandbox(ctx, claim, template)
 }
 
 // reconcileExpired ensures the Sandbox is deleted for Retained claims.
@@ -330,93 +330,95 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	}
 }
 
-func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
+func (r *SandboxClaimReconciler) computeAndSetStatus(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
+	logger := log.FromContext(ctx)
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
+
+		// Look up the pod IP if the sandbox is ready
+		if readyCondition.Status == metav1.ConditionTrue {
+			podName := sandbox.Name
+			if ann, ok := sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation]; ok && ann != "" {
+				podName = ann
+			}
+			pod := &corev1.Pod{}
+			if podErr := r.Get(ctx, client.ObjectKey{Name: podName, Namespace: sandbox.Namespace}, pod); podErr == nil {
+				claim.Status.SandboxStatus.PodIP = pod.Status.PodIP
+			} else {
+				logger.V(1).Info("Could not look up pod IP for status", "pod", podName, "error", podErr)
+			}
+		}
 	}
 }
 
-// tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
-func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, error) {
+// adoptSandboxFromCandidates picks the best candidate and transfers ownership to the claim.
+func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
 	log := log.FromContext(ctx)
 
-	// List all pods with the podTemplateHashLabel matching the hash
-	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
+	// Sort: ready sandboxes first, then by creation time (oldest first)
+	sort.Slice(candidates, func(i, j int) bool {
+		iReady := isSandboxReady(candidates[i])
+		jReady := isSandboxReady(candidates[j])
+		if iReady != jReady {
+			return iReady
+		}
+		return candidates[i].CreationTimestamp.Before(&candidates[j].CreationTimestamp)
 	})
 
-	if err := r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     claim.Namespace,
-	}); err != nil {
-		log.Error(err, "Failed to list pods from warm pool")
+	adopted := candidates[0]
+	log.Info("Adopting sandbox from warm pool", "sandbox", adopted.Name)
+
+	// Remove warm pool labels
+	delete(adopted.Labels, warmPoolSandboxLabel)
+	delete(adopted.Labels, sandboxTemplateRefHash)
+
+	// Transfer ownership from SandboxWarmPool to SandboxClaim
+	adopted.OwnerReferences = nil
+	if err := controllerutil.SetControllerReference(claim, adopted, r.Scheme); err != nil {
+		return nil, fmt.Errorf("failed to set controller reference on adopted sandbox: %w", err)
+	}
+
+	// Propagate trace context from claim
+	if adopted.Annotations == nil {
+		adopted.Annotations = make(map[string]string)
+	}
+	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		adopted.Annotations[asmetrics.TraceContextAnnotation] = tc
+	}
+
+	// Add sandbox ID label to pod template for NetworkPolicy targeting
+	if adopted.Spec.PodTemplate.ObjectMeta.Labels == nil {
+		adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+	}
+	adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+
+	// Update uses optimistic concurrency (resourceVersion) so concurrent
+	// claims racing to adopt the same sandbox will conflict and retry.
+	if err := r.Update(ctx, adopted); err != nil {
+		log.Error(err, "Failed to update adopted sandbox")
 		return nil, err
 	}
 
-	// Filter pods and create a slice of pointers for sorting
-	candidates := make([]*corev1.Pod, 0, len(podList.Items))
-	for i := range podList.Items {
-		pod := &podList.Items[i]
+	log.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
 
-		// Skip pods that are being deleted
-		if !pod.DeletionTimestamp.IsZero() {
-			continue
+	if r.Recorder != nil {
+		r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxAdopted", fmt.Sprintf("Adopted warm pool Sandbox %q", adopted.Name))
+	}
+
+	return adopted, nil
+}
+
+// isSandboxReady checks if a sandbox has Ready=True condition
+func isSandboxReady(sb *v1alpha1.Sandbox) bool {
+	for _, cond := range sb.Status.Conditions {
+		if cond.Type == string(v1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+			return true
 		}
-
-		// Skip pods that already have a different controller
-		if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
-			log.Info("Ignoring pod with different controller, but this shouldn't happen because this pod shouldn't have template ref label",
-				"pod", pod.Name,
-				"controller", controllerRef.Name,
-				"controllerKind", controllerRef.Kind)
-			continue
-		}
-
-		candidates = append(candidates, pod)
 	}
-
-	if len(candidates) == 0 {
-		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
-		return nil, nil
-	}
-
-	// Sort pods using podutils.ByLogging to select the best available pod.
-	sort.Sort(podutils.ByLogging(candidates))
-
-	// Get the first available pod
-	pod := candidates[0]
-	log.Info("Adopting pod from warm pool", "pod", pod.Name)
-
-	// Remove the pool labels
-	delete(pod.Labels, poolLabel)
-	delete(pod.Labels, sandboxTemplateRefHash)
-
-	// Remove existing owner references (from SandboxWarmPool)
-	pod.OwnerReferences = nil
-
-	nameHash := sandboxcontrollers.NameHash(claim.Name)
-	if pod.Labels == nil {
-		pod.Labels = make(map[string]string)
-	}
-
-	pod.Labels[sandboxLabel] = nameHash
-
-	// Label required by NetworkPolicy
-	// We add the new label with the Claim UID for unique targeting.
-	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
-
-	// Update the pod
-	if err := r.Update(ctx, pod); err != nil {
-		log.Error(err, "Failed to update adopted pod")
-		return nil, err
-	}
-
-	log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
-	return pod, nil
+	return false
 }
 
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
@@ -444,12 +446,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas
-	// Enforce a secure-by-default policy by disabling the automatic mounting
-	// of the service account token, adhering to security best practices for
-	// sandboxed environments.
 	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
 		automount := false
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
@@ -463,21 +461,6 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
 		return nil, err
-	}
-
-	// Before creating the sandbox, try to adopt a pod from the warm pool
-	adoptedPod, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
-	if adoptErr != nil {
-		logger.Error(adoptErr, "Failed to adopt pod from warm pool")
-		return nil, adoptErr
-	}
-
-	if adoptedPod != nil {
-		logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] = adoptedPod.Name
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {
@@ -495,8 +478,23 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	return sandbox, nil
 }
 
-func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
+func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, _ *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
+
+	// Check if a previously adopted sandbox is recorded in claim status
+	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
+		sandbox := &v1alpha1.Sandbox{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
+			if metav1.IsControlledBy(sandbox, claim) {
+				logger.Info("found existing adopted sandbox from status", "name", statusName)
+				return sandbox, nil
+			}
+		} else if !k8errors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
+		}
+	}
+
+	// Try name-based lookup (sandbox created by createSandbox uses claim.Name)
 	sandbox := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: claim.Namespace,
@@ -506,8 +504,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	if err := r.Get(ctx, client.ObjectKeyFromObject(sandbox), sandbox); err != nil {
 		sandbox = nil
 		if !k8errors.IsNotFound(err) {
-			err = fmt.Errorf("failed to get sandbox %q: %w", claim.Name, err)
-			return nil, err
+			return nil, fmt.Errorf("failed to get sandbox %q: %w", claim.Name, err)
 		}
 	}
 
@@ -521,7 +518,55 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return sandbox, nil
 	}
 
-	return r.createSandbox(ctx, claim, template)
+	// Single List: ownership guard + adoption candidate scan.
+	// This queries the informer cache (not the API server), so it's fast.
+	allSandboxes := &v1alpha1.SandboxList{}
+	if err := r.List(ctx, allSandboxes, client.InNamespace(claim.Namespace)); err != nil {
+		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
+	}
+
+	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+	var adoptionCandidates []*v1alpha1.Sandbox
+
+	for i := range allSandboxes.Items {
+		sb := &allSandboxes.Items[i]
+		if !sb.DeletionTimestamp.IsZero() {
+			continue
+		}
+
+		// Ownership guard: if this claim already owns a sandbox, return it
+		if metav1.IsControlledBy(sb, claim) {
+			logger.Info("found existing owned sandbox", "name", sb.Name)
+			return sb, nil
+		}
+
+		// Collect adoption candidates from warm pool
+		if _, ok := sb.Labels[warmPoolSandboxLabel]; !ok {
+			continue
+		}
+		if sb.Labels[sandboxTemplateRefHash] != templateHash {
+			continue
+		}
+		controllerRef := metav1.GetControllerOf(sb)
+		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+			continue
+		}
+		adoptionCandidates = append(adoptionCandidates, sb)
+	}
+
+	// Try to adopt from warm pool
+	if len(adoptionCandidates) > 0 {
+		adopted, err := r.adoptSandboxFromCandidates(ctx, claim, adoptionCandidates)
+		if err != nil {
+			logger.Error(err, "Failed to adopt sandbox from warm pool, falling back to creation")
+		}
+		if adopted != nil {
+			return adopted, nil
+		}
+	}
+
+	// No warm pool sandbox available — caller decides whether to create
+	return nil, nil
 }
 
 func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*extensionsv1alpha1.SandboxTemplate, error) {

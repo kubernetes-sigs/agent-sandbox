@@ -26,15 +26,16 @@ import (
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/kubectl/pkg/util/podutils"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
@@ -58,6 +59,7 @@ type SandboxClaimReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Tracer   asmetrics.Instrumenter
+	PodQueue *PodQueue
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -336,58 +338,20 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, string, error) {
 	log := log.FromContext(ctx)
 
-	// List all pods with the podTemplateHashLabel matching the hash
-	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxTemplateRefHash: sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name),
-	})
+	hash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 
-	if err := r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     claim.Namespace,
-	}); err != nil {
-		log.Error(err, "Failed to list pods from warm pool")
-		return nil, poolNameNone, err
-	}
-
-	// Filter pods and create a slice of pointers for sorting
-	candidates := make([]*corev1.Pod, 0, len(podList.Items))
-	for i := range podList.Items {
-		pod := &podList.Items[i]
-
-		// Skip pods that are being deleted
-		if !pod.DeletionTimestamp.IsZero() {
-			continue
-		}
-
-		// Skip pods that already have a different controller
-		if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
-			log.Info("Ignoring pod with different controller, but this shouldn't happen because this pod shouldn't have template ref label",
-				"pod", pod.Name,
-				"controller", controllerRef.Name,
-				"controllerKind", controllerRef.Kind)
-			continue
-		}
-
-		candidates = append(candidates, pod)
-	}
-
-	if len(candidates) == 0 {
-		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
+	pod, ok := r.PodQueue.Get(hash)
+	if !ok {
+		log.Info("No available pods in warm pool (PodQueue is empty for this hash)")
 		return nil, poolNameNone, nil
 	}
 
-	// Sort pods using podutils.ByLogging to select the best available pod.
-	sort.Sort(podutils.ByLogging(candidates))
-
-	// Get the first available pod
-	pod := candidates[0]
 	poolName := poolNameNone
 	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
 		poolName = controllerRef.Name
 	}
 
-	log.Info("Adopting pod from warm pool", "pod", pod.Name, "pool", poolName)
+	log.Info("Adopting pod from warm pool via PodQueue", "pod", pod.Name, "pool", poolName)
 
 	// Remove the pool labels
 	delete(pod.Labels, poolLabel)
@@ -411,8 +375,12 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
 		log.Error(err, "Failed to update adopted pod")
+		// If update fails, we unreserve the pod so it can be picked up by another claim
+		r.PodQueue.Unreserve(hash, pod)
 		return nil, poolNameNone, err
 	}
+	// Successfully adopted, remove from reserved completely
+	r.PodQueue.Done(pod)
 
 	log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
 	return pod, poolName, nil
@@ -582,9 +550,14 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if r.PodQueue == nil {
+		r.PodQueue = NewPodQueue()
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&v1alpha1.Sandbox{}).
+		Watches(&corev1.Pod{}, &podEventHandler{PodQueue: r.PodQueue}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }
@@ -637,4 +610,79 @@ func hasExpiredCondition(conditions []metav1.Condition) bool {
 		}
 	}
 	return false
+}
+
+// podEventHandler implements handler.EventHandler for the SandboxClaimReconciler.
+// It manages the PodQueue by watching for pod creations, updates, and deletions.
+type podEventHandler struct {
+	PodQueue *PodQueue
+}
+
+// isAdoptable checks if a pod is eligible to be added to the queue.
+func (h *podEventHandler) isAdoptable(pod *corev1.Pod) (string, bool) {
+	// Skip pods that are being deleted
+	if !pod.DeletionTimestamp.IsZero() {
+		return "", false
+	}
+
+	// Must have the template ref hash label
+	hash, ok := pod.Labels[sandboxTemplateRefHash]
+	if !ok {
+		return "", false
+	}
+
+	// Skip pods that have a different controller (unless it's SandboxWarmPool)
+	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+		return "", false
+	}
+
+	return hash, true
+}
+
+func (h *podEventHandler) Create(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	pod, ok := e.Object.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	if hash, adoptable := h.isAdoptable(pod); adoptable {
+		h.PodQueue.Add(hash, pod)
+	}
+}
+
+func (h *podEventHandler) Update(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	newPod, ok := e.ObjectNew.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	oldPod, ok := e.ObjectOld.(*corev1.Pod)
+	if !ok {
+		return
+	}
+
+	hash, adoptable := h.isAdoptable(newPod)
+
+	if !adoptable {
+		// If it was adoptable but now isn't (e.g., getting deleted or adopted by another claim), remove it
+		if oldHash, oldAdoptable := h.isAdoptable(oldPod); oldAdoptable {
+			h.PodQueue.Remove(oldHash, oldPod)
+		}
+		return
+	}
+
+	// It is adoptable, so we should ensure it is in the queue.
+	h.PodQueue.Add(hash, newPod)
+}
+
+func (h *podEventHandler) Delete(ctx context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	pod, ok := e.Object.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	if hash, ok := pod.Labels[sandboxTemplateRefHash]; ok {
+		h.PodQueue.Remove(hash, pod)
+	}
+}
+
+func (h *podEventHandler) Generic(ctx context.Context, e event.GenericEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	// Generic events are not typically used for pod lifecycle changes we care about.
 }

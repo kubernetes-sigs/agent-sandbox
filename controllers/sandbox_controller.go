@@ -219,9 +219,11 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 			message = "Pod is Running but not Ready"
 			for _, condition := range pod.Status.Conditions {
 				if condition.Type == corev1.PodReady {
-					if condition.Status == corev1.ConditionTrue {
+					if condition.Status == corev1.ConditionTrue && pod.Status.PodIP != "" {
 						message = "Pod is Ready"
 						podReady = true
+					} else if condition.Status == corev1.ConditionTrue {
+						message = "Pod is Ready but has no IP"
 					}
 					break
 				}

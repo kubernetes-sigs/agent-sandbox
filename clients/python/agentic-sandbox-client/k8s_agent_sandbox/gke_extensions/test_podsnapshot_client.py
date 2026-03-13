@@ -36,11 +36,11 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
     def setUp(self):
         logger.info("Setting up TestPodSnapshotSandboxClient...")
 
-        self.patcher1 = patch("kubernetes.config.load_incluster_config")
-        self.patcher2 = patch("kubernetes.config.load_kube_config")
+        self.load_incluster_config_patcher = patch("kubernetes.config.load_incluster_config")
+        self.load_kube_config_patcher = patch("kubernetes.config.load_kube_config")
         
-        self.mock_load_incluster = self.patcher1.start()
-        self.mock_load_kube = self.patcher2.start()
+        self.mock_load_incluster = self.load_incluster_config_patcher.start()
+        self.mock_load_kube = self.load_kube_config_patcher.start()
         
         # Mock kubernetes config loading
         self.mock_load_incluster.side_effect = config.ConfigException(
@@ -62,8 +62,8 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
     def tearDown(self):
         # Must stop patches started in setUp
-        self.patcher1.stop()
-        self.patcher2.stop()
+        self.load_incluster_config_patcher.stop()
+        self.load_kube_config_patcher.stop()
 
     def test_init(self):
         """Test initialization of PodSnapshotSandboxClient."""

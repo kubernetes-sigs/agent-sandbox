@@ -74,6 +74,14 @@ type SandboxClaimSpec struct {
 	// Lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+
+	// EnvOverrides are per-container environment variable overrides.
+	// Merged into pod spec at creation time. For warm pool adoption,
+	// stored as a pod annotation for the control plane to inject
+	// post-adoption.
+	// Key = container name, Value = map of env var name to value.
+	// +optional
+	EnvOverrides map[string]map[string]string `json:"envOverrides,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

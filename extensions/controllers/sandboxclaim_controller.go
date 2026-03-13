@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -408,6 +409,18 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	// Adopted pods must have the template hash label to ensure they are selected by the correct NetworkPolicy.
 	pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 
+	// Annotate the pod with envOverrides for control-plane post-adoption injection.
+	if len(claim.Spec.EnvOverrides) > 0 {
+		overridesJSON, err := json.Marshal(claim.Spec.EnvOverrides)
+		if err != nil {
+			return nil, poolNameNone, fmt.Errorf("marshal envOverrides: %w", err)
+		}
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		pod.Annotations["agents.x-k8s.io/env-overrides"] = string(overridesJSON)
+	}
+
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
 		log.Error(err, "Failed to update adopted pod")
@@ -448,6 +461,33 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
+
+	// Merge per-claim env overrides into the pod spec.
+	for containerName, envVars := range claim.Spec.EnvOverrides {
+		for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+			if sandbox.Spec.PodTemplate.Spec.Containers[i].Name != containerName {
+				continue
+			}
+			for k, v := range envVars {
+				found := false
+				for j := range sandbox.Spec.PodTemplate.Spec.Containers[i].Env {
+					if sandbox.Spec.PodTemplate.Spec.Containers[i].Env[j].Name == k {
+						sandbox.Spec.PodTemplate.Spec.Containers[i].Env[j].Value = v
+						sandbox.Spec.PodTemplate.Spec.Containers[i].Env[j].ValueFrom = nil
+						found = true
+						break
+					}
+				}
+				if !found {
+					sandbox.Spec.PodTemplate.Spec.Containers[i].Env = append(
+						sandbox.Spec.PodTemplate.Spec.Containers[i].Env,
+						corev1.EnvVar{Name: k, Value: v},
+					)
+				}
+			}
+		}
+	}
+
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas

@@ -28,6 +28,12 @@ spec:
             type: object
           spec:
             properties:
+              envOverrides:
+                additionalProperties:
+                  additionalProperties:
+                    type: string
+                  type: object
+                type: object
               lifecycle:
                 properties:
                   shutdownPolicy:

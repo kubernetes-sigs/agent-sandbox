@@ -97,6 +97,8 @@ def wait_for_snapshot_to_be_completed(
             timeout_seconds=podsnapshot_timeout,
             **kwargs,
         ):
+            if event is None:
+                continue
             if event["type"] in ["ADDED", "MODIFIED"]:
                 obj = event["object"]
                 try:

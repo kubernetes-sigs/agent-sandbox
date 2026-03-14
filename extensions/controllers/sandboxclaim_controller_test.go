@@ -1214,6 +1214,142 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 	})
 }
 
+func TestComputeAndSetStatusPodIP(t *testing.T) {
+	claimName := "podip-claim"
+	claimNs := "default"
+	sandboxName := claimName
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: claimNs},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	makeSandbox := func(ready bool) *sandboxv1alpha1.Sandbox {
+		status := metav1.ConditionFalse
+		reason := "SandboxNotReady"
+		if ready {
+			status = metav1.ConditionTrue
+			reason = "SandboxReady"
+		}
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: claimNs,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxClaim",
+					Name:       claimName,
+					UID:        "uid-1",
+					Controller: ptr.To(true),
+				}},
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: template.Spec.PodTemplate},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: status,
+					Reason: reason,
+				}},
+			},
+		}
+	}
+
+	makePod := func(podIP string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: claimNs,
+			},
+			Status: corev1.PodStatus{
+				PodIP: podIP,
+			},
+		}
+	}
+
+	testCases := []struct {
+		name          string
+		objects       []client.Object
+		sandbox       *sandboxv1alpha1.Sandbox
+		existingPodIP string
+		expectedIP    string
+	}{
+		{
+			name:       "sandbox ready with pod IP populated",
+			sandbox:    makeSandbox(true),
+			objects:    []client.Object{template, makePod("10.0.0.1")},
+			expectedIP: "10.0.0.1",
+		},
+		{
+			name:       "sandbox not ready - PodIP cleared despite pod existing",
+			sandbox:    makeSandbox(false),
+			objects:    []client.Object{template, makePod("10.0.0.2")},
+			expectedIP: "",
+		},
+		{
+			name:       "pod exists but has no IP",
+			sandbox:    makeSandbox(true),
+			objects:    []client.Object{template, makePod("")},
+			expectedIP: "",
+		},
+		{
+			name:       "no pod exists",
+			sandbox:    makeSandbox(true),
+			objects:    []client.Object{template},
+			expectedIP: "",
+		},
+		{
+			name:          "skips lookup when PodIP already cached",
+			sandbox:       makeSandbox(true),
+			objects:       []client.Object{template, makePod("10.0.0.99")},
+			existingPodIP: "10.0.0.1",
+			expectedIP:    "10.0.0.1",
+		},
+		{
+			name:          "clears cached PodIP when sandbox goes not-ready",
+			sandbox:       makeSandbox(false),
+			objects:       []client.Object{template},
+			existingPodIP: "10.0.0.1",
+			expectedIP:    "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+
+			claim := &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: claimNs, UID: "uid-1"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+				},
+			}
+			claim.Status.SandboxStatus.PodIP = tc.existingPodIP
+
+			allObjects := append(tc.objects, claim, tc.sandbox)
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claim).Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:   cl,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(10),
+				Tracer:   asmetrics.NewNoOp(),
+			}
+
+			reconciler.computeAndSetStatus(context.Background(), claim, tc.sandbox, nil, false)
+
+			if claim.Status.SandboxStatus.PodIP != tc.expectedIP {
+				t.Errorf("expected PodIP %q, got %q", tc.expectedIP, claim.Status.SandboxStatus.PodIP)
+			}
+		})
+	}
+}
+
 func newScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {

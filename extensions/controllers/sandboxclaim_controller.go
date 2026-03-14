@@ -137,7 +137,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Update Status & Events
-	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
+	r.computeAndSetStatus(ctx, claim, sandbox, reconcileErr, claimExpired)
 
 	if !hasExpiredCondition(originalClaimStatus.Conditions) && hasExpiredCondition(claim.Status.Conditions) {
 		if r.Recorder != nil {
@@ -323,12 +323,26 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	}
 }
 
-func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
+func (r *SandboxClaimReconciler) computeAndSetStatus(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
+		// Clear cached PodIP when the sandbox is not Ready (e.g. pod deleted)
+		// so we re-fetch it once a new pod comes up.
+		if !meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(v1alpha1.SandboxConditionReady)) {
+			claim.Status.SandboxStatus.PodIP = ""
+		} else if claim.Status.SandboxStatus.PodIP == "" {
+			podName := sandbox.Name
+			if tracked := sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation]; tracked != "" {
+				podName = tracked
+			}
+			pod := &corev1.Pod{}
+			if getErr := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, pod); getErr == nil {
+				claim.Status.SandboxStatus.PodIP = pod.Status.PodIP
+			}
+		}
 	}
 }
 

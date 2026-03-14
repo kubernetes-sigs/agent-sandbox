@@ -329,10 +329,11 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(ctx context.Context, claim 
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
-		// Only look up PodIP when we haven't cached it yet.
-		// Pod IPs don't change; if the pod is deleted, the sandbox
-		// goes not-Ready which triggers a new reconcile anyway.
-		if claim.Status.SandboxStatus.PodIP == "" {
+		// Clear cached PodIP when the sandbox is not Ready (e.g. pod deleted)
+		// so we re-fetch it once a new pod comes up.
+		if !meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(v1alpha1.SandboxConditionReady)) {
+			claim.Status.SandboxStatus.PodIP = ""
+		} else if claim.Status.SandboxStatus.PodIP == "" {
 			podName := sandbox.Name
 			if tracked := sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation]; tracked != "" {
 				podName = tracked

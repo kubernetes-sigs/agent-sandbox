@@ -1286,10 +1286,10 @@ func TestComputeAndSetStatusPodIP(t *testing.T) {
 			expectedIP: "10.0.0.1",
 		},
 		{
-			name:       "sandbox not ready - PodIP still populated from pod",
+			name:       "sandbox not ready - PodIP cleared despite pod existing",
 			sandbox:    makeSandbox(false),
 			objects:    []client.Object{template, makePod("10.0.0.2")},
-			expectedIP: "10.0.0.2",
+			expectedIP: "",
 		},
 		{
 			name:       "pod exists but has no IP",
@@ -1309,6 +1309,13 @@ func TestComputeAndSetStatusPodIP(t *testing.T) {
 			objects:       []client.Object{template, makePod("10.0.0.99")},
 			existingPodIP: "10.0.0.1",
 			expectedIP:    "10.0.0.1",
+		},
+		{
+			name:          "clears cached PodIP when sandbox goes not-ready",
+			sandbox:       makeSandbox(false),
+			objects:       []client.Object{template},
+			existingPodIP: "10.0.0.1",
+			expectedIP:    "",
 		},
 	}
 

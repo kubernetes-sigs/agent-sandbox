@@ -48,6 +48,31 @@ const (
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
 
+// podOwnership represents the ownership state of a Pod relative to a Sandbox.
+type podOwnership int
+
+const (
+	// podOwnedBySandbox indicates the Pod's controllerRef points to this Sandbox.
+	podOwnedBySandbox podOwnership = iota
+	// podUnowned indicates the Pod has no controllerRef.
+	podUnowned
+	// podOwnedByOther indicates the Pod's controllerRef points to a different controller.
+	podOwnedByOther
+)
+
+// checkPodOwnership determines whether a Pod is owned by the given Sandbox,
+// has no controller, or is owned by a different controller.
+func checkPodOwnership(pod *corev1.Pod, sandbox *sandboxv1alpha1.Sandbox) podOwnership {
+	controllerRef := metav1.GetControllerOf(pod)
+	if controllerRef == nil {
+		return podUnowned
+	}
+	if controllerRef.UID == sandbox.UID {
+		return podOwnedBySandbox
+	}
+	return podOwnedByOther
+}
+
 var (
 	// Scheme for use by sandbox controllers. Registers required types for client.
 	Scheme = runtime.NewScheme()
@@ -382,23 +407,33 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	// 1. PATH: Logic for deleting Pod when replicas is 0
 	if *sandbox.Spec.Replicas == 0 {
 		if pod != nil {
-			if pod.DeletionTimestamp.IsZero() {
-				log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-				if err := r.Delete(ctx, pod); err != nil {
-					return nil, fmt.Errorf("failed to delete pod: %w", err)
+			ownership := checkPodOwnership(pod, sandbox)
+			switch ownership {
+			case podOwnedBySandbox:
+				if pod.DeletionTimestamp.IsZero() {
+					log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					if err := r.Delete(ctx, pod); err != nil {
+						return nil, fmt.Errorf("failed to delete pod: %w", err)
+					}
+				} else {
+					log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
-			} else {
-				log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			case podUnowned:
+				log.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
+			case podOwnedByOther:
+				controllerRef := metav1.GetControllerOf(pod)
+				log.Info("Refusing to delete pod: pod is owned by a different controller",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
 			}
 		}
 
 		// Remove the pod name annotation from the sandbox if it exists
 		if _, exists := sandbox.Annotations[SandboxPodNameAnnotation]; exists {
 			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-			// Create a patch to update only the annotations
 			patch := client.MergeFrom(sandbox.DeepCopy())
 			delete(sandbox.Annotations, SandboxPodNameAnnotation)
 
@@ -410,7 +445,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, nil
 	}
 
-	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
+	// Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
@@ -421,28 +456,51 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			})
 		}
 
-		if pod.Labels == nil {
-			pod.Labels = make(map[string]string)
-		}
+		ownership := checkPodOwnership(pod, sandbox)
 		changed := false
-		if pod.Labels[sandboxLabel] != nameHash {
-			pod.Labels[sandboxLabel] = nameHash
-			changed = true
-		}
-		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
-		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-			if pod.Labels[k] != v {
-				pod.Labels[k] = v
-				changed = true
-			}
-		}
+		switch ownership {
+		case podOwnedByOther:
+			controllerRef := metav1.GetControllerOf(pod)
+			log.Info("Refusing to adopt pod: pod is owned by a different controller",
+				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
 
-		// Set controller reference if the pod is not controlled by anything.
-		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
+			if _, exists := sandbox.Annotations[SandboxPodNameAnnotation]; exists {
+				patch := client.MergeFrom(sandbox.DeepCopy())
+				delete(sandbox.Annotations, SandboxPodNameAnnotation)
+				if err := r.Patch(ctx, sandbox, patch); err != nil {
+					return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
+				}
+			}
+
+			return nil, fmt.Errorf("pod %q is owned by %s/%s, not by sandbox %q",
+				pod.Name, controllerRef.Kind, controllerRef.Name, sandbox.Name)
+
+		case podUnowned:
+			if pod.Labels == nil {
+				pod.Labels = make(map[string]string)
+			}
+			pod.Labels[sandboxLabel] = nameHash
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
 			changed = true
+
+		case podOwnedBySandbox:
+			if pod.Labels == nil {
+				pod.Labels = make(map[string]string)
+			}
+			if pod.Labels[sandboxLabel] != nameHash {
+				pod.Labels[sandboxLabel] = nameHash
+				changed = true
+			}
+			// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
+			for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+				if pod.Labels[k] != v {
+					pod.Labels[k] = v
+					changed = true
+				}
+			}
 		}
 
 		if changed {
@@ -456,7 +514,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
-	// 3. PATH: Create new Pod
+	// Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
 		sandboxLabel: nameHash,

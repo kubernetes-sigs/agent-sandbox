@@ -45,11 +45,14 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		Build()
 }
 
+const sandboxUID = types.UID("test-sandbox-uid")
+
 func sandboxControllerRef(name string) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion:         "agents.x-k8s.io/v1alpha1",
 		Kind:               "Sandbox",
 		Name:               name,
+		UID:                sandboxUID,
 		Controller:         ptr.To(true),
 		BlockOwnerDeletion: ptr.To(true),
 	}
@@ -502,6 +505,7 @@ func TestReconcile(t *testing.T) {
 			sb := &sandboxv1alpha1.Sandbox{}
 			sb.Name = sandboxName
 			sb.Namespace = sandboxNs
+			sb.UID = sandboxUID
 			sb.Generation = 1
 			sb.Spec = tc.sandboxSpec
 			r := SandboxReconciler{
@@ -555,6 +559,7 @@ func TestReconcilePod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sandboxName,
 			Namespace: sandboxNs,
+			UID:       sandboxUID,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
 			Replicas: ptr.To(int32(1)),
@@ -584,6 +589,7 @@ func TestReconcilePod(t *testing.T) {
 		wantPod                *corev1.Pod
 		expectErr              bool
 		wantSandboxAnnotations map[string]string
+		wantPodSurvives        string // if set, verify this pod still exists after reconcile
 	}{
 		{
 			name: "updates label and owner reference if Pod already exists",
@@ -658,6 +664,7 @@ func TestReconcilePod(t *testing.T) {
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 				},
 			},
@@ -665,6 +672,7 @@ func TestReconcilePod(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
+					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
 					Replicas: ptr.To(int32(0))},
@@ -706,6 +714,7 @@ func TestReconcilePod(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
+					UID:       sandboxUID,
 					Annotations: map[string]string{
 						SandboxPodNameAnnotation: "adopted-pod-name",
 					},
@@ -744,7 +753,7 @@ func TestReconcilePod(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			name: "does not change controller if Pod already has a different controller",
+			name: "refuses to modify pod owned by a different controller",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -772,37 +781,9 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			sandbox: sandboxObj,
-			// The pod should still have the original controller reference
-			wantPod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            sandboxName,
-					Namespace:       sandboxNs,
-					ResourceVersion: "2",
-					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
-						"custom-label":                      "label-val",
-					},
-					// Should still have the original controller reference
-					OwnerReferences: []metav1.OwnerReference{
-						{
-							APIVersion:         "apps/v1",
-							Kind:               "Deployment",
-							Name:               "some-other-controller",
-							UID:                "some-other-uid",
-							Controller:         ptr.To(true),
-							BlockOwnerDeletion: ptr.To(true),
-						},
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name: "foo",
-						},
-					},
-				},
-			},
+			sandbox:   sandboxObj,
+			wantPod:   nil,
+			expectErr: true,
 		},
 		{
 			name:        "error when annotated pod does not exist",
@@ -832,7 +813,158 @@ func TestReconcilePod(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name: "remove pod name annotation when replicas is 0",
+			name: "refuses to delete annotated pod owned by a different controller",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "victim-pod",
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "apps/v1",
+								Kind:               "Deployment",
+								Name:               "other-deployment",
+								UID:                "other-uid",
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(true),
+							},
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						SandboxPodNameAnnotation: "victim-pod",
+						"other-annotation":       "keep-me",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+			},
+			wantPod:                nil,
+			expectErr:              false,
+			wantSandboxAnnotations: map[string]string{"other-annotation": "keep-me"},
+			wantPodSurvives:        "victim-pod",
+		},
+		{
+			name: "refuses to delete annotated pod with no controller reference",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "unowned-pod",
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						SandboxPodNameAnnotation: "unowned-pod",
+						"other-annotation":       "keep-me",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+			},
+			wantPod:                nil,
+			expectErr:              false,
+			wantSandboxAnnotations: map[string]string{"other-annotation": "keep-me"},
+			wantPodSurvives:        "unowned-pod",
+		},
+		{
+			name: "deletes annotated pod owned by this sandbox",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "owned-pod",
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						SandboxPodNameAnnotation: "owned-pod",
+						"other-annotation":       "keep-me",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+			},
+			wantPod:                nil,
+			expectErr:              false,
+			wantSandboxAnnotations: map[string]string{"other-annotation": "keep-me"},
+		},
+		{
+			name: "refuses to adopt annotated pod owned by a different controller",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "foreign-pod",
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "apps/v1",
+								Kind:               "Deployment",
+								Name:               "other-deployment",
+								UID:                "other-uid",
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(true),
+							},
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						SandboxPodNameAnnotation: "foreign-pod",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					},
+				},
+			},
+			wantPod:   nil,
+			expectErr: true,
+		},
+		{
+			name: "refuses to delete unowned annotated pod and removes annotation when replicas is 0",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -858,6 +990,7 @@ func TestReconcilePod(t *testing.T) {
 			wantPod:                nil,
 			expectErr:              false,
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
+			wantPodSurvives:        "annotated-pod-name",
 		},
 	}
 
@@ -884,25 +1017,27 @@ func TestReconcilePod(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, tc.wantPod, livePod)
 			} else if !tc.expectErr {
-				// When wantPod is nil and no error expected, verify pod doesn't exist
-				livePod := &corev1.Pod{}
-				podName := sandboxName
-				// Check if there's an annotation with a non-empty value
-				if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
-					podName = annotatedPod
+				if tc.wantPodSurvives != "" {
+					// Pod should still exist (ownership check blocked deletion)
+					livePod := &corev1.Pod{}
+					err = r.Get(t.Context(), types.NamespacedName{Name: tc.wantPodSurvives, Namespace: sandboxNs}, livePod)
+					require.NoError(t, err, "expected pod %q to survive but it was deleted", tc.wantPodSurvives)
+				} else {
+					// When wantPod is nil and no error expected, verify pod doesn't exist
+					livePod := &corev1.Pod{}
+					podName := sandboxName
+					if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
+						podName = annotatedPod
+					}
+					err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)
+					require.True(t, k8serrors.IsNotFound(err))
 				}
-				err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)
-				require.True(t, k8serrors.IsNotFound(err))
 			}
 
-			// Check if sandbox annotations were updated as expected
 			if tc.wantSandboxAnnotations != nil {
-				// Fetch the sandbox to see if annotations were updated
 				liveSandbox := &sandboxv1alpha1.Sandbox{}
 				err = r.Get(t.Context(), types.NamespacedName{Name: tc.sandbox.Name, Namespace: tc.sandbox.Namespace}, liveSandbox)
 				require.NoError(t, err)
-
-				// Check if the annotations match what we expect
 				require.Equal(t, tc.wantSandboxAnnotations, liveSandbox.Annotations)
 			}
 		})

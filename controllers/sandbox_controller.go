@@ -49,6 +49,43 @@ const (
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
 
+// resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
+type resourceOwnership int
+
+const (
+	// resourceOwnedBySandbox indicates the resource's controllerRef points to this Sandbox.
+	resourceOwnedBySandbox resourceOwnership = iota
+	// resourceUnowned indicates the resource has no controllerRef.
+	resourceUnowned
+	// resourceOwnedByOther indicates the resource's controllerRef points to a different controller.
+	resourceOwnedByOther
+)
+
+// checkOwnership determines whether a Kubernetes resource is owned by the given Sandbox,
+// has no controller, or is owned by a different controller.
+// It returns both the ownership classification and the controller reference (if any),
+// so callers can log owner details without redundant GetControllerOf calls.
+func checkOwnership(obj client.Object, sandbox *sandboxv1alpha1.Sandbox) (resourceOwnership, *metav1.OwnerReference) {
+	controllerRef := metav1.GetControllerOf(obj)
+	if controllerRef == nil {
+		return resourceUnowned, nil
+	}
+	if controllerRef.UID == sandbox.UID {
+		return resourceOwnedBySandbox, controllerRef
+	}
+	return resourceOwnedByOther, controllerRef
+}
+
+// resolvePodName returns the name of the pod associated with the given Sandbox.
+// If the sandbox has adopted a warm pool pod, the pod name is tracked in the
+// agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
+func resolvePodName(sandbox *sandboxv1alpha1.Sandbox) string {
+	if name, ok := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; ok && name != "" {
+		return name
+	}
+	return sandbox.Name
+}
+
 var (
 	// Scheme for use by sandbox controllers. Registers required types for client.
 	Scheme = runtime.NewScheme()
@@ -291,6 +328,48 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 	} else {
 		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+
+		ownership, controllerRef := checkOwnership(service, sandbox)
+		switch ownership {
+		case resourceOwnedByOther:
+			log.Info("Refusing to use service: service is owned by a different controller",
+				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
+			return nil, fmt.Errorf("service %q is owned by %s/%s (UID: %s), not by sandbox %q",
+				service.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
+
+		case resourceUnowned:
+			// ClusterIP is immutable — refuse adoption if the service is not headless.
+			if service.Spec.ClusterIP != corev1.ClusterIPNone && service.Spec.ClusterIP != "" {
+				log.Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
+					"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
+					"Service.ClusterIP", service.Spec.ClusterIP)
+				return nil, fmt.Errorf("cannot adopt service %q: ClusterIP is %q (expected %q, field is immutable)",
+					service.Name, service.Spec.ClusterIP, corev1.ClusterIPNone)
+			}
+
+			log.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
+
+			// Enforce intended labels and selector to prevent traffic hijack.
+			if service.Labels == nil {
+				service.Labels = make(map[string]string)
+			}
+			service.Labels[sandboxLabel] = nameHash
+			service.Spec.Selector = map[string]string{
+				sandboxLabel: nameHash,
+			}
+
+			if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
+				return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
+			}
+			if err := r.Update(ctx, service); err != nil {
+				return nil, fmt.Errorf("failed to update service with owner reference: %w", err)
+			}
+
+		case resourceOwnedBySandbox:
+			// Already owned by this sandbox — no action needed.
+		}
+
 		setServiceStatus(sandbox, service)
 		return service, nil
 	}
@@ -360,11 +439,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	// Determine the pod name to look up
-	podName := sandbox.Name
-	var trackedPodName string
-	var podNameAnnotationExists bool
-	if trackedPodName, podNameAnnotationExists = sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; podNameAnnotationExists && trackedPodName != "" {
-		podName = trackedPodName
+	podName := resolvePodName(sandbox)
+	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]
+	if podName != sandbox.Name {
 		log.Info("Using tracked pod name from sandbox annotation", "podName", podName)
 	}
 
@@ -382,23 +459,32 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	// 1. PATH: Logic for deleting Pod when replicas is 0
 	if *sandbox.Spec.Replicas == 0 {
 		if pod != nil {
-			if pod.DeletionTimestamp.IsZero() {
-				log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-				if err := r.Delete(ctx, pod); err != nil {
-					return nil, fmt.Errorf("failed to delete pod: %w", err)
+			ownership, controllerRef := checkOwnership(pod, sandbox)
+			switch ownership {
+			case resourceOwnedBySandbox:
+				if pod.DeletionTimestamp.IsZero() {
+					log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					if err := r.Delete(ctx, pod); err != nil {
+						return nil, fmt.Errorf("failed to delete pod: %w", err)
+					}
+				} else {
+					log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
-			} else {
-				log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			case resourceUnowned:
+				log.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
+			case resourceOwnedByOther:
+				log.Info("Refusing to delete pod: pod is owned by a different controller",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 			}
 		}
 
 		// Remove the pod name annotation from the sandbox if it exists
 		if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
 			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-			// Create a patch to update only the annotations
 			patch := client.MergeFrom(sandbox.DeepCopy())
 			delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
 
@@ -448,34 +534,46 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			})
 		}
 
-		if pod.Labels == nil {
-			pod.Labels = make(map[string]string)
-		}
-		changed := false
-		if pod.Labels[sandboxLabel] != nameHash {
-			pod.Labels[sandboxLabel] = nameHash
-			changed = true
-		}
-		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
-		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-			if pod.Labels[k] != v {
-				pod.Labels[k] = v
-				changed = true
-			}
-		}
+		ownership, controllerRef := checkOwnership(pod, sandbox)
+		switch ownership {
+		case resourceOwnedByOther:
+			log.Info("Refusing to adopt pod: pod is owned by a different controller",
+				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
-		// Set controller reference if the pod is not controlled by anything.
-		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
+			if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
+				log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
+				patch := client.MergeFrom(sandbox.DeepCopy())
+				delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
+				if err := r.Patch(ctx, sandbox, patch); err != nil {
+					return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
+				}
+			}
+
+			return nil, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
+				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
+
+		case resourceUnowned:
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
-			changed = true
+
+		case resourceOwnedBySandbox:
+			// No additional action needed — label applied below.
 		}
 
-		if changed {
-			if err := r.Update(ctx, pod); err != nil {
-				return nil, fmt.Errorf("failed to update pod: %w", err)
-			}
+		// Apply label for both podUnowned and podOwnedBySandbox cases.
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		pod.Labels[sandboxLabel] = nameHash
+		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
+		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+			pod.Labels[k] = v
+		}
+
+		if err := r.Update(ctx, pod); err != nil {
+			return nil, fmt.Errorf("failed to update pod: %w", err)
 		}
 
 		if err := ensurePodNameAnnotation(pod.Name); err != nil {
@@ -487,7 +585,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
-	// 3. PATH: Create new Pod
+	// Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
 		sandboxLabel: nameHash,
@@ -557,6 +655,27 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name
 		err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc)
 		if err == nil {
+			ownership, controllerRef := checkOwnership(pvc, sandbox)
+			switch ownership {
+			case resourceOwnedByOther:
+				log.Info("Refusing to use PVC: PVC is owned by a different controller",
+					"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
+					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
+				return fmt.Errorf("PVC %q is owned by %s/%s (UID: %s), not by sandbox %q",
+					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
+
+			case resourceUnowned:
+				log.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+				}
+				if err := r.Update(ctx, pvc); err != nil {
+					return fmt.Errorf("failed to update PVC with owner reference: %w", err)
+				}
+
+			case resourceOwnedBySandbox:
+				// Already owned by this sandbox — no action needed.
+			}
 			continue
 		}
 
@@ -566,6 +685,9 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 		}
 
 		pvcLabels := maps.Clone(pvcTemplate.Labels)
+		if pvcLabels == nil {
+			pvcLabels = make(map[string]string)
+		}
 		pvcLabels[sandboxLabel] = nameHash
 
 		log.Info("Creating a new PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
@@ -591,25 +713,54 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
+	log := log.FromContext(ctx)
 	var allErrors error
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-		},
-	}
-	if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
-		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete pod: %w", err))
+
+	// Delete pod only if owned by this sandbox
+	podName := resolvePodName(sandbox)
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get pod: %w", err))
+		}
+	} else {
+		ownership, controllerRef := checkOwnership(pod, sandbox)
+		switch ownership {
+		case resourceOwnedBySandbox:
+			if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete pod: %w", err))
+			}
+		case resourceUnowned:
+			log.Info("Skipping pod deletion during expiry: pod has no controllerRef pointing to this sandbox",
+				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
+		case resourceOwnedByOther:
+			log.Info("Skipping pod deletion during expiry: pod is owned by a different controller",
+				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
+		}
 	}
 
-	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-		},
-	}
-	if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
-		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
+	// Delete service only if owned by this sandbox
+	service := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get service: %w", err))
+		}
+	} else {
+		ownership, controllerRef := checkOwnership(service, sandbox)
+		switch ownership {
+		case resourceOwnedBySandbox:
+			if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
+				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
+			}
+		case resourceUnowned:
+			log.Info("Skipping service deletion during expiry: service has no controllerRef pointing to this sandbox",
+				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
+		case resourceOwnedByOther:
+			log.Info("Skipping service deletion during expiry: service is owned by a different controller",
+				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
+		}
 	}
 
 	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {

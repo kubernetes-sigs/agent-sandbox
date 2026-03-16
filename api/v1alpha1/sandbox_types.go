@@ -29,6 +29,18 @@ const (
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
 	SandboxConditionFinished ConditionType = "Finished"
+	// SandboxReasonReady indicates the sandbox is fully operational
+	SandboxReasonReady = "SandboxReady"
+	// SandboxReasonPodProvisioning indicates the sandbox pod is being created or starting
+	SandboxReasonPodProvisioning = "PodProvisioning"
+	// SandboxReasonSuspended indicates the sandbox is suspended and not ready
+	SandboxReasonSuspended = "SandboxSuspended"
+	// SandboxReasonUnresponsive indicates the sandbox pod is in an unknown state
+	SandboxReasonUnresponsive = "SandboxUnresponsive"
+	// SandboxReasonSystemTermination indicates the sandbox is being terminated by the system (e.g., expiry)
+	SandboxReasonSystemTermination = "SystemInitiatedTermination"
+	// SandboxReasonUserTermination indicates the sandbox is being terminated by user request
+	SandboxReasonUserTermination = "UserInitiatedTermination"
 
 	// SandboxReasonExpired indicates expired state for Sandbox.
 	SandboxReasonExpired = "SandboxExpired"
@@ -47,11 +59,6 @@ const (
 	SandboxPropagatedLabelsAnnotation = "agents.x-k8s.io/propagated-labels"
 	// SandboxPropagatedAnnotationsAnnotation is the annotation used to track the annotations explicitly propagated from sandbox spec to pod.
 	SandboxPropagatedAnnotationsAnnotation = "agents.x-k8s.io/propagated-annotations"
-)
-
-type PodMetadata struct {
-	// labels defines the map of string keys and values that can be used to organize and categorize
-	// (scope and select) objects. May match selectors of replication controllers
 	// and services.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
 	// +optional

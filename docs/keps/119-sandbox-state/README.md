@@ -41,10 +41,6 @@ The controller evaluates the hierarchy top-down. The "Gap" between `Initialized`
 | **Expired** | `True` | `Any` | Any | **`False`** | `SandboxExpired` |
 | **Terminating** | `True` | `Any` | Any | **`False`** | `SandboxDeleting` |
 
----
-
-## Design Principles
-
 #### Why "Initialized" matters
 By isolating the one-time setup of Service into the `Initialized` condition, we provide users with high-fidelity feedback:
 * If **`Initialized` is False**, the issue is likely a platform or cloud provider error (e.g., failed to provide stable identity).

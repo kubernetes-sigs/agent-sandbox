@@ -652,7 +652,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 			Type:               string(sandboxv1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: sandbox.Generation,
-			Reason:             sandboxv1alpha1.SandboxReasonExpired,
+			Reason:             sandboxv1alpha1.SandboxReasonSystemTermination,
 			Message:            "Sandbox has expired",
 		})
 	}
@@ -687,7 +687,11 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) 
 // sandboxMarkedExpired checks if the sandbox is already marked as expired
 func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+<<<<<<< HEAD
 	return cond != nil && (cond.Reason == sandboxv1alpha1.SandboxReasonExpired)
+=======
+	return cond != nil && (cond.Reason == sandboxv1alpha1.SandboxReasonExpired || cond.Reason == sandboxv1alpha1.SandboxReasonSystemTermination)
+>>>>>>> 84dd30e (Add a KEP to discuss the status field of Sandbox.)
 }
 
 // SetupWithManager sets up the controller with the Manager.

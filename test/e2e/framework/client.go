@@ -416,6 +416,8 @@ func gvkForObject(obj runtime.Object) (schema.GroupVersionKind, error) {
 	switch o := obj.(type) {
 	case *corev1.Pod:
 		return schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}, nil
+	case *appsv1.Deployment:
+		return schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, nil
 	case *sandboxv1alpha1.Sandbox:
 		return sandboxGVK, nil
 	case *sandboxextensionsv1alpha1.SandboxWarmPool:
@@ -438,6 +440,8 @@ func gvrForGVK(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error)
 		return gv.WithResource("sandboxwarmpools"), nil
 	case schema.GroupKind{Kind: "Pod"}:
 		return gv.WithResource("pods"), nil
+	case schema.GroupKind{Kind: "Deployment", Group: "apps"}:
+		return gv.WithResource("deployments"), nil
 	case schema.GroupKind{Kind: "Namespace"}:
 		return gv.WithResource("namespaces"), nil
 	case schema.GroupKind{Kind: "SandboxClaim", Group: "extensions.agents.x-k8s.io"}:

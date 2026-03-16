@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -40,16 +41,16 @@ func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers
 	t.Cleanup(func() {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			var latest appsv1.Deployment
-			if err := tc.Get(t.Context(), types.NamespacedName{Name: "agent-sandbox-controller", Namespace: "agent-sandbox-system"}, &latest); err != nil {
+			if err := tc.Get(context.Background(), types.NamespacedName{Name: "agent-sandbox-controller", Namespace: "agent-sandbox-system"}, &latest); err != nil {
 				return err
 			}
 			latest.Spec = originalDeployment.Spec
-			return tc.Update(t.Context(), &latest)
+			return tc.Update(context.Background(), &latest)
 		})
 		require.NoError(t, err, "failed to restore controller deployment")
 
 		// Wait for the restored pod to be ready
-		err = tc.WaitForObject(t.Context(), &originalDeployment, []predicates.ObjectPredicate{
+		err = tc.WaitForObject(context.Background(), &originalDeployment, []predicates.ObjectPredicate{
 			predicates.ReadyReplicasConditionIsTrue,
 		}...)
 		require.NoError(t, err, "failed to wait for restored controller deployment")
@@ -141,17 +142,16 @@ func TestParallelSandboxes(t *testing.T) {
 	}
 }
 
-func TestParallelSandboxClaimsWithSufficientWarmPool(t *testing.T) {
-	tc := framework.NewTestContext(t)
+func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolSize int32, numClaims int) {
 	patchControllerConcurrency(t, tc, 10)
 
 	ns := &corev1.Namespace{}
-	ns.Name = fmt.Sprintf("parallel-claims-suff-pool-%d", time.Now().UnixNano())
+	ns.Name = fmt.Sprintf("parallel-claims-pool-%d", time.Now().UnixNano())
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 
 	// Create a SandboxTemplate
 	template := &extensionsv1alpha1.SandboxTemplate{}
-	template.Name = "test-template-suff"
+	template.Name = "test-template"
 	template.Namespace = ns.Name
 	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
@@ -163,17 +163,14 @@ func TestParallelSandboxClaimsWithSufficientWarmPool(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
 	poolObj := &extensionsv1alpha1.SandboxWarmPool{}
-	poolObj.Name = "warmpool-sufficient"
+	poolObj.Name = "warmpool"
 	poolObj.Namespace = ns.Name
-	// Pool size is explicitly set to handle all claims plus some buffer
-	poolSize := int32(25)
 	poolObj.Spec.Replicas = poolSize
 	poolObj.Spec.TemplateRef.Name = template.Name
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), poolObj))
 
 	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), types.NamespacedName{Name: poolObj.Name, Namespace: poolObj.Namespace}))
 
-	numClaims := 20
 	var wg sync.WaitGroup
 	errCh := make(chan error, numClaims)
 
@@ -204,67 +201,16 @@ func TestParallelSandboxClaimsWithSufficientWarmPool(t *testing.T) {
 	}
 }
 
+func TestParallelSandboxClaimsWithSufficientWarmPool(t *testing.T) {
+	tc := framework.NewTestContext(t)
+	// Pool size is explicitly set to handle all claims plus some buffer
+	runParallelSandboxClaimsTest(t, tc, 25, 20)
+}
+
 // This test is to exercise the scenario where there are more claims than those available in the
 // warm pool and hence pod creation will have to happen in parallel.
 func TestParallelSandboxClaimsWithInsufficientWarmPool(t *testing.T) {
 	tc := framework.NewTestContext(t)
-	patchControllerConcurrency(t, tc, 10)
-
-	ns := &corev1.Namespace{}
-	ns.Name = fmt.Sprintf("parallel-claims-insuff-pool-%d", time.Now().UnixNano())
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
-
-	// Create a SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{}
-	template.Name = "test-template-insuff"
-	template.Namespace = ns.Name
-	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{Name: "pause", Image: "registry.k8s.io/pause:3.10"},
-			},
-		},
-	}
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
-
-	poolObj := &extensionsv1alpha1.SandboxWarmPool{}
-	poolObj.Name = "warmpool-insufficient"
-	poolObj.Namespace = ns.Name
 	// Pool size is explicitly set to handle less claims than total
-	poolSize := int32(5)
-	poolObj.Spec.Replicas = poolSize
-	poolObj.Spec.TemplateRef.Name = template.Name
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), poolObj))
-
-	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), types.NamespacedName{Name: poolObj.Name, Namespace: poolObj.Namespace}))
-
-	numClaims := 20
-	var wg sync.WaitGroup
-	errCh := make(chan error, numClaims)
-
-	for i := 0; i < numClaims; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			claimName := fmt.Sprintf("claim-%d", idx)
-			claimObj := &extensionsv1alpha1.SandboxClaim{}
-			claimObj.Name = claimName
-			claimObj.Namespace = ns.Name
-			claimObj.Spec.TemplateRef.Name = template.Name
-			if err := tc.CreateWithCleanup(t.Context(), claimObj); err != nil {
-				errCh <- fmt.Errorf("failed creating claim %d: %w", idx, err)
-				return
-			}
-			if err := tc.WaitForObject(t.Context(), claimObj, predicates.ReadyConditionIsTrue); err != nil {
-				errCh <- fmt.Errorf("failed waiting for claim %d: %w", idx, err)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		t.Errorf("Error during parallel run: %v", err)
-	}
+	runParallelSandboxClaimsTest(t, tc, 5, 20)
 }

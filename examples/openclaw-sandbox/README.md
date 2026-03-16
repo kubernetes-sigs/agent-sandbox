@@ -1,6 +1,6 @@
-# Moltbot (OpenClaw) Sandbox Example
+# OpenClaw Sandbox Example
 
-This example demonstrates how to run [OpenClaw (Moltbot)](https://github.com/openclaw/openclaw) inside the Agent Sandbox.
+This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://github.com/openclaw/openclaw) inside the Agent Sandbox.
 
 ## Prerequisites
 
@@ -11,7 +11,7 @@ This example demonstrates how to run [OpenClaw (Moltbot)](https://github.com/ope
 
 1.  (If using Kind) Load the image into Kind:
     ```bash
-    kind load docker-image moltbot/moltbot:latest
+    kind load docker-image ghcr.io/openclaw/openclaw:latest
     ```
 
 2.  Generate a secure token:
@@ -21,7 +21,7 @@ This example demonstrates how to run [OpenClaw (Moltbot)](https://github.com/ope
 
 3.  Apply the Sandbox resource (replacing the token placeholder):
     ```bash
-    sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" moltbot-sandbox.yaml | kubectl apply -f -
+    sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" openclaw-sandbox.yaml | kubectl apply -f -
     ```
 
 4.  Verify the pod is running and port-forward to access the Gateway:
@@ -33,12 +33,12 @@ This example demonstrates how to run [OpenClaw (Moltbot)](https://github.com/ope
 
 ## CLI Operations
 
-You can run Moltbot CLI commands directly inside the sandbox container.
+You can run OpenClaw CLI commands directly inside the sandbox container.
 Note: The entry point is `dist/index.mjs` in newer versions.
 
 ```bash
 # Get the pod name
-export POD_NAME=$(kubectl get pod -l sandbox=moltbot-sandbox -o jsonpath='{.items[0].metadata.name}')
+export POD_NAME=$(kubectl get pod -l sandbox=openclaw-sandbox -o jsonpath='{.items[0].metadata.name}')
 
 # Check status
 kubectl exec -it $POD_NAME -- node dist/index.mjs channels status

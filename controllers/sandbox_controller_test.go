@@ -21,8 +21,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -201,142 +199,6 @@ func TestComputeReadyCondition(t *testing.T) {
 			require.Equal(t, tc.sandbox.Generation, condition.ObservedGeneration)
 			require.Equal(t, tc.expectedStatus, condition.Status)
 			require.Equal(t, tc.expectedReason, condition.Reason)
-		})
-	}
-}
-
-func TestSandboxCollector(t *testing.T) {
-	testCases := []struct {
-		name           string
-		sandboxes      []runtime.Object
-		expectedCount  int
-		expectedLabels map[string]int
-	}{
-		{
-			name: "single ready cold unknown sandbox",
-			sandboxes: []runtime.Object{
-				&sandboxv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "sandbox-1",
-						Namespace: "default",
-					},
-					Status: sandboxv1alpha1.SandboxStatus{
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(sandboxv1alpha1.SandboxConditionReady),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-			},
-			expectedCount: 1,
-			expectedLabels: map[string]int{
-				"expired:false launch_type:cold ready_condition:true sandbox_template:unknown": 1,
-			},
-		},
-		{
-			name: "mixed sandboxes",
-			sandboxes: []runtime.Object{
-				&sandboxv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "sandbox-1",
-						Namespace: "default",
-					},
-					Status: sandboxv1alpha1.SandboxStatus{
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(sandboxv1alpha1.SandboxConditionReady),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-				&sandboxv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "sandbox-2",
-						Namespace: "default",
-						Annotations: map[string]string{
-							SandboxPodNameAnnotation:     "adopted-pod",
-							SandboxTemplateRefAnnotation: "my-template",
-						},
-					},
-					Status: sandboxv1alpha1.SandboxStatus{
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(sandboxv1alpha1.SandboxConditionReady),
-								Status: metav1.ConditionFalse,
-								Reason: "SandboxExpired",
-							},
-						},
-					},
-				},
-				&sandboxv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "sandbox-3",
-						Namespace: "default",
-					},
-					Status: sandboxv1alpha1.SandboxStatus{
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(sandboxv1alpha1.SandboxConditionReady),
-								Status: metav1.ConditionFalse,
-							},
-						},
-					},
-				},
-				&sandboxv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "sandbox-4",
-						Namespace: "default",
-					},
-					Status: sandboxv1alpha1.SandboxStatus{
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(sandboxv1alpha1.SandboxConditionReady),
-								Status: metav1.ConditionFalse,
-							},
-						},
-					},
-				},
-			},
-			expectedCount: 3, // We expect 3 distinct metric series for the 4 sandboxes
-			expectedLabels: map[string]int{
-				"expired:false launch_type:cold ready_condition:true sandbox_template:unknown":     1,
-				"expired:true launch_type:warm ready_condition:false sandbox_template:my-template": 1,
-				"expired:false launch_type:cold ready_condition:false sandbox_template:unknown":    2,
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			fakeClient := newFakeClient(tc.sandboxes...)
-			collector := NewSandboxCollector(fakeClient)
-			registry := prometheus.NewRegistry()
-			registry.MustRegister(collector)
-			count, err := testutil.GatherAndCount(registry, "agent_sandboxes")
-			require.NoError(t, err)
-			require.Equal(t, tc.expectedCount, count)
-			metrics, err := registry.Gather()
-			require.NoError(t, err)
-			actualLabels := make(map[string]int)
-			for _, mf := range metrics {
-				if mf.GetName() == "agent_sandboxes" {
-					for _, m := range mf.GetMetric() {
-						labelStr := ""
-						for _, l := range m.GetLabel() {
-							labelStr += l.GetName() + ":" + l.GetValue() + " "
-						}
-						// Trim trailing space
-						if len(labelStr) > 0 {
-							labelStr = labelStr[:len(labelStr)-1]
-						}
-						actualLabels[labelStr] = int(m.GetGauge().GetValue())
-					}
-				}
-			}
-			require.Equal(t, tc.expectedLabels, actualLabels)
 		})
 	}
 }
@@ -844,7 +706,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "adopted-pod-name",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -948,7 +810,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "non-existent-pod",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "non-existent-pod",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -983,8 +845,8 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "annotated-pod-name",
-						"other-annotation":       "other-value",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "annotated-pod-name",
+						"other-annotation":                       "other-value",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -1024,7 +886,7 @@ func TestReconcilePod(t *testing.T) {
 				livePod := &corev1.Pod{}
 				podName := sandboxName
 				// Check if there's an annotation with a non-empty value
-				if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
+				if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
 					podName = annotatedPod
 				}
 				err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)

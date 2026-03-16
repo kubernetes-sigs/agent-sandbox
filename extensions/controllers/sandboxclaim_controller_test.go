@@ -986,7 +986,7 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 			} else if tc.expectSandboxCreate {
 				// Verify no pod name annotation when no adoption occurred
 				if sandbox.Annotations != nil {
-					if _, exists := sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation]; exists {
+					if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
 						t.Errorf("expected no pod name annotation but found one")
 					}
 				}

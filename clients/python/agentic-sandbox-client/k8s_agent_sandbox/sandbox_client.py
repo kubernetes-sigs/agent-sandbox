@@ -354,17 +354,12 @@ class SandboxClient:
             # Case 1: API URL provided manually (DNS / Internal) -> Do nothing, just use it.
             logging.info(f"Using configured API URL: {self.base_url}")
 
-        elif self.pod_ip:
-            # Case 2: Pod IP available from claim status -> Direct connection (fastest)
-            self.base_url = f"http://{self.pod_ip}:{self.server_port}"
-            logging.info(f"Using direct pod IP connection: {self.base_url}")
-
         elif self.gateway_name:
-            # Case 3: Gateway Name provided -> Production Mode (Discovery)
+            # Case 2: Gateway Name provided -> Production Mode (Discovery)
             self._wait_for_gateway_ip()
 
         else:
-            # Case 4: No Gateway, No URL, No Pod IP -> Developer Mode (Port Forward to Router)
+            # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)
             self._start_and_wait_for_port_forward()
 
         return self

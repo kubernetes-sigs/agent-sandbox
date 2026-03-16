@@ -48,29 +48,31 @@ const (
 	sandboxControllerFieldOwner = "sandbox-controller"
 )
 
-// podOwnership represents the ownership state of a Pod relative to a Sandbox.
-type podOwnership int
+// resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
+type resourceOwnership int
 
 const (
-	// podOwnedBySandbox indicates the Pod's controllerRef points to this Sandbox.
-	podOwnedBySandbox podOwnership = iota
-	// podUnowned indicates the Pod has no controllerRef.
-	podUnowned
-	// podOwnedByOther indicates the Pod's controllerRef points to a different controller.
-	podOwnedByOther
+	// resourceOwnedBySandbox indicates the resource's controllerRef points to this Sandbox.
+	resourceOwnedBySandbox resourceOwnership = iota
+	// resourceUnowned indicates the resource has no controllerRef.
+	resourceUnowned
+	// resourceOwnedByOther indicates the resource's controllerRef points to a different controller.
+	resourceOwnedByOther
 )
 
-// checkPodOwnership determines whether a Pod is owned by the given Sandbox,
+// checkOwnership determines whether a Kubernetes resource is owned by the given Sandbox,
 // has no controller, or is owned by a different controller.
-func checkPodOwnership(pod *corev1.Pod, sandbox *sandboxv1alpha1.Sandbox) podOwnership {
-	controllerRef := metav1.GetControllerOf(pod)
+// It returns both the ownership classification and the controller reference (if any),
+// so callers can log owner details without redundant GetControllerOf calls.
+func checkOwnership(obj client.Object, sandbox *sandboxv1alpha1.Sandbox) (resourceOwnership, *metav1.OwnerReference) {
+	controllerRef := metav1.GetControllerOf(obj)
 	if controllerRef == nil {
-		return podUnowned
+		return resourceUnowned, nil
 	}
 	if controllerRef.UID == sandbox.UID {
-		return podOwnedBySandbox
+		return resourceOwnedBySandbox, controllerRef
 	}
-	return podOwnedByOther
+	return resourceOwnedByOther, controllerRef
 }
 
 var (
@@ -409,9 +411,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	if *sandbox.Spec.Replicas == 0 {
 		if pod != nil {
-			ownership := checkPodOwnership(pod, sandbox)
+			ownership, controllerRef := checkOwnership(pod, sandbox)
 			switch ownership {
-			case podOwnedBySandbox:
+			case resourceOwnedBySandbox:
 				if pod.DeletionTimestamp.IsZero() {
 					log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
@@ -420,11 +422,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				} else {
 					log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
-			case podUnowned:
+			case resourceUnowned:
 				log.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
-			case podOwnedByOther:
-				controllerRef := metav1.GetControllerOf(pod)
+			case resourceOwnedByOther:
 				log.Info("Refusing to delete pod: pod is owned by a different controller",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
@@ -456,11 +457,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			})
 		}
 
-		ownership := checkPodOwnership(pod, sandbox)
-		changed := false
+		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
-		case podOwnedByOther:
-			controllerRef := metav1.GetControllerOf(pod)
+		case resourceOwnedByOther:
 			log.Info("Refusing to adopt pod: pod is owned by a different controller",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
@@ -477,13 +476,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, fmt.Errorf("pod %q is owned by %s/%s, not by sandbox %q",
 				pod.Name, controllerRef.Kind, controllerRef.Name, sandbox.Name)
 
-		case podUnowned:
+		case resourceUnowned:
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
-			changed = true
 
-		case podOwnedBySandbox:
+		case resourceOwnedBySandbox:
 			// No additional action needed — label applied below.
 		}
 
@@ -601,25 +599,53 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
+	log := log.FromContext(ctx)
 	var allErrors error
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-		},
-	}
-	if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
-		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete pod: %w", err))
+
+	// Delete pod only if owned by this sandbox
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get pod: %w", err))
+		}
+	} else {
+		ownership, controllerRef := checkOwnership(pod, sandbox)
+		switch ownership {
+		case resourceOwnedBySandbox:
+			if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete pod: %w", err))
+			}
+		case resourceUnowned:
+			log.Info("Skipping pod deletion during expiry: pod has no controllerRef pointing to this sandbox",
+				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
+		case resourceOwnedByOther:
+			log.Info("Skipping pod deletion during expiry: pod is owned by a different controller",
+				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
+		}
 	}
 
-	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-		},
-	}
-	if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
-		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
+	// Delete service only if owned by this sandbox
+	service := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get service: %w", err))
+		}
+	} else {
+		ownership, controllerRef := checkOwnership(service, sandbox)
+		switch ownership {
+		case resourceOwnedBySandbox:
+			if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
+				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
+			}
+		case resourceUnowned:
+			log.Info("Skipping service deletion during expiry: service has no controllerRef pointing to this sandbox",
+				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
+		case resourceOwnedByOther:
+			log.Info("Skipping service deletion during expiry: service is owned by a different controller",
+				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
+		}
 	}
 
 	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {

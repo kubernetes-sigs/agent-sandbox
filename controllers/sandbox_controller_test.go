@@ -216,6 +216,7 @@ func TestReconcile(t *testing.T) {
 		wantStatus           sandboxv1alpha1.SandboxStatus
 		wantObjs             []client.Object
 		wantDeletedObjs      []client.Object
+		wantSurvivingObjs    []client.Object
 		expectSandboxDeleted bool
 	}{
 		{
@@ -418,14 +419,16 @@ func TestReconcile(t *testing.T) {
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      sandboxName,
-						Namespace: sandboxNs,
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 				},
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      sandboxName,
-						Namespace: sandboxNs,
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 				},
 			},
@@ -465,14 +468,16 @@ func TestReconcile(t *testing.T) {
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      sandboxName,
-						Namespace: sandboxNs,
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 				},
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      sandboxName,
-						Namespace: sandboxNs,
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 				},
 			},
@@ -497,6 +502,135 @@ func TestReconcile(t *testing.T) {
 				&sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
 			},
 			expectSandboxDeleted: true,
+		},
+		{
+			name: "sandbox expired skips deletion of pod owned by different controller",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "apps/v1",
+								Kind:               "Deployment",
+								Name:               "other-deployment",
+								UID:                "other-uid",
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(true),
+							},
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
+			// Pod should NOT be deleted (owned by other), Service SHOULD be deleted (owned by sandbox)
+			wantDeletedObjs: []client.Object{
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+			wantSurvivingObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "sandbox expired skips deletion of unowned pod",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+						// No owner references
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
+			wantDeletedObjs: []client.Object{
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+			wantSurvivingObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "sandbox expired with no matching pod or service",
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
 		},
 	}
 
@@ -546,6 +680,12 @@ func TestReconcile(t *testing.T) {
 				liveObj := obj.DeepCopyObject().(client.Object)
 				err = r.Get(t.Context(), types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, liveObj)
 				require.True(t, k8serrors.IsNotFound(err))
+			}
+			for _, obj := range tc.wantSurvivingObjs {
+				liveObj := obj.DeepCopyObject().(client.Object)
+				err = r.Get(t.Context(), types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, liveObj)
+				require.NoError(t, err, "expected object %q/%q to survive but it was deleted or not found",
+					obj.GetNamespace(), obj.GetName())
 			}
 		})
 	}
@@ -1045,6 +1185,116 @@ func TestReconcilePod(t *testing.T) {
 					require.Equal(t, tc.wantSandboxAnnotations, liveSandbox.Annotations)
 				}
 			}
+		})
+	}
+}
+
+func TestCheckOwnership(t *testing.T) {
+	sandboxName := "test-sandbox"
+	sandboxUID := types.UID("sandbox-uid-123")
+
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sandboxName,
+			UID:  sandboxUID,
+		},
+	}
+
+	otherOwnerRef := metav1.OwnerReference{
+		APIVersion:         "apps/v1",
+		Kind:               "Deployment",
+		Name:               "other-controller",
+		UID:                "other-uid",
+		Controller:         ptr.To(true),
+		BlockOwnerDeletion: ptr.To(true),
+	}
+
+	sandboxOwnerRef := metav1.OwnerReference{
+		APIVersion:         "agents.x-k8s.io/v1alpha1",
+		Kind:               "Sandbox",
+		Name:               sandboxName,
+		UID:                sandboxUID,
+		Controller:         ptr.To(true),
+		BlockOwnerDeletion: ptr.To(true),
+	}
+
+	testCases := []struct {
+		name              string
+		obj               client.Object
+		wantOwnership     resourceOwnership
+		wantControllerRef *metav1.OwnerReference
+	}{
+		{
+			name: "pod owned by sandbox",
+			obj: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-pod",
+					OwnerReferences: []metav1.OwnerReference{sandboxOwnerRef},
+				},
+			},
+			wantOwnership:     resourceOwnedBySandbox,
+			wantControllerRef: &sandboxOwnerRef,
+		},
+		{
+			name: "pod with no owner",
+			obj: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "unowned-pod",
+				},
+			},
+			wantOwnership:     resourceUnowned,
+			wantControllerRef: nil,
+		},
+		{
+			name: "pod owned by different controller",
+			obj: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "foreign-pod",
+					OwnerReferences: []metav1.OwnerReference{otherOwnerRef},
+				},
+			},
+			wantOwnership:     resourceOwnedByOther,
+			wantControllerRef: &otherOwnerRef,
+		},
+		{
+			name: "service owned by sandbox",
+			obj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-service",
+					OwnerReferences: []metav1.OwnerReference{sandboxOwnerRef},
+				},
+			},
+			wantOwnership:     resourceOwnedBySandbox,
+			wantControllerRef: &sandboxOwnerRef,
+		},
+		{
+			name: "service with no owner",
+			obj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "unowned-service",
+				},
+			},
+			wantOwnership:     resourceUnowned,
+			wantControllerRef: nil,
+		},
+		{
+			name: "service owned by different controller",
+			obj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "foreign-service",
+					OwnerReferences: []metav1.OwnerReference{otherOwnerRef},
+				},
+			},
+			wantOwnership:     resourceOwnedByOther,
+			wantControllerRef: &otherOwnerRef,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ownership, controllerRef := checkOwnership(tc.obj, sandbox)
+			require.Equal(t, tc.wantOwnership, ownership)
+			require.Equal(t, tc.wantControllerRef, controllerRef)
 		})
 	}
 }

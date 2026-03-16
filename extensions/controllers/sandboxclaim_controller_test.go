@@ -987,21 +987,12 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
 				}
 
-<<<<<<< agent-sandboxes-point-in-time-metrics-12557458534412660193
-			} else if tc.expectSandboxCreate {
-				// Verify no pod name annotation when no adoption occurred
-				if sandbox.Annotations != nil {
-					if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
-						t.Errorf("expected no pod name annotation but found one")
-					}
-=======
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
 				var sandbox sandboxv1alpha1.Sandbox
 				err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 				if err != nil {
 					t.Fatalf("expected sandbox to be created but got error: %v", err)
->>>>>>> main
 				}
 			}
 		})

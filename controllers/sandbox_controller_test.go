@@ -960,8 +960,9 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantPod:   nil,
-			expectErr: true,
+			wantPod:                nil,
+			expectErr:              true,
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "refuses to delete unowned annotated pod and removes annotation when replicas is 0",
@@ -1038,7 +1039,11 @@ func TestReconcilePod(t *testing.T) {
 				liveSandbox := &sandboxv1alpha1.Sandbox{}
 				err = r.Get(t.Context(), types.NamespacedName{Name: tc.sandbox.Name, Namespace: tc.sandbox.Namespace}, liveSandbox)
 				require.NoError(t, err)
-				require.Equal(t, tc.wantSandboxAnnotations, liveSandbox.Annotations)
+				if len(tc.wantSandboxAnnotations) == 0 {
+					require.Empty(t, liveSandbox.Annotations)
+				} else {
+					require.Equal(t, tc.wantSandboxAnnotations, liveSandbox.Annotations)
+				}
 			}
 		})
 	}

@@ -466,6 +466,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
 
 			if _, exists := sandbox.Annotations[SandboxPodNameAnnotation]; exists {
+				log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 				patch := client.MergeFrom(sandbox.DeepCopy())
 				delete(sandbox.Annotations, SandboxPodNameAnnotation)
 				if err := r.Patch(ctx, sandbox, patch); err != nil {
@@ -477,36 +478,27 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				pod.Name, controllerRef.Kind, controllerRef.Name, sandbox.Name)
 
 		case podUnowned:
-			if pod.Labels == nil {
-				pod.Labels = make(map[string]string)
-			}
-			pod.Labels[sandboxLabel] = nameHash
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
 			changed = true
 
 		case podOwnedBySandbox:
-			if pod.Labels == nil {
-				pod.Labels = make(map[string]string)
-			}
-			if pod.Labels[sandboxLabel] != nameHash {
-				pod.Labels[sandboxLabel] = nameHash
-				changed = true
-			}
-			// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
-			for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-				if pod.Labels[k] != v {
-					pod.Labels[k] = v
-					changed = true
-				}
-			}
+			// No additional action needed — label applied below.
 		}
 
-		if changed {
-			if err := r.Update(ctx, pod); err != nil {
-				return nil, fmt.Errorf("failed to update pod: %w", err)
-			}
+		// Apply label for both podUnowned and podOwnedBySandbox cases.
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		pod.Labels[sandboxLabel] = nameHash
+		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
+		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+			pod.Labels[k] = v
+		}
+
+		if err := r.Update(ctx, pod); err != nil {
+			return nil, fmt.Errorf("failed to update pod: %w", err)
 		}
 
 		// TODO - Do we enfore (change) spec if a pod exists ?

@@ -15,7 +15,6 @@
 package controllers
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -55,150 +54,243 @@ func sandboxControllerRef(name string) metav1.OwnerReference {
 	}
 }
 
-func TestComputeReadyCondition(t *testing.T) {
+func TestComputeConditions(t *testing.T) {
 	r := &SandboxReconciler{}
 
+	gen := int64(1)
+	sbWithRepl := func(replicas int32) *sandboxv1alpha1.Sandbox {
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Generation: gen},
+			Spec:       sandboxv1alpha1.SandboxSpec{Replicas: ptr.To(replicas)},
+		}
+	}
+
 	testCases := []struct {
-		name           string
-		sandbox        *sandboxv1alpha1.Sandbox
-		err            error
-		svc            *corev1.Service
-		pod            *corev1.Pod
-		expectedStatus metav1.ConditionStatus
-		expectedReason string
+		name               string
+		sandbox            *sandboxv1alpha1.Sandbox
+		svcsProvisioned    bool
+		pvcsProvisioned    bool
+		pod                *corev1.Pod
+		expectedConditions []metav1.Condition
 	}{
 		{
-			name: "all ready",
-			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Generation: 1,
-				},
+			name:            "1. Provisioning - No dependencies",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: false,
+			pvcsProvisioned: false,
+			pod:             nil,
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "False", ObservedGeneration: gen, Reason: "SandboxInitializing", Message: "Provisioning dependencies"},
+				{Type: "Suspended", Status: "Unknown", ObservedGeneration: gen, Reason: "PendingEvaluation", Message: "The suspension status has not yet been determined."},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxInitializing", Message: "Waiting for Sandbox to be provisioned"},
 			},
-			err: nil,
-			svc: &corev1.Service{},
+		},
+		{
+			name:            "2. Provisioning - Partial dependencies (missing service)",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: false,
+			pvcsProvisioned: true,
+			pod:             nil,
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "False", ObservedGeneration: gen, Reason: "SandboxInitializing", Message: "Provisioning dependencies"},
+				{Type: "Suspended", Status: "Unknown", ObservedGeneration: gen, Reason: "PendingEvaluation", Message: "The suspension status has not yet been determined."},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxInitializing", Message: "Waiting for Sandbox to be provisioned"},
+			},
+		},
+		{
+			name:            "3. Dependencies provisioned, Pod missing",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
+			pod:             nil,
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "Unknown", ObservedGeneration: gen, Reason: "PendingEvaluation", Message: "The suspension status has not yet been determined."},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is initializing"},
+			},
+		},
+		{
+			name:            "4. Pod Pending",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
+			pod:             &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is in phase: Pending"},
+			},
+		},
+		{
+			name:            "5. Pod Running but not Ready",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
-						{
-							Type:   corev1.PodReady,
-							Status: corev1.ConditionTrue,
-						},
+						{Type: corev1.PodReady, Status: corev1.ConditionFalse},
 					},
 				},
 			},
-			expectedStatus: metav1.ConditionTrue,
-			expectedReason: "DependenciesReady",
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is Running but not Ready"},
+			},
 		},
 		{
-			name: "error",
-			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Generation: 1,
-				},
-			},
-			err:            errors.New("test error"),
-			svc:            &corev1.Service{},
-			pod:            &corev1.Pod{},
-			expectedStatus: metav1.ConditionFalse,
-			expectedReason: "ReconcilerError",
-		},
-		{
-			name: "pod not ready",
-			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Generation: 1,
-				},
-			},
-			err: nil,
-			svc: &corev1.Service{},
+			name:            "6. Operational Sandbox - Fully Ready",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
-						{
-							Type:   corev1.PodReady,
-							Status: corev1.ConditionFalse,
-						},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 					},
 				},
 			},
-			expectedStatus: metav1.ConditionFalse,
-			expectedReason: "DependenciesNotReady",
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
+				{Type: "Ready", Status: "True", ObservedGeneration: gen, Reason: "SandboxReady", Message: "Sandbox is operational"},
+			},
 		},
 		{
-			name: "pod running but not ready",
-			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Generation: 1,
-				},
-			},
-			err: nil,
-			svc: &corev1.Service{},
+			name:            "7. Suspended by user - Pod still terminating",
+			sandbox:         sbWithRepl(0),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
 				},
 			},
-			expectedStatus: metav1.ConditionFalse,
-			expectedReason: "DependenciesNotReady",
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "UserSuspended", Message: "Sandbox has been suspended by the user"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
+			},
 		},
 		{
-			name: "pod pending",
+			name:            "8. Fully suspended - Pod deleted",
+			sandbox:         sbWithRepl(0),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
+			pod:             nil,
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "UserSuspended", Message: "Sandbox has been suspended by the user"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
+			},
+		},
+		{
+			name:            "9. Resuming - Pod missing",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
+			pod:             nil,
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "Unknown", ObservedGeneration: gen, Reason: "PendingEvaluation", Message: "The suspension status has not yet been determined."},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is initializing"},
+			},
+		},
+		{
+			name:            "10. Unresponsive - Pod Status Unknown",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
+			pod:             &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}},
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
+				{Type: "Ready", Status: "Unknown", ObservedGeneration: gen, Reason: "SandboxUnresponsive", Message: "Pod status is unknown"},
+			},
+		},
+		{
+			name:            "11. Pod Failed - Crash Loop",
+			sandbox:         sbWithRepl(1),
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
+			pod:             &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is in phase: Failed"},
+			},
+		},
+		{
+			name:            "12. Suspended but missing dependencies",
+			sandbox:         sbWithRepl(0),
+			svcsProvisioned: false,
+			pvcsProvisioned: false,
+			pod:             nil,
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "False", ObservedGeneration: gen, Reason: "SandboxInitializing", Message: "Provisioning dependencies"},
+				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "UserSuspended", Message: "Sandbox has been suspended by the user"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxInitializing", Message: "Waiting for Sandbox to be provisioned"},
+			},
+		},
+		{
+			name: "13. User Initiated Termination (DeletionTimestamp set)",
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
-					Generation: 1,
+					Generation:        gen,
+					DeletionTimestamp: ptr.To(metav1.Now()),
 				},
+				Spec: sandboxv1alpha1.SandboxSpec{Replicas: ptr.To(int32(1))},
 			},
-			err: nil,
-			svc: &corev1.Service{},
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
 			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					Phase: corev1.PodPending,
-				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 			},
-			expectedStatus: metav1.ConditionFalse,
-			expectedReason: "DependenciesNotReady",
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "UserInitiatedTermination", Message: "Sandbox is terminating"},
+			},
 		},
 		{
-			name: "service not ready",
+			name: "14. System Initiated Termination (Expired)",
 			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Generation: 1,
+				ObjectMeta: metav1.ObjectMeta{Generation: gen},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					Lifecycle: sandboxv1alpha1.Lifecycle{
+						ShutdownTime: ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					},
 				},
 			},
-			err: nil,
-			svc: nil,
+			svcsProvisioned: true,
+			pvcsProvisioned: true,
 			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 			},
-			expectedStatus: metav1.ConditionFalse,
-			expectedReason: "DependenciesNotReady",
-		},
-		{
-			name: "all not ready",
-			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Generation: 1,
-				},
+			expectedConditions: []metav1.Condition{
+				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SystemInitiatedTermination", Message: "Sandbox has expired"},
 			},
-			err:            nil,
-			svc:            nil,
-			pod:            nil,
-			expectedStatus: metav1.ConditionFalse,
-			expectedReason: "DependenciesNotReady",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			condition := r.computeReadyCondition(tc.sandbox, tc.err, tc.svc, tc.pod)
-			require.Equal(t, sandboxv1alpha1.SandboxConditionReady.String(), condition.Type)
-			require.Equal(t, tc.sandbox.Generation, condition.ObservedGeneration)
-			require.Equal(t, tc.expectedStatus, condition.Status)
-			require.Equal(t, tc.expectedReason, condition.Reason)
+			conditions := r.computeConditions(tc.sandbox, tc.svcsProvisioned, tc.pod, tc.pvcsProvisioned)
+			opts := []cmp.Option{
+				cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
+			}
+			if diff := cmp.Diff(tc.expectedConditions, conditions, opts...); diff != "" {
+				t.Fatalf("unexpected conditions (-want,+got):\n%s", diff)
+			}
 		})
 	}
 }
@@ -210,6 +302,7 @@ func TestReconcile(t *testing.T) {
 		name                 string
 		initialObjs          []runtime.Object
 		sandboxSpec          sandboxv1alpha1.SandboxSpec
+		deletionTimestamp    *metav1.Time
 		wantStatus           sandboxv1alpha1.SandboxStatus
 		wantObjs             []client.Object
 		wantDeletedObjs      []client.Object
@@ -237,11 +330,25 @@ func TestReconcile(t *testing.T) {
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450", // Pre-computed hash of "sandbox-name"
 				Conditions: []metav1.Condition{
 					{
-						Type:               "Ready",
-						Status:             "False",
+						Type:               string(sandboxv1alpha1.SandboxConditionInitialized),
+						Status:             metav1.ConditionTrue,
 						ObservedGeneration: 1,
-						Reason:             "DependenciesNotReady",
-						Message:            "Pod exists with phase: ; Service Exists",
+						Reason:             sandboxv1alpha1.SandboxReasonInitialized,
+						Message:            "Service and PVCs are provisioned",
+					},
+					{
+						Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1alpha1.SandboxReasonNotSuspended,
+						Message:            "Sandbox is operational and not suspended",
+					},
+					{
+						Type:               string(sandboxv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1alpha1.SandboxReasonPodProvisioning,
+						Message:            "Pod is in phase: ",
 					},
 				},
 			},
@@ -330,11 +437,25 @@ func TestReconcile(t *testing.T) {
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450", // Pre-computed hash of "sandbox-name"
 				Conditions: []metav1.Condition{
 					{
-						Type:               "Ready",
-						Status:             "False",
+						Type:               string(sandboxv1alpha1.SandboxConditionInitialized),
+						Status:             metav1.ConditionTrue,
 						ObservedGeneration: 1,
-						Reason:             "DependenciesNotReady",
-						Message:            "Pod exists with phase: ; Service Exists",
+						Reason:             sandboxv1alpha1.SandboxReasonInitialized,
+						Message:            "Service and PVCs are provisioned",
+					},
+					{
+						Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1alpha1.SandboxReasonNotSuspended,
+						Message:            "Sandbox is operational and not suspended",
+					},
+					{
+						Type:               string(sandboxv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1alpha1.SandboxReasonPodProvisioning,
+						Message:            "Pod is in phase: ",
 					},
 				},
 			},
@@ -444,10 +565,10 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1alpha1.SandboxStatus{
 				Conditions: []metav1.Condition{
 					{
-						Type:               "Ready",
+						Type:               string(sandboxv1alpha1.SandboxConditionReady),
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "SandboxExpired",
+						Reason:             sandboxv1alpha1.SandboxReasonSystemTermination,
 						Message:            "Sandbox has expired",
 					},
 				},
@@ -495,6 +616,32 @@ func TestReconcile(t *testing.T) {
 			},
 			expectSandboxDeleted: true,
 		},
+		{
+			name:              "user initiated termination (DeletionTimestamp set)",
+			deletionTimestamp: ptr.To(metav1.Now()),
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(sandboxv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1alpha1.SandboxReasonUserTermination,
+						Message:            "Sandbox is terminating",
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -503,6 +650,10 @@ func TestReconcile(t *testing.T) {
 			sb.Name = sandboxName
 			sb.Namespace = sandboxNs
 			sb.Generation = 1
+			if tc.deletionTimestamp != nil {
+				sb.DeletionTimestamp = tc.deletionTimestamp
+				sb.Finalizers = []string{"test-finalizer"}
+			}
 			sb.Spec = tc.sandboxSpec
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sb)...),
@@ -707,7 +858,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "adopted-pod-name",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -812,7 +963,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "non-existent-pod",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "non-existent-pod",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -847,8 +998,8 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "annotated-pod-name",
-						"other-annotation":       "other-value",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "annotated-pod-name",
+						"other-annotation":                       "other-value",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -888,7 +1039,7 @@ func TestReconcilePod(t *testing.T) {
 				livePod := &corev1.Pod{}
 				podName := sandboxName
 				// Check if there's an annotation with a non-empty value
-				if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
+				if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
 					podName = annotatedPod
 				}
 				err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)

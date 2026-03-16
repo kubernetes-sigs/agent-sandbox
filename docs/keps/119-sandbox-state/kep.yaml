@@ -1,0 +1,10 @@
+title: Agent Sandbox Status Field
+kep-number: 2
+authors:
+  - "@SHRUTI6991"
+status: implementable
+creation-date: 2026-03-16
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

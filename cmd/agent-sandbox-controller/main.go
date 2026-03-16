@@ -202,6 +202,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register the custom Sandbox metric collector globally.
+	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
+
 	if err = (&controllers.SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

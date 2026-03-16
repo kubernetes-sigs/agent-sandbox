@@ -361,24 +361,33 @@ class PodSnapshotSandboxClient(SandboxClient):
                 )
 
             for condition in pod.status.conditions:
-                if condition.type == "PodRestored" and condition.status == "True":
-                    # Check if Snapshot UID is present in the condition.message
-                    if condition.message and snapshot_uid in condition.message:
-                        return RestoreCheckResult(
-                            success=True,
-                            error_reason="",
-                            error_code=SNAPSHOT_SUCCESS_CODE,
-                        )
+                if condition.type == "PodRestored":
+                    if condition.status == "True":
+                        # Check if Snapshot UID is present in the condition.message
+                        if condition.message and snapshot_uid in condition.message:
+                            return RestoreCheckResult(
+                                success=True,
+                                error_reason="",
+                                error_code=SNAPSHOT_SUCCESS_CODE,
+                            )
+                        else:
+                            return RestoreCheckResult(
+                                success=False,
+                                error_reason="Pod was not restored from the given snapshot",
+                                error_code=SNAPSHOT_ERROR_CODE,
+                            )
                     else:
+                        reason = f" reason: '{condition.get('reason') or ""}'"
+                        msg = f" message: '{condition.get('message') or ""}'"
                         return RestoreCheckResult(
                             success=False,
-                            error_reason="Pod was not restored from the given snapshot",
+                            error_reason=f"Restore attempted but pending or failed (status: '{condition.status}'{reason}{msg})",
                             error_code=SNAPSHOT_ERROR_CODE,
                         )
 
             return RestoreCheckResult(
                 success=False,
-                error_reason="Pod was not restored from any snapshot",
+                error_reason="Pod was started as a fresh instance",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 

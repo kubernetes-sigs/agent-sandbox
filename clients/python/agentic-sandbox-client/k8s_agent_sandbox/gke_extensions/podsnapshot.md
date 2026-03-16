@@ -21,7 +21,7 @@ A specialized Sandbox client for interacting with the GKE Pod Snapshot Controlle
     *   Waits for the snapshot to be processed.
     *   The Pod Snapshot Controller creates a `PodSnapshot` resource automatically.
     *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
-*   **`is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreResult`**:
+*   **`is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult`**:
     *   Checks if the sandbox pod was restored from the specified snapshot.
     *   Verifies restoration by checking the 'PodRestored' condition in the pod status and confirming the message contains the expected snapshot UID.
     *   Returns RestoreResult object(success, error_code, error_reason).

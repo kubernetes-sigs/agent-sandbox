@@ -328,6 +328,29 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 	} else {
 		log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+
+		ownership, controllerRef := checkOwnership(service, sandbox)
+		switch ownership {
+		case resourceOwnedByOther:
+			log.Info("Refusing to use service: service is owned by a different controller",
+				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
+			return nil, fmt.Errorf("service %q is owned by %s/%s, not by sandbox %q",
+				service.Name, controllerRef.Kind, controllerRef.Name, sandbox.Name)
+
+		case resourceUnowned:
+			log.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
+			if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
+				return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
+			}
+			if err := r.Update(ctx, service); err != nil {
+				return nil, fmt.Errorf("failed to update service with owner reference: %w", err)
+			}
+
+		case resourceOwnedBySandbox:
+			// Already owned by this sandbox — no action needed.
+		}
+
 		setServiceStatus(sandbox, service)
 		return service, nil
 	}

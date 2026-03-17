@@ -1288,6 +1288,157 @@ func TestReconcilePod(t *testing.T) {
 	}
 }
 
+func TestReconcileService(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := "name-hash"
+	sandboxObj := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+		},
+	}
+
+	testCases := []struct {
+		name                  string
+		initialObjs           []runtime.Object
+		sandbox               *sandboxv1alpha1.Sandbox
+		wantService           *corev1.Service
+		expectErr             bool
+		wantStatusService     string
+		wantStatusServiceFQDN string
+	}{
+		{
+			name:    "creates a new headless service when none exists",
+			sandbox: sandboxObj,
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "uses existing service owned by this sandbox",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+				},
+			},
+			sandbox:               sandboxObj,
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "refuses to use service owned by a different controller",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "apps/v1",
+								Kind:               "Deployment",
+								Name:               "some-other-controller",
+								UID:                "some-other-uid",
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(true),
+							},
+						},
+					},
+				},
+			},
+			sandbox:     sandboxObj,
+			wantService: nil,
+			expectErr:   true,
+		},
+		{
+			name: "adopts unowned service and sets controller reference",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+				},
+			},
+			sandbox: sandboxObj,
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := SandboxReconciler{
+				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
+				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
+			}
+
+			svc, err := r.reconcileService(t.Context(), tc.sandbox, nameHash)
+			if tc.expectErr {
+				require.Error(t, err)
+				require.Nil(t, svc)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, svc)
+			}
+
+			// Verify status was set correctly
+			if tc.wantStatusService != "" {
+				require.Equal(t, tc.wantStatusService, tc.sandbox.Status.Service)
+				require.Equal(t, tc.wantStatusServiceFQDN, tc.sandbox.Status.ServiceFQDN)
+			}
+
+			// Verify the live service in the fake client matches expected state
+			if tc.wantService != nil {
+				liveSvc := &corev1.Service{}
+				err = r.Get(t.Context(), types.NamespacedName{
+					Name: sandboxName, Namespace: sandboxNs,
+				}, liveSvc)
+				require.NoError(t, err)
+				if diff := cmp.Diff(tc.wantService, liveSvc, cmpopts.IgnoreFields(metav1.TypeMeta{}, "APIVersion", "Kind")); diff != "" {
+					t.Errorf("live service mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
 func TestCheckOwnership(t *testing.T) {
 	sandboxName := "test-sandbox"
 	sandboxUID := types.UID("sandbox-uid-123")

@@ -42,3 +42,6 @@ tracing = [
     "opentelemetry-exporter-otlp~=1.39.0",
     "opentelemetry-instrumentation-requests~=0.60b0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["k8s_agent_sandbox"]

@@ -39,6 +39,7 @@ type ChromeSandboxClaimMetrics struct {
 
 // BenchmarkChromeSandboxClaimStartup measures the time for Chrome to start in a sandbox claim.
 // Run with: go test -bench=BenchmarkChromeSandboxClaimStartup -benchtime=10x ./test/e2e/...
+// To add parallelism, use the -cpu flag (e.g., -cpu=1,2,4).
 // Make sure that WARM_POOL_SIZE is set appropriately to account for the number of parallel
 // test iterations.
 func BenchmarkChromeSandboxClaimStartup(b *testing.B) {

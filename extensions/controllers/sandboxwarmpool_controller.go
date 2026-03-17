@@ -154,6 +154,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// Update status replicas
 	warmPool.Status.Replicas = currentReplicas
+	warmPool.Status.Selector = labelSelector.String()
 
 	// Calculate ready replicas
 	readyReplicas := int32(0)

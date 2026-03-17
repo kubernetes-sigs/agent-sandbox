@@ -43,12 +43,16 @@ type SandboxWarmPoolStatus struct {
 	// ReadyReplicas is the total number of sandboxes in the pool that are in a ready state.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+
+	// Selector is the label selector used to find the pods in the pool.
+	// +optional
+	Selector string `json:"selector,omitempty"`
 }
 
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

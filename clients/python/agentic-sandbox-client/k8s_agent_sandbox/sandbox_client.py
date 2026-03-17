@@ -44,6 +44,11 @@ from .constants import (
     SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME,
     POD_NAME_ANNOTATION,
 )
+from .exceptions import (
+    SandboxNotReadyError,
+    SandboxPortForwardError,
+    SandboxRequestError,
+)
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -391,12 +396,12 @@ class SandboxClient:
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         if not self.is_ready():
-            raise RuntimeError("Sandbox is not ready for communication.")
+            raise SandboxNotReadyError("Sandbox is not ready for communication.")
 
         # Check if port-forward died silently
         if self.port_forward_process and self.port_forward_process.poll() is not None:
             _, stderr = self.port_forward_process.communicate()
-            raise RuntimeError(
+            raise SandboxPortForwardError(
                 f"Kubectl Port-Forward crashed BEFORE request!\n"
                 f"Stderr: {stderr.decode(errors='ignore')}"
             )
@@ -417,14 +422,24 @@ class SandboxClient:
             # Check if port-forward died DURING request
             if self.port_forward_process and self.port_forward_process.poll() is not None:
                 _, stderr = self.port_forward_process.communicate()
-                raise RuntimeError(
+                raise SandboxPortForwardError(
                     f"Kubectl Port-Forward crashed DURING request!\n"
                     f"Stderr: {stderr.decode(errors='ignore')}"
                 ) from e
 
+            status_code = None
+            resp = None
+            # `e` should always have a response here except in connection errors or timeouts.
+            if hasattr(e, "response") and e.response is not None:
+                resp = e.response
+                status_code = resp.status_code
+
             logging.error(f"Request to gateway router failed: {e}")
-            raise RuntimeError(
-                f"Failed to communicate with the sandbox via the gateway at {url}.") from e
+            raise SandboxRequestError(
+                f"Failed to communicate with the sandbox via the gateway at {url}.",
+                status_code=status_code,
+                response=resp,
+            ) from e
 
     @trace_span("run")
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:

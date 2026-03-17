@@ -63,10 +63,10 @@ export HF_TOKEN='your_huggingface_token_here'
 
 Get a token from [HuggingFace](https://huggingface.co/settings/tokens).
 
-### 3. Navigate to the examples, coding-agent directory
+### 3. Navigate to the examples, langchain directory
 
 ```bash
-cd examples/coding-agent
+cd examples/langchain
 ```
 
 ### 4. Set your huggingface token
@@ -83,7 +83,9 @@ type: Opaque
 stringData:
   token: "<HF_TOKEN>"  # Replace with your actual HuggingFace token
 ```
+
 ### 5. Build and Deploy
+
 ```bash
 # Build init container image
 docker build -f Dockerfile.init -t model-downloader:latest .
@@ -105,7 +107,7 @@ kubectl logs -f coding-agent-sandbox -c model-downloader
 kubectl wait --for=condition=ready pod -l app=coding-agent --timeout=600s
 ```
 
-### 5. Use the Agent
+### 6. Use the Agent
 
 ```bash
 # Attach to the agent & hit enter to get interraction prompt

@@ -18,12 +18,12 @@ set -e
 export KIND_CLUSTER_NAME="agent-sandbox"
 
 # Navigate to root to build/deploy controller if needed
-# Assuming this script is run from examples/moltbot-sandbox
+# Assuming this script is run from examples/openclaw-sandbox
 cd ../../
 # Only build/deploy if user asks or if we want to ensure latest controller
 # make build 
 # make deploy-kind
-cd examples/moltbot-sandbox
+cd examples/openclaw-sandbox
 
 echo "Pulling ghcr.io/openclaw/openclaw:latest..."
 docker pull ghcr.io/openclaw/openclaw:latest
@@ -36,12 +36,12 @@ export OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)
 echo "Token: $OPENCLAW_GATEWAY_TOKEN"
 
 echo "Applying sandbox resource with generated token..."
-sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" moltbot-sandbox.yaml | kubectl apply -f -
+sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" openclaw-sandbox.yaml | kubectl apply -f -
 
 # Cleanup function
 cleanup() {
     echo "Cleaning up..."
-    kubectl delete --ignore-not-found -f moltbot-sandbox.yaml
+    kubectl delete --ignore-not-found -f openclaw-sandbox.yaml
     # We do NOT delete the controller or cluster here to allow inspection
     # kubectl delete --ignore-not-found statefulset agent-sandbox-controller -n agent-sandbox-system
     # cd ../../
@@ -50,10 +50,10 @@ cleanup() {
 # trap cleanup EXIT
 
 echo "Waiting for sandbox pod to be ready..."
-kubectl wait --for=condition=ready pod --selector=sandbox=moltbot-sandbox --timeout=120s
+kubectl wait --for=condition=ready pod --selector=sandbox=openclaw-sandbox --timeout=120s
 
 echo "Port-forwarding service..."
-POD_NAME=$(kubectl get pods -l sandbox=moltbot-sandbox -o jsonpath='{.items[0].metadata.name}')
+POD_NAME=$(kubectl get pods -l sandbox=openclaw-sandbox -o jsonpath='{.items[0].metadata.name}')
 kubectl port-forward "pod/${POD_NAME}" 18789:18789 &
 PF_PID=$!
 

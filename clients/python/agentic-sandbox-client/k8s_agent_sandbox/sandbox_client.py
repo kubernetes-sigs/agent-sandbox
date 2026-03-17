@@ -40,6 +40,11 @@ from .models import (
     SandboxTracerConfig
 )
 from .k8s_helper import K8sHelper
+from .exceptions import (
+    SandboxNotReadyError,
+    SandboxPortForwardError,
+    SandboxRequestError,
+)
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -260,7 +265,7 @@ class SandboxClient(Generic[T]):
     def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
         self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
-        
+
     @trace_span("delete_claim")
     def _delete_claim(self, claim_name: str, namespace: str):
         """Deletes the SandboxClaim custom resource from the Kubernetes cluster."""

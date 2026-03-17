@@ -1,0 +1,7 @@
+langgraph>=1.0.1
+langchain-core>=1.0.1
+torch>=2.0.0
+transformers>=4.36.0
+accelerate>=0.25.0
+sentencepiece
+protobuf

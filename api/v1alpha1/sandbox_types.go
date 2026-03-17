@@ -166,6 +166,10 @@ type SandboxStatus struct {
 	// LabelSelector is the label selector for pods.
 	// +optional
 	LabelSelector string `json:"selector,omitempty"`
+
+	// PodIP is the IP address of the sandbox pod.
+	// +optional
+	PodIP string `json:"podIP,omitempty"`
 }
 
 // +genclient

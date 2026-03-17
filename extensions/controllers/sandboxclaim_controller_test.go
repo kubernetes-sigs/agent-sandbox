@@ -1231,6 +1231,64 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func TestComputeAndSetStatusPodIP(t *testing.T) {
+	scheme := newScheme(t)
+	_ = scheme
+
+	readySandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
+		Status: sandboxv1alpha1.SandboxStatus{
+			PodIP: "10.0.0.42",
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	notReadySandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
+		Status: sandboxv1alpha1.SandboxStatus{
+			PodIP: "",
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "NotReady",
+			}},
+		},
+	}
+
+	t.Run("copies PodIP from sandbox status", func(t *testing.T) {
+		claim := &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"},
+		}
+		r := &SandboxClaimReconciler{}
+		r.computeAndSetStatus(claim, readySandbox, nil, false)
+		if claim.Status.SandboxStatus.PodIP != "10.0.0.42" {
+			t.Errorf("expected PodIP %q, got %q", "10.0.0.42", claim.Status.SandboxStatus.PodIP)
+		}
+	})
+
+	t.Run("PodIP empty when sandbox not ready", func(t *testing.T) {
+		claim := &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"},
+		}
+		r := &SandboxClaimReconciler{}
+		r.computeAndSetStatus(claim, notReadySandbox, nil, false)
+		if claim.Status.SandboxStatus.PodIP != "" {
+			t.Errorf("expected empty PodIP, got %q", claim.Status.SandboxStatus.PodIP)
+		}
+	})
+
+	t.Run("PodIP empty when sandbox is nil", func(t *testing.T) {
+		claim := &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"},
+		}
+		r := &SandboxClaimReconciler{}
+		r.computeAndSetStatus(claim, nil, nil, false)
+		if claim.Status.SandboxStatus.PodIP != "" {
+			t.Errorf("expected empty PodIP, got %q", claim.Status.SandboxStatus.PodIP)
+		}
+	})
+}
+
 func ignoreTimestamp(_, _ metav1.Time) bool {
 	return true
 }

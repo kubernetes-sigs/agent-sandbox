@@ -45,13 +45,13 @@ const (
 
 // NetworkPolicySpec defines the desired state of the NetworkPolicy.
 type NetworkPolicySpec struct {
-	// Ingress is a list of ingress rules to be applied to the sandbox.
+	// ingress is a list of ingress rules to be applied to the sandbox.
 	// Traffic is allowed to the sandbox if it matches at least one rule.
 	// If this list is empty, all ingress traffic is blocked (Default Deny).
 	// +optional
 	Ingress []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
 
-	// Egress is a list of egress rules to be applied to the sandbox.
+	// egress is a list of egress rules to be applied to the sandbox.
 	// Traffic is allowed out of the sandbox if it matches at least one rule.
 	// If this list is empty, all egress traffic is blocked (Default Deny).
 	// +optional
@@ -60,14 +60,14 @@ type NetworkPolicySpec struct {
 
 // SandboxTemplateSpec defines the desired state of Sandbox
 type SandboxTemplateSpec struct {
-	// template is the object that describes the pod spec that will be used to create
+	// podTemplate defines the object template that describes the pod spec that will be used to create
 	// an agent sandbox.
 	// If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false
 	// to ensure a secure-by-default environment.
-	// +kubebuilder:validation:Required
+	// +required
 	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 
-	// NetworkPolicy defines the network policy to be applied to the sandboxes
+	// networkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template. A single shared NetworkPolicy is created per Template.
 	// Behavior is dictated by the NetworkPolicyManagement field:
 	// - If Management is "Unmanaged": This field is completely ignored.
@@ -92,7 +92,7 @@ type SandboxTemplateSpec struct {
 	// +optional
 	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
 
-	// NetworkPolicyManagement defines whether the controller manages the NetworkPolicy.
+	// networkPolicyManagement defines whether the controller manages the NetworkPolicy.
 	// Valid values are "Managed" (default) or "Unmanaged".
 	// +kubebuilder:validation:Enum=Managed;Unmanaged
 	// +kubebuilder:default=Managed

@@ -6,7 +6,7 @@
 # https://github.com/kubernetes-sigs/kube-api-linter/blob/main/docs/linters.md
 version: "2"
 run:
-  go: "1.25"
+  go: "1.26"
   allow-parallel-runners: true
 linters:
   default: none
@@ -63,9 +63,9 @@ linters:
       - zz_generated.*\.go$
     rules:
     # KAL only validates the API folders for CRD client generation.
-    - path: api/.*
+    - path-except: api/.*
       linters:
         - kubeapilinter
-    - path: extensions/api/.*
+    - path-except: extensions/api/.*
       linters:
         - kubeapilinter

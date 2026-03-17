@@ -1,5 +1,5 @@
 .PHONY: all
-all: fix-go-generate build lint-go test-unit toc-verify
+all: fix-go-generate build lint-go lint-api test-unit toc-verify
 
 .PHONY: fix-go-generate
 fix-go-generate:

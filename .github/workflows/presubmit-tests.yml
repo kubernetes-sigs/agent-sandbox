@@ -15,7 +15,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -23,16 +23,18 @@ jobs:
           python-version: '3.11'
 
       - name: Cache golangci-lint
+        id: cache-kal
         uses: actions/cache@v4
         with:
           path: dev/tools/tmp/bin/golangci-kube-api-linter
-          key: golangci-kube-api-linter-${{ hashFiles('dev/tools/.custom-gcl.yaml', 'dev/tools/go.mod') }}
+          key: ${{ runner.os }}-golangci-kube-api-linter-${{ hashFiles('dev/tools/.custom-gcl.yaml', 'dev/tools/go.mod') }}
 
       - name: Build golangci-kube-api-linter (if not cached)
         run: ./dev/tools/build-kal
+        if: steps.cache-kal.outputs.cache-hit != 'true'
 
       - name: Run lint-go
-        run: ./dev/ci/presubmits/lint-go
+        run: make lint-go
 
       - name: Run lint-api
-        run: ./dev/ci/presubmits/lint-api
+        run: make lint-api

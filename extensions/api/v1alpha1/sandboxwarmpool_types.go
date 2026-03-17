@@ -23,24 +23,24 @@ import (
 
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool
 type SandboxWarmPoolSpec struct {
-	// Replicas is the desired number of sandboxes in the pool.
+	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
-	// +kubebuilder:validation:Required
+	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
 }
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool
 type SandboxWarmPoolStatus struct {
-	// Replicas is the total number of sandboxes in the pool.
+	// replicas is the total number of sandboxes in the pool.
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 
-	// ReadyReplicas is the total number of sandboxes in the pool that are in a ready state.
+	// readyReplicas is the total number of sandboxes in the pool that are in a ready state.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 }

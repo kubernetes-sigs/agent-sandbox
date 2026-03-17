@@ -42,7 +42,7 @@ const (
 
 // Lifecycle defines the lifecycle management for the SandboxClaim.
 type Lifecycle struct {
-	// ShutdownTime is the absolute time when the SandboxClaim expires.
+	// shutdownTime is the absolute time when the SandboxClaim expires.
 	// This time governs the lifecycle of the claim. It is not propagated to the
 	// underlying Sandbox. Instead, the SandboxClaim controller enforces this
 	// expiration by deleting the Sandbox resources when the time is reached.
@@ -52,7 +52,7 @@ type Lifecycle struct {
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
-	// ShutdownPolicy determines the behavior when the SandboxClaim expires.
+	// shutdownPolicy determines the behavior when the SandboxClaim expires.
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
@@ -61,34 +61,36 @@ type Lifecycle struct {
 // SandboxTemplateRef references a SandboxTemplate
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
-	// +kubebuilder:validation:Required
+	// +required
 	Name string `json:"name,omitempty" protobuf:"bytes,1,name=name"`
 }
 
 // SandboxClaimSpec defines the desired state of Sandbox
 type SandboxClaimSpec struct {
-	// SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox
-	// +kubebuilder:validation:Required
+	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
+	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
 
-	// Lifecycle defines when and how the SandboxClaim should be shut down.
+	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatus struct {
-	// Conditions represent the latest available observations of a Sandbox's current state.
+	// conditions represent the latest available observations of a Sandbox's current state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" protobuf:"bytes,1,rep,name=conditions"`
 
+	// sandbox defines the state of Sandbox
+	// +optional
 	SandboxStatus SandboxStatus `json:"sandbox,omitempty" protobuf:"bytes,2,opt,name=sandboxStatus"`
 }
 
 type SandboxStatus struct {
-	// SandboxName is the name of the Sandbox created from this claim
+	// Name is the name of the Sandbox created from this claim
 	// +optional
-	Name string `json:"Name,omitempty"`
+	Name string `json:"Name,omitempty"` //nolint:kubeapilinter
 }
 
 // +genclient

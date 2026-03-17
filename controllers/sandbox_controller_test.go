@@ -1309,6 +1309,7 @@ func TestReconcileService(t *testing.T) {
 		sandbox               *sandboxv1alpha1.Sandbox
 		wantService           *corev1.Service
 		expectErr             bool
+		errContains           string // substring that must appear in the error
 		wantStatusService     string
 		wantStatusServiceFQDN string
 	}{
@@ -1393,7 +1394,72 @@ func TestReconcileService(t *testing.T) {
 					Name:            sandboxName,
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "refuses to adopt unowned service with non-headless ClusterIP",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "10.96.0.100",
+					},
+				},
+			},
+			sandbox:     sandboxObj,
+			wantService: nil,
+			expectErr:   true,
+			errContains: "immutable",
+		},
+		{
+			name: "adopts unowned headless service and overwrites wrong selector",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "None",
+						Selector: map[string]string{
+							"app": "something-else",
+						},
+					},
+				},
+			},
+			sandbox: sandboxObj,
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
 				},
 			},
 			wantStatusService:     sandboxName,
@@ -1413,6 +1479,9 @@ func TestReconcileService(t *testing.T) {
 			if tc.expectErr {
 				require.Error(t, err)
 				require.Nil(t, svc)
+				if tc.errContains != "" {
+					require.Contains(t, err.Error(), tc.errContains)
+				}
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, svc)

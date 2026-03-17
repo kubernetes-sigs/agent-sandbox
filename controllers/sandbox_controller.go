@@ -334,12 +334,31 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		case resourceOwnedByOther:
 			log.Info("Refusing to use service: service is owned by a different controller",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
-				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
-			return nil, fmt.Errorf("service %q is owned by %s/%s, not by sandbox %q",
-				service.Name, controllerRef.Kind, controllerRef.Name, sandbox.Name)
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
+			return nil, fmt.Errorf("service %q is owned by %s/%s (UID: %s), not by sandbox %q",
+				service.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 		case resourceUnowned:
+			// ClusterIP is immutable — refuse adoption if the service is not headless.
+			if service.Spec.ClusterIP != corev1.ClusterIPNone && service.Spec.ClusterIP != "" {
+				log.Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
+					"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
+					"Service.ClusterIP", service.Spec.ClusterIP)
+				return nil, fmt.Errorf("cannot adopt service %q: ClusterIP is %q (expected %q, field is immutable)",
+					service.Name, service.Spec.ClusterIP, corev1.ClusterIPNone)
+			}
+
 			log.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
+
+			// Enforce intended labels and selector to prevent traffic hijack.
+			if service.Labels == nil {
+				service.Labels = make(map[string]string)
+			}
+			service.Labels[sandboxLabel] = nameHash
+			service.Spec.Selector = map[string]string{
+				sandboxLabel: nameHash,
+			}
+
 			if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 			}
@@ -459,7 +478,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			case resourceOwnedByOther:
 				log.Info("Refusing to delete pod: pod is owned by a different controller",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
-					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
+					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 			}
 		}
 
@@ -493,7 +512,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		case resourceOwnedByOther:
 			log.Info("Refusing to adopt pod: pod is owned by a different controller",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
-				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
 			if _, exists := sandbox.Annotations[SandboxPodNameAnnotation]; exists {
 				log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
@@ -504,8 +523,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				}
 			}
 
-			return nil, fmt.Errorf("pod %q is owned by %s/%s, not by sandbox %q",
-				pod.Name, controllerRef.Kind, controllerRef.Name, sandbox.Name)
+			return nil, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
+				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 		case resourceUnowned:
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
@@ -653,7 +672,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		case resourceOwnedByOther:
 			log.Info("Skipping pod deletion during expiry: pod is owned by a different controller",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
-				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 		}
 	}
 
@@ -676,7 +695,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		case resourceOwnedByOther:
 			log.Info("Skipping service deletion during expiry: service is owned by a different controller",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
-				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name)
+				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 		}
 	}
 

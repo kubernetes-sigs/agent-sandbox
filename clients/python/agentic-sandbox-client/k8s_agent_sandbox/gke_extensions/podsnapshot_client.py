@@ -329,9 +329,6 @@ class PodSnapshotSandboxClient(SandboxClient):
         """
         Checks if the sandbox pod was restored from the specified snapshot.
 
-        This is verified by inspecting the 'PodRestored' condition in the pod status
-        and confirming that the condition's message contains the provided snapshot UID.
-
         Returns:
             RestoreCheckResult: The result of the restore check operation.
         """

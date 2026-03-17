@@ -68,12 +68,16 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	template := &extensionsv1alpha1.SandboxTemplate{}
 	template.Name = "chrome-template"
 	template.Namespace = ns.Name
+	imageTag := os.Getenv("IMAGE_TAG")
+	if imageTag == "" {
+		imageTag = "latest"
+	}
 	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
 					Name:            "chrome-sandbox",
-					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", os.Getenv("IMAGE_TAG")),
+					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", imageTag),
 					ImagePullPolicy: corev1.PullIfNotPresent,
 				},
 			},
@@ -108,14 +112,12 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			metrics, err := runChromeSandboxClaim(tc, ns.Name, template.Name)
+			metrics := runChromeSandboxClaim(tc, ns.Name, template.Name)
 
-			if err == nil {
-				mu.Lock()
-				totalClaimReadySec += metrics.ClaimReady.Seconds()
-				totalClaims++
-				mu.Unlock()
-			}
+			mu.Lock()
+			totalClaimReadySec += metrics.ClaimReady.Seconds()
+			totalClaims++
+			mu.Unlock()
 		}
 	})
 
@@ -124,7 +126,7 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	}
 }
 
-func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName string) (*ChromeSandboxClaimMetrics, error) {
+func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName string) *ChromeSandboxClaimMetrics {
 	metrics := &ChromeSandboxClaimMetrics{}
 
 	// Unique name for this claim
@@ -147,14 +149,12 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 
 	// 2. Wait for Claim Ready
 	// We use the common predicates
-	if err := tc.WaitForObject(tc.Context(), claim, predicates.ReadyConditionIsTrue); err != nil {
-		tc.Logf("Failed to wait for claim %s ready: %v", claimName, err)
-		return metrics, err
-	}
+	tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
+
 	metrics.ClaimReady.Set(time.Since(startTime))
 	tc.Logf("Claim %s is ready", claimName)
 
-	return metrics, nil
+	return metrics
 }
 
 var claimCounter int64

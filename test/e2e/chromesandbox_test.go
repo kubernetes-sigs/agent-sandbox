@@ -45,6 +45,11 @@ type ChromeSandboxMetrics struct {
 }
 
 func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
+	imageTag := os.Getenv("IMAGE_TAG")
+	if imageTag == "" {
+		imageTag = "latest"
+	}
+
 	sandbox := &sandboxv1alpha1.Sandbox{}
 	sandbox.Name = "chrome-sandbox"
 	sandbox.Namespace = namespace
@@ -54,7 +59,7 @@ func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
 				{
 					Name: "chrome-sandbox",
 					// might be nice to remove the IMAGE_TAG env var so this is easier to run from IDE
-					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", os.Getenv("IMAGE_TAG")),
+					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", imageTag),
 					ImagePullPolicy: corev1.PullIfNotPresent,
 				},
 			},

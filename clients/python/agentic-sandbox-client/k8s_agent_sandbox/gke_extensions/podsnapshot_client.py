@@ -374,8 +374,10 @@ class PodSnapshotSandboxClient(SandboxClient):
                                 error_code=SNAPSHOT_ERROR_CODE,
                             )
                     else:
-                        reason = f" reason: '{condition.get('reason') or ""}'"
-                        msg = f" message: '{condition.get('message') or ""}'"
+                        reason_val = condition.get("reason") or ""
+                        msg_val = condition.get("message") or ""
+                        reason = f" reason: '{reason_val}'"
+                        msg = f" message: '{msg_val}'"
                         return RestoreCheckResult(
                             success=False,
                             error_reason=f"Restore attempted but pending or failed (status: '{condition.status}'{reason}{msg})",

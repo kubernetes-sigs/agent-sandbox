@@ -1618,6 +1618,137 @@ func TestCheckOwnership(t *testing.T) {
 	}
 }
 
+func TestReconcilePVCs(t *testing.T) {
+	sandboxName := "test-sandbox"
+	sandboxNs := "test-ns"
+	sandboxUID := types.UID("sandbox-uid-123")
+	otherUID := types.UID("other-uid-456")
+	pvcTemplateName := "data"
+	pvcName := pvcTemplateName + "-" + sandboxName // "data-test-sandbox"
+
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{Name: pvcTemplateName},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("1Gi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name        string
+		initialObjs []runtime.Object
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name:      "creates new PVC when none exists",
+			expectErr: false,
+		},
+		{
+			name: "uses existing PVC owned by this sandbox",
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "agents.x-k8s.io/v1alpha1",
+								Kind:               "Sandbox",
+								Name:               sandboxName,
+								UID:                sandboxUID,
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(true),
+							},
+						},
+					},
+				},
+			},
+			expectErr: false,
+		},
+		{
+			name: "refuses PVC owned by a different controller",
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "apps/v1",
+								Kind:               "Deployment",
+								Name:               "other-controller",
+								UID:                otherUID,
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(true),
+							},
+						},
+					},
+				},
+			},
+			expectErr:   true,
+			errContains: "is owned by",
+		},
+		{
+			name: "adopts unowned PVC",
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						// No owner references.
+					},
+				},
+			},
+			expectErr: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := SandboxReconciler{
+				Client: newFakeClient(append(tc.initialObjs, sandbox)...),
+				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
+			}
+
+			err := r.reconcilePVCs(t.Context(), sandbox)
+			if tc.expectErr {
+				require.Error(t, err)
+				if tc.errContains != "" {
+					require.Contains(t, err.Error(), tc.errContains)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+
+			// Verify PVC exists and is owned by the sandbox.
+			livePVC := &corev1.PersistentVolumeClaim{}
+			err = r.Get(t.Context(), types.NamespacedName{Name: pvcName, Namespace: sandboxNs}, livePVC)
+			require.NoError(t, err)
+			ownerRef := metav1.GetControllerOf(livePVC)
+			require.NotNil(t, ownerRef, "PVC should have a controller owner reference")
+			require.Equal(t, sandboxUID, ownerRef.UID, "PVC controller reference UID should match sandbox UID")
+		})
+	}
+}
+
 func TestSandboxExpiry(t *testing.T) {
 	testCases := []struct {
 		name           string

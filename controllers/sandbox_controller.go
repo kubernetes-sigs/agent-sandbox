@@ -620,6 +620,27 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name
 		err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc)
 		if err == nil {
+			ownership, controllerRef := checkOwnership(pvc, sandbox)
+			switch ownership {
+			case resourceOwnedByOther:
+				log.Info("Refusing to use PVC: PVC is owned by a different controller",
+					"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
+					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
+				return fmt.Errorf("PVC %q is owned by %s/%s (UID: %s), not by sandbox %q",
+					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
+
+			case resourceUnowned:
+				log.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+				}
+				if err := r.Update(ctx, pvc); err != nil {
+					return fmt.Errorf("failed to update PVC with owner reference: %w", err)
+				}
+
+			case resourceOwnedBySandbox:
+				// Already owned by this sandbox — no action needed.
+			}
 			continue
 		}
 

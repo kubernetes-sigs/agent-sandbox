@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Integration tests for _request() exception handling.
-
-Spins up a real HTTP server that mimics sandbox responses (409, 503, 202, etc.)
-and exercises the full SandboxClient._request() path over real HTTP — no mocks.
-"""
-
 import json
 import threading
 import unittest

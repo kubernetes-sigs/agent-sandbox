@@ -622,7 +622,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 
 	if sandbox != nil && !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
-		latency := newReady.LastTransitionTime.Time.Sub(sandbox.CreationTimestamp.Time)
+		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
 		asmetrics.RecordSandboxCreationLatency(latency, launchType, claim.Spec.TemplateRef.Name)
 	}
 }

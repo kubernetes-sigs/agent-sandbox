@@ -39,22 +39,17 @@ type ChromeSandboxClaimMetrics struct {
 
 // BenchmarkChromeSandboxClaimStartup measures the time for Chrome to start in a sandbox claim.
 // Run with: go test -bench=BenchmarkChromeSandboxClaimStartup -benchtime=10x ./test/e2e/...
+// Make sure that WARM_POOL_SIZE is set appropriately to account for the number of parallel
+// test iterations.
 func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	// Configuration from environment variables
-	warmPoolSize := 6
+	warmPoolSize := 10
 	if s := os.Getenv("WARM_POOL_SIZE"); s != "" {
 		if v, err := strconv.Atoi(s); err == nil {
 			warmPoolSize = v
 		}
 	}
-	parallelism := 3
-	if s := os.Getenv("PARALLELISM"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil {
-			parallelism = v
-		}
-	}
-
-	b.Logf("Benchmark Configuration: WarmPoolSize=%d, Parallelism=%d", warmPoolSize, parallelism)
+	b.Logf("Benchmark Configuration: WarmPoolSize=%d", warmPoolSize)
 
 	tc := framework.NewTestContext(b)
 	ctx := tc.Context()
@@ -107,7 +102,6 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	)
 
 	// 5. Benchmark Loop
-	b.SetParallelism(parallelism)
 	b.ResetTimer()
 
 	b.RunParallel(func(pb *testing.PB) {

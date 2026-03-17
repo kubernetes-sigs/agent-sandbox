@@ -620,6 +620,11 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
 	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
+
+	if sandbox != nil && !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
+		latency := newReady.LastTransitionTime.Time.Sub(sandbox.CreationTimestamp.Time)
+		asmetrics.RecordSandboxCreationLatency(latency, launchType, claim.Spec.TemplateRef.Name)
+	}
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller

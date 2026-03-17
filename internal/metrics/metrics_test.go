@@ -43,6 +43,28 @@ func TestClaimLatencyRecording(t *testing.T) {
 	}
 }
 
+func TestSandboxLatencyRecording(t *testing.T) {
+	testCases := []struct {
+		name       string
+		launchType string
+	}{
+		{"Warm", LaunchTypeWarm},
+		{"Cold", LaunchTypeCold},
+		{"Unknown", LaunchTypeUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			SandboxCreationLatency.Reset()
+			SandboxCreationLatency.WithLabelValues(tc.launchType, "test-tmpl").Observe(1000)
+
+			if testutil.CollectAndCount(SandboxCreationLatency) != 1 {
+				t.Errorf("Expected 1 observation")
+			}
+		})
+	}
+}
+
 func TestSandboxClaimCreationRecording(t *testing.T) {
 	testCases := []struct {
 		name         string

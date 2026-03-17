@@ -206,6 +206,49 @@ func TestComputeReadyCondition(t *testing.T) {
 	}
 }
 
+func TestResolvePodName(t *testing.T) {
+	testCases := []struct {
+		name        string
+		annotations map[string]string
+		wantPodName string
+	}{
+		{
+			name:        "no annotations",
+			annotations: nil,
+			wantPodName: "my-sandbox",
+		},
+		{
+			name:        "annotation not present",
+			annotations: map[string]string{"other": "value"},
+			wantPodName: "my-sandbox",
+		},
+		{
+			name:        "annotation present but empty",
+			annotations: map[string]string{SandboxPodNameAnnotation: ""},
+			wantPodName: "my-sandbox",
+		},
+		{
+			name:        "annotation present with warm pool pod name",
+			annotations: map[string]string{SandboxPodNameAnnotation: "warmpool-abc-xyz"},
+			wantPodName: "warmpool-abc-xyz",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "my-sandbox",
+					Namespace:   "default",
+					Annotations: tc.annotations,
+				},
+			}
+			got := resolvePodName(sandbox)
+			require.Equal(t, tc.wantPodName, got)
+		})
+	}
+}
+
 func TestReconcile(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"
@@ -213,6 +256,7 @@ func TestReconcile(t *testing.T) {
 		name                 string
 		initialObjs          []runtime.Object
 		sandboxSpec          sandboxv1alpha1.SandboxSpec
+		sandboxAnnotations   map[string]string
 		wantStatus           sandboxv1alpha1.SandboxStatus
 		wantObjs             []client.Object
 		wantDeletedObjs      []client.Object
@@ -464,6 +508,58 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "sandbox expired with retain policy deletes adopted warm pool pod",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "warmpool-abc-xyz",
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+				},
+			},
+			sandboxAnnotations: map[string]string{
+				SandboxPodNameAnnotation: "warmpool-abc-xyz",
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+				Lifecycle: sandboxv1alpha1.Lifecycle{
+					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+				},
+			},
+			wantDeletedObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "warmpool-abc-xyz", Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
 			name: "sandbox expired with delete policy",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
@@ -642,6 +738,9 @@ func TestReconcile(t *testing.T) {
 			sb.UID = sandboxUID
 			sb.Generation = 1
 			sb.Spec = tc.sandboxSpec
+			if tc.sandboxAnnotations != nil {
+				sb.Annotations = tc.sandboxAnnotations
+			}
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sb)...),
 				Scheme: Scheme,

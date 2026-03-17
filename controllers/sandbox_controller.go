@@ -75,6 +75,16 @@ func checkOwnership(obj client.Object, sandbox *sandboxv1alpha1.Sandbox) (resour
 	return resourceOwnedByOther, controllerRef
 }
 
+// resolvePodName returns the name of the pod associated with the given Sandbox.
+// If the sandbox has adopted a warm pool pod, the pod name is tracked in the
+// agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
+func resolvePodName(sandbox *sandboxv1alpha1.Sandbox) string {
+	if name, ok := sandbox.Annotations[SandboxPodNameAnnotation]; ok && name != "" {
+		return name
+	}
+	return sandbox.Name
+}
+
 var (
 	// Scheme for use by sandbox controllers. Registers required types for client.
 	Scheme = runtime.NewScheme()
@@ -387,11 +397,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	// Determine the pod name to look up
-	podName := sandbox.Name
-	var trackedPodName string
-	var podNameAnnotationExists bool
-	if trackedPodName, podNameAnnotationExists = sandbox.Annotations[SandboxPodNameAnnotation]; podNameAnnotationExists && trackedPodName != "" {
-		podName = trackedPodName
+	podName := resolvePodName(sandbox)
+	_, podNameAnnotationExists := sandbox.Annotations[SandboxPodNameAnnotation]
+	if podName != sandbox.Name {
 		log.Info("Using tracked pod name from sandbox annotation", "podName", podName)
 	}
 
@@ -603,8 +611,9 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	var allErrors error
 
 	// Delete pod only if owned by this sandbox
+	podName := resolvePodName(sandbox)
 	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod); err != nil {
 		if !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get pod: %w", err))
 		}

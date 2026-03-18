@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -333,6 +334,89 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 	}
 }
 
+func mergeStringMap(dst map[string]string, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for key, val := range src {
+		dst[key] = val
+	}
+	return dst
+}
+
+func mergeEnvVars(existing []corev1.EnvVar, overrides map[string]string) []corev1.EnvVar {
+	if len(overrides) == 0 {
+		return existing
+	}
+	indexByName := make(map[string]int, len(existing))
+	for i := range existing {
+		indexByName[existing[i].Name] = i
+	}
+	for name, value := range overrides {
+		if idx, ok := indexByName[name]; ok {
+			existing[idx].Value = value
+			existing[idx].ValueFrom = nil
+			continue
+		}
+		existing = append(existing, corev1.EnvVar{Name: name, Value: value})
+	}
+	return existing
+}
+
+func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *extensionsv1alpha1.WorkspaceResources) {
+	if overrides == nil {
+		return
+	}
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	if overrides.CPUMillicores > 0 {
+		qty := resource.MustParse(fmt.Sprintf("%dm", overrides.CPUMillicores))
+		container.Resources.Requests[corev1.ResourceCPU] = qty
+		container.Resources.Limits[corev1.ResourceCPU] = qty
+	}
+	if overrides.MemoryMB > 0 {
+		qty := resource.MustParse(fmt.Sprintf("%dMi", overrides.MemoryMB))
+		container.Resources.Requests[corev1.ResourceMemory] = qty
+		container.Resources.Limits[corev1.ResourceMemory] = qty
+	}
+	if overrides.DiskGB > 0 {
+		qty := resource.MustParse(fmt.Sprintf("%dGi", overrides.DiskGB))
+		container.Resources.Requests[corev1.ResourceEphemeralStorage] = qty
+		container.Resources.Limits[corev1.ResourceEphemeralStorage] = qty
+	}
+}
+
+func applyClaimOverridesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1alpha1.SandboxClaim) {
+	for i := range spec.Containers {
+		container := &spec.Containers[i]
+		if envOverrides, ok := claim.Spec.EnvOverrides[container.Name]; ok {
+			container.Env = mergeEnvVars(container.Env, envOverrides)
+		}
+		if container.Name == "workspace" {
+			applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
+		}
+	}
+}
+
+func applyClaimMetadataToSandbox(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) {
+	sandbox.Labels = mergeStringMap(sandbox.Labels, claim.Labels)
+	sandbox.Annotations = mergeStringMap(sandbox.Annotations, claim.Annotations)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels = mergeStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim.Labels)
+	sandbox.Spec.PodTemplate.ObjectMeta.Annotations = mergeStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Annotations, claim.Annotations)
+}
+
+func applyClaimMetadataToPod(claim *extensionsv1alpha1.SandboxClaim, pod *corev1.Pod) {
+	pod.Labels = mergeStringMap(pod.Labels, claim.Labels)
+	pod.Annotations = mergeStringMap(pod.Annotations, claim.Annotations)
+}
+
 // tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
 func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, string, error) {
 	log := log.FromContext(ctx)
@@ -408,6 +492,8 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 	// Adopted pods must have the template hash label to ensure they are selected by the correct NetworkPolicy.
 	pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+	applyClaimMetadataToPod(claim, pod)
+	applyClaimOverridesToPodSpec(&pod.Spec, claim)
 
 	// Update the pod
 	if err := r.Update(ctx, pod); err != nil {
@@ -440,15 +526,16 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
 	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
 
-	// Propagate the trace context annotation to the Sandbox resource
-	if sandbox.Annotations == nil {
-		sandbox.Annotations = make(map[string]string)
-	}
+	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
+	applyClaimMetadataToSandbox(claim, sandbox)
+	applyClaimOverridesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim)
+
 	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		if sandbox.Annotations == nil {
+			sandbox.Annotations = make(map[string]string)
+		}
 		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 	}
-
-	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas

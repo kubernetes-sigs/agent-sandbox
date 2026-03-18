@@ -155,6 +155,53 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 	}
 
+	templateWithClaimOverrides := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "override-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "workspace",
+							Image: "workspace-image",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{},
+								Limits:   corev1.ResourceList{},
+							},
+						},
+						{
+							Name:  "codewire-sidecar",
+							Image: "sidecar-image",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	claimWithOverrides := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "override-claim",
+			Namespace: "default",
+			UID:       "claim-uid-overrides",
+			Labels:    map[string]string{"codewire.sh/environment-id": "env-123", "codewire.sh/org-id": "org-123"},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "override-template"},
+			EnvOverrides: map[string]map[string]string{
+				"codewire-sidecar": {
+					"CODEWIRE_ENVIRONMENT_ID": "env-123",
+					"CODEWIRE_SIDECAR_TOKEN":  "token-123",
+				},
+			},
+			WorkspaceResources: &extensionsv1alpha1.WorkspaceResources{
+				CPUMillicores: 4000,
+				MemoryMB:      8192,
+				DiskGB:        40,
+			},
+		},
+	}
+
 	claimForAutomount := &extensionsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "automount-claim", Namespace: "default", UID: "claim-uid-automount"},
 		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "automount-template"}},
@@ -272,6 +319,56 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 			validateSandbox: validateSandboxAutomountTrue,
+		},
+		{
+			name:             "sandbox is created with claim overrides",
+			claimToReconcile: claimWithOverrides,
+			existingObjects:  []client.Object{templateWithClaimOverrides},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				if got := sandbox.Labels["codewire.sh/environment-id"]; got != "env-123" {
+					t.Fatalf("sandbox label codewire.sh/environment-id = %q, want env-123", got)
+				}
+				if got := sandbox.Spec.PodTemplate.ObjectMeta.Labels["codewire.sh/org-id"]; got != "org-123" {
+					t.Fatalf("pod template label codewire.sh/org-id = %q, want org-123", got)
+				}
+				var workspace *corev1.Container
+				var sidecar *corev1.Container
+				for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+					switch sandbox.Spec.PodTemplate.Spec.Containers[i].Name {
+					case "workspace":
+						workspace = &sandbox.Spec.PodTemplate.Spec.Containers[i]
+					case "codewire-sidecar":
+						sidecar = &sandbox.Spec.PodTemplate.Spec.Containers[i]
+					}
+				}
+				if workspace == nil || sidecar == nil {
+					t.Fatalf("expected workspace and sidecar containers in sandbox pod template")
+				}
+				if got := workspace.Resources.Requests.Cpu().MilliValue(); got != 4000 {
+					t.Fatalf("workspace cpu request = %d, want 4000", got)
+				}
+				if got := workspace.Resources.Requests.Memory().Value() / (1024 * 1024); got != 8192 {
+					t.Fatalf("workspace memory request = %dMi, want 8192Mi", got)
+				}
+				ephemeralStorage := workspace.Resources.Requests[corev1.ResourceEphemeralStorage]
+				if got := ephemeralStorage.Value() / (1024 * 1024 * 1024); got != 40 {
+					t.Fatalf("workspace ephemeral-storage request = %dGi, want 40Gi", got)
+				}
+				foundToken := false
+				for _, envVar := range sidecar.Env {
+					if envVar.Name == "CODEWIRE_SIDECAR_TOKEN" && envVar.Value == "token-123" {
+						foundToken = true
+						break
+					}
+				}
+				if !foundToken {
+					t.Fatalf("expected CODEWIRE_SIDECAR_TOKEN override on sidecar container")
+				}
+			},
 		},
 		{
 			name:             "sandbox is not created when template is not found",
@@ -992,6 +1089,137 @@ func TestSandboxClaimPodAdoption(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSandboxClaimPodAdoptionAppliesClaimOverrides(t *testing.T) {
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "workspace",
+							Image: "workspace-image",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{},
+								Limits:   corev1.ResourceList{},
+							},
+						},
+						{
+							Name:  "codewire-sidecar",
+							Image: "sidecar-image",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid",
+			Labels:    map[string]string{"codewire.sh/environment-id": "env-789", "codewire.sh/org-id": "org-789"},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			EnvOverrides: map[string]map[string]string{
+				"codewire-sidecar": {
+					"CODEWIRE_ENVIRONMENT_ID": "env-789",
+					"CODEWIRE_SIDECAR_TOKEN":  "token-789",
+				},
+			},
+			WorkspaceResources: &extensionsv1alpha1.WorkspaceResources{
+				CPUMillicores: 2000,
+				MemoryMB:      4096,
+			},
+		},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	warmPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				poolLabel:              poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxWarmPool",
+					Name:       "test-pool",
+					UID:        "pool-uid",
+					Controller: ptr.To(true),
+				},
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "workspace",
+					Image: "workspace-image",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{},
+						Limits:   corev1.ResourceList{},
+					},
+				},
+				{
+					Name:  "codewire-sidecar",
+					Image: "sidecar-image",
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	scheme := newScheme(t)
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, warmPod).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   client,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var adoptedPod corev1.Pod
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "warm-pod", Namespace: "default"}, &adoptedPod); err != nil {
+		t.Fatalf("get adopted pod: %v", err)
+	}
+	if got := adoptedPod.Labels["codewire.sh/environment-id"]; got != "env-789" {
+		t.Fatalf("adopted pod label codewire.sh/environment-id = %q, want env-789", got)
+	}
+	if got := adoptedPod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue(); got != 2000 {
+		t.Fatalf("workspace cpu request = %d, want 2000", got)
+	}
+	foundToken := false
+	for _, envVar := range adoptedPod.Spec.Containers[1].Env {
+		if envVar.Name == "CODEWIRE_SIDECAR_TOKEN" && envVar.Value == "token-789" {
+			foundToken = true
+			break
+		}
+	}
+	if !foundToken {
+		t.Fatalf("expected CODEWIRE_SIDECAR_TOKEN override on adopted sidecar container")
 	}
 }
 

@@ -25,6 +25,7 @@ from kubernetes import config
 
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.exceptions import (
+    SandboxMetadataError,
     SandboxNotReadyError,
     SandboxRequestError,
 )
@@ -189,6 +190,53 @@ class TestRequestExceptions(unittest.TestCase):
 
         with self.assertRaises(SandboxNotReadyError):
             sandbox._request("GET", "health")
+
+
+    def test_missing_sandbox_name_raises_metadata_error(self):
+        """Validates SandboxMetadataError when sandbox object has no name."""
+        sandbox = self._make_sandbox()
+
+        fake_events = [
+            {
+                "type": "MODIFIED",
+                "object": {
+                    "metadata": {},
+                    "status": {
+                        "conditions": [{"type": "Ready", "status": "True"}]
+                    },
+                },
+            }
+        ]
+
+        with patch.object(
+            sandbox.custom_objects_api,
+            "list_namespaced_custom_object",
+        ), patch("kubernetes.watch.Watch.stream", return_value=iter(fake_events)):
+            with self.assertRaises(SandboxMetadataError):
+                sandbox._wait_for_sandbox_ready()
+
+    def test_metadata_error_is_catchable_as_runtime_error(self):
+        """Backwards compatibility: SandboxMetadataError is still a RuntimeError."""
+        sandbox = self._make_sandbox()
+
+        fake_events = [
+            {
+                "type": "MODIFIED",
+                "object": {
+                    "metadata": {},
+                    "status": {
+                        "conditions": [{"type": "Ready", "status": "True"}]
+                    },
+                },
+            }
+        ]
+
+        with patch.object(
+            sandbox.custom_objects_api,
+            "list_namespaced_custom_object",
+        ), patch("kubernetes.watch.Watch.stream", return_value=iter(fake_events)):
+            with self.assertRaises(RuntimeError):
+                sandbox._wait_for_sandbox_ready()
 
 
 if __name__ == "__main__":

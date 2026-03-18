@@ -163,8 +163,9 @@ type SandboxStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// replicas is the number of actual replicas.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
-	Replicas int32 `json:"replicas"`
+	Replicas int32 `json:"replicas,omitempty"`
 
 	// selector is the label selector for pods.
 	// +optional

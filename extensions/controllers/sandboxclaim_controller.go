@@ -44,6 +44,7 @@ import (
 const (
 	sandboxTemplateLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
+
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 

@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -325,25 +326,95 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(ctx context.Context, claim 
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
+		claim.Status.SandboxStatus.PodIP = sandbox.Status.PodIP
+	}
+}
 
-		// Look up the pod IP if the sandbox is ready
-		if readyCondition.Status == metav1.ConditionTrue {
-			podName := sandbox.Name
-			if ann, ok := sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation]; ok && ann != "" {
-				podName = ann
-			}
-			pod := &corev1.Pod{}
-			if podErr := r.Get(ctx, client.ObjectKey{Name: podName, Namespace: sandbox.Namespace}, pod); podErr == nil {
-				claim.Status.SandboxStatus.PodIP = pod.Status.PodIP
-			} else {
-				logger.V(1).Info("Could not look up pod IP for status", "pod", podName, "error", podErr)
-			}
+func mergeStringMap(dst map[string]string, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for key, val := range src {
+		dst[key] = val
+	}
+	return dst
+}
+
+func mergeEnvVars(existing []corev1.EnvVar, overrides map[string]string) []corev1.EnvVar {
+	if len(overrides) == 0 {
+		return existing
+	}
+	indexByName := make(map[string]int, len(existing))
+	for i := range existing {
+		indexByName[existing[i].Name] = i
+	}
+	for name, value := range overrides {
+		if idx, ok := indexByName[name]; ok {
+			existing[idx].Value = value
+			existing[idx].ValueFrom = nil
+			continue
+		}
+		existing = append(existing, corev1.EnvVar{Name: name, Value: value})
+	}
+	return existing
+}
+
+func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *extensionsv1alpha1.WorkspaceResources) {
+	if overrides == nil {
+		return
+	}
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	if overrides.CPUMillicores > 0 {
+		qty := resource.MustParse(fmt.Sprintf("%dm", overrides.CPUMillicores))
+		container.Resources.Requests[corev1.ResourceCPU] = qty
+		container.Resources.Limits[corev1.ResourceCPU] = qty
+	}
+	if overrides.MemoryMB > 0 {
+		qty := resource.MustParse(fmt.Sprintf("%dMi", overrides.MemoryMB))
+		container.Resources.Requests[corev1.ResourceMemory] = qty
+		container.Resources.Limits[corev1.ResourceMemory] = qty
+	}
+	if overrides.DiskGB > 0 {
+		qty := resource.MustParse(fmt.Sprintf("%dGi", overrides.DiskGB))
+		container.Resources.Requests[corev1.ResourceEphemeralStorage] = qty
+		container.Resources.Limits[corev1.ResourceEphemeralStorage] = qty
+	}
+}
+
+func applyClaimOverridesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1alpha1.SandboxClaim) {
+	for i := range spec.Containers {
+		container := &spec.Containers[i]
+		if envOverrides, ok := claim.Spec.EnvOverrides[container.Name]; ok {
+			container.Env = mergeEnvVars(container.Env, envOverrides)
+		}
+		if container.Name == "workspace" {
+			applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
 		}
 	}
 }
 
-// adoptSandboxFromCandidates picks the best candidate and transfers ownership to the claim.
-func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
+func applyClaimMetadataToSandbox(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) {
+	sandbox.Labels = mergeStringMap(sandbox.Labels, claim.Labels)
+	sandbox.Annotations = mergeStringMap(sandbox.Annotations, claim.Annotations)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels = mergeStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim.Labels)
+	sandbox.Spec.PodTemplate.ObjectMeta.Annotations = mergeStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Annotations, claim.Annotations)
+}
+
+func applyClaimMetadataToPod(claim *extensionsv1alpha1.SandboxClaim, pod *corev1.Pod) {
+	pod.Labels = mergeStringMap(pod.Labels, claim.Labels)
+	pod.Annotations = mergeStringMap(pod.Annotations, claim.Annotations)
+}
+
+// tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
+func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, string, error) {
 	log := log.FromContext(ctx)
 
 	// Sort: ready sandboxes first, then by creation time (oldest first)
@@ -406,7 +477,53 @@ func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 			return true
 		}
 	}
-	return false
+
+	if len(candidates) == 0 {
+		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
+		return nil, poolNameNone, nil
+	}
+
+	// Sort pods using podutils.ByLogging to select the best available pod.
+	sort.Sort(podutils.ByLogging(candidates))
+
+	// Get the first available pod
+	pod := candidates[0]
+	poolName := poolNameNone
+	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
+		poolName = controllerRef.Name
+	}
+
+	log.Info("Adopting pod from warm pool", "pod", pod.Name, "pool", poolName)
+
+	// Remove the pool labels
+	delete(pod.Labels, poolLabel)
+
+	// Remove existing owner references (from SandboxWarmPool)
+	pod.OwnerReferences = nil
+
+	nameHash := sandboxcontrollers.NameHash(claim.Name)
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+
+	pod.Labels[sandboxLabel] = nameHash
+
+	// Label required by NetworkPolicy
+	// We add the new label with the Claim UID for unique targeting.
+	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// Adopted pods must have the template hash label to ensure they are selected by the correct NetworkPolicy.
+	pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+	applyClaimMetadataToPod(claim, pod)
+	applyClaimOverridesToPodSpec(&pod.Spec, claim)
+
+	// Update the pod
+	if err := r.Update(ctx, pod); err != nil {
+		log.Error(err, "Failed to update adopted pod")
+		return nil, poolNameNone, err
+	}
+
+	log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
+	return pod, poolName, nil
 }
 
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
@@ -430,15 +547,17 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
 	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
 
-	// Propagate the trace context annotation to the Sandbox resource
-	if sandbox.Annotations == nil {
-		sandbox.Annotations = make(map[string]string)
-	}
+	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
+	applyClaimMetadataToSandbox(claim, sandbox)
+	applyClaimOverridesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim)
+
 	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		if sandbox.Annotations == nil {
+			sandbox.Annotations = make(map[string]string)
+		}
 		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 	}
-
-	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
+	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas
 	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {

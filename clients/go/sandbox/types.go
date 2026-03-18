@@ -36,38 +36,24 @@ const (
 	headerRequestID        = "X-Request-ID"
 )
 
-// Sentinel errors returned by the SDK. Use errors.Is to check for specific
-// failure modes in application code.
+// Sentinel errors returned by the SDK.
 var (
-	// ErrNotReady indicates the client has not completed Open or has lost connectivity.
-	ErrNotReady = errors.New("client is not ready")
-	// ErrTimeout indicates an operation exceeded its deadline.
-	ErrTimeout = errors.New("operation timed out")
-	// ErrClaimFailed indicates the SandboxClaim could not be created.
-	ErrClaimFailed = errors.New("claim creation failed")
-	// ErrPortForwardDied indicates the port-forward tunnel dropped unexpectedly.
-	ErrPortForwardDied = errors.New("port-forward connection lost")
-	// ErrAlreadyOpen indicates Open was called on an already-open client.
-	ErrAlreadyOpen = errors.New("client is already open; call Close first")
-	// ErrOrphanedClaim indicates Close failed to delete the claim; retry with Close.
-	ErrOrphanedClaim = errors.New("orphaned claim; call Close() to retry deletion")
-	// ErrRetriesExhausted indicates all HTTP retry attempts failed.
+	ErrNotReady         = errors.New("sandbox is not ready")
+	ErrTimeout          = errors.New("operation timed out")
+	ErrClaimFailed      = errors.New("claim creation failed")
+	ErrPortForwardDied  = errors.New("port-forward connection lost")
+	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
+	ErrOrphanedClaim    = errors.New("orphaned claim; call Close() to retry deletion")
 	ErrRetriesExhausted = errors.New("retries exhausted")
-	// ErrSandboxDeleted indicates the sandbox was removed before becoming ready.
-	ErrSandboxDeleted = errors.New("sandbox was deleted before becoming ready")
-	// ErrGatewayDeleted indicates the gateway was removed during address discovery.
-	ErrGatewayDeleted = errors.New("gateway was deleted during address discovery")
+	ErrSandboxDeleted   = errors.New("sandbox was deleted before becoming ready")
+	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
 )
 
 // HTTPError represents a non-OK HTTP response from the sandbox.
-// Use errors.As to inspect the status code programmatically.
 type HTTPError struct {
-	// StatusCode is the HTTP status code returned by the sandbox server.
 	StatusCode int
-	// Body is the (possibly truncated) response body.
-	Body string
-	// Operation is the SDK method that triggered the request (e.g. "Run", "Read").
-	Operation string
+	Body       string
+	Operation  string
 }
 
 func (e *HTTPError) Error() string {
@@ -82,25 +68,41 @@ func (e *HTTPError) Error() string {
 type CallOption func(*callOptions)
 
 type callOptions struct {
-	timeout time.Duration
+	timeout     time.Duration
+	maxAttempts int // 0 = use default (maxAttempts const); 1 = no retry
 }
 
 // WithTimeout sets the total timeout for a single operation, overriding
-// the client's RequestTimeout for that call. If the caller's context
-// already has a shorter deadline, the context deadline takes precedence.
+// the default RequestTimeout for that call.
 func WithTimeout(d time.Duration) CallOption {
 	return func(o *callOptions) {
 		o.timeout = d
 	}
 }
 
-// Client provides high-level interaction with an agent-sandbox instance.
-// SandboxClient implements this interface; consumers should accept Client
-// in their APIs to enable testing with mocks.
-type Client interface {
+// WithMaxAttempts sets the maximum number of attempts for an operation.
+// Values ≤0 are ignored and the default is used (1 for Run, 6 for file
+// operations).
+//
+//	result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
+func WithMaxAttempts(n int) CallOption {
+	return func(o *callOptions) {
+		if n > 0 {
+			o.maxAttempts = n
+		}
+	}
+}
+
+// Handle provides high-level interaction with a sandbox instance.
+// Sandbox implements this interface; consumers should accept Handle
+// in their APIs to enable testing with mocks. For sub-object access
+// (Commands(), Files()), use the concrete *Sandbox type directly.
+type Handle interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error
+	Disconnect(ctx context.Context) error
 	IsReady() bool
+
 	Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error)
 	Write(ctx context.Context, path string, content []byte, opts ...CallOption) error
 	Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error)
@@ -108,21 +110,13 @@ type Client interface {
 	Exists(ctx context.Context, path string, opts ...CallOption) (bool, error)
 }
 
-// SandboxInfo provides read-only access to sandbox identity metadata.
-// These accessors are on the concrete SandboxClient rather than the Client
-// interface so that adding new accessors is not a breaking change for
-// mock/fake implementors.
-type SandboxInfo interface {
+// Info provides read-only access to sandbox identity metadata.
+type Info interface {
 	ClaimName() string
 	SandboxName() string
 	PodName() string
 	Annotations() map[string]string
 }
-
-var (
-	_ Client      = (*SandboxClient)(nil)
-	_ SandboxInfo = (*SandboxClient)(nil)
-)
 
 // ExecutionResult holds the result of a command execution in the sandbox.
 type ExecutionResult struct {
@@ -132,7 +126,6 @@ type ExecutionResult struct {
 }
 
 // FileType represents the type of a file entry.
-// List() rejects types other than FileTypeFile and FileTypeDirectory.
 type FileType string
 
 const (

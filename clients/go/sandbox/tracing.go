@@ -42,6 +42,7 @@ var (
 	AttrFileExists       = attribute.Key("sandbox.file.exists")
 	AttrGatewayName      = attribute.Key("sandbox.gateway.name")
 	AttrGatewayNamespace = attribute.Key("sandbox.gateway.namespace")
+	AttrRequestID        = attribute.Key("sandbox.request_id")
 )
 
 var (
@@ -52,12 +53,7 @@ var (
 
 // InitTracer initializes a global OpenTelemetry TracerProvider with an
 // OTLP/gRPC exporter. Only the first call takes effect; subsequent calls
-// return the existing provider's shutdown function. The endpoint is
-// controlled by OTEL_EXPORTER_OTLP_ENDPOINT (default: localhost:4317).
-//
-//	shutdown, err := sandbox.InitTracer(ctx, "my-service")
-//	if err != nil { ... }
-//	defer shutdown(ctx)
+// return the existing provider's shutdown function.
 func InitTracer(ctx context.Context, serviceName string) (shutdown func(context.Context) error, err error) {
 	globalProviderMu.Lock()
 	defer globalProviderMu.Unlock()
@@ -94,9 +90,7 @@ func InitTracer(ctx context.Context, serviceName string) (shutdown func(context.
 }
 
 // ShutdownTracer shuts down the global TracerProvider initialized by
-// InitTracer, flushing any remaining spans and closing the exporter
-// connection. This is a no-op if InitTracer was never called or if
-// a custom TracerProvider was used. Call this at program exit.
+// InitTracer. This is a no-op if InitTracer was never called.
 func ShutdownTracer(ctx context.Context) error {
 	globalProviderMu.Lock()
 	shutdown := globalShutdown
@@ -109,15 +103,17 @@ func ShutdownTracer(ctx context.Context) error {
 	return nil
 }
 
-// startSpan creates a child span of the lifecycle span (if active) or the
-// passed context.
-func (c *SandboxClient) startSpan(ctx context.Context, operation string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	c.mu.Lock()
-	if c.lifecycleCtx != nil {
-		ctx = trace.ContextWithSpan(ctx, trace.SpanFromContext(c.lifecycleCtx))
+// startSpan creates a child span parented to whatever span is in ctx.
+func startSpan(ctx context.Context, tracer trace.Tracer, svcName, operation string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return tracer.Start(ctx, svcName+"."+operation, trace.WithAttributes(attrs...))
+}
+
+// withLifecycleSpan injects the lifecycle span as parent into ctx.
+func withLifecycleSpan(ctx context.Context, lifecycleCtx context.Context) context.Context {
+	if lifecycleCtx != nil {
+		return trace.ContextWithSpan(ctx, trace.SpanFromContext(lifecycleCtx))
 	}
-	c.mu.Unlock()
-	return c.tracer.Start(ctx, c.traceServiceName+"."+operation, trace.WithAttributes(attrs...))
+	return ctx
 }
 
 // recordError sets the span status to Error and records the error event.
@@ -140,17 +136,17 @@ func traceContextJSON(ctx context.Context) string {
 	return string(data)
 }
 
-// initTracer configures the client's tracer from Options.
-func (c *SandboxClient) initTracer() {
-	c.traceServiceName = c.opts.TraceServiceName
+// newTracer configures a tracer from Options.
+func newTracer(opts Options) (trace.Tracer, string) {
+	svcName := opts.TraceServiceName
 
 	var provider trace.TracerProvider
-	if c.opts.TracerProvider != nil {
-		provider = c.opts.TracerProvider
+	if opts.TracerProvider != nil {
+		provider = opts.TracerProvider
 	} else {
 		provider = otel.GetTracerProvider()
 	}
 
-	scope := strings.ReplaceAll(c.traceServiceName, "-", "_")
-	c.tracer = provider.Tracer(scope)
+	scope := strings.ReplaceAll(svcName, "-", "_")
+	return provider.Tracer(scope), svcName
 }

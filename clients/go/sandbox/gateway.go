@@ -21,10 +21,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/trace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 )
 
 var gatewayGVR = schema.GroupVersionResource{
@@ -33,57 +36,70 @@ var gatewayGVR = schema.GroupVersionResource{
 	Resource: gatewayPlural,
 }
 
-// waitForGatewayIP blocks until the named Gateway has an external address,
-// then sets c.baseURL.
-func (c *SandboxClient) waitForGatewayIP(ctx context.Context) (retErr error) {
-	ctx, span := c.startSpan(ctx, "wait_for_gateway",
-		AttrGatewayName.String(c.opts.GatewayName),
-		AttrGatewayNamespace.String(c.opts.GatewayNamespace),
-	)
-	defer func() {
-		if retErr != nil {
-			recordError(span, retErr)
-		}
-		span.End()
-	}()
+// gatewayStrategy discovers the sandbox-router URL by watching a Kubernetes
+// Gateway resource for an external address.
+type gatewayStrategy struct {
+	dynamicClient    dynamic.Interface
+	gatewayName      string
+	gatewayNamespace string
+	gatewayScheme    string
+	timeout          time.Duration
+	log              logr.Logger
+	tracer           trace.Tracer
+	svcName          string
+}
 
-	if c.dynamicClient == nil {
-		return fmt.Errorf("sandbox: dynamic client required for gateway discovery")
+func (g *gatewayStrategy) Connect(ctx context.Context) (string, error) {
+	ctx, span := startSpan(ctx, g.tracer, g.svcName, "wait_for_gateway",
+		AttrGatewayName.String(g.gatewayName),
+		AttrGatewayNamespace.String(g.gatewayNamespace),
+	)
+	defer span.End()
+
+	if g.dynamicClient == nil {
+		err := fmt.Errorf("sandbox: dynamic client required for gateway discovery")
+		recordError(span, err)
+		return "", err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.opts.GatewayReadyTimeout)
+	ctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
 
 	listOpts := metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("metadata.name=%s", c.opts.GatewayName),
+		FieldSelector: fmt.Sprintf("metadata.name=%s", g.gatewayName),
 	}
 
 	watchBackoff := 100 * time.Millisecond
 	const maxWatchBackoff = 5 * time.Second
 
 	for {
-		list, listErr := c.dynamicClient.Resource(gatewayGVR).Namespace(c.opts.GatewayNamespace).List(ctx, listOpts)
+		list, listErr := g.dynamicClient.Resource(gatewayGVR).Namespace(g.gatewayNamespace).List(ctx, listOpts)
 		if listErr == nil {
 			for i := range list.Items {
-				if addr := extractGatewayAddress(&list.Items[i]); addr != "" {
-					c.setGatewayURL(addr)
-					return nil
+				if list.Items[i].GetName() != g.gatewayName {
+					continue
+				}
+				if addr, rejected := extractGatewayAddress(&list.Items[i]); addr != "" {
+					return g.formatURL(addr), nil
+				} else if rejected != "" {
+					g.log.Info("gateway address rejected by validation", "gateway", list.Items[i].GetName(), "address", rejected)
 				}
 			}
 			listOpts.ResourceVersion = list.GetResourceVersion()
 		} else {
-			c.log.V(1).Info("list gateways failed, falling through to watch", "error", listErr, "gateway", c.opts.GatewayName)
+			g.log.V(1).Info("list gateways failed, falling through to watch", "error", listErr, "gateway", g.gatewayName)
 		}
 
-		watcher, err := c.dynamicClient.Resource(gatewayGVR).Namespace(c.opts.GatewayNamespace).Watch(ctx, listOpts)
+		watcher, err := g.dynamicClient.Resource(gatewayGVR).Namespace(g.gatewayNamespace).Watch(ctx, listOpts)
 		if err != nil {
 			if ctx.Err() != nil {
-				return fmt.Errorf("%w: gateway %s did not get an address within %s", ErrTimeout, c.opts.GatewayName, c.opts.GatewayReadyTimeout)
+				retErr := fmt.Errorf("%w: gateway %s did not get an address within %s", ErrTimeout, g.gatewayName, g.timeout)
+				recordError(span, retErr)
+				return "", retErr
 			}
-			// Transient watch creation error; backoff and re-list.
-			c.log.V(1).Info("watch creation failed, retrying", "error", err, "gateway", c.opts.GatewayName)
+			g.log.V(1).Info("watch creation failed, retrying", "error", err, "gateway", g.gatewayName)
 			listOpts.ResourceVersion = ""
-			c.sleepWithContext(ctx, watchBackoff)
+			sleepWithContext(ctx, watchBackoff)
 			watchBackoff *= 2
 			if watchBackoff > maxWatchBackoff {
 				watchBackoff = maxWatchBackoff
@@ -91,18 +107,19 @@ func (c *SandboxClient) waitForGatewayIP(ctx context.Context) (retErr error) {
 			continue
 		}
 
-		done, watchErr := c.drainGatewayWatch(ctx, watcher)
+		url, done, watchErr := g.drainWatch(ctx, watcher)
 		watcher.Stop()
 		if done {
-			return nil
+			return url, nil
 		}
 		if watchErr != nil {
-			return watchErr
+			recordError(span, watchErr)
+			return "", watchErr
 		}
-		c.log.V(1).Info("gateway watch closed, re-establishing", "gateway", c.opts.GatewayName)
+		g.log.V(1).Info("gateway watch closed, re-establishing", "gateway", g.gatewayName)
 		listOpts.ResourceVersion = ""
 
-		c.sleepWithContext(ctx, watchBackoff)
+		sleepWithContext(ctx, watchBackoff)
 		watchBackoff *= 2
 		if watchBackoff > maxWatchBackoff {
 			watchBackoff = maxWatchBackoff
@@ -110,69 +127,106 @@ func (c *SandboxClient) waitForGatewayIP(ctx context.Context) (retErr error) {
 	}
 }
 
-// drainGatewayWatch returns (true, nil) when an IP is found,
-// (false, err) on fatal error, or (false, nil) if the watch channel closes.
-func (c *SandboxClient) drainGatewayWatch(ctx context.Context, watcher watch.Interface) (bool, error) {
+func (g *gatewayStrategy) Close() error { return nil }
+
+func (g *gatewayStrategy) drainWatch(ctx context.Context, watcher watch.Interface) (string, bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return false, fmt.Errorf("%w: gateway %s did not get an address within %s", ErrTimeout, c.opts.GatewayName, c.opts.GatewayReadyTimeout)
+			return "", false, fmt.Errorf("%w: gateway %s did not get an address within %s", ErrTimeout, g.gatewayName, g.timeout)
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
-				return false, nil // watch closed, caller should retry
+				return "", false, nil
 			}
 			if event.Type == watch.Error {
-				// All watch errors (410 Gone, transient 5xx, etc.) are
-				// recoverable: return nil so the outer loop re-lists with
-				// backoff rather than aborting and deleting the claim.
-				c.log.V(1).Info("transient gateway watch error, will re-list", "error", event.Object)
-				return false, nil
+				g.log.V(1).Info("transient gateway watch error, will re-list", "error", event.Object)
+				return "", false, nil
 			}
 			if event.Type == watch.Deleted {
-				return false, ErrGatewayDeleted
+				return "", false, ErrGatewayDeleted
 			}
 			gw, ok := event.Object.(*unstructured.Unstructured)
 			if !ok {
 				continue
 			}
-			addr := extractGatewayAddress(gw)
-			if addr != "" {
-				c.setGatewayURL(addr)
-				return true, nil
+			if gw.GetName() != g.gatewayName {
+				continue
 			}
-			c.log.V(1).Info("gateway object received but address not yet available", "gateway", gw.GetName())
+			addr, rejected := extractGatewayAddress(gw)
+			if addr != "" {
+				return g.formatURL(addr), true, nil
+			}
+			if rejected != "" {
+				g.log.Info("gateway address rejected by validation", "gateway", gw.GetName(), "address", rejected)
+			} else {
+				g.log.V(1).Info("gateway object received but address not yet available", "gateway", gw.GetName())
+			}
 		}
 	}
 }
 
-func (c *SandboxClient) setGatewayURL(addr string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	scheme := c.opts.GatewayScheme
-	// Bracket IPv6 addresses per RFC 3986.
+func (g *gatewayStrategy) formatURL(addr string) string {
 	if net.ParseIP(addr) != nil && strings.Contains(addr, ":") {
-		c.baseURL = fmt.Sprintf("%s://[%s]", scheme, addr)
-	} else {
-		c.baseURL = fmt.Sprintf("%s://%s", scheme, addr)
+		return fmt.Sprintf("%s://[%s]", g.gatewayScheme, addr)
 	}
+	return fmt.Sprintf("%s://%s", g.gatewayScheme, addr)
 }
 
-func extractGatewayAddress(gw *unstructured.Unstructured) string {
+// extractGatewayAddress returns the validated address from a Gateway status.
+// If the address is present but fails validation, rejected contains the raw
+// value so the caller can log a diagnostic message.
+func extractGatewayAddress(gw *unstructured.Unstructured) (addr, rejected string) {
 	status, ok := gw.Object["status"].(map[string]interface{})
 	if !ok {
-		return ""
+		return "", ""
 	}
 	addresses, ok := status["addresses"].([]interface{})
 	if !ok || len(addresses) == 0 {
-		return ""
+		return "", ""
 	}
 	first, ok := addresses[0].(map[string]interface{})
 	if !ok {
-		return ""
+		return "", ""
 	}
 	val, ok := first["value"].(string)
 	if !ok || val == "" {
-		return ""
+		return "", ""
 	}
-	return val
+	// Validate the address to prevent SSRF via a compromised Gateway resource.
+	// The address must be a valid IP or a hostname; reject values containing
+	// path separators, query strings, or fragments.
+	if strings.ContainsAny(val, "/?#@") {
+		return "", val
+	}
+	if net.ParseIP(val) == nil && !isValidGatewayHostname(val) {
+		return "", val
+	}
+	return val, ""
+}
+
+// isValidGatewayHostname checks that s looks like a DNS hostname: only
+// [a-zA-Z0-9.-] and no empty labels. This prevents injection of path,
+// query, or userinfo components into the constructed URL.
+func isValidGatewayHostname(s string) bool {
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-':
+			if i == 0 || s[i-1] == '.' {
+				return false
+			}
+		case c == '.':
+			if i == 0 || s[i-1] == '.' || s[i-1] == '-' {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	last := s[len(s)-1]
+	return last != '-' && last != '.'
 }

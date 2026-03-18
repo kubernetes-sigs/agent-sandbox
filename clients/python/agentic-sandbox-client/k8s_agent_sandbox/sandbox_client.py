@@ -41,6 +41,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .exceptions import (
+    SandboxMetadataError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,

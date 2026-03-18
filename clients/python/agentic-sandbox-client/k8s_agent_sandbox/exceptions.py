@@ -27,6 +27,10 @@ class SandboxPortForwardError(SandboxError):
     """Raised when the port-forward process crashes."""
 
 
+class SandboxMetadataError(SandboxError):
+    """Raised when the sandbox object is missing expected metadata."""
+
+
 class SandboxRequestError(SandboxError):
     """Raised when an HTTP request to the sandbox fails.
 

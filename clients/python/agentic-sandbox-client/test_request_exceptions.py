@@ -100,6 +100,7 @@ class TestRequestExceptions(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
         cls.server_thread.join(timeout=5)
 
     def _make_sandbox(self) -> SandboxClient:
@@ -174,10 +175,10 @@ class TestRequestExceptions(unittest.TestCase):
     def test_connection_refused_has_no_status_code(self):
         """Validates no status_code does not raise an unhandled exception."""
         sandbox = self._make_sandbox()
-        sandbox.base_url = "http://127.0.0.1:1"
+        sandbox.base_url = "http://192.0.2.0"
 
         with self.assertRaises(SandboxRequestError) as ctx:
-            sandbox._request("POST", "run")
+            sandbox._request("POST", "run", timeout=1)
 
         self.assertIsNone(ctx.exception.status_code)
 

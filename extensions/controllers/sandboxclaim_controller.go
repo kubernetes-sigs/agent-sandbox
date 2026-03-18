@@ -43,15 +43,14 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-// TODO: These constants should be imported from the main controller package Issue #216
+// TODO: Some of these constants should be imported from the main controller package Issue #216
 const (
 	sandboxLabel         = "agents.x-k8s.io/sandbox-name-hash"
 	poolNameNone         = "none"
 	sandboxTemplateLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
+	// podAvailabilityField is a virtual index key used to track pods that are ready for adoption
+	podAvailabilityField = "agents.x-k8s.io/is-Available"
 )
-
-// podAvailabilityField is a virtual index key used to track pods that are ready for adoption
-const podAvailabilityField = "status.isAvailable"
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -409,7 +408,7 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 		// Attempt adoption. API Server handles the final atomic check via resourceVersion.
 		if err := r.Update(ctx, pod); err != nil {
-			if k8errors.IsConflict(err) {
+			if k8errors.IsConflict(err) || k8errors.IsNotFound(err) {
 				// Another worker adopted this pod while we were processing; try next candidate.
 				continue
 			}

@@ -37,9 +37,10 @@ const (
 	defaultRequestTimeout          = 180 * time.Second
 	defaultPerAttemptTimeout       = 60 * time.Second
 	defaultMaxDownloadSize         = 256 << 20 // 256 MB
+	defaultMaxUploadSize           = 256 << 20 // 256 MB
 )
 
-// Options configures the SandboxClient.
+// Options configures a Sandbox instance.
 type Options struct {
 	// TemplateName is the name of the SandboxTemplate to use. Required.
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
@@ -89,17 +90,19 @@ type Options struct {
 	// Default: 180s.
 	RequestTimeout time.Duration
 
-	// PerAttemptTimeout bounds the time to receive response headers for
-	// each HTTP attempt. On the default transport, it also sets DialContext
-	// timeout and ResponseHeaderTimeout. On success, the timer is stopped
-	// so response body reads are governed by RequestTimeout instead.
+	// PerAttemptTimeout bounds the time to receive response headers per
+	// HTTP attempt. Stopped on success so body reads use RequestTimeout.
 	// Default: 60s.
 	PerAttemptTimeout time.Duration
 
-	// MaxDownloadSize is the maximum response body size for Read() and the
-	// JSON decode limit for Run() responses. List() and Exists() use a
-	// fixed internal limit. Default: 256 MB.
+	// MaxDownloadSize is the maximum response body size for Read().
+	// Run() uses a fixed 16 MB decode limit; List() and Exists() use a
+	// fixed 8 MB internal limit. Default: 256 MB.
 	MaxDownloadSize int64
+
+	// MaxUploadSize is the maximum content size for Write(). Content
+	// exceeding this limit is rejected before any network I/O. Default: 256 MB.
+	MaxUploadSize int64
 
 	// Logger for structured logging. Defaults to stderr at INFO level.
 	// Provide a custom logr.Logger for full control, or set Quiet to
@@ -110,17 +113,19 @@ type Options struct {
 	// custom Logger is provided (non-zero-value).
 	Quiet bool
 
+	// K8sHelper provides pre-constructed Kubernetes clients. If nil, a new
+	// K8sHelper is created from RestConfig. Use this to share clients
+	// across multiple Sandbox instances.
+	K8sHelper *K8sHelper
+
 	// RestConfig overrides the Kubernetes REST config. If nil, the client first
 	// tries in-cluster config (for pods), then falls back to the default
-	// kubeconfig (~/.kube/config or KUBECONFIG env).
+	// kubeconfig (~/.kube/config or KUBECONFIG env). Ignored when K8sHelper is set.
 	RestConfig *rest.Config
 
-	// HTTPTransport overrides the HTTP transport used for sandbox operations
-	// (Run, Read, Write, List, Exists). If nil, a default transport with
-	// sensible timeouts and connection pooling is created. Use this to
-	// configure custom TLS certificates, proxies, or other transport-level
-	// settings. The SDK always wraps the transport in its own http.Client
-	// with timeout and retry handling.
+	// HTTPTransport overrides the HTTP transport for sandbox operations.
+	// If nil, a default transport with sensible timeouts is created.
+	// Use this for custom TLS, proxies, or other transport-level settings.
 	HTTPTransport http.RoundTripper
 
 	// EnableTracing auto-initializes a global OTLP/gRPC TracerProvider when
@@ -174,6 +179,9 @@ func (o *Options) setDefaults() {
 	if o.MaxDownloadSize == 0 {
 		o.MaxDownloadSize = defaultMaxDownloadSize
 	}
+	if o.MaxUploadSize == 0 {
+		o.MaxUploadSize = defaultMaxUploadSize
+	}
 	if o.TraceServiceName == "" {
 		o.TraceServiceName = "sandbox-client"
 	}
@@ -194,6 +202,8 @@ func (o *Options) setDefaults() {
 
 // isValidDNSSubdomain checks RFC 1123 DNS subdomain rules: max 253 chars,
 // dot-separated labels of [a-z0-9-] that start and end with alphanumeric.
+// Per-label length is not enforced here because Kubernetes IsDNS1123Subdomain
+// does not enforce it for resource names.
 func isValidDNSSubdomain(s string) bool {
 	if len(s) == 0 || len(s) > 253 {
 		return false
@@ -289,6 +299,9 @@ func (o *Options) validate() error {
 	}
 	if o.MaxDownloadSize <= 0 {
 		return fmt.Errorf("sandbox: MaxDownloadSize must be positive")
+	}
+	if o.MaxUploadSize <= 0 {
+		return fmt.Errorf("sandbox: MaxUploadSize must be positive")
 	}
 	return nil
 }

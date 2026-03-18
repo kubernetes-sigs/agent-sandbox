@@ -53,9 +53,9 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		SandboxReadyTimeout: 180 * time.Second,
 	}
 
-	client, err := NewClient(opts)
+	client, err := New(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("NewClient() error: %v", err)
+		t.Fatalf("New() error: %v", err)
 	}
 	defer client.Close(context.Background())
 
@@ -141,7 +141,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	t.Log("Closing sandbox...")
 }
 
-func newIntegrationClient(t *testing.T) *SandboxClient {
+func newIntegrationClient(t *testing.T) *Sandbox {
 	t.Helper()
 	if os.Getenv("INTEGRATION_TEST") == "" && *gatewayName == "" && *apiURL == "" {
 		t.Skip("set INTEGRATION_TEST=1 or provide --gateway-name/--api-url to run integration tests")
@@ -150,7 +150,7 @@ func newIntegrationClient(t *testing.T) *SandboxClient {
 	if gwNS == "" {
 		gwNS = *namespace
 	}
-	client, err := NewClient(Options{
+	client, err := New(context.Background(), Options{
 		TemplateName:        *templateName,
 		Namespace:           *namespace,
 		GatewayName:         *gatewayName,
@@ -161,7 +161,7 @@ func newIntegrationClient(t *testing.T) *SandboxClient {
 		Quiet:               true,
 	})
 	if err != nil {
-		t.Fatalf("NewClient() error: %v", err)
+		t.Fatalf("New() error: %v", err)
 	}
 	return client
 }

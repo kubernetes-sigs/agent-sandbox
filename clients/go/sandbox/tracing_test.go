@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -42,28 +43,31 @@ func sandboxHTTPHandler() http.Handler {
 		switch {
 		case r.URL.Path == "/execute":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(ExecutionResult{Stdout: "hello", ExitCode: 0})
+			_ = json.NewEncoder(w).Encode(ExecutionResult{Stdout: "hello", ExitCode: 0})
 		case strings.HasPrefix(r.URL.Path, "/download/"):
-			w.Write([]byte("file-data"))
+			_, _ = w.Write([]byte("file-data"))
 		case r.URL.Path == "/upload":
 			w.WriteHeader(http.StatusOK)
 		case strings.HasPrefix(r.URL.Path, "/list/"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode([]FileEntry{{Name: "a.txt", Type: FileTypeFile}})
+			_ = json.NewEncoder(w).Encode([]FileEntry{{Name: "a.txt", Type: FileTypeFile}})
 		case strings.HasPrefix(r.URL.Path, "/exists/"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+			_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
 }
 
-func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*SandboxClient, *fakeagents.Clientset, *fakeextensions.Clientset, *httptest.Server) {
+func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset, *httptest.Server) {
 	t.Helper()
 
 	srv := httptest.NewServer(sandboxHTTPHandler())
 	t.Cleanup(srv.Close)
+
+	agentsCS := fakeagents.NewSimpleClientset()
+	extensionsCS := fakeextensions.NewSimpleClientset()
 
 	opts := Options{
 		TemplateName:        "test-template",
@@ -72,12 +76,17 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*SandboxCli
 		TraceServiceName:    "test-svc",
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
+		K8sHelper: &K8sHelper{
+			AgentsClient:     agentsCS.AgentsV1alpha1(),
+			ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+			Log:              logr.Discard(),
+		},
 	}
-	opts.setDefaults()
 
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
-	c := newClientFromInterfaces(opts, agentsCS.AgentsV1alpha1(), extensionsCS.ExtensionsV1alpha1(), nil, nil, nil, nil)
+	c, err := New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
 
 	return c, agentsCS, extensionsCS, srv
 }
@@ -122,7 +131,7 @@ func setupTracedWatch(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensio
 func TestTracingLifecycleAndOperations(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	t.Cleanup(func() { tp.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	c, agentsCS, extensionsCS, _ := newTracedTestClient(t, tp)
 	_, capturedClaim := setupTracedWatch(agentsCS, extensionsCS)
@@ -144,12 +153,12 @@ func TestTracingLifecycleAndOperations(t *testing.T) {
 	}
 
 	// Write
-	if err := c.Write(ctx, "/tmp/test.txt", []byte("content")); err != nil {
+	if err := c.Write(ctx, "test.txt", []byte("content")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
 	// Read
-	data, err := c.Read(ctx, "/tmp/test.txt")
+	data, err := c.Read(ctx, "test.txt")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -167,7 +176,7 @@ func TestTracingLifecycleAndOperations(t *testing.T) {
 	}
 
 	// Exists
-	exists, err := c.Exists(ctx, "/tmp/test.txt")
+	exists, err := c.Exists(ctx, "test.txt")
 	if err != nil {
 		t.Fatalf("Exists: %v", err)
 	}
@@ -224,11 +233,11 @@ func TestTracingLifecycleAndOperations(t *testing.T) {
 	assertSpanAttrInt(t, spanByName["test-svc.run"], "sandbox.exit_code", 0)
 
 	// Verify Write attributes
-	assertSpanAttr(t, spanByName["test-svc.write"], "sandbox.file.path", "/tmp/test.txt")
+	assertSpanAttr(t, spanByName["test-svc.write"], "sandbox.file.path", "test.txt")
 	assertSpanAttrInt(t, spanByName["test-svc.write"], "sandbox.file.size", 7) // len("content")
 
 	// Verify Read attributes
-	assertSpanAttr(t, spanByName["test-svc.read"], "sandbox.file.path", "/tmp/test.txt")
+	assertSpanAttr(t, spanByName["test-svc.read"], "sandbox.file.path", "test.txt")
 	assertSpanAttrInt(t, spanByName["test-svc.read"], "sandbox.file.size", 9) // len("file-data")
 
 	// Verify List attributes
@@ -236,7 +245,7 @@ func TestTracingLifecycleAndOperations(t *testing.T) {
 	assertSpanAttrInt(t, spanByName["test-svc.list"], "sandbox.file.count", 1)
 
 	// Verify Exists attributes
-	assertSpanAttr(t, spanByName["test-svc.exists"], "sandbox.file.path", "/tmp/test.txt")
+	assertSpanAttr(t, spanByName["test-svc.exists"], "sandbox.file.path", "test.txt")
 	assertSpanAttrBool(t, spanByName["test-svc.exists"], "sandbox.file.exists", true)
 
 	// Verify claim name attribute
@@ -272,19 +281,27 @@ func TestTracingNoopWithoutProvider(t *testing.T) {
 	srv := httptest.NewServer(sandboxHTTPHandler())
 	t.Cleanup(srv.Close)
 
+	agentsCS := fakeagents.NewSimpleClientset()
+	extensionsCS := fakeextensions.NewSimpleClientset()
+
 	opts := Options{
 		TemplateName:        "test-template",
 		APIURL:              srv.URL,
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
+		K8sHelper: &K8sHelper{
+			AgentsClient:     agentsCS.AgentsV1alpha1(),
+			ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+			Log:              logr.Discard(),
+		},
 	}
-	opts.setDefaults()
 
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
-	c := newClientFromInterfaces(opts, agentsCS.AgentsV1alpha1(), extensionsCS.ExtensionsV1alpha1(), nil, nil, nil, nil)
+	c, err := New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
 
-	sb := readySandbox("test-claim", "default")
+	sb := readySandbox("test-claim")
 	setupWatchWithReactor(agentsCS, extensionsCS, sb)
 
 	ctx := context.Background()
@@ -302,14 +319,17 @@ func TestTracingNoopWithoutProvider(t *testing.T) {
 func TestTracingErrorRecording(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	t.Cleanup(func() { tp.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	// Server that returns 400 for Run
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("bad request"))
+		_, _ = w.Write([]byte("bad request"))
 	}))
 	t.Cleanup(srv.Close)
+
+	agentsCS := fakeagents.NewSimpleClientset()
+	extensionsCS := fakeextensions.NewSimpleClientset()
 
 	opts := Options{
 		TemplateName:        "test-template",
@@ -318,14 +338,19 @@ func TestTracingErrorRecording(t *testing.T) {
 		TraceServiceName:    "test-svc",
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
+		K8sHelper: &K8sHelper{
+			AgentsClient:     agentsCS.AgentsV1alpha1(),
+			ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+			Log:              logr.Discard(),
+		},
 	}
-	opts.setDefaults()
 
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
-	c := newClientFromInterfaces(opts, agentsCS.AgentsV1alpha1(), extensionsCS.ExtensionsV1alpha1(), nil, nil, nil, nil)
+	c, err := New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
 
-	sb := readySandbox("test-claim", "default")
+	sb := readySandbox("test-claim")
 	setupWatchWithReactor(agentsCS, extensionsCS, sb)
 
 	ctx := context.Background()
@@ -334,7 +359,7 @@ func TestTracingErrorRecording(t *testing.T) {
 	}
 
 	// Run should fail
-	_, err := c.Run(ctx, "fail")
+	_, err = c.Run(ctx, "fail")
 	if err == nil {
 		t.Fatal("expected Run to fail")
 	}

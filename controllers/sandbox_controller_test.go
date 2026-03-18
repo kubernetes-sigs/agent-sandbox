@@ -206,6 +206,9 @@ func TestComputeReadyCondition(t *testing.T) {
 func TestReconcile(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"
+	testContainerRevision := podTemplateRevision(&corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "test-container"}},
+	})
 	testCases := []struct {
 		name                 string
 		initialObjs          []runtime.Object
@@ -254,6 +257,9 @@ func TestReconcile(t *testing.T) {
 						ResourceVersion: "1",
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						Annotations: map[string]string{
+							podTemplateRevisionAnnotation: testContainerRevision,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -350,7 +356,8 @@ func TestReconcile(t *testing.T) {
 							"custom-label":                      "label-val",
 						},
 						Annotations: map[string]string{
-							"custom-annotation": "anno-val",
+							"custom-annotation":           "anno-val",
+							podTemplateRevisionAnnotation: testContainerRevision,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -639,6 +646,7 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 	}
+	sandboxRevision := podTemplateRevision(&sandboxObj.Spec.PodTemplate.Spec)
 	testCases := []struct {
 		name                   string
 		initialObjs            []runtime.Object
@@ -674,6 +682,9 @@ func TestReconcilePod(t *testing.T) {
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 					},
+					Annotations: map[string]string{
+						podTemplateRevisionAnnotation: sandboxRevision,
+					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.PodSpec{
@@ -698,7 +709,8 @@ func TestReconcilePod(t *testing.T) {
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
-						"custom-annotation": "anno-val",
+						"custom-annotation":           "anno-val",
+						podTemplateRevisionAnnotation: sandboxRevision,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -792,6 +804,11 @@ func TestReconcilePod(t *testing.T) {
 					Labels: map[string]string{
 						sandboxLabel: nameHash,
 					},
+					Annotations: map[string]string{
+						podTemplateRevisionAnnotation: podTemplateRevision(&corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						}),
+					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.PodSpec{
@@ -843,6 +860,9 @@ func TestReconcilePod(t *testing.T) {
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 					},
+					Annotations: map[string]string{
+						podTemplateRevisionAnnotation: sandboxRevision,
+					},
 					// Should still have the original controller reference
 					OwnerReferences: []metav1.OwnerReference{
 						{
@@ -863,6 +883,45 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
+		},
+		{
+			name: "revision mismatch deletes stale pod and clears annotation",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "warm-pool-pod",
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Annotations: map[string]string{
+							podTemplateRevisionAnnotation: "aaa000aaa000",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "old-container"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					Annotations: map[string]string{
+						SandboxPodNameAnnotation: "warm-pool-pod",
+						"other-annotation":       "keep-me",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "new-container"}},
+						},
+					},
+				},
+			},
+			wantPod:                nil,
+			expectErr:              false,
+			wantSandboxAnnotations: map[string]string{"other-annotation": "keep-me"},
 		},
 		{
 			name:        "error when annotated pod does not exist",

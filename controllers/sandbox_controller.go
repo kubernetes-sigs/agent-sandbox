@@ -16,6 +16,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -43,10 +45,18 @@ import (
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
-	SandboxPodNameAnnotation    = "agents.x-k8s.io/pod-name"
-	sandboxControllerFieldOwner = "sandbox-controller"
+	sandboxLabel                   = "agents.x-k8s.io/sandbox-name-hash"
+	SandboxPodNameAnnotation       = "agents.x-k8s.io/pod-name"
+	podTemplateRevisionAnnotation  = "agents.x-k8s.io/pod-template-revision"
+	sandboxControllerFieldOwner    = "sandbox-controller"
 )
+
+func podTemplateRevision(spec *corev1.PodSpec) string {
+	h := sha256.New()
+	data, _ := json.Marshal(spec)
+	h.Write(data)
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
 
 var (
 	// Scheme for use by sandbox controllers. Registers required types for client.
@@ -423,6 +433,32 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			})
 		}
 
+		desiredRevision := podTemplateRevision(&sandbox.Spec.PodTemplate.Spec)
+		currentRevision := pod.Annotations[podTemplateRevisionAnnotation]
+
+		if currentRevision != "" && currentRevision != desiredRevision {
+			log.Info("Pod template revision changed, deleting stale pod",
+				"Pod.Name", pod.Name,
+				"currentRevision", currentRevision,
+				"desiredRevision", desiredRevision)
+
+			if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+				return nil, fmt.Errorf("failed to delete stale pod: %w", err)
+			}
+
+			// Clear tracking annotation so next reconcile creates fresh pod
+			if _, exists := sandbox.Annotations[SandboxPodNameAnnotation]; exists {
+				patch := client.MergeFrom(sandbox.DeepCopy())
+				delete(sandbox.Annotations, SandboxPodNameAnnotation)
+				if err := r.Patch(ctx, sandbox, patch); err != nil {
+					return nil, fmt.Errorf("failed to clear pod name annotation: %w", err)
+				}
+			}
+
+			// Return nil to requeue — next reconcile hits PATH 3 (create new pod)
+			return nil, nil
+		}
+
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
@@ -435,12 +471,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			}
 		}
 
+		// Stamp revision annotation on adoption
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		pod.Annotations[podTemplateRevisionAnnotation] = desiredRevision
+
 		if err := r.Update(ctx, pod); err != nil {
 			return nil, fmt.Errorf("failed to update pod: %w", err)
 		}
-
-		// TODO - Do we enfore (change) spec if a pod exists ?
-		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
 	}
 
@@ -456,6 +495,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 		annotations[k] = v
 	}
+	annotations[podTemplateRevisionAnnotation] = podTemplateRevision(&sandbox.Spec.PodTemplate.Spec)
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 

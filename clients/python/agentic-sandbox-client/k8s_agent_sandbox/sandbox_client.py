@@ -45,6 +45,7 @@ from .constants import (
     POD_NAME_ANNOTATION,
 )
 from .exceptions import (
+    SandboxMetadataError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,
@@ -178,8 +179,9 @@ class SandboxClient:
     def _wait_for_sandbox_ready(self):
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
         if not self.claim_name:
-            raise RuntimeError(
-                "Cannot wait for sandbox; a sandboxclaim has not been created.")
+            raise SandboxNotReadyError(
+                "Cannot wait for sandbox; a sandboxclaim has not been created."
+            )
 
         w = watch.Watch()
         logging.info("Watching for Sandbox to become ready...")
@@ -208,8 +210,9 @@ class SandboxClient:
                     self.sandbox_name = metadata.get(
                         "name")
                     if not self.sandbox_name:
-                        raise RuntimeError(
-                            "Could not determine sandbox name from sandbox object.")
+                        raise SandboxMetadataError(
+                            "Could not determine sandbox name from sandbox object."
+                        )
                     logging.info(f"Sandbox {self.sandbox_name} is ready.")
 
                     self.annotations = sandbox_object.get(
@@ -266,7 +269,7 @@ class SandboxClient:
         while time.monotonic() - start_time < self.port_forward_ready_timeout:
             if self.port_forward_process.poll() is not None:
                 _, stderr = self.port_forward_process.communicate()
-                raise RuntimeError(
+                raise SandboxPortForwardError(
                     f"Tunnel crashed: {stderr.decode(errors='ignore')}")
 
             try:

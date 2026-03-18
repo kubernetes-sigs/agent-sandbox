@@ -144,7 +144,7 @@ You can add commands in PRs/issues to trigger certain actions, see [Prow command
 
 This repo uses squash merge by default. If you need to retain separate commits in a PR when it merges, use the `/label tide/merge-method-rebase` command to change the merge method.
 
-@k8s-ci-robot doesn't handle GitHub Actions in presubmits, so no presubmits should be added to [GitHub Workflows](../.github/workflows).
+@k8s-ci-robot doesn't handle GitHub Actions in presubmits, so [GitHub Workflows](../.github/workflows) should contain only non-presubmit jobs.
 
 ### Image Registries and Promotion
 

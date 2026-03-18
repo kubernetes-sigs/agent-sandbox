@@ -15,7 +15,6 @@
 package v1alpha1
 
 import (
-	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
@@ -23,40 +22,12 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 // Important: Run "make" to regenerate code after modifying this file
 
-// NetworkPolicyManagement defines whether the controller automatically generates
-// and manages a shared NetworkPolicy for this template.
-type NetworkPolicyManagement string
-
 const (
 	// SandboxIDLabel is the label key applied to the Pod to identify the owning Claim UID.
 	// The SandboxClaim controller injects this label into the Pod
 	// System-injected labels/annotations shouldn't be touched
 	SandboxIDLabel = "agents.x-k8s.io/claim-uid"
-
-	// NetworkPolicyManagementManaged means the controller will ensure a shared NetworkPolicy exists.
-	// This shared NetworkPolicy will be a user provide one or a default controller created policy.
-	// This is the default behavior if the field is omitted.
-	NetworkPolicyManagementManaged NetworkPolicyManagement = "Managed"
-
-	// NetworkPolicyManagementUnmanaged means the controller will skip NetworkPolicy
-	// creation entirely, allowing external systems (like Cilium) to manage networking.
-	NetworkPolicyManagementUnmanaged NetworkPolicyManagement = "Unmanaged"
 )
-
-// NetworkPolicySpec defines the desired state of the NetworkPolicy.
-type NetworkPolicySpec struct {
-	// Ingress is a list of ingress rules to be applied to the sandbox.
-	// Traffic is allowed to the sandbox if it matches at least one rule.
-	// If this list is empty, all ingress traffic is blocked (Default Deny).
-	// +optional
-	Ingress []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
-
-	// Egress is a list of egress rules to be applied to the sandbox.
-	// Traffic is allowed out of the sandbox if it matches at least one rule.
-	// If this list is empty, all egress traffic is blocked (Default Deny).
-	// +optional
-	Egress []networkingv1.NetworkPolicyEgressRule `json:"egress,omitempty"`
-}
 
 // SandboxTemplateSpec defines the desired state of Sandbox
 type SandboxTemplateSpec struct {
@@ -90,14 +61,14 @@ type SandboxTemplateSpec struct {
 	// You MUST explicitly allow traffic to these sidecar ports using 'Ingress',
 	// otherwise the sidecars may fail health checks.
 	// +optional
-	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
+	NetworkPolicy *sandboxv1alpha1.NetworkPolicySpec `json:"networkPolicy,omitempty"`
 
 	// NetworkPolicyManagement defines whether the controller manages the NetworkPolicy.
 	// Valid values are "Managed" (default) or "Unmanaged".
 	// +kubebuilder:validation:Enum=Managed;Unmanaged
 	// +kubebuilder:default=Managed
 	// +optional
-	NetworkPolicyManagement NetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
+	NetworkPolicyManagement sandboxv1alpha1.NetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

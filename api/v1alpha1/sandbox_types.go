@@ -16,6 +16,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -30,7 +31,35 @@ const (
 
 	// SandboxReasonExpired indicates expired state for Sandbox
 	SandboxReasonExpired = "SandboxExpired"
+
+	// NetworkPolicyManagementManaged means the controller will ensure a NetworkPolicy exists.
+	// This NetworkPolicy will be a user provide one or a default controller created policy.
+	// This is the default behavior if the field is omitted.
+	NetworkPolicyManagementManaged NetworkPolicyManagement = "Managed"
+
+	// NetworkPolicyManagementUnmanaged means the controller will skip NetworkPolicy
+	// creation entirely, allowing external systems (like Cilium) to manage networking.
+	NetworkPolicyManagementUnmanaged NetworkPolicyManagement = "Unmanaged"
 )
+
+// NetworkPolicyManagement defines whether the controller automatically generates
+// and manages a NetworkPolicy for this sandbox.
+type NetworkPolicyManagement string
+
+// NetworkPolicySpec defines the desired state of the NetworkPolicy.
+type NetworkPolicySpec struct {
+	// Ingress is a list of ingress rules to be applied to the sandbox.
+	// Traffic is allowed to the sandbox if it matches at least one rule.
+	// If this list is empty, all ingress traffic is blocked (Default Deny).
+	// +optional
+	Ingress []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
+
+	// Egress is a list of egress rules to be applied to the sandbox.
+	// Traffic is allowed out of the sandbox if it matches at least one rule.
+	// If this list is empty, all egress traffic is blocked (Default Deny).
+	// +optional
+	Egress []networkingv1.NetworkPolicyEgressRule `json:"egress,omitempty"`
+}
 
 type PodMetadata struct {
 	// Map of string keys and values that can be used to organize and categorize
@@ -111,6 +140,29 @@ type SandboxSpec struct {
 	// Lifecycle defines when and how the sandbox should be shut down.
 	// +optional
 	Lifecycle `json:",inline"`
+
+	// NetworkPolicy defines the network policy to be applied to the sandbox.
+	// Behavior is dictated by the NetworkPolicyManagement field:
+	// - If Management is "Unmanaged": This field is completely ignored.
+	// - If Management is "Managed" (default) and this field is omitted (nil): The controller
+	//   automatically applies a strict Secure Default policy:
+	//     * Ingress: Allow traffic only from the Sandbox Router.
+	//     * Egress: Allow Public Internet only. Blocks internal IPs (RFC1918), Metadata Server, etc.
+	// - If Management is "Managed" and this field is provided: The controller applies your custom rules.
+	// WARNING: This policy enforces a strict "Default Deny" ingress posture.
+	// If your Pod uses sidecars (e.g., Istio proxy, monitoring agents) that listen
+	// on their own ports, the NetworkPolicy will BLOCK traffic to them by default.
+	// You MUST explicitly allow traffic to these sidecar ports using 'Ingress',
+	// otherwise the sidecars may fail health checks.
+	// +optional
+	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
+
+	// NetworkPolicyManagement defines whether the controller manages the NetworkPolicy.
+	// Valid values are "Managed" (default) or "Unmanaged".
+	// +kubebuilder:validation:Enum=Managed;Unmanaged
+	// +kubebuilder:default=Managed
+	// +optional
+	NetworkPolicyManagement NetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
 
 	// Replicas is the number of desired replicas.
 	// The only allowed values are 0 and 1.

@@ -49,7 +49,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	templateWithNP := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+			NetworkPolicy: &sandboxv1alpha1.NetworkPolicySpec{
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
 					{
 						From: []networkingv1.NetworkPolicyPeer{
@@ -71,8 +71,8 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	templateOptOut := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+			NetworkPolicyManagement: sandboxv1alpha1.NetworkPolicyManagementUnmanaged,
+			NetworkPolicy: &sandboxv1alpha1.NetworkPolicySpec{
 				Egress: []networkingv1.NetworkPolicyEgressRule{{}}, // Should be ignored
 			},
 		},

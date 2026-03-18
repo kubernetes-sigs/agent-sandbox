@@ -71,7 +71,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					},
 				},
 			},
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+			NetworkPolicy: &sandboxv1alpha1.NetworkPolicySpec{
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
 					{
 						From: []networkingv1.NetworkPolicyPeer{
@@ -166,13 +166,13 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
+			NetworkPolicyManagement: sandboxv1alpha1.NetworkPolicyManagementUnmanaged,
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
 				},
 			},
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+			NetworkPolicy: &sandboxv1alpha1.NetworkPolicySpec{
 				Egress: []networkingv1.NetworkPolicyEgressRule{{}},
 			},
 		},

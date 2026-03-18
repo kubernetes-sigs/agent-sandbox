@@ -23,6 +23,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,6 +73,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -171,6 +174,10 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	// Reconcile PVCs
 	err := r.reconcilePVCs(ctx, sandbox)
+	allErrors = errors.Join(allErrors, err)
+
+	// Reconcile Network Policy
+	err = r.reconcileNetworkPolicy(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
 	// Reconcile Pod
@@ -456,7 +463,21 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		annotations[k] = v
 	}
 
+	management := sandbox.Spec.NetworkPolicyManagement
+	isManaged := management == "" || management == sandboxv1alpha1.NetworkPolicyManagementManaged
+	isSecureByDefault := isManaged && sandbox.Spec.NetworkPolicy == nil
+
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
+
+	// To prevent internal DNS enumeration while still allowing public domain resolution,
+	// we explicitly override the Pod's DNS config to use external public resolvers.
+	// We only inject this if using the strict "Secure by Default" policy.
+	if isSecureByDefault && mutatedSpec.DNSPolicy == "" {
+		mutatedSpec.DNSPolicy = corev1.DNSNone
+		mutatedSpec.DNSConfig = &corev1.PodDNSConfig{
+			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
+		}
+	}
 
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name
@@ -583,6 +604,144 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	}
 
 	return false, allErrors
+}
+
+func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) error {
+	logger := log.FromContext(ctx)
+
+	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcileNetworkPolicy", nil)
+	defer end()
+
+	npName := sandbox.Name + "-network-policy"
+	npNamespace := sandbox.Namespace
+
+	management := sandbox.Spec.NetworkPolicyManagement
+	if management == "" {
+		management = sandboxv1alpha1.NetworkPolicyManagementManaged
+	}
+
+	// 1. Handle "Unmanaged" Opt-Out
+	if management == sandboxv1alpha1.NetworkPolicyManagementUnmanaged {
+		existingNP := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: npName, Namespace: npNamespace},
+		}
+		if err := r.Delete(ctx, existingNP); err != nil && !k8serrors.IsNotFound(err) {
+			logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
+			return err
+		} else if err == nil {
+			logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
+		}
+		return nil
+	}
+
+	// 2. Construct Desired NetworkPolicy Spec
+	var desiredSpec networkingv1.NetworkPolicySpec
+	if sandbox.Spec.NetworkPolicy == nil {
+		desiredSpec = r.buildDefaultNetworkPolicySpec(nameHash)
+	} else {
+		desiredSpec = networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					sandboxLabel: nameHash,
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			},
+			Ingress: sandbox.Spec.NetworkPolicy.Ingress,
+			Egress:  sandbox.Spec.NetworkPolicy.Egress,
+		}
+	}
+
+	// 3. Reconcile Existing vs Desired
+	existingNP := &networkingv1.NetworkPolicy{}
+	err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
+
+	if err == nil {
+		// Policy exists: Semantic DeepEqual check for drift
+		if equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {
+			return nil // Perfect match, O(1) efficiency.
+		}
+
+		existingNP.Spec = desiredSpec
+		if err := r.Update(ctx, existingNP); err != nil {
+			logger.Error(err, "Failed to update NetworkPolicy", "name", npName)
+			return err
+		}
+		logger.Info("Successfully updated NetworkPolicy", "name", npName)
+		return nil
+	}
+
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get NetworkPolicy: %w", err)
+	}
+
+	// 4. Create New Policy
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: npName, Namespace: npNamespace},
+		Spec:       desiredSpec,
+	}
+
+	if err := ctrl.SetControllerReference(sandbox, np, r.Scheme); err != nil {
+		return err
+	}
+
+	if err := r.Create(ctx, np, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		logger.Error(err, "Failed to create NetworkPolicy", "name", npName)
+		return err
+	}
+
+	logger.Info("Successfully created NetworkPolicy", "name", npName)
+	return nil
+}
+
+// buildDefaultNetworkPolicySpec generates the "Secure by Default" network policy.
+func (r *SandboxReconciler) buildDefaultNetworkPolicySpec(nameHash string) networkingv1.NetworkPolicySpec {
+	return networkingv1.NetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				sandboxLabel: nameHash,
+			},
+		},
+		PolicyTypes: []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeEgress,
+		},
+		// 1. INGRESS: Allow traffic only from the Sandbox Router
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"app": "sandbox-router",
+							},
+						},
+						NamespaceSelector: &metav1.LabelSelector{},
+					},
+				},
+			},
+		},
+		// 2. EGRESS: Allow Public Internet only. Blocks internal private IPs.
+		Egress: []networkingv1.NetworkPolicyEgressRule{
+			{
+				To: []networkingv1.NetworkPolicyPeer{
+					{
+						IPBlock: &networkingv1.IPBlock{
+							CIDR: "0.0.0.0/0",
+							Except: []string{
+								"10.0.0.0/8",
+								"172.16.0.0/12",
+								"192.168.0.0/16",
+								"169.254.0.0/16",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // checks if the sandbox has expired

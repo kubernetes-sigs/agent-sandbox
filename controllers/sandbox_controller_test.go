@@ -23,6 +23,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -258,6 +259,10 @@ func TestReconcile(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.PodSpec{
+						DNSPolicy: corev1.DNSNone,
+						DNSConfig: &corev1.PodDNSConfig{
+							Nameservers: []string{"8.8.8.8", "1.1.1.1"},
+						},
 						Containers: []corev1.Container{
 							{
 								Name: "test-container",
@@ -355,6 +360,10 @@ func TestReconcile(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.PodSpec{
+						DNSPolicy: corev1.DNSNone,
+						DNSConfig: &corev1.PodDNSConfig{
+							Nameservers: []string{"8.8.8.8", "1.1.1.1"},
+						},
 						Containers: []corev1.Container{
 							{
 								Name: "test-container",
@@ -641,6 +650,10 @@ func TestReconcilePod(t *testing.T) {
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.PodSpec{
+					DNSPolicy: corev1.DNSNone,
+					DNSConfig: &corev1.PodDNSConfig{
+						Nameservers: []string{"8.8.8.8", "1.1.1.1"},
+					},
 					Containers: []corev1.Container{
 						{
 							Name: "test-container",
@@ -955,6 +968,166 @@ func TestSandboxExpiry(t *testing.T) {
 				require.Greater(t, requeueAfter, time.Duration(0))
 			} else {
 				require.Equal(t, time.Duration(0), requeueAfter)
+			}
+		})
+	}
+}
+
+func TestSandboxReconcileNetworkPolicy(t *testing.T) {
+	sandboxDefault := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
+			},
+		},
+	}
+
+	sandboxWithNP := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox-custom", Namespace: "default"},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			NetworkPolicy: &sandboxv1alpha1.NetworkPolicySpec{
+				Ingress: []networkingv1.NetworkPolicyIngressRule{
+					{
+						From: []networkingv1.NetworkPolicyPeer{
+							{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "ingress"}}},
+						},
+					},
+				},
+				Egress: []networkingv1.NetworkPolicyEgressRule{
+					{
+						To: []networkingv1.NetworkPolicyPeer{
+							{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "metrics"}}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sandboxOptOut := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox-optout", Namespace: "default"},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			NetworkPolicyManagement: sandboxv1alpha1.NetworkPolicyManagementUnmanaged,
+			NetworkPolicy: &sandboxv1alpha1.NetworkPolicySpec{
+				Egress: []networkingv1.NetworkPolicyEgressRule{{}}, // Should be ignored
+			},
+		},
+	}
+
+	existingNPToDelete := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox-optout-network-policy", Namespace: "default"},
+		Spec:       networkingv1.NetworkPolicySpec{},
+	}
+
+	outdatedNPToUpdate := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox-custom-network-policy", Namespace: "default"},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"old-label": "outdated"}}, // Will be overwritten
+		},
+	}
+
+	testCases := []struct {
+		name                  string
+		sandboxToReconcile    *sandboxv1alpha1.Sandbox
+		existingObjects       []runtime.Object
+		expectNetworkPolicy   bool
+		validateNetworkPolicy func(t *testing.T, np *networkingv1.NetworkPolicy)
+	}{
+		{
+			name:                "Creates Default Secure Policy (Strict Isolation) when sandbox has none",
+			sandboxToReconcile: sandboxDefault,
+			existingObjects:     []runtime.Object{sandboxDefault},
+			expectNetworkPolicy: true,
+			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
+				if len(np.Spec.PolicyTypes) != 2 {
+					t.Errorf("Expected 2 PolicyTypes, got %d", len(np.Spec.PolicyTypes))
+				}
+				if len(np.Spec.Ingress) != 1 || np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "sandbox-router" {
+					t.Errorf("Expected Default Ingress rule to target sandbox-router")
+				}
+				if len(np.Spec.Egress) != 1 || np.Spec.Egress[0].To[0].IPBlock.CIDR != "0.0.0.0/0" {
+					t.Fatalf("Expected Default Egress IPBlock 0.0.0.0/0")
+				}
+				expectedLabelKey := sandboxLabel
+				if _, ok := np.Spec.PodSelector.MatchLabels[expectedLabelKey]; !ok {
+					t.Errorf("Expected PodSelector MatchLabels to contain %q", expectedLabelKey)
+				}
+			},
+		},
+		{
+			name:                "Creates custom network policy when defined in sandbox",
+			sandboxToReconcile: sandboxWithNP,
+			existingObjects:     []runtime.Object{sandboxWithNP},
+			expectNetworkPolicy: true,
+			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
+				expectedHash := NameHash("test-sandbox-custom")
+				if np.Spec.PodSelector.MatchLabels[sandboxLabel] != expectedHash {
+					t.Errorf("unexpected pod selector hash")
+				}
+				if np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "ingress" {
+					t.Errorf("unexpected custom ingress rule")
+				}
+			},
+		},
+		{
+			name:                "NetworkPolicy is not created when sandbox is Unmanaged",
+			sandboxToReconcile: sandboxOptOut,
+			existingObjects:     []runtime.Object{sandboxOptOut},
+			expectNetworkPolicy: false,
+		},
+		{
+			name:                "Existing NetworkPolicy is deleted when sandbox updates to Unmanaged",
+			sandboxToReconcile: sandboxOptOut,
+			existingObjects:     []runtime.Object{sandboxOptOut, existingNPToDelete},
+			expectNetworkPolicy: false,
+		},
+		{
+			name:                "Existing NetworkPolicy is updated when sandbox spec changes",
+			sandboxToReconcile: sandboxWithNP,
+			existingObjects:     []runtime.Object{sandboxWithNP, outdatedNPToUpdate},
+			expectNetworkPolicy: true,
+			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
+				if _, exists := np.Spec.PodSelector.MatchLabels["old-label"]; exists {
+					t.Errorf("expected old outdated labels to be removed")
+				}
+				if np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "ingress" {
+					t.Errorf("expected updated ingress rule with app: ingress")
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			reconciler := &SandboxReconciler{
+				Client: newFakeClient(tc.existingObjects...),
+				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
+			}
+
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: tc.sandboxToReconcile.Name, Namespace: "default"},
+			}
+
+			_, err := reconciler.Reconcile(t.Context(), req)
+			if err != nil {
+				t.Fatalf("reconcile: (%v)", err)
+			}
+
+			var np networkingv1.NetworkPolicy
+			npName := types.NamespacedName{Name: tc.sandboxToReconcile.Name + "-network-policy", Namespace: req.Namespace}
+			err = reconciler.Get(t.Context(), npName, &np)
+
+			if tc.expectNetworkPolicy && err != nil {
+				t.Fatalf("expected network policy to exist, got err: %v", err)
+			}
+			if !tc.expectNetworkPolicy && !k8serrors.IsNotFound(err) {
+				t.Fatalf("expected network policy to not exist (err: %v)", err)
+			}
+
+			if tc.expectNetworkPolicy && tc.validateNetworkPolicy != nil {
+				tc.validateNetworkPolicy(t, &np)
 			}
 		})
 	}

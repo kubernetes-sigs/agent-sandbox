@@ -38,7 +38,6 @@ import (
 
 	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
@@ -437,7 +436,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	// Determine if we are in "Secure By Default" mode
 	management := template.Spec.NetworkPolicyManagement
-	isManaged := management == "" || management == sandboxv1alpha1.NetworkPolicyManagementManaged
+	isManaged := management == "" || management == v1alpha1.NetworkPolicyManagementManaged
 	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
 
 	// Propagate the trace context annotation to the Sandbox resource

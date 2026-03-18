@@ -1036,7 +1036,7 @@ func TestSandboxReconcileNetworkPolicy(t *testing.T) {
 	}{
 		{
 			name:                "Creates Default Secure Policy (Strict Isolation) when sandbox has none",
-			sandboxToReconcile: sandboxDefault,
+			sandboxToReconcile:  sandboxDefault,
 			existingObjects:     []runtime.Object{sandboxDefault},
 			expectNetworkPolicy: true,
 			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
@@ -1057,7 +1057,7 @@ func TestSandboxReconcileNetworkPolicy(t *testing.T) {
 		},
 		{
 			name:                "Creates custom network policy when defined in sandbox",
-			sandboxToReconcile: sandboxWithNP,
+			sandboxToReconcile:  sandboxWithNP,
 			existingObjects:     []runtime.Object{sandboxWithNP},
 			expectNetworkPolicy: true,
 			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
@@ -1072,19 +1072,19 @@ func TestSandboxReconcileNetworkPolicy(t *testing.T) {
 		},
 		{
 			name:                "NetworkPolicy is not created when sandbox is Unmanaged",
-			sandboxToReconcile: sandboxOptOut,
+			sandboxToReconcile:  sandboxOptOut,
 			existingObjects:     []runtime.Object{sandboxOptOut},
 			expectNetworkPolicy: false,
 		},
 		{
 			name:                "Existing NetworkPolicy is deleted when sandbox updates to Unmanaged",
-			sandboxToReconcile: sandboxOptOut,
+			sandboxToReconcile:  sandboxOptOut,
 			existingObjects:     []runtime.Object{sandboxOptOut, existingNPToDelete},
 			expectNetworkPolicy: false,
 		},
 		{
 			name:                "Existing NetworkPolicy is updated when sandbox spec changes",
-			sandboxToReconcile: sandboxWithNP,
+			sandboxToReconcile:  sandboxWithNP,
 			existingObjects:     []runtime.Object{sandboxWithNP, outdatedNPToUpdate},
 			expectNetworkPolicy: true,
 			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {

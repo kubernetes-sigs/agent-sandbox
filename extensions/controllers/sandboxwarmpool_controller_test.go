@@ -186,7 +186,7 @@ func TestReconcilePool(t *testing.T) {
 			require.Equal(t, tc.expectedReplicas, count)
 			require.Equal(t, tc.expectedReplicas, warmPool.Status.Replicas)
 
-			expectedSelector := "agents.x-k8s.io/pool=" + poolNameHash
+			expectedSelector := warmPoolSandboxLabel + "=" + poolNameHash
 			require.Equal(t, expectedSelector, warmPool.Status.Selector, "Status.Selector mismatch")
 		})
 	}

@@ -430,12 +430,8 @@ class SandboxClient:
                     f"Stderr: {stderr.decode(errors='ignore')}"
                 ) from e
 
-            status_code = None
-            resp = None
-            # `e` should always have a response here except in connection errors or timeouts.
-            if hasattr(e, "response") and e.response is not None:
-                resp = e.response
-                status_code = resp.status_code
+            resp = getattr(e, "response", None)
+            status_code = resp.status_code if resp is not None else None
 
             logging.error(f"Request to gateway router failed: {e}")
             raise SandboxRequestError(

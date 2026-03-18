@@ -63,9 +63,7 @@ linters:
       - zz_generated.*\.go$
     rules:
     # KAL only validates the API folders for CRD client generation.
-    - path-except: api/.*
+    - path-except: "api/.*"
       linters:
         - kubeapilinter
-    - path-except: extensions/api/.*
-      linters:
-        - kubeapilinter
+

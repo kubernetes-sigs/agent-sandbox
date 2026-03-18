@@ -319,8 +319,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	}
 }
 
-func (r *SandboxClaimReconciler) computeAndSetStatus(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
-	logger := log.FromContext(ctx)
+func (r *SandboxClaimReconciler) computeAndSetStatus(_ context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 
@@ -413,8 +412,8 @@ func applyClaimMetadataToPod(claim *extensionsv1alpha1.SandboxClaim, pod *corev1
 	pod.Annotations = mergeStringMap(pod.Annotations, claim.Annotations)
 }
 
-// tryAdoptPodFromPool attempts to find and adopt a pod from the warm pool
-func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox) (*corev1.Pod, string, error) {
+// adoptSandboxFromCandidates picks the best warm pool sandbox and transfers ownership to the claim.
+func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
 	log := log.FromContext(ctx)
 
 	// Sort: ready sandboxes first, then by creation time (oldest first)
@@ -430,9 +429,19 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	adopted := candidates[0]
 	log.Info("Adopting sandbox from warm pool", "sandbox", adopted.Name)
 
-	// Remove warm pool labels
+	// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 	delete(adopted.Labels, warmPoolSandboxLabel)
 	delete(adopted.Labels, sandboxTemplateRefHash)
+
+	// Extract pool name and pod condition from the sandbox before clearing owner references
+	poolName := "none"
+	if controllerRef := metav1.GetControllerOf(adopted); controllerRef != nil {
+		poolName = controllerRef.Name
+	}
+	podCondition := "not_ready"
+	if isSandboxReady(adopted) {
+		podCondition = "ready"
+	}
 
 	// Transfer ownership from SandboxWarmPool to SandboxClaim
 	adopted.OwnerReferences = nil
@@ -447,6 +456,10 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
 		adopted.Annotations[asmetrics.TraceContextAnnotation] = tc
 	}
+
+	// Apply claim metadata and overrides to adopted sandbox
+	applyClaimMetadataToSandbox(claim, adopted)
+	applyClaimOverridesToPodSpec(&adopted.Spec.PodTemplate.Spec, claim)
 
 	// Add sandbox ID label to pod template for NetworkPolicy targeting
 	if adopted.Spec.PodTemplate.ObjectMeta.Labels == nil {
@@ -467,6 +480,8 @@ func (r *SandboxClaimReconciler) tryAdoptPodFromPool(ctx context.Context, claim 
 		r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxAdopted", fmt.Sprintf("Adopted warm pool Sandbox %q", adopted.Name))
 	}
 
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, claim.Spec.TemplateRef.Name, asmetrics.LaunchTypeWarm, poolName, podCondition)
+
 	return adopted, nil
 }
 
@@ -477,53 +492,7 @@ func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 			return true
 		}
 	}
-
-	if len(candidates) == 0 {
-		log.Info("No available pods in warm pool (all pods are being deleted, owned by other controllers, or pool is empty)")
-		return nil, poolNameNone, nil
-	}
-
-	// Sort pods using podutils.ByLogging to select the best available pod.
-	sort.Sort(podutils.ByLogging(candidates))
-
-	// Get the first available pod
-	pod := candidates[0]
-	poolName := poolNameNone
-	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
-		poolName = controllerRef.Name
-	}
-
-	log.Info("Adopting pod from warm pool", "pod", pod.Name, "pool", poolName)
-
-	// Remove the pool labels
-	delete(pod.Labels, poolLabel)
-
-	// Remove existing owner references (from SandboxWarmPool)
-	pod.OwnerReferences = nil
-
-	nameHash := sandboxcontrollers.NameHash(claim.Name)
-	if pod.Labels == nil {
-		pod.Labels = make(map[string]string)
-	}
-
-	pod.Labels[sandboxLabel] = nameHash
-
-	// Label required by NetworkPolicy
-	// We add the new label with the Claim UID for unique targeting.
-	pod.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
-	// Adopted pods must have the template hash label to ensure they are selected by the correct NetworkPolicy.
-	pod.Labels[sandboxTemplateLabel] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
-	applyClaimMetadataToPod(claim, pod)
-	applyClaimOverridesToPodSpec(&pod.Spec, claim)
-
-	// Update the pod
-	if err := r.Update(ctx, pod); err != nil {
-		log.Error(err, "Failed to update adopted pod")
-		return nil, poolNameNone, err
-	}
-
-	log.Info("Successfully adopted pod from warm pool", "pod", pod.Name, "sandbox", sandbox.Name)
-	return pod, poolName, nil
+	return false
 }
 
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {

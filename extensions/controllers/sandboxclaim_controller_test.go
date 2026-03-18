@@ -1085,7 +1085,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	}
 }
 
-func TestSandboxClaimPodAdoptionAppliesClaimOverrides(t *testing.T) {
+func TestSandboxAdoptionAppliesClaimOverrides(t *testing.T) {
 	template := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
@@ -1132,13 +1132,12 @@ func TestSandboxClaimPodAdoptionAppliesClaimOverrides(t *testing.T) {
 		},
 	}
 
-	poolNameHash := sandboxcontrollers.NameHash("test-pool")
-	warmPod := &corev1.Pod{
+	warmSandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "warm-pod",
+			Name:      "warm-sb",
 			Namespace: "default",
 			Labels: map[string]string{
-				poolLabel:              poolNameHash,
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{
@@ -1151,34 +1150,38 @@ func TestSandboxClaimPodAdoptionAppliesClaimOverrides(t *testing.T) {
 				},
 			},
 		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "workspace",
-					Image: "workspace-image",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{},
-						Limits:   corev1.ResourceList{},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "workspace",
+							Image: "workspace-image",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{},
+								Limits:   corev1.ResourceList{},
+							},
+						},
+						{
+							Name:  "codewire-sidecar",
+							Image: "sidecar-image",
+						},
 					},
-				},
-				{
-					Name:  "codewire-sidecar",
-					Image: "sidecar-image",
 				},
 			},
 		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{
-				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-			},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
 		},
 	}
 
 	scheme := newScheme(t)
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(template, claim, warmPod).
+		WithObjects(template, claim, warmSandbox).
 		WithStatusSubresource(claim).
 		Build()
 
@@ -1194,18 +1197,18 @@ func TestSandboxClaimPodAdoptionAppliesClaimOverrides(t *testing.T) {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	var adoptedPod corev1.Pod
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "warm-pod", Namespace: "default"}, &adoptedPod); err != nil {
-		t.Fatalf("get adopted pod: %v", err)
+	var adoptedSandbox sandboxv1alpha1.Sandbox
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "warm-sb", Namespace: "default"}, &adoptedSandbox); err != nil {
+		t.Fatalf("get adopted sandbox: %v", err)
 	}
-	if got := adoptedPod.Labels["codewire.sh/environment-id"]; got != "env-789" {
-		t.Fatalf("adopted pod label codewire.sh/environment-id = %q, want env-789", got)
+	if got := adoptedSandbox.Labels["codewire.sh/environment-id"]; got != "env-789" {
+		t.Fatalf("adopted sandbox label codewire.sh/environment-id = %q, want env-789", got)
 	}
-	if got := adoptedPod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue(); got != 2000 {
+	if got := adoptedSandbox.Spec.PodTemplate.Spec.Containers[0].Resources.Requests.Cpu().MilliValue(); got != 2000 {
 		t.Fatalf("workspace cpu request = %d, want 2000", got)
 	}
 	foundToken := false
-	for _, envVar := range adoptedPod.Spec.Containers[1].Env {
+	for _, envVar := range adoptedSandbox.Spec.PodTemplate.Spec.Containers[1].Env {
 		if envVar.Name == "CODEWIRE_SIDECAR_TOKEN" && envVar.Value == "token-789" {
 			foundToken = true
 			break
@@ -1434,7 +1437,7 @@ func TestComputeAndSetStatusPodIP(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"},
 		}
 		r := &SandboxClaimReconciler{}
-		r.computeAndSetStatus(claim, readySandbox, nil, false)
+		r.computeAndSetStatus(context.Background(), claim, readySandbox, nil, false)
 		if claim.Status.SandboxStatus.PodIP != "10.0.0.42" {
 			t.Errorf("expected PodIP %q, got %q", "10.0.0.42", claim.Status.SandboxStatus.PodIP)
 		}
@@ -1445,7 +1448,7 @@ func TestComputeAndSetStatusPodIP(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"},
 		}
 		r := &SandboxClaimReconciler{}
-		r.computeAndSetStatus(claim, notReadySandbox, nil, false)
+		r.computeAndSetStatus(context.Background(), claim, notReadySandbox, nil, false)
 		if claim.Status.SandboxStatus.PodIP != "" {
 			t.Errorf("expected empty PodIP, got %q", claim.Status.SandboxStatus.PodIP)
 		}
@@ -1456,7 +1459,7 @@ func TestComputeAndSetStatusPodIP(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"},
 		}
 		r := &SandboxClaimReconciler{}
-		r.computeAndSetStatus(claim, nil, nil, false)
+		r.computeAndSetStatus(context.Background(), claim, nil, nil, false)
 		if claim.Status.SandboxStatus.PodIP != "" {
 			t.Errorf("expected empty PodIP, got %q", claim.Status.SandboxStatus.PodIP)
 		}

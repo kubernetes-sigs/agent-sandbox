@@ -17,6 +17,7 @@ package metrics
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -43,7 +44,7 @@ func TestClaimLatencyRecording(t *testing.T) {
 	}
 }
 
-func TestSandboxLatencyRecording(t *testing.T) {
+func TestSandboxCreationLatencyRecording(t *testing.T) {
 	testCases := []struct {
 		name       string
 		launchType string
@@ -56,7 +57,7 @@ func TestSandboxLatencyRecording(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			SandboxCreationLatency.Reset()
-			SandboxCreationLatency.WithLabelValues(tc.launchType, "test-tmpl").Observe(1000)
+			RecordSandboxCreationLatency(1000*time.Millisecond, tc.launchType, "test-tmpl")
 
 			if testutil.CollectAndCount(SandboxCreationLatency) != 1 {
 				t.Errorf("Expected 1 observation")

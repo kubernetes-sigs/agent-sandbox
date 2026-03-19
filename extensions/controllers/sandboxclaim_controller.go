@@ -621,9 +621,15 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 
-	if sandbox != nil && !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
-		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-		asmetrics.RecordSandboxCreationLatency(latency, launchType, claim.Spec.TemplateRef.Name)
+	// For cold launches, also record the time from Sandbox creation to Ready state to capture controller overhead.
+	if sandbox != nil && !sandbox.CreationTimestamp.IsZero() {
+		sandboxReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1alpha1.SandboxConditionReady))
+		if sandboxReady != nil && sandboxReady.Status == metav1.ConditionTrue && !sandboxReady.LastTransitionTime.IsZero() {
+			latency := sandboxReady.LastTransitionTime.Time.Sub(sandbox.CreationTimestamp.Time)
+			if latency >= 0 {
+				asmetrics.RecordSandboxCreationLatency(latency, launchType, claim.Spec.TemplateRef.Name)
+			}
+		}
 	}
 }
 

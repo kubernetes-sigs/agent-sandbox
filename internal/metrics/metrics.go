@@ -50,9 +50,9 @@ var (
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_creation_latency_ms",
-			Help: "Latency from Sandbox creation to Pod Ready state in milliseconds.",
-			// Buckets for latency from 50ms to 4 minutes
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+			Help: "Latency from Sandbox creation to Pod Ready state in milliseconds. For warm launches, this measures controller synchronization overhead since the Pod is pre-provisioned.",
+			// Buckets for latency from 50ms to 10 minutes
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)

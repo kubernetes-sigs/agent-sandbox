@@ -33,14 +33,14 @@ const (
 )
 
 type PodMetadata struct {
-	// Map of string keys and values that can be used to organize and categorize
+	// labels defines the map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers
 	// and services.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
 	// +optional
 	Labels map[string]string `json:"labels,omitempty" protobuf:"bytes,1,rep,name=labels"`
 
-	// Annotations is an unstructured key value map stored with a resource that may be
+	// annotations is an unstructured key value map stored with a resource that may be
 	// set by external tools to store and retrieve arbitrary metadata. They are not
 	// queryable and should be preserved when modifying objects.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations
@@ -49,7 +49,7 @@ type PodMetadata struct {
 }
 
 type EmbeddedObjectMetadata struct {
-	// Name must be unique within a namespace. Is required when creating resources, although
+	// name must be unique within a namespace. Is required when creating resources, although
 	// some resources may allow a client to request the generation of an appropriate name
 	// automatically. Name is primarily intended for creation idempotence and configuration
 	// definition.
@@ -58,14 +58,14 @@ type EmbeddedObjectMetadata struct {
 	// +optional
 	Name string `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
 
-	// Map of string keys and values that can be used to organize and categorize
+	// labels defines the map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers
 	// and services.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
 	// +optional
 	Labels map[string]string `json:"labels,omitempty" protobuf:"bytes,1,rep,name=labels"`
 
-	// Annotations is an unstructured key value map stored with a resource that may be
+	// annotations is an unstructured key value map stored with a resource that may be
 	// set by external tools to store and retrieve arbitrary metadata. They are not
 	// queryable and should be preserved when modifying objects.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations
@@ -74,22 +74,22 @@ type EmbeddedObjectMetadata struct {
 }
 
 type PodTemplate struct {
-	// Spec is the Pod's spec
-	// +kubebuilder:validation:Required
+	// spec is the Pod's spec
+	// +required
 	Spec corev1.PodSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 
-	// Metadata is the Pod's metadata. Only labels and annotations are used.
-	// +kubebuilder:validation:Optional
+	// metadata is the Pod's metadata. Only labels and annotations are used.
+	// +optional
 	ObjectMeta PodMetadata `json:"metadata" protobuf:"bytes,3,opt,name=metadata"`
 }
 
 type PersistentVolumeClaimTemplate struct {
-	// Metadata is the PVC's metadata.
-	// +kubebuilder:validation:Optional
+	// metadata is the PVC's metadata.
+	// +optional
 	EmbeddedObjectMetadata `json:"metadata" protobuf:"bytes,3,opt,name=metadata"`
 
-	// Spec is the PVC's spec
-	// +kubebuilder:validation:Required
+	// spec is the PVC's spec
+	// +required
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 }
 
@@ -98,21 +98,20 @@ type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// PodTemplate describes the pod spec that will be used to create an agent sandbox.
-	// +kubebuilder:validation:Required
+	// podTemplate describes the pod spec that will be used to create an agent sandbox.
+	// +required
 	PodTemplate PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 
-	// VolumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
+	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
 	// +optional
-	// +kubebuilder:validation:Optional
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.
 	// +optional
 	Lifecycle `json:",inline"`
 
-	// Replicas is the number of desired replicas.
+	// replicas is the number of desired replicas.
 	// The only allowed values are 0 and 1.
 	// Defaults to 1.
 	// +kubebuilder:validation:Minimum=0
@@ -135,12 +134,12 @@ const (
 
 // Lifecycle defines the lifecycle management for the Sandbox.
 type Lifecycle struct {
-	// ShutdownTime is the absolute time when the sandbox expires.
+	// shutdownTime is the absolute time when the sandbox expires.
 	// +kubebuilder:validation:Format="date-time"
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
-	// ShutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.
+	// shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.
 	// Underlying resources(Pods, Services) are always deleted on expiry.
 	// +kubebuilder:default=Retain
 	// +optional
@@ -149,21 +148,26 @@ type Lifecycle struct {
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
-	// FQDN that is valid for default cluster settings
+	// serviceFQDN that is valid for default cluster settings
 	// Limitation: Hardcoded to the domain .cluster.local
 	// e.g. sandbox-example.default.svc.cluster.local
+	// +optional
 	ServiceFQDN string `json:"serviceFQDN,omitempty"`
 
-	// e.g. sandbox-example
+	// service is a sandbox-example
+	// +optional
 	Service string `json:"service,omitempty"`
 
-	// status conditions array
+	// conditions defines the status conditions array
+	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Replicas is the number of actual replicas.
-	Replicas int32 `json:"replicas"`
+	// replicas is the number of actual replicas.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
 
-	// LabelSelector is the label selector for pods.
+	// selector is the label selector for pods.
 	// +optional
 	LabelSelector string `json:"selector,omitempty"`
 }

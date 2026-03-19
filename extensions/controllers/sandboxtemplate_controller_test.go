@@ -125,7 +125,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			expectNetworkPolicy: true,
 			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
 				expectedHash := sandboxcontrollers.NameHash("test-template-custom")
-				if np.Spec.PodSelector.MatchLabels[sandboxTemplateLabel] != expectedHash {
+				if np.Spec.PodSelector.MatchLabels[sandboxTemplateRefHash] != expectedHash {
 					t.Errorf("unexpected pod selector hash")
 				}
 				if np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "ingress" {

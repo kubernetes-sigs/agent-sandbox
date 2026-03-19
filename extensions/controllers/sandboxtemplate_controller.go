@@ -98,7 +98,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		desiredSpec = networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					sandboxTemplateLabel: sandboxcontrollers.NameHash(template.Name),
+					sandboxTemplateRefHash: sandboxcontrollers.NameHash(template.Name),
 				},
 			},
 			PolicyTypes: []networkingv1.PolicyType{
@@ -157,7 +157,7 @@ func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPoli
 	return networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				sandboxTemplateLabel: sandboxcontrollers.NameHash(templateName),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash(templateName),
 			},
 		},
 		PolicyTypes: []networkingv1.PolicyType{

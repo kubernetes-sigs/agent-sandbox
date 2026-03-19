@@ -31,6 +31,50 @@ The `extensions` module provides additional CRDs and controllers that build on t
 *   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandbox Pods that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
+## Architecture
+
+agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox custom resource, and the controller manages the underlying runtime resources.
+
+### Architecture Diagram
+
+```mermaid
+flowchart TB
+
+    User[User]
+
+    Claim[SandboxClaim]
+    Template[SandboxTemplate]
+    Sandbox[Sandbox]
+
+    ClaimController[Claim Controller]
+    Controller[Sandbox Controller]
+
+    Pod[Sandbox Pod]
+    Runtime[Sandbox Runtime Environment]
+
+    WarmPool[SandboxWarmPool]
+
+    %% User paths
+    User -->|creates| Sandbox
+    User -->|creates| Claim
+
+    %% Claim workflow
+    Claim -->|references| Template
+    Claim -->|reconciled by| ClaimController
+    ClaimController -->|creates| Sandbox
+
+    %% Pod handling
+    ClaimController -->|adopts pod from| WarmPool
+    Sandbox -->|reconciled by| Controller
+    Controller -->|creates Pod if needed| Pod
+
+    %% Runtime
+    Pod --> Runtime
+
+    %% Warm pool
+    WarmPool -->|pre-warmed pods| Pod
+```
+
 ## Installation
 
 ### Core Components & Extensions

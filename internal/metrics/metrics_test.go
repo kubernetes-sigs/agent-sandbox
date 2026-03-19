@@ -17,6 +17,7 @@ package metrics
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -37,6 +38,28 @@ func TestClaimLatencyRecording(t *testing.T) {
 			ClaimStartupLatency.WithLabelValues(tc.launchType, "test-tmpl").Observe(1000)
 
 			if testutil.CollectAndCount(ClaimStartupLatency) != 1 {
+				t.Errorf("Expected 1 observation")
+			}
+		})
+	}
+}
+
+func TestSandboxCreationLatencyRecording(t *testing.T) {
+	testCases := []struct {
+		name       string
+		launchType string
+	}{
+		{"Warm", LaunchTypeWarm},
+		{"Cold", LaunchTypeCold},
+		{"Unknown", LaunchTypeUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			SandboxCreationLatency.Reset()
+			RecordSandboxCreationLatency(1000*time.Millisecond, "default", tc.launchType, "test-tmpl")
+
+			if testutil.CollectAndCount(SandboxCreationLatency) != 1 {
 				t.Errorf("Expected 1 observation")
 			}
 		})

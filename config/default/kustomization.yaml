@@ -1,0 +1,6 @@
+namespace: agent-sandbox-system
+
+resources:
+- ../crd
+- ../rbac
+- ../manager

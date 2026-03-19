@@ -44,7 +44,7 @@ type SandboxWarmPoolStatus struct {
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
-	// Selector is the label selector used to find the pods in the pool.
+	// selector is the label selector used to find the pods in the pool.
 	// +optional
 	Selector string `json:"selector,omitempty"`
 }

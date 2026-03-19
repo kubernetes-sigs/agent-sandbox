@@ -45,6 +45,7 @@ var (
 
 	// SandboxCreationLatency measures the time from Sandbox creation to Pod Ready state.
 	// Labels:
+	// - namespace: the namespace of the sandbox
 	// - launch_type: "warm", "cold", "unknown"
 	// - sandbox_template: the SandboxTemplateRef
 	SandboxCreationLatency = prometheus.NewHistogramVec(
@@ -54,7 +55,7 @@ var (
 			// Buckets for latency from 50ms to 10 minutes
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
 		},
-		[]string{"launch_type", "sandbox_template"},
+		[]string{"namespace", "launch_type", "sandbox_template"},
 	)
 
 	// SandboxClaimCreationTotal calculates the total number of SandboxClaims created.
@@ -87,8 +88,8 @@ func RecordClaimStartupLatency(startTime time.Time, launchType, templateName str
 }
 
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.
-func RecordSandboxCreationLatency(duration time.Duration, launchType, templateName string) {
-	SandboxCreationLatency.WithLabelValues(launchType, templateName).Observe(float64(duration.Milliseconds()))
+func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType, templateName string) {
+	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
 }
 
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.

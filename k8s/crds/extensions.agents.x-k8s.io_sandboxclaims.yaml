@@ -90,7 +90,7 @@ spec:
                 type: array
               sandbox:
                 properties:
-                  Name:
+                  name:
                     type: string
                 type: object
             type: object

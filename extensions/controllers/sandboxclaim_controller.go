@@ -625,7 +625,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	if sandbox != nil && !sandbox.CreationTimestamp.IsZero() {
 		sandboxReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1alpha1.SandboxConditionReady))
 		if sandboxReady != nil && sandboxReady.Status == metav1.ConditionTrue && !sandboxReady.LastTransitionTime.IsZero() {
-			latency := sandboxReady.LastTransitionTime.Time.Sub(sandbox.CreationTimestamp.Time)
+			latency := sandboxReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
 			if latency >= 0 {
 				asmetrics.RecordSandboxCreationLatency(latency, launchType, claim.Spec.TemplateRef.Name)
 			}

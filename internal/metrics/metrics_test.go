@@ -57,7 +57,7 @@ func TestSandboxCreationLatencyRecording(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			SandboxCreationLatency.Reset()
-			RecordSandboxCreationLatency(1000*time.Millisecond, "default",tc.launchType, "test-tmpl")
+			RecordSandboxCreationLatency(1000*time.Millisecond, "default", tc.launchType, "test-tmpl")
 
 			if testutil.CollectAndCount(SandboxCreationLatency) != 1 {
 				t.Errorf("Expected 1 observation")

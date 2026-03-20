@@ -45,6 +45,12 @@ from .constants import (
     SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME,
     POD_NAME_ANNOTATION,
 )
+from .exceptions import (
+    SandboxMetadataError,
+    SandboxNotReadyError,
+    SandboxPortForwardError,
+    SandboxRequestError,
+)
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -159,8 +165,9 @@ class SandboxClient:
     def _wait_for_sandbox_ready(self):
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
         if not self.claim_name:
-            raise RuntimeError(
-                "Cannot wait for sandbox; a sandboxclaim has not been created.")
+            raise SandboxNotReadyError(
+                "Cannot wait for sandbox; a sandboxclaim has not been created."
+            )
 
         # First, discover the sandbox name from the SandboxClaim status.
         # With warm pool adoption, the sandbox name may differ from the claim name.
@@ -281,7 +288,7 @@ class SandboxClient:
         while time.monotonic() - start_time < self.port_forward_ready_timeout:
             if self.port_forward_process.poll() is not None:
                 _, stderr = self.port_forward_process.communicate()
-                raise RuntimeError(
+                raise SandboxPortForwardError(
                     f"Tunnel crashed: {stderr.decode(errors='ignore')}")
 
             try:
@@ -411,12 +418,12 @@ class SandboxClient:
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         if not self.is_ready():
-            raise RuntimeError("Sandbox is not ready for communication.")
+            raise SandboxNotReadyError("Sandbox is not ready for communication.")
 
         # Check if port-forward died silently
         if self.port_forward_process and self.port_forward_process.poll() is not None:
             _, stderr = self.port_forward_process.communicate()
-            raise RuntimeError(
+            raise SandboxPortForwardError(
                 f"Kubectl Port-Forward crashed BEFORE request!\n"
                 f"Stderr: {stderr.decode(errors='ignore')}"
             )
@@ -437,14 +444,20 @@ class SandboxClient:
             # Check if port-forward died DURING request
             if self.port_forward_process and self.port_forward_process.poll() is not None:
                 _, stderr = self.port_forward_process.communicate()
-                raise RuntimeError(
+                raise SandboxPortForwardError(
                     f"Kubectl Port-Forward crashed DURING request!\n"
                     f"Stderr: {stderr.decode(errors='ignore')}"
                 ) from e
 
+            resp = getattr(e, "response", None)
+            status_code = resp.status_code if resp is not None else None
+
             logging.error(f"Request to gateway router failed: {e}")
-            raise RuntimeError(
-                f"Failed to communicate with the sandbox via the gateway at {url}.") from e
+            raise SandboxRequestError(
+                f"Failed to communicate with the sandbox via the gateway at {url}.",
+                status_code=status_code,
+                response=resp,
+            ) from e
 
     @trace_span("run")
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:

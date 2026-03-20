@@ -13,3 +13,9 @@
 # limitations under the License.
 
 from .sandbox_client import SandboxClient
+from .exceptions import (
+    SandboxError,
+    SandboxNotReadyError,
+    SandboxPortForwardError,
+    SandboxRequestError,
+)

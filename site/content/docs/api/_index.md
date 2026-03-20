@@ -3,6 +3,7 @@ title: "API Documentation"
 linkTitle: "API Documentation"
 weight: 36
 description: >
-  How to use the Agent Sandbox API
+  Technical reference for the Agent Sandbox API resources and types
 ---
+<!-- docs/api.md is generated using https://github.com/elastic/crd-ref-docs. -->
 {{% include-file file="additional/docs/api.md" %}}

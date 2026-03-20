@@ -138,10 +138,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 	}
 
-	controlledSandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
-	controlledSandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
-		Nameservers: []string{"8.8.8.8", "1.1.1.1"},
-	}
+	controlledSandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSClusterFirst
 
 	controlledSandboxWithDefault := controlledSandbox.DeepCopy()
 	controlledSandboxWithDefault.Spec.PodTemplate.Spec.AutomountServiceAccountToken = ptr.To(false)
@@ -219,10 +216,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
 		expectedSpec.AutomountServiceAccountToken = ptr.To(false)
 
-		expectedSpec.DNSPolicy = corev1.DNSNone
-		expectedSpec.DNSConfig = &corev1.PodDNSConfig{
-			Nameservers: []string{"8.8.8.8", "1.1.1.1"},
-		}
+		expectedSpec.DNSPolicy = corev1.DNSClusterFirst
 		if diff := cmp.Diff(&sandbox.Spec.PodTemplate.Spec, expectedSpec); diff != "" {
 			t.Errorf("unexpected sandbox spec:\n%s", diff)
 		}
@@ -235,9 +229,10 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 
 	validateSandboxDNSUntouched := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
-		// Prove that the air-gapped fix works: DNS should not be overridden!
-		if sandbox.Spec.PodTemplate.Spec.DNSPolicy == corev1.DNSNone {
-			t.Errorf("Expected DNSPolicy to remain untouched, but it was set to None")
+		// Prove that the air-gapped fix works: DNS should not be overridden
+		// when user provides custom network policy rules.
+		if sandbox.Spec.PodTemplate.Spec.DNSPolicy == corev1.DNSClusterFirst {
+			t.Errorf("Expected DNSPolicy to remain untouched, but it was set to ClusterFirst")
 		}
 		if sandbox.Spec.PodTemplate.Spec.DNSConfig != nil {
 			t.Errorf("Expected DNSConfig to be nil, but got %v", sandbox.Spec.PodTemplate.Spec.DNSConfig)
@@ -351,15 +346,12 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Message: "Sandbox is not ready",
 			},
 			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
-				// Verify DNS Bypass is successfully injected
-				if sandbox.Spec.PodTemplate.Spec.DNSPolicy != corev1.DNSNone {
-					t.Errorf("Expected DNSPolicy to be 'None', got %q", sandbox.Spec.PodTemplate.Spec.DNSPolicy)
+				// Verify ClusterFirst DNS is set for secure-by-default sandboxes
+				if sandbox.Spec.PodTemplate.Spec.DNSPolicy != corev1.DNSClusterFirst {
+					t.Errorf("Expected DNSPolicy to be 'ClusterFirst', got %q", sandbox.Spec.PodTemplate.Spec.DNSPolicy)
 				}
-				if sandbox.Spec.PodTemplate.Spec.DNSConfig == nil || len(sandbox.Spec.PodTemplate.Spec.DNSConfig.Nameservers) != 2 {
-					t.Fatalf("Expected injected DNSConfig with 2 public nameservers")
-				}
-				if sandbox.Spec.PodTemplate.Spec.DNSConfig.Nameservers[0] != "8.8.8.8" {
-					t.Errorf("Expected first nameserver to be 8.8.8.8, got %q", sandbox.Spec.PodTemplate.Spec.DNSConfig.Nameservers[0])
+				if sandbox.Spec.PodTemplate.Spec.DNSConfig != nil {
+					t.Errorf("Expected DNSConfig to be nil, got %v", sandbox.Spec.PodTemplate.Spec.DNSConfig)
 				}
 			},
 		},

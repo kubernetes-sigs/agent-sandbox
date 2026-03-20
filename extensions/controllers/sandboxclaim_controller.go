@@ -33,13 +33,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
+
+const templateRefIndexField = ".spec.sandboxTemplateRef.name"
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -619,11 +623,49 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxClaim{}, templateRefIndexField, func(obj client.Object) []string {
+		claim, ok := obj.(*extensionsv1alpha1.SandboxClaim)
+		if !ok {
+			return nil
+		}
+		return []string{claim.Spec.TemplateRef.Name}
+	}); err != nil {
+		return fmt.Errorf("failed to create index for SandboxClaim templateRef: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}).
 		Owns(&v1alpha1.Sandbox{}).
+		Watches(&extensionsv1alpha1.SandboxTemplate{}, handler.EnqueueRequestsFromMapFunc(r.findClaimsForTemplate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
+}
+
+// findClaimsForTemplate returns reconcile requests for all SandboxClaims
+// that reference the given SandboxTemplate. This ensures that when a
+// SandboxTemplate is created or updated, any claims waiting for it get reconciled.
+func (r *SandboxClaimReconciler) findClaimsForTemplate(ctx context.Context, obj client.Object) []reconcile.Request {
+	template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
+	if !ok {
+		return nil
+	}
+
+	claimList := &extensionsv1alpha1.SandboxClaimList{}
+	if err := r.List(ctx, claimList,
+		client.InNamespace(template.Namespace),
+		client.MatchingFields{templateRefIndexField: template.Name},
+	); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list SandboxClaims for template", "template", template.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, len(claimList.Items))
+	for i, claim := range claimList.Items {
+		requests[i] = reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&claim),
+		}
+	}
+	return requests
 }
 
 // reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.

@@ -117,7 +117,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID
+	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
 	tc := r.Tracer.GetTraceContext(ctx)
 	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
 		patch := client.MergeFrom(sandbox.DeepCopy())
@@ -129,8 +129,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Return to ensure the next loop uses the persisted ID
-		return ctrl.Result{}, nil
 	}
 
 	if sandbox.Spec.Replicas == nil {
@@ -426,17 +424,31 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
-		pod.Labels[sandboxLabel] = nameHash
+		changed := false
+		if pod.Labels[sandboxLabel] != nameHash {
+			pod.Labels[sandboxLabel] = nameHash
+			changed = true
+		}
+		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
+		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+			if pod.Labels[k] != v {
+				pod.Labels[k] = v
+				changed = true
+			}
+		}
 
 		// Set controller reference if the pod is not controlled by anything.
 		if controllerRef := metav1.GetControllerOf(pod); controllerRef == nil {
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
+			changed = true
 		}
 
-		if err := r.Update(ctx, pod); err != nil {
-			return nil, fmt.Errorf("failed to update pod: %w", err)
+		if changed {
+			if err := r.Update(ctx, pod); err != nil {
+				return nil, fmt.Errorf("failed to update pod: %w", err)
+			}
 		}
 
 		// TODO - Do we enfore (change) spec if a pod exists ?

@@ -162,15 +162,19 @@ class SandboxClient:
             raise RuntimeError(
                 "Cannot wait for sandbox; a sandboxclaim has not been created.")
 
+        # First, discover the sandbox name from the SandboxClaim status.
+        # With warm pool adoption, the sandbox name may differ from the claim name.
+        sandbox_name = self._resolve_sandbox_name()
+
         w = watch.Watch()
-        logging.info("Watching for Sandbox to become ready...")
+        logging.info(f"Watching for Sandbox '{sandbox_name}' to become ready...")
         for event in w.stream(
             func=self.custom_objects_api.list_namespaced_custom_object,
             namespace=self.namespace,
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             plural=SANDBOX_PLURAL_NAME,
-            field_selector=f"metadata.name={self.claim_name}",
+            field_selector=f"metadata.name={sandbox_name}",
             timeout_seconds=self.sandbox_ready_timeout
         ):
             if event["type"] in ["ADDED", "MODIFIED"]:
@@ -184,13 +188,7 @@ class SandboxClient:
                         break
 
                 if is_ready:
-                    metadata = sandbox_object.get(
-                        "metadata", {})
-                    self.sandbox_name = metadata.get(
-                        "name")
-                    if not self.sandbox_name:
-                        raise RuntimeError(
-                            "Could not determine sandbox name from sandbox object.")
+                    self.sandbox_name = sandbox_name
                     logging.info(f"Sandbox {self.sandbox_name} is ready.")
 
                     self.annotations = sandbox_object.get(
@@ -208,6 +206,42 @@ class SandboxClient:
         self.__exit__(None, None, None)
         raise TimeoutError(
             f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
+
+    def _resolve_sandbox_name(self) -> str:
+        """Resolves the actual Sandbox name from the SandboxClaim status.
+
+        With warm pool adoption, the sandbox name may differ from the claim
+        name. This method watches the SandboxClaim until the sandbox name
+        appears in the claim's status, then returns it.
+        """
+        w = watch.Watch()
+        logging.info(f"Resolving sandbox name from claim '{self.claim_name}'...")
+        for event in w.stream(
+            func=self.custom_objects_api.list_namespaced_custom_object,
+            namespace=self.namespace,
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            plural=CLAIM_PLURAL_NAME,
+            field_selector=f"metadata.name={self.claim_name}",
+            timeout_seconds=self.sandbox_ready_timeout
+        ):
+            if event["type"] == "DELETED":
+                raise RuntimeError(
+                    f"SandboxClaim '{self.claim_name}' was deleted while resolving sandbox name")
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                claim_object = event['object']
+                sandbox_status = claim_object.get(
+                    'status', {}).get('sandbox', {})
+                name = sandbox_status.get('Name', '')
+                if name:
+                    logging.info(
+                        f"Resolved sandbox name '{name}' from claim status")
+                    w.stop()
+                    return name
+
+        raise TimeoutError(
+            f"Could not resolve sandbox name from claim "
+            f"'{self.claim_name}' within {self.sandbox_ready_timeout} seconds.")
 
     def _get_free_port(self):
         """Finds a free port on localhost."""
@@ -390,7 +424,7 @@ class SandboxClient:
         url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.get("headers", {})
-        headers["X-Sandbox-ID"] = self.claim_name
+        headers["X-Sandbox-ID"] = self.sandbox_name or self.claim_name
         headers["X-Sandbox-Namespace"] = self.namespace
         headers["X-Sandbox-Port"] = str(self.server_port)
         kwargs["headers"] = headers

@@ -1,0 +1,48 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: internal-llm-template
+spec:
+  podTemplate:
+    spec:
+      # Use hostAliases to natively configure /etc/hosts for the local LLM.
+      # This completely avoids the need for internal DNS resolution!
+      hostAliases:
+      - ip: "10.50.0.100"
+        hostnames:
+        - "llm.internal"
+        - "ollama.local"
+      
+      containers:
+      - name: agent
+        image: python:3.11-slim
+        env:
+        # The agent can now safely call this hostname
+        - name: LLM_API_BASE
+          value: "http://llm.internal:8000"
+
+  # Custom Network Policy
+  networkPolicy:
+    ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: sandbox-router
+    egress:
+      # 1. Allow access to specific internal LLM Server via IP
+      - to:
+        - ipBlock:
+            cidr: 10.50.0.100/32
+        ports:
+        - protocol: TCP
+          port: 8000
+      
+      # 2. Allow Public Internet (Blocks all other private IPs AND internal DNS)
+      - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+            - 192.168.0.0/16
+            - 169.254.0.0/16

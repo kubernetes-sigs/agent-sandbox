@@ -67,6 +67,8 @@ spec:
               replicas:
                 format: int32
                 type: integer
+              selector:
+                type: string
             type: object
         required:
         - spec
@@ -75,6 +77,7 @@ spec:
     storage: true
     subresources:
       scale:
+        labelSelectorPath: .status.selector
         specReplicasPath: .spec.replicas
         statusReplicasPath: .status.replicas
       status: {}

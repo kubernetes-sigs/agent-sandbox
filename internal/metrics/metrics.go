@@ -42,15 +42,57 @@ var (
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
+
+	// SandboxCreationLatency measures the time from Sandbox creation to Pod Ready state.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - launch_type: "warm", "cold", "unknown"
+	// - sandbox_template: the SandboxTemplateRef
+	SandboxCreationLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_creation_latency_ms",
+			Help: "Latency from Sandbox creation to Pod Ready state in milliseconds. For warm launches, this measures controller synchronization overhead since the Pod is pre-provisioned.",
+			// Buckets for latency from 50ms to 10 minutes
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+		},
+		[]string{"namespace", "launch_type", "sandbox_template"},
+	)
+
+	// SandboxClaimCreationTotal calculates the total number of SandboxClaims created.
+	// Labels:
+	// - namespace: the namespace of the claim
+	// - sandbox_template: the SandboxTemplateRef
+	// - launch_type: "warm", "cold", "unknown"
+	// - warmpool_name: the name of the warm pool (if applicable)
+	// - pod_condition: "ready", "not_ready"
+	SandboxClaimCreationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_claim_creation_total",
+			Help: "Total number of SandboxClaims created, labeled by namespace, sandbox template, launch type, warmpool name, and pod condition.",
+		},
+		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition"},
+	)
 )
 
 // Init registers custom metrics with the global controller-runtime registry.
 func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
+	metrics.Registry.MustRegister(SandboxCreationLatency)
+	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.
 func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
 	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+}
+
+// RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.
+func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType, templateName string) {
+	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
+}
+
+// RecordSandboxClaimCreation increments the total count of created sandbox claims.
+func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition string) {
+	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition).Inc()
 }

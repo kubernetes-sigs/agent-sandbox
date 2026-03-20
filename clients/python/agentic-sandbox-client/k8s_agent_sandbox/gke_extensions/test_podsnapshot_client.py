@@ -17,6 +17,8 @@ import logging
 from unittest.mock import MagicMock, patch, call
 from k8s_agent_sandbox.gke_extensions.podsnapshot_client import (
     PodSnapshotSandboxClient,
+    SNAPSHOT_ERROR_CODE,
+    SNAPSHOT_SUCCESS_CODE,
 )
 from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_KIND,
@@ -35,14 +37,23 @@ logger = logging.getLogger(__name__)
 
 class TestPodSnapshotSandboxClient(unittest.TestCase):
 
-    @patch("kubernetes.config")
-    def setUp(self, mock_config):
+    def setUp(self):
         logger.info("Setting up TestPodSnapshotSandboxClient...")
-        # Mock kubernetes config loading
-        mock_config.load_incluster_config.side_effect = config.ConfigException(
-            "Not in cluster"
+
+        self.load_incluster_config_patcher = patch(
+            "kubernetes.config.load_incluster_config"
         )
-        mock_config.load_kube_config.return_value = None
+        self.load_kube_config_patcher = patch("kubernetes.config.load_kube_config")
+
+        self.mock_load_incluster = self.load_incluster_config_patcher.start()
+        self.addCleanup(self.load_incluster_config_patcher.stop)
+
+        self.mock_load_kube = self.load_kube_config_patcher.start()
+        self.addCleanup(self.load_kube_config_patcher.stop)
+
+        # Mock kubernetes config loading
+        self.mock_load_incluster.side_effect = config.ConfigException("Not in cluster")
+        self.mock_load_kube.return_value = None
 
         # Create client without patching super, as it's tested separately
         with patch.object(
@@ -247,7 +258,10 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             body={
                 "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
                 "kind": f"{PODSNAPSHOTMANUALTRIGGER_API_KIND}",
-                "metadata": {"name": result.trigger_name, "namespace": self.client.namespace},
+                "metadata": {
+                    "name": result.trigger_name,
+                    "namespace": self.client.namespace,
+                },
                 "spec": {"targetPod": self.client.pod_name},
             },
         )
@@ -312,7 +326,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
 
         result = self.client.snapshot("test-retry")
 
-        self.assertTrue(result.success,result.error_reason)
+        self.assertTrue(result.success, result.error_reason)
         self.assertEqual(result.snapshot_uid, "snapshot-uid-retry")
         logging.info("Finished test_snapshot_processed_retry.")
 
@@ -552,6 +566,195 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.assertIn("Failed to create PodSnapshotManualTrigger", result.error_reason)
         self.assertIn("Invalid value", result.error_reason)
         logging.info("Finished test_snapshot_invalid_name_api_exception.")
+
+    def test_is_restored_from_snapshot_success(self):
+        """Test successful identification of restore from snapshot."""
+        logging.info("Starting test_is_restored_from_snapshot_success...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        mock_pod = MagicMock()
+        mock_condition = MagicMock()
+        mock_condition.type = "PodRestored"
+        mock_condition.status = "True"
+        mock_condition.message = "Restored from snapshot test-uid"
+        mock_pod.status.conditions = [mock_condition]
+
+        self.client.core_v1_api.read_namespaced_pod.return_value = mock_pod
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+
+        self.assertTrue(result.success, result.error_reason)
+        self.assertEqual(result.error_code, SNAPSHOT_SUCCESS_CODE)
+        self.client.core_v1_api.read_namespaced_pod.assert_called_once_with(
+            "test-pod", "test-ns"
+        )
+        logging.info("Finished test_is_restored_from_snapshot_success.")
+
+    def test_is_restored_from_snapshot_empty_uid(self):
+        """Test is_restored_from_snapshot with empty UID."""
+        logging.info("Starting test_is_restored_from_snapshot_empty_uid...")
+        result = self.client.is_restored_from_snapshot("")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Snapshot UID cannot be empty", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_empty_uid.")
+
+    def test_is_restored_from_snapshot_pending_or_failed(self):
+        """Test is_restored_from_snapshot when PodRestored condition is not True."""
+        logging.info("Starting test_is_restored_from_snapshot_pending_or_failed...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        mock_pod = MagicMock()
+        mock_condition = MagicMock()
+        mock_condition.type = "PodRestored"
+        mock_condition.status = "False"
+
+        # We also need to simulate condition.get('reason') and condition.get('message')
+        # since it's a MagicMock, we can set side_effect for get
+        def mock_get(key):
+            if key == "reason":
+                return "FailedToRestore"
+            elif key == "message":
+                return "Snapshot not found"
+            return None
+
+        mock_condition.get.side_effect = mock_get
+        mock_pod.status.conditions = [mock_condition]
+
+        self.client.core_v1_api.read_namespaced_pod.return_value = mock_pod
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Restore attempted but pending or failed", result.error_reason)
+        self.assertIn("status: 'False'", result.error_reason)
+        self.assertIn("reason: 'FailedToRestore'", result.error_reason)
+        self.assertIn("message: 'Snapshot not found'", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_pending_or_failed.")
+
+    def test_is_restored_from_snapshot_no_pod_name(self):
+        """Test is_restored_from_snapshot when pod name is missing."""
+        logging.info("Starting test_is_restored_from_snapshot_no_pod_name...")
+        self.client.pod_name = None
+        result = self.client.is_restored_from_snapshot("test-uid")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Pod name not found", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_no_pod_name.")
+
+    def test_is_restored_from_snapshot_no_status(self):
+        """Test is_restored_from_snapshot when pod status is None."""
+        logging.info("Starting test_is_restored_from_snapshot_no_status...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        mock_pod = MagicMock()
+        mock_pod.status = None
+        self.client.core_v1_api.read_namespaced_pod.return_value = mock_pod
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Pod status or conditions not found", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_no_status.")
+
+    def test_is_restored_from_snapshot_no_conditions(self):
+        """Test is_restored_from_snapshot when pod has no conditions."""
+        logging.info("Starting test_is_restored_from_snapshot_no_conditions...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        mock_pod = MagicMock()
+        mock_pod.status.conditions = None
+        self.client.core_v1_api.read_namespaced_pod.return_value = mock_pod
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Pod status or conditions not found", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_no_conditions.")
+
+    def test_is_restored_from_snapshot_wrong_uid(self):
+        """Test is_restored_from_snapshot when restored from a different snapshot."""
+        logging.info("Starting test_is_restored_from_snapshot_wrong_uid...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        mock_pod = MagicMock()
+        mock_condition = MagicMock()
+        mock_condition.type = "PodRestored"
+        mock_condition.status = "True"
+        mock_condition.message = "Restored from snapshot other-uid"
+        mock_pod.status.conditions = [mock_condition]
+
+        self.client.core_v1_api.read_namespaced_pod.return_value = mock_pod
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("not restored from the given snapshot", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_wrong_uid.")
+
+    def test_is_restored_from_snapshot_not_restored(self):
+        """Test is_restored_from_snapshot when not restored from any snapshot."""
+        logging.info("Starting test_is_restored_from_snapshot_not_restored...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        mock_pod = MagicMock()
+        mock_condition = MagicMock()
+        mock_condition.type = "PodScheduled"
+        mock_condition.status = "True"
+        mock_pod.status.conditions = [mock_condition]
+
+        self.client.core_v1_api.read_namespaced_pod.return_value = mock_pod
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("started as a fresh instance", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_not_restored.")
+
+    def test_is_restored_from_snapshot_api_exception(self):
+        """Test is_restored_from_snapshot handling ApiException."""
+        logging.info("Starting test_is_restored_from_snapshot_api_exception...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        self.client.core_v1_api.read_namespaced_pod.side_effect = ApiException(
+            status=500, reason="Internal Server Error"
+        )
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Failed to check pod restore status", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_api_exception.")
+
+    def test_is_restored_from_snapshot_generic_exception(self):
+        """
+        Test is_restored_from_snapshot handling generic exception.
+        A generic exception here could represent unexpected errors such as:
+        - Network issues leading to aborted connections or timeouts (urllib3.exceptions or socket errors)
+        - Deserialization issues when parsing the API response (e.g. ValueError or TypeError)
+        - Threading/Async context errors within the underlying kubernetes client library
+        """
+        logging.info("Starting test_is_restored_from_snapshot_generic_exception...")
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        self.client.core_v1_api.read_namespaced_pod.side_effect = ValueError(
+            "Deserialization error"
+        )
+
+        result = self.client.is_restored_from_snapshot("test-uid")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Unexpected error", result.error_reason)
+        logging.info("Finished test_is_restored_from_snapshot_generic_exception.")
 
 
 if __name__ == "__main__":

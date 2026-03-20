@@ -26,8 +26,9 @@ import (
 // objectWithStatus is a simplified struct to parse the status of a resource.
 type objectWithStatus struct {
 	Status struct {
-		Conditions    []metav1.Condition `json:"conditions,omitempty"`
-		ReadyReplicas int                `json:"readyReplicas,omitempty"`
+		Conditions         []metav1.Condition `json:"conditions,omitempty"`
+		ReadyReplicas      int                `json:"readyReplicas,omitempty"`
+		ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	} `json:"status"`
 	Spec struct {
 		Replicas int `json:"replicas,omitempty"`
@@ -120,6 +121,31 @@ func (s *ReadyReplicasPredicate) Matches(obj client.Object) (bool, error) {
 		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
 	}
 	if status.Status.ReadyReplicas == status.Spec.Replicas {
+		return true, nil
+	}
+	return false, nil
+}
+
+// ObservedGenerationMatchesGeneration checks if the given object's ObservedGeneration matches its Generation.
+var ObservedGenerationMatchesGeneration = &ObservedGenerationMatchesGenerationPredicate{}
+
+type ObservedGenerationMatchesGenerationPredicate struct{}
+
+func (s *ObservedGenerationMatchesGenerationPredicate) String() string {
+	return "ObservedGenerationMatchesGenerationPredicate(ObservedGeneration == Generation)"
+}
+
+func (s *ObservedGenerationMatchesGenerationPredicate) Matches(obj client.Object) (bool, error) {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+	if status.Status.ObservedGeneration == obj.GetGeneration() {
 		return true, nil
 	}
 	return false, nil

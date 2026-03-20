@@ -25,6 +25,11 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("clients", "python", "agentic-sandbox-client", "sandbox-router"),
         "requirements": "requirements.txt",
     },
+    {
+        "name": "k8s-agent-sandbox",
+        "dir": os.path.join("clients", "python", "agentic-sandbox-client", "k8s_agent_sandbox"),
+        "requirements": "requirements.txt",
+    }
 ]
 
 
@@ -61,13 +66,21 @@ def run_python_tests(repo_root):
         print(f"\n=== Setting up Python venv for {suite['name']} tests ===")
         subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
 
+        env = os.environ.copy()
+        env["PIP_EXTRA_INDEX_URL"] = os.environ.get("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+
         req_file = os.path.join(test_dir, suite["requirements"])
         if os.path.isfile(req_file):
             subprocess.check_call(
-                [venv_pip, "install", "--quiet", "-r", req_file])
+                [venv_pip, "install", "--quiet", "-r", req_file], env=env)
+        elif suite["name"] == "k8s-agent-sandbox":
+            # install the package itself with test extras
+            package_dir = os.path.dirname(test_dir)
+            subprocess.check_call(
+            [venv_pip, "install", "--quiet", "-e", ".[test]"], cwd=package_dir, env=env)
 
         subprocess.check_call(
-            [venv_pip, "install", "--quiet", "pytest"])
+            [venv_pip, "install", "--quiet", "pytest"], env=env)
 
         print(f"\n=== Running Python unit tests: {suite['name']} ===")
         junit_file = os.path.join(

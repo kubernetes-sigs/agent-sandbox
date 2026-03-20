@@ -495,24 +495,6 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		return nil, err
 	}
 
-<<<<<<< agent-sandboxes-point-in-time-metrics-12557458534412660193
-	// Before creating the sandbox, try to adopt a pod from the warm pool
-	adoptedPod, poolName, adoptErr := r.tryAdoptPodFromPool(ctx, claim, sandbox)
-	if adoptErr != nil {
-		logger.Error(adoptErr, "Failed to adopt pod from warm pool")
-		return nil, adoptErr
-	}
-
-	if adoptedPod != nil {
-		logger.Info("Adopted pod from warm pool for sandbox", "pod", adoptedPod.Name, "sandbox", sandbox.Name)
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] = adoptedPod.Name
-	}
-
-=======
->>>>>>> main
 	if err := r.Create(ctx, sandbox); err != nil {
 		err = fmt.Errorf("sandbox create error: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)

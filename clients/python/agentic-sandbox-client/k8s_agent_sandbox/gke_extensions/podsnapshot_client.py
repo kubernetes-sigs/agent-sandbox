@@ -182,6 +182,8 @@ class PodSnapshotSandboxClient(SandboxClient):
                 timeout_seconds=self.podsnapshot_timeout,
                 **kwargs,
             ):
+                if event is None:
+                    continue
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     obj = event["object"]
                     try:

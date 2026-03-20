@@ -1,5 +1,5 @@
 .PHONY: all
-all: fix-go-generate build lint-go test-unit toc-verify
+all: fix-go-generate build lint-go lint-api test-unit toc-verify
 
 .PHONY: fix-go-generate
 fix-go-generate:
@@ -52,6 +52,10 @@ test-e2e-benchmarks:
 lint-go:
 	./dev/tools/lint-go
 
+.PHONY: lint-api
+lint-api:
+	./dev/tools/lint-api
+
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
@@ -98,3 +102,8 @@ toc-update:
 .PHONY: toc-verify
 toc-verify:
 	./dev/tools/verify-toc
+
+.PHONY: clean
+clean:
+	rm -rf dev/tools/tmp
+	rm -rf bin/manager

@@ -1,5 +1,12 @@
 # Agent Sandbox
 
+<p>
+  <a href="https://github.com/kubernetes-sigs/agent-sandbox/releases"><img src="https://img.shields.io/github/v/release/kubernetes-sigs/agent-sandbox" alt="GitHub release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/Apache-2-blue.svg" alt="Apache-2.0 license"></a>
+</p>
+
+[Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
+
 **agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes.**
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
@@ -23,6 +30,50 @@ The `extensions` module provides additional CRDs and controllers that build on t
 *   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
 *   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandbox Pods that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
+
+## Architecture
+
+agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox custom resource, and the controller manages the underlying runtime resources.
+
+### Architecture Diagram
+
+```mermaid
+flowchart TB
+
+    User[User]
+
+    Claim[SandboxClaim]
+    Template[SandboxTemplate]
+    Sandbox[Sandbox]
+
+    ClaimController[Claim Controller]
+    Controller[Sandbox Controller]
+
+    Pod[Sandbox Pod]
+    Runtime[Sandbox Runtime Environment]
+
+    WarmPool[SandboxWarmPool]
+
+    %% User paths
+    User -->|creates| Sandbox
+    User -->|creates| Claim
+
+    %% Claim workflow
+    Claim -->|references| Template
+    Claim -->|reconciled by| ClaimController
+    ClaimController -->|creates| Sandbox
+
+    %% Pod handling
+    ClaimController -->|adopts pod from| WarmPool
+    Sandbox -->|reconciled by| Controller
+    Controller -->|creates Pod if needed| Pod
+
+    %% Runtime
+    Pod --> Runtime
+
+    %% Warm pool
+    WarmPool -->|pre-warmed pods| Pod
+```
 
 ## Installation
 

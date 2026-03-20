@@ -1,0 +1,7 @@
+FROM python:3.13-slim
+
+RUN pip install --no-cache-dir torch transformers
+
+COPY download_model.py /app/download_model.py
+
+ENTRYPOINT ["python3", "-u", "/app/download_model.py"]

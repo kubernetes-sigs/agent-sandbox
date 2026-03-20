@@ -286,24 +286,34 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 
 	testContext.MustWaitForObject(sandboxClaim, predicates.ReadyConditionIsTrue)
 
+	// Re-read the claim to get the adopted sandbox name from status
+	testContext.MustMatchPredicates(sandboxClaim, predicates.ReadyConditionIsTrue)
+	sandboxName := sandboxClaim.Status.SandboxStatus.Name
+	require.NotEmpty(testingT, sandboxName, "expected sandbox name in claim status")
+	testingT.Logf("Adopted sandbox name from claim status: %s", sandboxName)
+
 	sandboxID := types.NamespacedName{
 		Namespace: ns.Name,
-		Name:      "python-sandbox-claim",
+		Name:      sandboxName,
 	}
 
 	require.NoError(testingT, testContext.WaitForSandboxReady(testingT.Context(), sandboxID))
 
-	// Get the SandboxClaim to extract the sandbox name
+	// Get the Sandbox to extract the pod name
 	sandbox, err := testContext.GetSandbox(ctx, sandboxID)
 	require.NoError(testingT, err)
 
-	sandboxName, _, err := unstructured.NestedString(sandbox.Object, "metadata", "annotations", "agents.x-k8s.io/pod-name")
-	require.NoError(testingT, err)
-	testingT.Logf("DEBUG: Extracted SandboxName from Sandbox: sandboxName - %s", sandboxName)
+	// The pod-name annotation is set by the sandbox controller for adopted pods.
+	// For warm pool sandboxes the pod name defaults to the sandbox name.
+	podName, _, _ := unstructured.NestedString(sandbox.Object, "metadata", "annotations", "agents.x-k8s.io/pod-name")
+	if podName == "" {
+		podName = sandboxName
+	}
+	testingT.Logf("DEBUG: Using pod name: %s", podName)
 
 	podID := types.NamespacedName{
 		Namespace: ns.Name,
-		Name:      sandboxName,
+		Name:      podName,
 	}
 
 	// Run the tests on the pod

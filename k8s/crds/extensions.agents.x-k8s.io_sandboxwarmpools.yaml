@@ -52,7 +52,7 @@ spec:
                     default: Recreate
                     enum:
                     - Recreate
-                    - OnDelete
+                    - OnReplenish
                     type: string
                 type: object
             required:

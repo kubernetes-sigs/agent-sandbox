@@ -15,12 +15,7 @@ Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API gro
 
 
 
-
 #### EmbeddedObjectMetadata
-
-
-
-
 
 
 
@@ -55,24 +50,16 @@ _Appears in:_
 
 
 
-
-
-
-
 _Appears in:_
 - [SandboxSpec](#sandboxspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `metadata` _[EmbeddedObjectMetadata](#embeddedobjectmetadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `metadata` _[EmbeddedObjectMetadata](#embeddedobjectmetadata)_ | Metadata for the PVC template. Only name, labels, and annotations are supported. |  | Optional: \{\} <br /> |
 | `spec` _[PersistentVolumeClaimSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#persistentvolumeclaimspec-v1-core)_ | Spec is the PVC's spec |  | Required: \{\} <br /> |
 
 
 #### PodMetadata
-
-
-
-
 
 
 
@@ -89,17 +76,13 @@ _Appears in:_
 
 
 
-
-
-
-
 _Appears in:_
 - [SandboxSpec](#sandboxspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `spec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#podspec-v1-core)_ | Spec is the Pod's spec |  | Required: \{\} <br /> |
-| `metadata` _[PodMetadata](#podmetadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `metadata` _[PodMetadata](#podmetadata)_ | Metadata for the Pod. Only labels and annotations are supported. |  | Optional: \{\} <br /> |
 
 
 #### Sandbox
@@ -110,14 +93,10 @@ Sandbox is the Schema for the sandboxes API
 
 
 
-
-
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `agents.x-k8s.io/v1alpha1` | | |
 | `kind` _string_ | `Sandbox` | | |
-| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
-| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[SandboxSpec](#sandboxspec)_ | spec defines the desired state of Sandbox |  |  |
 | `status` _[SandboxStatus](#sandboxstatus)_ | status defines the observed state of Sandbox |  |  |
@@ -160,7 +139,7 @@ _Appears in:_
 | `service` _string_ | e.g. sandbox-example |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | status conditions array |  |  |
 | `replicas` _integer_ | Replicas is the number of actual replicas. |  |  |
-| `selector` _string_ | LabelSelector is the label selector for pods. |  |  |
+| `labelSelector` _string_ | LabelSelector is the label selector for pods. |  |  |
 
 
 #### ShutdownPolicy
@@ -185,7 +164,7 @@ _Appears in:_
 
 ## extensions.agents.x-k8s.io/v1alpha1
 
-Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API group.
+Package v1alpha1 contains API Schema definitions for the extensions v1alpha1 API group.
 
 ### Resource Types
 - [SandboxClaim](#sandboxclaim)
@@ -207,7 +186,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#time-v1-meta)_ | ShutdownTime is the absolute time when the SandboxClaim expires.<br />This time governs the lifecycle of the claim. It is not propagated to the<br />underlying Sandbox. Instead, the SandboxClaim controller enforces this<br />expiration by deleting the Sandbox resources when the time is reached.<br />If this field is omitted or set to nil, the SandboxClaim itself won't expire.<br />This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported. |  | Format: date-time <br /> |
+| `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ShutdownTime is the absolute time when the SandboxClaim expires.<br />This time governs the lifecycle of the claim. It is not propagated to the<br />underlying Sandbox. Instead, the SandboxClaim controller enforces this<br />expiration by deleting the Sandbox resources when the time is reached.<br />If this field is omitted or set to nil, the SandboxClaim itself won't expire.<br />This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported. |  | Format: date-time <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | ShutdownPolicy determines the behavior when the SandboxClaim expires. | Retain | Enum: [Delete Retain] <br /> |
 
 
@@ -224,8 +203,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `ingress` _[NetworkPolicyIngressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#networkpolicyingressrule-v1-networking) array_ | Ingress is a list of ingress rules to be applied to the sandbox.<br />Traffic is allowed to the sandbox if it matches at least one rule.<br />If this list is empty, all ingress traffic is blocked (Default Deny). |  |  |
-| `egress` _[NetworkPolicyEgressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#networkpolicyegressrule-v1-networking) array_ | Egress is a list of egress rules to be applied to the sandbox.<br />Traffic is allowed out of the sandbox if it matches at least one rule.<br />If this list is empty, all egress traffic is blocked (Default Deny). |  |  |
+| `ingress` _[NetworkPolicyIngressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#networkpolicyingressrule-v1-networking) array_ | Ingress is a list of ingress rules to be applied to the sandbox.<br />Traffic is allowed to the sandbox if it matches at least one rule.<br />If this list is empty, all ingress traffic is blocked (Default Deny). |  |  |
+| `egress` _[NetworkPolicyEgressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#networkpolicyegressrule-v1-networking) array_ | Egress is a list of egress rules to be applied to the sandbox.<br />Traffic is allowed out of the sandbox if it matches at least one rule.<br />If this list is empty, all egress traffic is blocked (Default Deny). |  |  |
 
 
 #### SandboxClaim
@@ -236,14 +215,13 @@ SandboxClaim is the Schema for the sandbox Claim API
 
 
 
-
-
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1alpha1` | | |
 | `kind` _string_ | `SandboxClaim` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[SandboxClaimSpec](#sandboxclaimspec)_ | spec defines the desired state of Sandbox |  |  |
+| `status` _[SandboxClaimStatus](#sandboxclaimstatus)_ | status defines the observed state of Sandbox |  |  |
 
 
 #### SandboxClaimSpec
@@ -259,17 +237,28 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox |  | Required: \{\} <br /> |
+| `templateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox |  | Required: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | Lifecycle defines when and how the SandboxClaim should be shut down. |  |  |
 
 
+#### SandboxClaimStatus
+
+
+
+SandboxClaimStatus defines the observed state of Sandbox.
+
+
+
+_Appears in:_
+- [SandboxClaim](#sandboxclaim)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions represent the latest available observations of a Sandbox's current state. |  |  |
+| `sandbox` _[SandboxStatus](#sandboxstatus)_ |  |  |  |
 
 
 #### SandboxStatus
-
-
-
-
 
 
 
@@ -285,9 +274,7 @@ _Appears in:_
 
 
 
-SandboxTemplate is the Schema for the sandboxe template API
-
-
+SandboxTemplate is the Schema for the sandbox template API
 
 
 
@@ -295,15 +282,16 @@ SandboxTemplate is the Schema for the sandboxe template API
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1alpha1` | | |
 | `kind` _string_ | `SandboxTemplate` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[SandboxTemplateSpec](#sandboxtemplatespec)_ | spec defines the desired state of Sandbox |  |  |
+| `status` _[SandboxTemplateStatus](#sandboxtemplatestatus)_ | status defines the observed state of Sandbox |  |  |
 
 
 #### SandboxTemplateRef
 
 
 
-SandboxTemmplateRef references a SandboxTemplate
+SandboxTemplateRef references a SandboxTemplate
 
 
 
@@ -333,6 +321,17 @@ _Appears in:_
 | `networkPolicy` _[NetworkPolicySpec](#networkpolicyspec)_ | NetworkPolicy defines the network policy to be applied to the sandboxes<br />created from this template.<br />NOTE: This is a restricted subset of the standard Kubernetes NetworkPolicySpec.<br />Fields like 'PodSelector' and 'PolicyTypes' are intentionally excluded because<br />they are managed by the controller to ensure strict isolation and default-deny posture.<br />WARNING: This policy enforces a strict "Default Deny" ingress posture.<br />If your Pod uses sidecars (e.g., Istio proxy, monitoring agents) that listen<br />on their own ports, the NetworkPolicy will BLOCK traffic to them by default.<br />You MUST explicitly allow traffic to these sidecar ports using 'Ingress',<br />otherwise the sidecars may fail health checks. |  |  |
 
 
+#### SandboxTemplateStatus
+
+
+
+SandboxTemplateStatus defines the observed state of Sandbox.
+
+
+
+_Appears in:_
+- [SandboxTemplate](#sandboxtemplate)
+
 
 
 #### SandboxWarmPool
@@ -343,14 +342,13 @@ SandboxWarmPool is the Schema for the sandboxwarmpools API
 
 
 
-
-
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1alpha1` | | |
 | `kind` _string_ | `SandboxWarmPool` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[SandboxWarmPoolSpec](#sandboxwarmpoolspec)_ | spec defines the desired state of SandboxWarmPool |  |  |
+| `status` _[SandboxWarmPoolStatus](#sandboxwarmpoolstatus)_ | status defines the observed state of SandboxWarmPool |  |  |
 
 
 #### SandboxWarmPoolSpec
@@ -367,9 +365,24 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `replicas` _integer_ | Replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. |  | Minimum: 0 <br />Required: \{\} <br /> |
-| `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox |  | Required: \{\} <br /> |
+| `templateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox |  | Required: \{\} <br /> |
 
 
+#### SandboxWarmPoolStatus
+
+
+
+SandboxWarmPoolStatus defines the observed state of SandboxWarmPool
+
+
+
+_Appears in:_
+- [SandboxWarmPool](#sandboxwarmpool)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | Replicas is the total number of sandboxes in the pool. |  |  |
+| `readyReplicas` _integer_ | ReadyReplicas is the total number of sandboxes in the pool that are in a ready state. |  |  |
 
 
 #### ShutdownPolicy

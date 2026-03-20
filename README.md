@@ -1,7 +1,4 @@
-<div style="display: flex; justify-content: space-between; align-items: center;">
-  <h1 style="margin: 0;">Agent Sandbox</h1>
-  <img src="site/assets/icons/color_logo.svg" alt="Agent Sandbox logo" width="150" />
-</div>
+# Agent Sandbox
 
 
 
@@ -9,6 +6,8 @@
   <a href="https://github.com/kubernetes-sigs/agent-sandbox/releases"><img src="https://img.shields.io/github/v/release/kubernetes-sigs/agent-sandbox" alt="GitHub release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/Apache-2-blue.svg" alt="Apache-2.0 license"></a>
 </p>
+
+<img src="site/assets/icons/color_logo.svg" alt="Agent Sandbox logo" width="150" />
 
 [Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
 

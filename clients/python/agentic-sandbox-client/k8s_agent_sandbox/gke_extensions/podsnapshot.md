@@ -24,7 +24,14 @@ A specialized Sandbox client for interacting with the GKE Pod Snapshot Controlle
 *   **`is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult`**:
     *   Checks if the sandbox pod was restored from the specified snapshot.
     *   Verifies restoration by checking the 'PodRestored' condition in the pod status and confirming the message contains the expected snapshot UID.
-    *   Returns RestoreResult object(success, error_code, error_reason).
+    *   Returns RestoreCheckResult object(success, error_code, error_reason).
+*   **`list_snapshots(self, grouping_labels: dict[str, str] | None = None, ready_only: bool = True) -> ListSnapshotResult`**:
+    *   Checks for existing snapshots matching the provided grouping labels associated with the sandbox.
+    *   If `ready_only` is True, only returns snapshots that are in the 'Ready' state.
+    *   Returns a `ListSnapshotResult` object (success, error_code, error_reason, snapshots) containing the mapped snapshots sorted by creation timestamp (newest first).
+*   **`delete_snapshots(self, grouping_labels: dict[str, str] | None = None, snapshot_uid: str | None = None) -> DeleteSnapshotResult`**:
+    *   Deletes snapshots based on provided parameters: a specific snapshot if `snapshot_uid` is provided, all matching `grouping_labels`, or all snapshots for the pod if neither is provided.
+    *   Returns a `DeleteSnapshotResult` object (success, error_code, error_reason, deleted_snapshots) containing the list of successfully deleted snapshot UIDs.
 *   **`__exit__(self)`**:
     *   Cleans up the `PodSnapshotManualTrigger` resources.
     *   Cleans up the `SandboxClaim` resources.

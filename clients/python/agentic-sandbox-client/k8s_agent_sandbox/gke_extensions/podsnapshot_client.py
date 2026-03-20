@@ -26,6 +26,7 @@ from ..constants import (
     PODSNAPSHOT_API_KIND,
     PODSNAPSHOTMANUALTRIGGER_API_KIND,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
+    PODSNAPSHOT_PLURAL,
 )
 
 SNAPSHOT_SUCCESS_CODE = 0
@@ -59,6 +60,26 @@ class RestoreCheckResult:
     """Result of a restore check operation."""
 
     success: bool
+    error_reason: str
+    error_code: int
+
+
+@dataclass
+class ListSnapshotResult:
+    """Result of a list snapshots operation."""
+
+    success: bool
+    snapshots: list[dict[str, str]]
+    error_reason: str
+    error_code: int
+
+
+@dataclass
+class DeleteSnapshotResult:
+    """Result of a delete snapshot operation."""
+
+    success: bool
+    deleted_snapshots: list[str]
     error_reason: str
     error_code: int
 
@@ -406,6 +427,209 @@ class PodSnapshotSandboxClient(SandboxClient):
                 error_reason=f"Unexpected error: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
+
+    def list_snapshots(
+        self, grouping_labels: dict[str, str] | None = None, ready_only: bool = True
+    ) -> ListSnapshotResult:
+        """
+        Checks for existing snapshots matching the grouping labels associated with the sandbox.
+        Returns a ListSnapshotResult containing valid snapshots sorted by creation timestamp (newest first).
+
+        grouping_labels: Filters snapshots by their metadata labels.
+        ready_only: If True, only returns snapshots that are in the 'Ready' state.
+        """
+
+        valid_snapshots = []
+
+        selectors = []
+        if not self.pod_name:
+            logger.warning("Pod name not found. Ensure sandbox is created.")
+            return ListSnapshotResult(
+                success=False,
+                snapshots=[],
+                error_reason="Pod name not found. Ensure sandbox is created.",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+        selectors.append(f"podsnapshot.gke.io/pod-name={self.pod_name}")
+
+        if grouping_labels:
+            for k, v in grouping_labels.items():
+                selectors.append(f"{k}={v}")
+
+        label_selector = ",".join(selectors)
+
+        logger.info(f"Listing snapshots with label selector: {label_selector}")
+        try:
+            # Fetch the PodSnapshots using label selector directly
+            response = self.custom_objects_api.list_namespaced_custom_object(
+                group=PODSNAPSHOT_API_GROUP,
+                version=PODSNAPSHOT_API_VERSION,
+                namespace=self.namespace,
+                plural=PODSNAPSHOT_PLURAL,
+                label_selector=label_selector,
+            )
+        except ApiException as e:
+            logger.error(f"Failed to list PodSnapshots: {e}")
+            return ListSnapshotResult(
+                success=False,
+                snapshots=[],
+                error_reason=f"Failed to list PodSnapshots: {e}",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+        except Exception as e:
+            logger.exception(
+                f"Unexpected error during list snapshots for grouping labels '{grouping_labels}': {e}"
+            )
+            return ListSnapshotResult(
+                success=False,
+                snapshots=[],
+                error_reason=f"Unexpected error: {e}",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+        for snapshot in response.get("items") or []:
+            status = snapshot.get("status", {})
+            conditions = status.get("conditions") or []
+            metadata = snapshot.get("metadata", {})
+
+            # Check for Ready=True
+            is_ready = False
+            for cond in conditions:
+                if cond.get("type") == "Ready" and cond.get("status") == "True":
+                    is_ready = True
+                    break
+
+            # Skip if only ready snapshots are requested
+            if ready_only and not is_ready:
+                continue
+
+            valid_snapshots.append(
+                {
+                    "snapshot_id": metadata.get("name"),
+                    "source_pod": metadata.get("labels", {}).get(
+                        "podsnapshot.gke.io/pod-name", "Unknown"
+                    ),
+                    "uid": metadata.get("uid"),
+                    "creationTimestamp": metadata.get("creationTimestamp", ""),
+                    "status": "Ready" if is_ready else "NotReady",
+                }
+            )
+
+        if not valid_snapshots:
+            logger.info("No snapshots found matching criteria.")
+            return ListSnapshotResult(
+                success=True,
+                snapshots=[],
+                error_reason="",
+                error_code=SNAPSHOT_SUCCESS_CODE,
+            )
+
+        # Sort snapshots by creation timestamp descending
+        valid_snapshots.sort(key=lambda x: x["creationTimestamp"], reverse=True)
+        logger.info(f"Found {len(valid_snapshots)} ready snapshots.")
+        return ListSnapshotResult(
+            success=True,
+            snapshots=valid_snapshots,
+            error_reason="",
+            error_code=SNAPSHOT_SUCCESS_CODE,
+        )
+
+    def delete_snapshots(
+        self,
+        grouping_labels: dict[str, str] | None = None,
+        snapshot_uid: str | None = None,
+    ) -> DeleteSnapshotResult:
+        """
+        Deletes snapshots.
+        - If snapshot_uid is provided, deletes that specific snapshot.
+        - If grouping_labels is provided, deletes all snapshots matching the grouping labels.
+        - If not provided, deletes ALL snapshots for this pod.
+        Returns a DeleteSnapshotResult containing the list of successfully deleted snapshots.
+        """
+        snapshots_to_delete = []
+
+        if snapshot_uid:
+            snapshots_to_delete.append(snapshot_uid)
+        else:
+            logger.info(
+                "No snapshot_uid provided. Deleting ALL snapshots for this pod."
+            )
+            # Fetch all snapshots using list_snapshots without filtering by ready status
+            snapshots_result = self.list_snapshots(
+                grouping_labels=grouping_labels, ready_only=False
+            )
+            if not snapshots_result.success:
+                return DeleteSnapshotResult(
+                    success=False,
+                    deleted_snapshots=[],
+                    error_reason=f"Failed to list snapshots before deletion: {snapshots_result.error_reason}",
+                    error_code=SNAPSHOT_ERROR_CODE,
+                )
+            if (
+                snapshots_result
+                and snapshots_result.success
+                and snapshots_result.snapshots
+            ):
+                snapshots_to_delete = [
+                    s["snapshot_id"] for s in snapshots_result.snapshots
+                ]
+        logger.info(f"Snapshots to delete: {snapshots_to_delete}")
+
+        if not snapshots_to_delete:
+            logger.info("No snapshots found matching criteria to delete.")
+            return DeleteSnapshotResult(
+                success=True,
+                deleted_snapshots=[],
+                error_reason="",
+                error_code=SNAPSHOT_SUCCESS_CODE,
+            )
+
+        deleted_snapshots = []
+        for uid in snapshots_to_delete:
+            # Delete PodSnapshot
+            try:
+                logger.info(f"Deleting PodSnapshot '{uid}'...")
+                self.custom_objects_api.delete_namespaced_custom_object(
+                    group=PODSNAPSHOT_API_GROUP,
+                    version=PODSNAPSHOT_API_VERSION,
+                    namespace=self.namespace,
+                    plural=PODSNAPSHOT_PLURAL,
+                    name=uid,
+                )
+                logger.info(f"PodSnapshot '{uid}' deleted.")
+                deleted_snapshots.append(uid)
+            except ApiException as e:
+                if e.status == 404:
+                    logger.info(
+                        f"PodSnapshot '{uid}' not found in K8s (already deleted?)."
+                    )
+                else:
+                    logger.error(f"Failed to delete PodSnapshot '{uid}': {e}")
+                    return DeleteSnapshotResult(
+                        success=False,
+                        deleted_snapshots=deleted_snapshots,
+                        error_reason=f"Failed to delete PodSnapshot '{uid}': {e}",
+                        error_code=SNAPSHOT_ERROR_CODE,
+                    )
+            except Exception as e:
+                logger.exception(f"Unexpected error deleting PodSnapshot '{uid}': {e}")
+                return DeleteSnapshotResult(
+                    success=False,
+                    deleted_snapshots=deleted_snapshots,
+                    error_reason=f"Unexpected error deleting PodSnapshot '{uid}': {e}",
+                    error_code=SNAPSHOT_ERROR_CODE,
+                )
+
+        logger.info(
+            f"Snapshot deletion process completed. Deleted {len(deleted_snapshots)} snapshots."
+        )
+        return DeleteSnapshotResult(
+            success=True,
+            deleted_snapshots=deleted_snapshots,
+            error_reason="",
+            error_code=SNAPSHOT_SUCCESS_CODE,
+        )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """

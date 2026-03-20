@@ -70,6 +70,9 @@ def main(
     first_snapshot_name = "test-snapshot-10"
     second_snapshot_name = "test-snapshot-20"
 
+    # grouping labels used in PodSnapshotPolicy to group snapshots - tenant-id and user-id
+    grouping_labels = {"tenant-id": "test-tenant", "user-id": "test-user"}
+
     try:
         print("\n***** Phase 1: Starting Counter *****")
 
@@ -98,19 +101,43 @@ def main(
             recent_snapshot_uid = snapshot_response.snapshot_uid
             print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
-        print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
-        with PodSnapshotSandboxClient(
-            template_name=template_name,
-            namespace=namespace,
-            api_url=api_url,
-            server_port=server_port,
-        ) as sandbox_restored:  # restores from second_snapshot_name by default
-
-            restore_result = sandbox_restored.is_restored_from_snapshot(
-                recent_snapshot_uid
+            print(
+                "\n***** List all existing ready snapshots associated with the sandbox. *****"
             )
-            assert restore_result.success, restore_result.error_reason
-            print("Pod was restored from the most recent snapshot.")
+            list_result = sandbox.list_snapshots(grouping_labels=grouping_labels)
+            assert list_result.success, list_result.error_reason
+            if list_result.snapshots:
+                for snap in list_result.snapshots:
+                    print(
+                        f"Snapshot ID: {snap['snapshot_id']}, Source Pod: {snap['source_pod']}, Creation Time: {snap['creationTimestamp']}"
+                    )
+            else:
+                print(
+                    f"No ready snapshots found or failed: {list_result.error_reason if list_result else ''}"
+                )
+
+            print(
+                "\n***** Phase 2: Restoring from most recent snapshot & Verifying *****"
+            )
+            with PodSnapshotSandboxClient(
+                template_name=template_name,
+                namespace=namespace,
+                api_url=api_url,
+                server_port=server_port,
+            ) as sandbox_restored:  # restores from second_snapshot_name by default
+
+                restore_result = sandbox_restored.is_restored_from_snapshot(
+                    recent_snapshot_uid
+                )
+                assert restore_result.success, restore_result.error_reason
+                print("Pod was restored from the most recent snapshot.")
+
+                print("\n**** Deleting snapshots *****")
+                delete_result = sandbox.delete_snapshots(
+                    grouping_labels=grouping_labels
+                )
+                assert delete_result.success, delete_result.error_reason
+                print(f"Deleted Snapshots: {delete_result.deleted_snapshots}")
 
         print("--- Pod Snapshot Test Passed! ---")
 

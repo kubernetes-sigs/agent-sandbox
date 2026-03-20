@@ -302,8 +302,10 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {
 		podLabels[k] = v
 	}
-	// Propagate template ref hash to pod template for NetworkPolicy targeting
+	// Propagate pool and template labels to pod template for consistency and targeting
+	podLabels[warmPoolSandboxLabel] = poolNameHash
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
+	podLabels[sandboxPodTemplateHash] = currentPodTemplateHash
 
 	podAnnotations := make(map[string]string)
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Annotations {

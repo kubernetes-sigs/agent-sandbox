@@ -51,7 +51,7 @@ const (
 
 // SandboxWarmPoolUpdateStrategy defines the update strategy for the SandboxWarmPool.
 type SandboxWarmPoolUpdateStrategy struct {
-	// Type indicates the type of the SandboxWarmPoolUpdateStrategy.
+	// type indicates the type of the SandboxWarmPoolUpdateStrategy.
 	// Default is Recreate.
 	// +kubebuilder:validation:Enum=Recreate;OnReplenish
 	// +kubebuilder:default=Recreate

@@ -116,26 +116,28 @@ def main(
                     f"No ready snapshots found or failed: {list_result.error_reason if list_result else ''}"
                 )
 
-        print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
-        with PodSnapshotSandboxClient(
-            template_name=template_name,
-            namespace=namespace,
-            api_url=api_url,
-            server_port=server_port,
-        ) as sandbox_restored:  # restores from second_snapshot_name by default
-
-            restore_result = sandbox_restored.is_restored_from_snapshot(
-                recent_snapshot_uid
+            print(
+                "\n***** Phase 2: Restoring from most recent snapshot & Verifying *****"
             )
-            assert restore_result.success, restore_result.error_reason
-            print("Pod was restored from the most recent snapshot.")
+            with PodSnapshotSandboxClient(
+                template_name=template_name,
+                namespace=namespace,
+                api_url=api_url,
+                server_port=server_port,
+            ) as sandbox_restored:  # restores from second_snapshot_name by default
 
-            print("\n**** Deleting snapshots *****")
-            delete_result = sandbox_restored.delete_snapshots(
-                grouping_labels=grouping_labels
-            )
-            assert delete_result.success, delete_result.error_reason
-            print(f"Deleted Snapshots: {delete_result.deleted_snapshots}")
+                restore_result = sandbox_restored.is_restored_from_snapshot(
+                    recent_snapshot_uid
+                )
+                assert restore_result.success, restore_result.error_reason
+                print("Pod was restored from the most recent snapshot.")
+
+                print("\n**** Deleting snapshots *****")
+                delete_result = sandbox.delete_snapshots(
+                    grouping_labels=grouping_labels
+                )
+                assert delete_result.success, delete_result.error_reason
+                print(f"Deleted Snapshots: {delete_result.deleted_snapshots}")
 
         print("--- Pod Snapshot Test Passed! ---")
 

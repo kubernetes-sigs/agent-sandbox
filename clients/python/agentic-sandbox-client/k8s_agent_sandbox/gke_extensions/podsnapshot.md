@@ -26,7 +26,7 @@ A specialized Sandbox client for interacting with the GKE Pod Snapshot Controlle
     *   Verifies restoration by checking the 'PodRestored' condition in the pod status and confirming the message contains the expected snapshot UID.
     *   Returns RestoreCheckResult object(success, error_code, error_reason).
 *   **`list_snapshots(self, grouping_labels: dict[str, str] | None = None, ready_only: bool = True) -> ListSnapshotResult`**:
-    *   Checks for existing snapshots matching the provided grouping labels.
+    *   Checks for existing snapshots matching the provided grouping labels associated with the sandbox.
     *   If `ready_only` is True, only returns snapshots that are in the 'Ready' state.
     *   Returns a `ListSnapshotResult` object (success, error_code, error_reason, snapshots) containing the mapped snapshots sorted by creation timestamp (newest first).
 *   **`delete_snapshots(self, grouping_labels: dict[str, str] | None = None, snapshot_uid: str | None = None) -> DeleteSnapshotResult`**:

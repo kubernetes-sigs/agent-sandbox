@@ -432,7 +432,7 @@ class PodSnapshotSandboxClient(SandboxClient):
         self, grouping_labels: dict[str, str] | None = None, ready_only: bool = True
     ) -> ListSnapshotResult:
         """
-        Checks for existing snapshots matching the grouping labels.
+        Checks for existing snapshots matching the grouping labels associated with the sandbox.
         Returns a ListSnapshotResult containing valid snapshots sorted by creation timestamp (newest first).
 
         grouping_labels: Filters snapshots by their metadata labels.
@@ -441,11 +441,23 @@ class PodSnapshotSandboxClient(SandboxClient):
 
         valid_snapshots = []
 
-        label_selector = ""
+        selectors = []
+        if not self.pod_name:
+            logger.warning("Pod name not found. Ensure sandbox is created.")
+            return ListSnapshotResult(
+                success=False,
+                snapshots=[],
+                error_reason="Pod name not found. Ensure sandbox is created.",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+        selectors.append(f"podsnapshot.gke.io/pod-name={self.pod_name}")
+
         if grouping_labels:
             for k, v in grouping_labels.items():
-                label_selector += f"{k}={v},"
-            label_selector = label_selector[:-1]
+                selectors.append(f"{k}={v}")
+
+        label_selector = ",".join(selectors)
 
         logger.info(f"Listing snapshots with label selector: {label_selector}")
         try:

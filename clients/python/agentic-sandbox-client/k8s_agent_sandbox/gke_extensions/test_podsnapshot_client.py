@@ -797,6 +797,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             mock_response
         )
 
+        self.client.pod_name = "test-pod"
         result = self.client.list_snapshots(
             grouping_labels={"test-label": "test-value"}
         )
@@ -811,11 +812,12 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector="test-label=test-value",
+            label_selector="podsnapshot.gke.io/pod-name=test-pod,test-label=test-value",
         )
 
     def test_list_snapshots_no_results(self):
         """Test list_snapshots returns successfully with empty list if none found."""
+        self.client.pod_name = "test-pod"
         self.client.custom_objects_api.list_namespaced_custom_object.return_value = {
             "items": []
         }
@@ -827,10 +829,19 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace=self.client.namespace,
             plural=PODSNAPSHOT_PLURAL,
-            label_selector="",
+            label_selector="podsnapshot.gke.io/pod-name=test-pod",
         )
 
+    def test_list_snapshots_no_pod_name(self):
+        """Test list_snapshots fails when pod name is missing."""
+        self.client.pod_name = None
+        result = self.client.list_snapshots()
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
+        self.assertIn("Pod name not found", result.error_reason)
+
     def test_list_snapshots_api_exception(self):
+        self.client.pod_name = "test-pod"
         self.client.custom_objects_api.list_namespaced_custom_object.side_effect = (
             ApiException(500, "Internal Server Error")
         )
@@ -839,6 +850,7 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.assertIn("Failed to list PodSnapshots", result.error_reason)
 
     def test_list_snapshots_generic_exception(self):
+        self.client.pod_name = "test-pod"
         self.client.custom_objects_api.list_namespaced_custom_object.side_effect = (
             ValueError("Unexpected")
         )

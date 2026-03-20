@@ -9,7 +9,7 @@
 
 ## Deploy analytics tools
 
-This section describes how to build Docker image that defines analytics tool for an ADK agent, and push the Docker image to a Artifact Registry repository and deploy from it.
+This section describes how to build Docker image that defines analytics tool for an ADK agent, push the Docker image to a Artifact Registry repository and deploy the pushed image.
 
 Run the following commands:
 
@@ -54,7 +54,7 @@ Once it's running, port-forward the jupyterlab and access on `http://127.0.0.1:8
 kubectl port-forward "pod/jupyterlab-sandbox" 8888:8888
 ```
 
-Follow the `welcome.ipynb` notebook.
+Follow the `welcome.ipynb` notebook (defined in `jupyterlab.yaml`).
 
 ## Analytics example
 

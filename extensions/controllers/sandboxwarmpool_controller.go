@@ -291,15 +291,12 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
 
-	// Enforce DNS secure-by-default for warm pool sandboxes.
+	// Use ClusterFirst DNS by default for secure warm pool sandboxes.
 	management := template.Spec.NetworkPolicyManagement
 	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
 	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
 	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
-		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
-		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
-			Nameservers: []string{"8.8.8.8", "1.1.1.1"},
-		}
+		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSClusterFirst
 	}
 
 	// Set controller reference so the Sandbox is owned by the SandboxWarmPool

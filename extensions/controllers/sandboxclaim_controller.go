@@ -469,15 +469,11 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		automount := false
 		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
 	}
-	// To prevent internal DNS enumeration while still allowing public domain resolution,
-	// we explicitly override the Pod's DNS config to use external public resolvers.
-	// We only inject this if using the strict "Secure by Default" policy. If the user
-	// provides custom rules or is Unmanaged, we leave DNS alone for air-gapped/proxy compatibility.
+	// Use ClusterFirst DNS by default for secure sandboxes. This prevents external DNS
+	// enumeration while still allowing resolution of cluster-internal names, which is
+	// needed for sidecars, health checks, and other multi-container pod patterns.
 	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
-		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
-		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
-			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
-		}
+		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSClusterFirst
 	}
 
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {

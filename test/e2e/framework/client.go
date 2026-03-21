@@ -36,6 +36,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxextensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -52,6 +56,8 @@ type ClusterClient struct {
 	T
 	client        client.Client
 	dynamicClient dynamic.Interface
+	clientset     kubernetes.Interface
+	restConfig    *rest.Config
 	scheme        *runtime.Scheme
 	watchSet      *WatchSet
 }
@@ -659,6 +665,50 @@ func (cl *ClusterClient) ExecuteOnNode(ctx context.Context, nodeName string, com
 	err := cmd.Run()
 	if err != nil {
 		return stdout.String(), stderr.String(), fmt.Errorf("docker exec failed: %w (stderr: %s)", err, stderr.String())
+	}
+
+	return stdout.String(), stderr.String(), nil
+}
+
+// PodExec executes a command in a container within a pod using client-go.
+func (cl *ClusterClient) PodExec(ctx context.Context, namespace, podName, containerName string, command []string, stdin io.Reader) (string, string, error) {
+	cl.Helper()
+
+	req := cl.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec")
+
+	option := &corev1.PodExecOptions{
+		Container: containerName,
+		Command:   command,
+		Stdin:     stdin != nil,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       false,
+	}
+
+	req.VersionedParams(
+		option,
+		scheme.ParameterCodec,
+	)
+
+	exec, err := remotecommand.NewSPDYExecutor(cl.restConfig, "POST", req.URL())
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create SPDY executor: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  stdin,
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Tty:    false,
+	})
+
+	if err != nil {
+		return stdout.String(), stderr.String(), fmt.Errorf("pod exec failed: %w (stderr: %s)", err, stderr.String())
 	}
 
 	return stdout.String(), stderr.String(), nil

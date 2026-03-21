@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -39,6 +40,7 @@ import (
 )
 
 const (
+	poolPodIDLabel         = "agents.x-k8s.io/pool-pod-id"
 	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
 	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
 )
@@ -258,6 +260,8 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	}
 	// Propagate template ref hash to pod template for NetworkPolicy targeting
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
+
+	podLabels[poolPodIDLabel] = string(uuid.NewUUID())
 
 	podAnnotations := make(map[string]string)
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Annotations {

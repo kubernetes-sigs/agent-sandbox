@@ -418,6 +418,18 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 			// Verify pod template annotations
 			require.Equal(t, "from-podtemplate", sb.Spec.PodTemplate.ObjectMeta.Annotations["pod-annotation"])
 		}
+
+		// Verify each pod template has a unique pool-pod-id label
+		podIDs := make(map[string]struct{})
+		for _, pod := range list.Items {
+			id, ok := pod.Spec.PodTemplate.ObjectMeta.Labels[poolPodIDLabel]
+			require.True(t, ok, "pod %s should have %s label", pod.Name, poolPodIDLabel)
+			require.NotEmpty(t, id, "pool-pod-id should not be empty")
+			_, duplicate := podIDs[id]
+			require.False(t, duplicate, "pool-pod-id %s is not unique across pods", id)
+			podIDs[id] = struct{}{}
+		}
+		require.Len(t, podIDs, int(replicas))
 	})
 }
 

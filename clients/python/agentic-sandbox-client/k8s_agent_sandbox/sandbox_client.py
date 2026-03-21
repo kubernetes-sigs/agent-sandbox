@@ -232,7 +232,7 @@ class SandboxClient:
                 claim_object = event['object']
                 sandbox_status = claim_object.get(
                     'status', {}).get('sandbox', {})
-                name = sandbox_status.get('Name', '')
+                name = sandbox_status.get('name', '')
                 if name:
                     logging.info(
                         f"Resolved sandbox name '{name}' from claim status")

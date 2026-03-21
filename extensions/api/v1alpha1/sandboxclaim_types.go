@@ -88,10 +88,9 @@ type SandboxClaimStatus struct {
 }
 
 type SandboxStatus struct {
-	// Name is the name of the Sandbox created from this claim
-	// TODO: change `Name` to `name`
+	// name is the name of the Sandbox created from this claim
 	// +optional
-	Name string `json:"Name,omitempty"` //nolint:kubeapilinter
+	Name string `json:"name,omitempty"`
 }
 
 // +genclient

@@ -38,6 +38,10 @@ const (
 	maxAttempts = 6
 	baseBackoff = 500 * time.Millisecond
 	maxBackoff  = 8 * time.Second
+
+	// maxDrainBytes caps how much of a response body is read to allow
+	// the underlying TCP connection to be reused by net/http's transport.
+	maxDrainBytes = 4 << 10
 )
 
 var retryableStatusCodes = map[int]bool{
@@ -285,7 +289,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		if retryableStatusCodes[resp.StatusCode] {
 			if attempt >= limit-1 {
 				errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-				_, _ = io.Copy(io.Discard, resp.Body)
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 				_ = resp.Body.Close()
 				attemptTimer.Stop()
 				attemptCancel()
@@ -294,7 +298,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 				return nil, fmt.Errorf("%w: %s failed after %d attempts (url=%s reqID=%s): %w",
 					ErrRetriesExhausted, method, limit, reqURL, reqID, httpErr)
 			}
-			_, _ = io.Copy(io.Discard, resp.Body)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 			_ = resp.Body.Close()
 			attemptTimer.Stop()
 			attemptCancel()
@@ -312,7 +316,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		// between Do() returning and Stop(). The response body is tied to
 		// the cancelled attemptCtx and is unusable; discard and retry.
 		if attemptCtx.Err() != nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 			_ = resp.Body.Close()
 			attemptCancel()
 			if ctx.Err() != nil {

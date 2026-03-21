@@ -129,7 +129,6 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 		return fmt.Errorf("%s: write(%q) failed: %w", f.errPrefix(), path, err)
 	}
 	defer resp.Body.Close()
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body) }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
@@ -137,6 +136,7 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 		recordError(span, retErr)
 		return retErr
 	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 	f.log.V(1).Info("write completed", "path", path, "size", len(content))
 	return nil
 }
@@ -162,7 +162,6 @@ func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]by
 		return nil, fmt.Errorf("%s: read(%q) failed: %w", f.errPrefix(), path, err)
 	}
 	defer resp.Body.Close()
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body) }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
@@ -170,6 +169,7 @@ func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]by
 		recordError(span, retErr)
 		return nil, retErr
 	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, f.maxDownload+1))
 	if err != nil {
 		recordError(span, err)
@@ -206,7 +206,6 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 		return nil, fmt.Errorf("%s: list(%q) failed: %w", f.errPrefix(), path, err)
 	}
 	defer resp.Body.Close()
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body) }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
@@ -214,6 +213,7 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 		recordError(span, retErr)
 		return nil, retErr
 	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 
 	var entries []FileEntry
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetadataResponseSize)).Decode(&entries); err != nil {
@@ -255,7 +255,6 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 		return false, fmt.Errorf("%s: exists(%q) failed: %w", f.errPrefix(), path, err)
 	}
 	defer resp.Body.Close()
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body) }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
@@ -263,6 +262,7 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 		recordError(span, retErr)
 		return false, retErr
 	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 
 	var result struct {
 		Exists bool `json:"exists"`

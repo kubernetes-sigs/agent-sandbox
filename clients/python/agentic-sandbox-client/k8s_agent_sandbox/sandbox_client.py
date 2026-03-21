@@ -45,6 +45,7 @@ from .constants import (
     SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME,
     POD_NAME_ANNOTATION,
 )
+from .metrics import DISCOVERY_LATENCY_MS
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -355,17 +356,34 @@ class SandboxClient:
         self._wait_for_sandbox_ready()
 
         # STRATEGY SELECTION
-        if self.base_url:
-            # Case 1: API URL provided manually (DNS / Internal) -> Do nothing, just use it.
-            logging.info(f"Using configured API URL: {self.base_url}")
+        start_time = time.time()
+        is_preconfigured = bool(self.base_url)
+        mode = "unknown"
 
-        elif self.gateway_name:
-            # Case 2: Gateway Name provided -> Production Mode (Discovery)
-            self._wait_for_gateway_ip()
+        try:
+            if is_preconfigured:
+                # Case 1: API URL provided manually (DNS / Internal) -> Do nothing, just use it.
+                mode = "preconfigured"
+                logging.info(f"Using configured API URL: {self.base_url}")
+                # We do not record discovery latency for pre-configured URL
+            else:
+                if self.gateway_name:
+                    # Case 2: Gateway Name provided -> Production Mode (Discovery)
+                    mode = "gateway"
+                    self._wait_for_gateway_ip()
+                else:
+                    # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)
+                    mode = "port_forward"
+                    self._start_and_wait_for_port_forward()
 
-        else:
-            # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)
-            self._start_and_wait_for_port_forward()
+                latency_ms = (time.time() - start_time) * 1000
+                DISCOVERY_LATENCY_MS.labels(status="success", mode=mode).observe(latency_ms)
+
+        except Exception:
+            if not is_preconfigured:
+                latency_ms = (time.time() - start_time) * 1000
+                DISCOVERY_LATENCY_MS.labels(status="failure", mode=mode).observe(latency_ms)
+            raise
 
         return self
 

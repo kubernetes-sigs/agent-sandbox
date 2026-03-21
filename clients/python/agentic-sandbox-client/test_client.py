@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 from pydantic import ValidationError
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.sandbox_client import ExecutionResult, FileEntry
+from k8s_agent_sandbox.metrics import DISCOVERY_LATENCY_MS
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 
@@ -163,6 +164,25 @@ async def main(template_name: str, gateway_name: str | None, api_url: str | None
             # Restore original method
             sandbox._request = original_request
             print("--- Pydantic Validation Tests Passed ---")
+
+            print("\n--- Testing Metrics ---")
+
+            # Count how many successful discovery latency metrics were recorded in total
+            total_discovery_metrics = 0
+            # We use collect() to safely access Prometheus metric values across all label combinations
+            for metric in DISCOVERY_LATENCY_MS.collect():
+                for sample in metric.samples:
+                    if sample.name == "sandbox_client_discovery_latency_ms_count" and sample.labels.get("status") == "success":
+                        total_discovery_metrics += sample.value
+
+            # As long as it's not preconfigured, it should have recorded discovery latency
+            if not api_url:
+                print(f"Total discovery latency metrics recorded: {total_discovery_metrics}")
+                assert total_discovery_metrics > 0, "Expected at least one discovery latency metric to be recorded"
+            else:
+                print("Skipping discovery latency check because api_url is preconfigured")
+
+            print("--- Metrics Tests Passed ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")

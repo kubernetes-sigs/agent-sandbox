@@ -11,5 +11,6 @@
 {{/* Fix all relative README.md and INSTALL.md links */}}
 {{- $content = replaceRE `\]\((\./)?README\.md(#[^)]+)?\)` (printf "](%s$1)" (strings.TrimSuffix "/" $sectionPath)) $content -}}
 {{- $content = replaceRE `\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)` "](/docs/getting_started/$2)" $content -}}
+{{- $content = replaceRE `src="site/assets/` `src="/assets/` $content -}}
 
 {{- $content | markdownify -}}

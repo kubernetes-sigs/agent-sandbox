@@ -16,6 +16,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -39,9 +41,24 @@ import (
 )
 
 const (
-	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
-	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
+	sandboxTemplateRefHash       = "agents.x-k8s.io/sandbox-template-ref-hash"
+	warmPoolSandboxLabel         = "agents.x-k8s.io/warm-pool-sandbox"
+	templateContentHashLabel     = "agents.x-k8s.io/template-content-hash"
 )
+
+// templateContentHash computes a SHA-256 hash over the JSON-serialized
+// SandboxTemplate spec, returning the first 8 hex chars. This captures
+// everything the template defines and is used to detect spec drift between
+// warm pool sandboxes and the current template.
+func templateContentHash(template *extensionsv1alpha1.SandboxTemplate) string {
+	data, err := json.Marshal(template.Spec)
+	if err != nil {
+		// Spec is always serializable; this should never happen.
+		return "00000000"
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:])[:8]
+}
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
 type SandboxWarmPoolReconciler struct {
@@ -142,6 +159,37 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				"controller", controllerRef.Name,
 				"controllerKind", controllerRef.Kind)
 		}
+	}
+
+	// Compute the current template content hash to detect spec drift.
+	currentContentHash := ""
+	if template, err := r.getTemplate(ctx, warmPool); err == nil {
+		currentContentHash = templateContentHash(template)
+	} else if !k8serrors.IsNotFound(err) {
+		log.Error(err, "Failed to get template for content hash")
+		allErrors = errors.Join(allErrors, err)
+	}
+
+	// Delete sandboxes whose template content hash doesn't match the
+	// current template spec (stale from a prior template version).
+	if currentContentHash != "" {
+		var freshSandboxes []sandboxv1alpha1.Sandbox
+		for _, sb := range activeSandboxes {
+			sbHash := sb.Labels[templateContentHashLabel]
+			if sbHash != "" && sbHash != currentContentHash {
+				log.Info("Deleting stale warm pool sandbox (template content hash mismatch)",
+					"sandbox", sb.Name,
+					"sandboxHash", sbHash,
+					"currentHash", currentContentHash)
+				if err := r.Delete(ctx, &sb); err != nil {
+					log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
+					allErrors = errors.Join(allErrors, err)
+				}
+				continue
+			}
+			freshSandboxes = append(freshSandboxes, sb)
+		}
+		activeSandboxes = freshSandboxes
 	}
 
 	const warmPoolReadinessGracePeriod = 5 * time.Minute
@@ -245,10 +293,14 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 		return err
 	}
 
+	// Compute template content hash for spec-drift detection.
+	contentHash := templateContentHash(template)
+
 	// Build labels for the Sandbox CR
 	sandboxLabels := map[string]string{
-		warmPoolSandboxLabel:   poolNameHash,
-		sandboxTemplateRefHash: sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name),
+		warmPoolSandboxLabel:     poolNameHash,
+		sandboxTemplateRefHash:   sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name),
+		templateContentHashLabel: contentHash,
 	}
 
 	// Copy template pod labels into sandbox pod template
@@ -258,6 +310,7 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	}
 	// Propagate template ref hash to pod template for NetworkPolicy targeting
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
+	podLabels[templateContentHashLabel] = contentHash
 
 	podAnnotations := make(map[string]string)
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Annotations {

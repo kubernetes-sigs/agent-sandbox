@@ -525,6 +525,149 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	}
 }
 
+func TestTemplateContentHash(t *testing.T) {
+	t.Run("deterministic", func(t *testing.T) {
+		tmpl := createTemplate("default")
+		h1 := templateContentHash(tmpl)
+		h2 := templateContentHash(tmpl)
+		require.Equal(t, h1, h2)
+		require.Len(t, h1, 8)
+	})
+
+	t.Run("changes on spec change", func(t *testing.T) {
+		tmpl1 := createTemplate("default")
+		h1 := templateContentHash(tmpl1)
+
+		tmpl2 := createTemplate("default")
+		tmpl2.Spec.PodTemplate.Spec.Containers[0].Image = "different-image"
+		h2 := templateContentHash(tmpl2)
+
+		require.NotEqual(t, h1, h2)
+	})
+
+	t.Run("ignores metadata changes", func(t *testing.T) {
+		tmpl1 := createTemplate("default")
+		h1 := templateContentHash(tmpl1)
+
+		tmpl2 := createTemplate("default")
+		tmpl2.Name = "different-name"
+		tmpl2.ResourceVersion = "12345"
+		h2 := templateContentHash(tmpl2)
+
+		require.Equal(t, h1, h2)
+	})
+}
+
+func TestReconcilePoolContentHashStamped(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	template := createTemplate(poolNamespace)
+	scheme := newTestScheme()
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(template).
+			Build(),
+		Scheme: scheme,
+	}
+
+	ctx := context.Background()
+	err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	list := &sandboxv1alpha1.SandboxList{}
+	err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+	require.NoError(t, err)
+	require.Len(t, list.Items, int(replicas))
+
+	expectedHash := templateContentHash(template)
+	for _, sb := range list.Items {
+		require.Equal(t, expectedHash, sb.Labels[templateContentHashLabel],
+			"sandbox %s should have template content hash label", sb.Name)
+		require.Equal(t, expectedHash, sb.Spec.PodTemplate.ObjectMeta.Labels[templateContentHashLabel],
+			"sandbox %s pod template should have content hash label", sb.Name)
+	}
+}
+
+func TestReconcilePoolRotatesStale(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	template := createTemplate(poolNamespace)
+	scheme := newTestScheme()
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	// Create sandboxes with an old content hash.
+	createStaleSandbox := func(suffix string) *sandboxv1alpha1.Sandbox {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, suffix)
+		sb.Labels[templateContentHashLabel] = "oldold00"
+		return sb
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(
+				template,
+				createStaleSandbox("-stale1"),
+				createStaleSandbox("-stale2"),
+			).
+			Build(),
+		Scheme: scheme,
+	}
+
+	ctx := context.Background()
+
+	// First reconcile: deletes stale sandboxes and creates fresh ones.
+	err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	list := &sandboxv1alpha1.SandboxList{}
+	err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+	require.NoError(t, err)
+
+	currentHash := templateContentHash(template)
+	for _, sb := range list.Items {
+		if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
+			require.Equal(t, currentHash, sb.Labels[templateContentHashLabel],
+				"sandbox %s should have current content hash after rotation", sb.Name)
+		}
+	}
+}
+
 func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"

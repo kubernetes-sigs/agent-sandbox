@@ -24,6 +24,14 @@ import (
 const (
 	// ClaimExpiredReason is the reason used in conditions/events when a claim expires.
 	ClaimExpiredReason = "ClaimExpired"
+
+	// ClaimNameLabel is propagated to Sandboxes and backing Pods so consumers can
+	// locate the workload associated with a SandboxClaim.
+	ClaimNameLabel = "agents.x-k8s.io/claim-name"
+
+	// ClaimUIDLabel is propagated to Sandboxes and backing Pods as a stable,
+	// immutable claim identity.
+	ClaimUIDLabel = "agents.x-k8s.io/claim-uid"
 )
 
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.

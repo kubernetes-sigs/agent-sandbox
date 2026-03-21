@@ -997,13 +997,29 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					t.Errorf("expected template ref label to be removed from adopted sandbox")
 				}
 
-				// 2. Verify SandboxID label was added to pod template
+				// 1b. Verify universal claim identity labels were added
+				if val := adoptedSandbox.Labels[extensionsv1alpha1.ClaimNameLabel]; val != claim.Name {
+					t.Errorf("expected adopted sandbox to have claim-name label %q, got %q", claim.Name, val)
+				}
+				if val := adoptedSandbox.Labels[extensionsv1alpha1.ClaimUIDLabel]; val != string(claim.UID) {
+					t.Errorf("expected adopted sandbox to have claim-uid label %q, got %q", claim.UID, val)
+				}
+
+				// 2. Verify pod template labels were added for claim identity and policy targeting
+				if val := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.ClaimNameLabel]; val != claim.Name {
+					t.Errorf("expected pod template to have claim-name label %q, got %q", claim.Name, val)
+				}
+				if val := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.ClaimUIDLabel]; val != string(claim.UID) {
+					t.Errorf("expected pod template to have claim-uid label %q, got %q", claim.UID, val)
+				}
+
+				// 3. Verify SandboxID label was added to pod template
 				expectedUID := string(types.UID("claim-uid"))
 				if val := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel]; val != expectedUID {
 					t.Errorf("expected pod template to have SandboxID label %q, got %q", expectedUID, val)
 				}
 
-				// 3. Verify claim is the controller owner
+				// 4. Verify claim is the controller owner
 				controllerRef := metav1.GetControllerOf(&adoptedSandbox)
 				if controllerRef == nil || controllerRef.UID != claim.UID {
 					t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
@@ -1015,6 +1031,18 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 				if err != nil {
 					t.Fatalf("expected sandbox to be created but got error: %v", err)
+				}
+				if val := sandbox.Labels[extensionsv1alpha1.ClaimNameLabel]; val != claim.Name {
+					t.Errorf("expected sandbox to have claim-name label %q, got %q", claim.Name, val)
+				}
+				if val := sandbox.Labels[extensionsv1alpha1.ClaimUIDLabel]; val != string(claim.UID) {
+					t.Errorf("expected sandbox to have claim-uid label %q, got %q", claim.UID, val)
+				}
+				if val := sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.ClaimNameLabel]; val != claim.Name {
+					t.Errorf("expected pod template to have claim-name label %q, got %q", claim.Name, val)
+				}
+				if val := sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.ClaimUIDLabel]; val != string(claim.UID) {
+					t.Errorf("expected pod template to have claim-uid label %q, got %q", claim.UID, val)
 				}
 			}
 		})

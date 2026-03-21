@@ -1309,6 +1309,217 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 	})
 }
 
+func TestSandboxClaimAdoptionSkipsStaleContentHash(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "new-image:v2"}},
+				},
+			},
+		},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "hash-claim", Namespace: "default",
+			UID: "hash-claim-uid",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	currentHash := templateContentHash(template)
+
+	// Stale sandbox: content hash from old template version.
+	staleSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "stale-sb", Namespace: "default",
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
+			Labels: map[string]string{
+				warmPoolSandboxLabel:     poolNameHash,
+				sandboxTemplateRefHash:   sandboxcontrollers.NameHash("test-template"),
+				templateContentHashLabel: "oldold00",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxWarmPool",
+				Name: "test-pool", UID: "wp-uid", Controller: ptr.To(true),
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "old-image:v1"}}},
+			},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	// Fresh sandbox: content hash matches current template.
+	freshSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fresh-sb", Namespace: "default",
+			CreationTimestamp: metav1.Now(),
+			Labels: map[string]string{
+				warmPoolSandboxLabel:     poolNameHash,
+				sandboxTemplateRefHash:   sandboxcontrollers.NameHash("test-template"),
+				templateContentHashLabel: currentHash,
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxWarmPool",
+				Name: "test-pool", UID: "wp-uid", Controller: ptr.To(true),
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "new-image:v2"}}},
+			},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	reconciler := &SandboxClaimReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(template, claim, staleSandbox, freshSandbox).
+			WithStatusSubresource(claim).
+			Build(),
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "hash-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Should have adopted the fresh sandbox, not the stale one.
+	var adopted sandboxv1alpha1.Sandbox
+	err = reconciler.Get(context.Background(), types.NamespacedName{Name: "fresh-sb", Namespace: "default"}, &adopted)
+	if err != nil {
+		t.Fatalf("failed to get fresh sandbox: %v", err)
+	}
+	controllerRef := metav1.GetControllerOf(&adopted)
+	if controllerRef == nil || controllerRef.UID != claim.UID {
+		t.Fatalf("expected fresh-sb to be adopted by claim, got controller %v", controllerRef)
+	}
+
+	// Stale sandbox should still be owned by warm pool (not adopted).
+	var stale sandboxv1alpha1.Sandbox
+	err = reconciler.Get(context.Background(), types.NamespacedName{Name: "stale-sb", Namespace: "default"}, &stale)
+	if err != nil {
+		t.Fatalf("failed to get stale sandbox: %v", err)
+	}
+	staleRef := metav1.GetControllerOf(&stale)
+	if staleRef != nil && staleRef.UID == claim.UID {
+		t.Fatal("stale sandbox should not have been adopted by claim")
+	}
+}
+
+func TestSandboxClaimAdoptionRemovesContentHashLabel(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "label-claim", Namespace: "default", UID: "label-claim-uid",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	contentHash := templateContentHash(template)
+
+	poolSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pool-sb", Namespace: "default",
+			CreationTimestamp: metav1.Now(),
+			Labels: map[string]string{
+				warmPoolSandboxLabel:     poolNameHash,
+				sandboxTemplateRefHash:   sandboxcontrollers.NameHash("test-template"),
+				templateContentHashLabel: contentHash,
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxWarmPool",
+				Name: "test-pool", UID: "wp-uid", Controller: ptr.To(true),
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	reconciler := &SandboxClaimReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(template, claim, poolSandbox).
+			WithStatusSubresource(claim).
+			Build(),
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "label-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var adopted sandboxv1alpha1.Sandbox
+	err = reconciler.Get(context.Background(), types.NamespacedName{Name: "pool-sb", Namespace: "default"}, &adopted)
+	if err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+
+	// All warm pool labels should be removed after adoption.
+	if _, exists := adopted.Labels[warmPoolSandboxLabel]; exists {
+		t.Error("warmPoolSandboxLabel should be removed after adoption")
+	}
+	if _, exists := adopted.Labels[sandboxTemplateRefHash]; exists {
+		t.Error("sandboxTemplateRefHash should be removed after adoption")
+	}
+	if _, exists := adopted.Labels[templateContentHashLabel]; exists {
+		t.Error("templateContentHashLabel should be removed after adoption")
+	}
+}
+
 func newScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {

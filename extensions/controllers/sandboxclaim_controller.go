@@ -339,6 +339,15 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 	}
 }
 
+func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1alpha1.SandboxClaim) map[string]string {
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[extensionsv1alpha1.ClaimNameLabel] = claim.Name
+	labels[extensionsv1alpha1.ClaimUIDLabel] = string(claim.UID)
+	return labels
+}
+
 // adoptSandboxFromCandidates picks the best candidate and transfers ownership to the claim.
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
 	log := log.FromContext(ctx)
@@ -402,9 +411,8 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		}
 
 		// Add sandbox ID label to pod template for NetworkPolicy targeting
-		if adopted.Spec.PodTemplate.ObjectMeta.Labels == nil {
-			adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
-		}
+		adopted.Labels = ensureClaimIdentityLabels(adopted.Labels, claim)
+		adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 
 		// Update uses optimistic concurrency (resourceVersion) so concurrent
@@ -501,6 +509,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
+	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
 

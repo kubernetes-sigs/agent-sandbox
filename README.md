@@ -36,6 +36,21 @@ The `extensions` module provides additional CRDs and controllers that build on t
 *   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandbox Pods that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
+### Claim Identity Labels
+
+When a `SandboxClaim` creates or adopts a `Sandbox`, agent-sandbox propagates the following labels to both the claimed `Sandbox` and its backing `Pod`:
+
+*   `agents.x-k8s.io/claim-name`
+*   `agents.x-k8s.io/claim-uid`
+
+These labels provide a stable, consumer-agnostic way to locate the runtime object associated with a claim, including warm-pool adoption flows.
+
+Example:
+
+```sh
+kubectl get pods -A -l agents.x-k8s.io/claim-name=<sandbox-claim-name>
+```
+
 ## Architecture
 
 agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox custom resource, and the controller manages the underlying runtime resources.

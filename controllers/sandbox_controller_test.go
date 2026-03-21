@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -713,6 +714,12 @@ func TestReconcilePod(t *testing.T) {
 				Spec: sandboxv1alpha1.SandboxSpec{
 					Replicas: ptr.To(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
+						ObjectMeta: sandboxv1alpha1.PodMetadata{
+							Labels: map[string]string{
+								extensionsv1alpha1.ClaimNameLabel: "sandbox-claim-1",
+								extensionsv1alpha1.ClaimUIDLabel:  "claim-uid-1",
+							},
+						},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
 								{
@@ -729,7 +736,9 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxLabel:                      nameHash,
+						extensionsv1alpha1.ClaimNameLabel: "sandbox-claim-1",
+						extensionsv1alpha1.ClaimUIDLabel:  "claim-uid-1",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},

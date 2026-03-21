@@ -476,6 +476,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 	}
 
+	// Track the sandbox template ref to be used by metrics collector
+	sandbox.Annotations[v1alpha1.SandboxTemplateRefAnnotation] = template.Name
+
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
@@ -731,7 +734,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// This is unlikely to happen; here for completeness only.
 	if sandbox == nil {
 		launchType = asmetrics.LaunchTypeUnknown
-	} else if sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "" {
+	} else if sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] != "" {
 		// Existence of the SandboxPodNameAnnotation implies the pod was adopted from a warm pool.
 		launchType = asmetrics.LaunchTypeWarm
 	}

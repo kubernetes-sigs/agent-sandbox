@@ -72,6 +72,20 @@ var (
 		},
 		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition"},
 	)
+
+	// AgentSandboxesDesc describes the agent_sandboxes metric point-in-time counts.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - ready_condition: "true" | "false"
+	// - expired: "true" | "false"
+	// - launch_type: "warm" | "cold"
+	// - sandbox_template: sandboxTemplateRef
+	AgentSandboxesDesc = prometheus.NewDesc(
+		"agent_sandboxes",
+		"Monitor the point-in-time number of sandboxes in the cluster.",
+		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template"},
+		nil,
+	)
 )
 
 // Init registers custom metrics with the global controller-runtime registry.

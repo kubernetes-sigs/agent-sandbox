@@ -99,6 +99,9 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), metricsCollectTimeout)
 	defer cancel()
 
+	// TODO(chw120): The current O(N) List call during metrics collection poses a scalability concern.
+	// In large clusters, frequent scrapes could lead to high CPU usage or OOM.
+	// This should be replaced with a more efficient implementation.
 	if err := c.client.List(ctx, &sandboxList); err != nil {
 		c.logger.Error(err, "Failed to list sandboxes for metrics collection")
 		return

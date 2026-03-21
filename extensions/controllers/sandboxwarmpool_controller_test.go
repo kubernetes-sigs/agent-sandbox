@@ -42,28 +42,53 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func createPoolSandbox(poolName, namespace, poolNameHash, suffix string) *sandboxv1alpha1.Sandbox {
+func createPoolSandbox(poolName, namespace, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, suffix string) *sandboxv1alpha1.Sandbox {
 	replicas := int32(1)
+	templateRefHash := ""
+	podTemplateHash := "initial-pod-hash" // Default placeholder for tests
+	var podSpec corev1.PodSpec
+
+	if template != nil {
+		templateRefHash = sandboxcontrollers.NameHash(template.Name)
+		podSpec = *template.Spec.PodTemplate.Spec.DeepCopy()
+		// If template has a version label, we could use it as part of the hash placeholder
+		if v, ok := template.Spec.PodTemplate.ObjectMeta.Labels["version"]; ok {
+			podTemplateHash = "pod-hash-" + v
+		}
+	} else {
+		// Fallback for tests that don't provide a template
+		podSpec = corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "test-container",
+					Image: "test-image",
+				},
+			},
+		}
+	}
+
 	return &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              poolName + suffix,
 			Namespace:         namespace,
 			CreationTimestamp: metav1.Now(),
 			Labels: map[string]string{
-				warmPoolSandboxLabel: poolNameHash,
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: templateRefHash,
+				sandboxPodTemplateHash: podTemplateHash,
 			},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
 			Replicas: &replicas,
 			PodTemplate: sandboxv1alpha1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "test-image",
-						},
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						warmPoolSandboxLabel:   poolNameHash,
+						sandboxTemplateRefHash: templateRefHash,
+						sandboxPodTemplateHash: podTemplateHash,
 					},
 				},
+				Spec: podSpec,
 			},
 		},
 	}
@@ -102,6 +127,7 @@ func TestReconcilePool(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      poolName,
 			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
 			Replicas: replicas,
@@ -128,7 +154,7 @@ func TestReconcilePool(t *testing.T) {
 			name: "creates additional sandboxes when under-provisioned",
 			initialObjs: []runtime.Object{
 				template,
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-abc123"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
 			},
 			expectedReplicas: replicas,
 		},
@@ -136,10 +162,10 @@ func TestReconcilePool(t *testing.T) {
 			name: "deletes excess sandboxes when over-provisioned",
 			initialObjs: []runtime.Object{
 				template,
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-abc123"),
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-def456"),
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-ghi789"),
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-jkl012"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-def456"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-ghi789"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-jkl012"),
 			},
 			expectedReplicas: replicas,
 		},
@@ -147,9 +173,9 @@ func TestReconcilePool(t *testing.T) {
 			name: "maintains correct replica count",
 			initialObjs: []runtime.Object{
 				template,
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-abc123"),
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-def456"),
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-ghi789"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-def456"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-ghi789"),
 			},
 			expectedReplicas: replicas,
 		},
@@ -220,7 +246,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 	poolNameHash := sandboxcontrollers.NameHash(poolName)
 
 	createSandboxWithOwner := func(suffix string, ownerUID string) *sandboxv1alpha1.Sandbox {
-		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, suffix)
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
 		if ownerUID != "" {
 			sb.OwnerReferences = []metav1.OwnerReference{
 				{
@@ -236,7 +262,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 	}
 
 	createSandboxWithDifferentController := func(suffix string) *sandboxv1alpha1.Sandbox {
-		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, suffix)
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
 		sb.OwnerReferences = []metav1.OwnerReference{
 			{
 				APIVersion: "apps/v1",
@@ -434,6 +460,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      poolName,
 			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
 			Replicas: replicas,
@@ -446,7 +473,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	poolNameHash := sandboxcontrollers.NameHash(poolName)
 
 	createSandboxWithReadyCondition := func(suffix string, ready metav1.ConditionStatus) *sandboxv1alpha1.Sandbox {
-		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, suffix)
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
 		sb.Status.Conditions = []metav1.Condition{
 			{
 				Type:   string(sandboxv1alpha1.SandboxConditionReady),
@@ -495,8 +522,8 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			name: "sandboxes with no ready condition",
 			initialObjs: []runtime.Object{
 				template,
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-abc123"),
-				createPoolSandbox(poolName, poolNamespace, poolNameHash, "-def456"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-def456"),
 				createSandboxWithReadyCondition("-ghi789", metav1.ConditionTrue),
 			},
 			expectedReadyReplicas: 1,
@@ -550,7 +577,7 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 	poolNameHash := sandboxcontrollers.NameHash(poolName)
 
 	createSandboxWithAge := func(suffix string, ready metav1.ConditionStatus, age time.Duration) *sandboxv1alpha1.Sandbox {
-		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, suffix)
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
 		sb.CreationTimestamp = metav1.Time{Time: time.Now().Add(-age)}
 		sb.Status.Conditions = []metav1.Condition{
 			{
@@ -624,4 +651,227 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 		require.Equal(t, replicas, poolCount)
 		require.Equal(t, replicas, warmPool.Status.Replicas)
 	})
+}
+
+func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	testCases := []struct {
+		name                 string
+		strategy             extensionsv1alpha1.SandboxWarmPoolUpdateStrategyType
+		expectedUpdatedImage bool
+	}{
+		{
+			name:                 "Recreate strategy updates all pod images immediately",
+			strategy:             extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+			expectedUpdatedImage: true,
+		},
+		{
+			name:                 "OnReplenish strategy retains original pod images until manual deletion",
+			strategy:             extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType,
+			expectedUpdatedImage: false,
+		},
+		{
+			name:                 "Default strategy (empty string) behaves like Recreate and updates all immediately",
+			strategy:             "",
+			expectedUpdatedImage: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create initial SandboxTemplate
+			template := &extensionsv1alpha1.SandboxTemplate{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: extensionsv1alpha1.GroupVersion.String(),
+					Kind:       "SandboxTemplate",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: poolNamespace,
+				},
+				Spec: extensionsv1alpha1.SandboxTemplateSpec{
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "image-v1",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			warmPool := &extensionsv1alpha1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: poolNamespace,
+					UID:       "warmpool-uid-123",
+				},
+				Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+					Replicas: replicas,
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+						Name: templateName,
+					},
+					UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
+						Type: tc.strategy,
+					},
+				},
+			}
+
+			scheme := newTestScheme()
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithRuntimeObjects(template, warmPool).
+					Build(),
+				Scheme: scheme,
+			}
+
+			ctx := context.Background()
+
+			// Initial reconciliation to create the sandboxes
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Get initial hash label
+			template, initialHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Verify sandboxes exist with initial image and hash
+			sandboxes := &sandboxv1alpha1.SandboxList{}
+			err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, sandboxes.Items, int(replicas))
+			for _, sb := range sandboxes.Items {
+				require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image)
+				require.Equal(t, initialHash, sb.Labels[sandboxPodTemplateHash], "Sandbox should have initial template hash label")
+			}
+
+			// Update the SandboxTemplate content
+			updatedTemplate := template.DeepCopy()
+			updatedTemplate.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+			err = r.Update(ctx, updatedTemplate)
+			require.NoError(t, err)
+
+			// Get new expected hash label
+			_, updatedHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+			require.NoError(t, err)
+			require.NotEqual(t, initialHash, updatedHash, "Hashes should differ after template update")
+
+			// Reconcile again to trigger rollout (or lack thereof)
+			err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Verify state after update
+			err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, sandboxes.Items, int(replicas))
+
+			if tc.expectedUpdatedImage {
+				// For Recreate strategy, all should be updated
+				for _, sb := range sandboxes.Items {
+					require.Equal(t, "image-v2", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should have updated image")
+					require.Equal(t, updatedHash, sb.Labels[sandboxPodTemplateHash], "Sandbox should have updated template hash label")
+				}
+				t.Log("Verified: All sandboxes updated immediately with Recreate strategy")
+			} else {
+				// For OnReplenish, all should still be v1
+				for _, sb := range sandboxes.Items {
+					require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image")
+					require.Equal(t, initialHash, sb.Labels[sandboxPodTemplateHash], "Sandbox should retain original template hash label")
+				}
+				t.Log("Verified: Sandboxes retained original image after update with OnReplenish strategy")
+
+				// Now manually delete one sandbox to test replenishment
+				sbToDelete := &sandboxes.Items[0]
+				err = r.Delete(ctx, sbToDelete)
+				require.NoError(t, err)
+
+				// Reconcile to trigger replenishment
+				err = r.reconcilePool(ctx, warmPool)
+				require.NoError(t, err)
+
+				// Verify that we have 2 sandboxes: one old (v1) and one new (v2)
+				err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+				require.NoError(t, err)
+				require.Len(t, sandboxes.Items, int(replicas))
+
+				v1Count, v2Count := 0, 0
+				for _, sb := range sandboxes.Items {
+					switch sb.Spec.PodTemplate.Spec.Containers[0].Image {
+					case "image-v1":
+						v1Count++
+						require.Equal(t, initialHash, sb.Labels[sandboxPodTemplateHash])
+					case "image-v2":
+						v2Count++
+						require.Equal(t, updatedHash, sb.Labels[sandboxPodTemplateHash])
+					}
+				}
+				require.Equal(t, 1, v1Count, "Should have one remaining v1 sandbox")
+				require.Equal(t, 1, v2Count, "Should have one newly created v2 sandbox")
+				t.Log("Verified: New sandbox picking up updated template during replenishment in OnReplenish mode")
+			}
+		})
+	}
+}
+
+func TestFindWarmPoolsForTemplate(t *testing.T) {
+	namespace := "default"
+	templateName := "test-template"
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: namespace,
+		},
+	}
+
+	wp1 := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-1",
+			Namespace: namespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	wp2 := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-2",
+			Namespace: namespace,
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: "other-template",
+			},
+		},
+	}
+
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithIndex(&extensionsv1alpha1.SandboxWarmPool{}, templateRefField, func(rawObj client.Object) []string {
+				wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)
+				return []string{wp.Spec.TemplateRef.Name}
+			}).
+			WithRuntimeObjects(wp1, wp2).
+			Build(),
+		Scheme: scheme,
+	}
+
+	requests := r.findWarmPoolsForTemplate(context.Background(), template)
+
+	require.Len(t, requests, 1)
+	require.Equal(t, "pool-1", requests[0].Name)
+	require.Equal(t, namespace, requests[0].Namespace)
 }

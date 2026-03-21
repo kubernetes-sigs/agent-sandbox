@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -27,11 +28,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
@@ -41,6 +45,12 @@ import (
 const (
 	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
 	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
+
+	// sandboxPodTemplateHash tracks the specific version/content of the template.
+	sandboxPodTemplateHash = "agents.x-k8s.io/sandbox-pod-template-hash"
+
+	// templateRefField is the field used for indexing SandboxWarmPools by their template reference name.
+	templateRefField = ".spec.templateRef.Name"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
@@ -114,35 +124,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		return err
 	}
 
-	// Filter sandboxes by ownership
-	var activeSandboxes []sandboxv1alpha1.Sandbox
-	var allErrors error
+	// Fetch template and compute hash once to avoid repeated expensive operations
+	template, currentPodTemplateHash, tmplErr := r.fetchTemplateAndHash(ctx, warmPool)
 
-	for _, sb := range sandboxList.Items {
-		if !sb.DeletionTimestamp.IsZero() {
-			continue
-		}
-
-		controllerRef := metav1.GetControllerOf(&sb)
-
-		if controllerRef == nil {
-			// Orphaned sandbox - adopt it
-			log.Info("Adopting orphaned sandbox", "sandbox", sb.Name)
-			if err := r.adoptSandbox(ctx, warmPool, &sb); err != nil {
-				log.Error(err, "Failed to adopt sandbox", "sandbox", sb.Name)
-				allErrors = errors.Join(allErrors, err)
-				continue
-			}
-			activeSandboxes = append(activeSandboxes, sb)
-		} else if controllerRef.UID == warmPool.UID {
-			activeSandboxes = append(activeSandboxes, sb)
-		} else {
-			log.Info("Ignoring sandbox with different controller",
-				"sandbox", sb.Name,
-				"controller", controllerRef.Name,
-				"controllerKind", controllerRef.Kind)
-		}
-	}
+	// Delete stale pods, filter pods by ownership and adopt orphans
+	activeSandboxes, allErrors := r.filterActiveSandboxes(ctx, warmPool, sandboxList.Items, template, currentPodTemplateHash, tmplErr)
 
 	const warmPoolReadinessGracePeriod = 5 * time.Minute
 
@@ -186,11 +172,15 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// Create new sandboxes if we need more
 	if currentReplicas < desiredReplicas {
+		if tmplErr != nil {
+			return errors.Join(allErrors, tmplErr)
+		}
+
 		sandboxesToCreate := desiredReplicas - currentReplicas
 		log.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 
 		for i := int32(0); i < sandboxesToCreate; i++ {
-			if err := r.createPoolSandbox(ctx, warmPool, poolNameHash); err != nil {
+			if err := r.createPoolSandbox(ctx, warmPool, poolNameHash, template, currentPodTemplateHash); err != nil {
 				log.Error(err, "Failed to create pool sandbox")
 				allErrors = errors.Join(allErrors, err)
 			}
@@ -233,22 +223,78 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 	return r.Update(ctx, sb)
 }
 
-// createPoolSandbox creates a full Sandbox CR (with pod template, service, etc.) for the warm pool
-func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string) error {
+// filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans
+func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, sandboxes []sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string, tmplErr error) ([]sandboxv1alpha1.Sandbox, error) {
 	log := log.FromContext(ctx)
+	var activeSandboxes []sandboxv1alpha1.Sandbox
+	var allErrors error
 
-	// Try getting template
-	var template *extensionsv1alpha1.SandboxTemplate
-	var err error
-	if template, err = r.getTemplate(ctx, warmPool); err != nil {
-		log.Error(err, "Failed to get sandbox template for warm pool", "warmPoolName", warmPool.Name)
-		return err
+	vettedHashes := make(map[string]bool)
+
+	updateStrategy := warmPool.Spec.UpdateStrategy.Type
+	if updateStrategy == "" {
+		updateStrategy = extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType
 	}
+
+	for _, sb := range sandboxes {
+		if !sb.DeletionTimestamp.IsZero() {
+			continue
+		}
+
+		controllerRef := metav1.GetControllerOf(&sb)
+		isOrphan := controllerRef == nil
+		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
+
+		if !isOrphan && !isControlledByPool {
+			log.Info("Ignoring sandbox with different controller", "sandbox", sb.Name, "controller", controllerRef.Name)
+			continue
+		}
+
+		if updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType && tmplErr == nil && r.isSandboxStale(&sb, template, currentPodTemplateHash, vettedHashes) {
+			log.Info("Deleting stale sandbox from pool", "sandbox", sb.Name)
+			if err := r.Delete(ctx, &sb); err != nil {
+				log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
+				allErrors = errors.Join(allErrors, err)
+			}
+			continue
+		}
+
+		if isOrphan {
+			log.Info("Adopting orphaned sandbox", "sandbox", sb.Name)
+			if err := r.adoptSandbox(ctx, warmPool, &sb); err != nil {
+				log.Error(err, "Failed to adopt sandbox", "sandbox", sb.Name)
+				allErrors = errors.Join(allErrors, err)
+				continue
+			}
+		}
+
+		activeSandboxes = append(activeSandboxes, sb)
+	}
+	return activeSandboxes, allErrors
+}
+
+// fetchTemplateAndHash fetches the sandbox template and computes its hash.
+func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) (*extensionsv1alpha1.SandboxTemplate, string, error) {
+	log := log.FromContext(ctx)
+	template, tmplErr := r.getTemplate(ctx, warmPool)
+	var currentPodTemplateHash string
+	if tmplErr == nil {
+		currentPodTemplateHash = r.computePodTemplateHash(template)
+	} else {
+		log.Error(tmplErr, "Failed to get sandbox template", "templateRef", warmPool.Spec.TemplateRef.Name)
+	}
+	return template, currentPodTemplateHash, tmplErr
+}
+
+// createPoolSandbox creates a full Sandbox CR (with pod template, service, etc.) for the warm pool
+func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string) error {
+	log := log.FromContext(ctx)
 
 	// Build labels for the Sandbox CR
 	sandboxLabels := map[string]string{
 		warmPoolSandboxLabel:   poolNameHash,
 		sandboxTemplateRefHash: sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name),
+		sandboxPodTemplateHash: currentPodTemplateHash,
 	}
 
 	// Copy template pod labels into sandbox pod template
@@ -256,8 +302,10 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {
 		podLabels[k] = v
 	}
-	// Propagate template ref hash to pod template for NetworkPolicy targeting
+	// Propagate pool and template labels to pod template for consistency and targeting
+	podLabels[warmPoolSandboxLabel] = poolNameHash
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
+	podLabels[sandboxPodTemplateHash] = currentPodTemplateHash
 
 	podAnnotations := make(map[string]string)
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Annotations {
@@ -364,11 +412,96 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 	return template, nil
 }
 
+// computePodTemplateHash computes a hash of the sandbox template's PodTemplate.
+func (r *SandboxWarmPoolReconciler) computePodTemplateHash(template *extensionsv1alpha1.SandboxTemplate) string {
+	data := struct {
+		Name        string                      `json:"name"`
+		PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate"`
+	}{
+		Name:        template.Name,
+		PodTemplate: template.Spec.PodTemplate,
+	}
+	specJSON, err := json.Marshal(data)
+	if err != nil {
+		return ""
+	}
+	return sandboxcontrollers.NameHash(string(specJSON))
+}
+
+// isSandboxStale checks if the sandbox version matches the current template.
+// It uses a cache (vettedHashes) to avoid repeated expensive DeepEqual calls
+// for sandboxes with the same hash.
+func (r *SandboxWarmPoolReconciler) isSandboxStale(
+	sandbox *sandboxv1alpha1.Sandbox,
+	template *extensionsv1alpha1.SandboxTemplate,
+	currentTemplateHash string,
+	vettedHashes map[string]bool,
+) bool {
+	sandboxHash := sandbox.Labels[sandboxPodTemplateHash]
+
+	// If hashes match, it's fresh.
+	if sandboxHash == currentTemplateHash {
+		return false
+	}
+
+	// Check if we've already evaluated this specific old version.
+	if isStale, found := vettedHashes[sandboxHash]; found {
+		return isStale
+	}
+
+	// Perform Semantic DeepEqual on the Pod Spec only.
+	// We ignore metadata/labels here to avoid false positives from runtime labels.
+	isStale := !equality.Semantic.DeepEqual(&template.Spec.PodTemplate.Spec, &sandbox.Spec.PodTemplate.Spec)
+
+	// Save the result for the next sandbox with this same hash.
+	vettedHashes[sandboxHash] = isStale
+
+	return isStale
+}
+
 // SetupWithManager sets up the controller with the Manager
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxWarmPool{}, templateRefField, func(rawObj client.Object) []string {
+		wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)
+		if wp.Spec.TemplateRef.Name == "" {
+			return nil
+		}
+		return []string{wp.Spec.TemplateRef.Name}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxWarmPool{}).
 		Owns(&sandboxv1alpha1.Sandbox{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
+		Watches(
+			&extensionsv1alpha1.SandboxTemplate{},
+			handler.EnqueueRequestsFromMapFunc(r.findWarmPoolsForTemplate),
+		).
 		Complete(r)
+}
+
+// findWarmPoolsForTemplate returns a list of reconcile.Requests for all SandboxWarmPools that reference the template.
+func (r *SandboxWarmPoolReconciler) findWarmPoolsForTemplate(ctx context.Context, obj client.Object) []reconcile.Request {
+	template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
+	if !ok {
+		return nil
+	}
+
+	warmPools := &extensionsv1alpha1.SandboxWarmPoolList{}
+	if err := r.List(ctx, warmPools, client.InNamespace(template.Namespace), client.MatchingFields{templateRefField: template.Name}); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, wp := range warmPools.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      wp.Name,
+				Namespace: wp.Namespace,
+			},
+		})
+	}
+	return requests
 }

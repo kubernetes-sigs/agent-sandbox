@@ -32,6 +32,31 @@ type SandboxWarmPoolSpec struct {
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+
+	// updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes
+	// +optional
+	UpdateStrategy SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
+}
+
+// SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates
+// all possible update strategies for the SandboxWarmPool controller.
+type SandboxWarmPoolUpdateStrategyType string
+
+const (
+	// RecreateSandboxWarmPoolUpdateStrategyType indicates that stale pods are deleted immediately to ensure the pool only contains fresh pods.
+	RecreateSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "Recreate"
+	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale pods are only replaced when they are manually deleted.
+	OnReplenishSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "OnReplenish"
+)
+
+// SandboxWarmPoolUpdateStrategy defines the update strategy for the SandboxWarmPool.
+type SandboxWarmPoolUpdateStrategy struct {
+	// type indicates the type of the SandboxWarmPoolUpdateStrategy.
+	// Default is Recreate.
+	// +kubebuilder:validation:Enum=Recreate;OnReplenish
+	// +kubebuilder:default=Recreate
+	// +optional
+	Type SandboxWarmPoolUpdateStrategyType `json:"type,omitempty"`
 }
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool

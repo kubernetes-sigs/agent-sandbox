@@ -2,13 +2,14 @@ apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
   # The test_client.py expects the template to have this name
-  name: python-sandbox-template
-  namespace: default
+  name: ${SANDBOX_TEMPLATE_NAME}
+  namespace: ${SANDBOX_NAMESPACE}
 spec:
   podTemplate:
     spec:
-      # Optional, if gVisor is specified, must have gVisor enabled node
-      runtimeClassName: gvisor
+      # Optional: uncomment one of the lines below to enable sandbox isolation.
+      # runtimeClassName: gvisor      # gVisor (see examples/quickstart/gvisor.md)
+      # runtimeClassName: kata-qemu   # Kata Containers (see examples/quickstart/kata-containers.md)
       containers:
       - name: python-runtime
         # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox

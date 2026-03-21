@@ -843,6 +843,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		expectSandboxAdoption   bool
 		expectedAdoptedSandbox  string
 		expectNewSandboxCreated bool
+		simulateConflicts       int
 	}{
 		{
 			name: "adopts oldest ready sandbox from warm pool",
@@ -915,26 +916,47 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
-			name: "cold starts when all warm pool sandboxes are non-ready",
+			name: "adopts oldest non-ready sandbox when no ready sandboxes exist",
 			existingObjects: []client.Object{
 				template,
 				claim,
 				createWarmPoolSandbox("not-ready-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
 				createWarmPoolSandbox("not-ready-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
 			},
-			expectSandboxAdoption:   false,
-			expectNewSandboxCreated: true,
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "not-ready-1",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "retries on conflict when adopting sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
+				createWarmPoolSandbox("pool-sb-2", metav1.Now(), true),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "pool-sb-2",
+			expectNewSandboxCreated: false,
+			simulateConflicts:       1, // Fail update on the first sandbox, succeed on the second
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
-			fakeClient := fake.NewClientBuilder().
+			var fakeClient client.Client = fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tc.existingObjects...).
 				WithStatusSubresource(claim).
 				Build()
+
+			if tc.simulateConflicts > 0 {
+				fakeClient = &conflictClient{
+					Client:       fakeClient,
+					maxConflicts: tc.simulateConflicts,
+				}
+			}
 
 			reconciler := &SandboxClaimReconciler{
 				Client:   fakeClient,
@@ -1288,4 +1310,20 @@ func newScheme(t *testing.T) *runtime.Scheme {
 
 func ignoreTimestamp(_, _ metav1.Time) bool {
 	return true
+}
+
+type conflictClient struct {
+	client.Client
+	conflictCount int
+	maxConflicts  int
+}
+
+func (c *conflictClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if sandbox, ok := obj.(*sandboxv1alpha1.Sandbox); ok {
+		if c.conflictCount < c.maxConflicts {
+			c.conflictCount++
+			return k8errors.NewConflict(sandboxv1alpha1.Resource("sandboxes"), sandbox.Name, fmt.Errorf("simulated conflict"))
+		}
+	}
+	return c.Client.Update(ctx, obj, opts...)
 }

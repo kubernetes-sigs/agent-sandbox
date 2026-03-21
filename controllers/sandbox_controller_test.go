@@ -649,6 +649,9 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
+			wantSandboxAnnotations: map[string]string{
+				SandboxPodNameAnnotation: sandboxName,
+			},
 		},
 		{
 			name: "delete pod if replicas is 0",

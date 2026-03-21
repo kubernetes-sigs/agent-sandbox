@@ -386,6 +386,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 		delete(adopted.Labels, warmPoolSandboxLabel)
 		delete(adopted.Labels, sandboxTemplateRefHash)
+		delete(adopted.Labels, templateContentHashLabel)
 
 		// Transfer ownership from SandboxWarmPool to SandboxClaim
 		adopted.OwnerReferences = nil
@@ -601,6 +602,27 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			continue
 		}
 		adoptionCandidates = append(adoptionCandidates, sb)
+	}
+
+	// Filter adoption candidates by template content hash to avoid adopting
+	// sandboxes created from a stale template spec.
+	if len(adoptionCandidates) > 0 {
+		template, err := r.getTemplate(ctx, claim)
+		if err == nil && template != nil {
+			contentHash := templateContentHash(template)
+			var filtered []*v1alpha1.Sandbox
+			for _, c := range adoptionCandidates {
+				if ch := c.Labels[templateContentHashLabel]; ch != "" && ch != contentHash {
+					logger.Info("skipping stale adoption candidate (content hash mismatch)",
+						"sandbox", c.Name,
+						"sandboxHash", ch,
+						"currentHash", contentHash)
+					continue
+				}
+				filtered = append(filtered, c)
+			}
+			adoptionCandidates = filtered
+		}
 	}
 
 	// Try to adopt from warm pool

@@ -1,0 +1,137 @@
+{{$runtimeClass := DefaultParam .CL2_RUNTIME_CLASS "gvisor"}}
+{{$rampUpQps := DefaultParam .CL2_RAMP_UP_QPS 100}}
+{{$rampDownQps := DefaultParam .CL2_RAMP_DOWN_QPS 50}}
+{{$replicas := DefaultParam .CL2_REPLICAS 100}}
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+name: warmpool-burst-test
+automanagedNamespaces: {{$namespaces}}
+
+tuningSets:
+- name: RampUp
+  qpsLoad:
+    qps: {{$rampUpQps}} 
+- name: RampDown
+  qpsLoad:
+    qps: {{$rampDownQps}} 
+
+steps:
+# --- 1. SETUP INFRASTRUCTURE ---
+- name: Create Sandbox Templates
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: RampUp
+    objectBundle:
+    - basename: perf-template-warm
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      templateFillMap:
+        LatencyType: warm
+        RuntimeClass: {{$runtimeClass}}
+    - basename: perf-template-cold
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      templateFillMap:
+        LatencyType: cold
+        RuntimeClass: {{$runtimeClass}}
+
+- name: Create Warmpools
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: RampUp
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: "cluster-loader-warmpool.yaml"
+      templateFillMap:
+        TemplateName: perf-template-warm-0
+        Replicas: {{$replicas}}
+    waits:
+    - type: Running
+      labelSelector: "agents.x-k8s.io/pool"
+
+# --- 2. DRAIN WARMPOOL (Excluded from Cold Measurement) ---
+# TODO: Add a measurement once we have the metric to measure acquistion from warmpool.
+- name: Claim with Warmpool
+  phases:
+  - name: Drain Pool
+    namespaceRange: {min: 1, max: {{$namespaces}}}
+    tuningSet: RampUp
+    replicasPerNamespace: {{$replicas}} 
+    objectBundle:
+    - basename: warmpool-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      templateFillMap:
+        TemplateName: perf-template-warm-0
+        LatencyType: warm # Labeled as warm to stay out of cold metrics
+    waits:
+    - type: Running
+      labelSelector: "latency-type=warm"
+
+# --- 3. MEASUREMENT: COLD START ---
+- name: Start Cold Latency Measurement
+  measurements:
+  # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
+  # once agent_sandbox_creation_latency_ms metrics are available to measure 
+  # end-to-end controller overhead.
+  - identifier: ColdAcquisitionLatency
+    method: PodStartupLatency
+    params:
+      action: start
+      labelSelector: "latency-type=cold" # Explicitly watch ONLY cold pods
+
+- name: Claim without Warmpool
+  phases:
+  - name: Cold Start {{$replicas}}
+    namespaceRange: {min: 1, max: {{$namespaces}}}
+    tuningSet: RampUp
+    replicasPerNamespace: {{$replicas}} # Requesting {{$replicas}} specifically for the cold phase
+    objectBundle:
+    - basename: cold-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      templateFillMap:
+        TemplateName: perf-template-cold-0
+        LatencyType: cold # This matches the measurement selector
+    waits:
+    - type: Running
+      labelSelector: "latency-type=cold"
+
+- name: Gather Cold Latency Measurement
+  measurements:
+  - identifier: ColdAcquisitionLatency
+    method: PodStartupLatency
+    params:
+      action: gather
+
+# --- 4. CLEANUP ---
+- name: Wait before deletion
+  measurements:
+  - identifier: Wait
+    method: Sleep
+    params:
+      duration: 20s
+
+- name: Cleanup All Claims
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: RampDown
+    objectBundle:
+    - basename: warmpool-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+    - basename: cold-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+    waits:
+    - type: Deleted
+      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+
+- name: Delete Warmpools and Templates
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: RampDown
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: "cluster-loader-warmpool.yaml"
+    - basename: perf-template-warm
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+    - basename: perf-template-cold
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"

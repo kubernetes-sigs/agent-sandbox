@@ -337,8 +337,8 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		Status: warmPool.Status,
 	}
 
-	// Send the Server-Side Apply request to update the status subresource
-	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil {
+	// Send the Update request to update the status subresource
+	if err := r.Client.Status().Update(ctx, patch); err != nil {
 		log.Error(err, "Failed to apply SandboxWarmPool status via SSA")
 		return err
 	}

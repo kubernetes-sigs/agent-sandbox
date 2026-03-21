@@ -3815,6 +3815,7 @@ spec:
                 - spec
                 type: object
               replicas:
+                default: 1
                 format: int32
                 maximum: 1
                 minimum: 0

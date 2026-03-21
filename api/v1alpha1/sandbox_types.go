@@ -116,6 +116,7 @@ type SandboxSpec struct {
 	// Defaults to 1.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1
+	// +kubebuilder:default=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 }

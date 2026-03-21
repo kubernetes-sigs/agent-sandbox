@@ -69,7 +69,6 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 		return nil, fmt.Errorf("%s: run failed: %w", c.errPrefix(), err)
 	}
 	defer resp.Body.Close()
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body) }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
@@ -77,6 +76,7 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 		recordError(span, retErr)
 		return nil, retErr
 	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 
 	result := ExecutionResult{ExitCode: -1}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxExecutionResponseSize)).Decode(&result); err != nil {

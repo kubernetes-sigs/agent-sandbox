@@ -6,4 +6,4 @@ description: >
   How to get started with Agent Sandbox
 ---
 
-{{% include-file file="additional/README.md" %}}
+{{< include-file file="additional/README.md" >}}

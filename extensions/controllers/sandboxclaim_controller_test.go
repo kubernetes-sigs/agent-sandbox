@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1111,6 +1112,282 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	}
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
 		t.Error("pool sandbox should still have warm pool label (should not have been adopted)")
+	}
+}
+
+func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "workspace", Image: "workspace:latest"},
+						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+					},
+				},
+			},
+		},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			WorkspaceResources: &extensionsv1alpha1.WorkspaceResources{
+				CPUMillicores: 2000,
+				MemoryMB:      4096,
+				DiskGB:        20,
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var sandbox sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+
+	var workspace, sidecar *corev1.Container
+	for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+		container := &sandbox.Spec.PodTemplate.Spec.Containers[i]
+		switch container.Name {
+		case "workspace":
+			workspace = container
+		case "codewire-sidecar":
+			sidecar = container
+		}
+	}
+	if workspace == nil {
+		t.Fatal("workspace container not found in created sandbox")
+	}
+	if sidecar == nil {
+		t.Fatal("sidecar container not found in created sandbox")
+	}
+
+	if got := workspace.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2000m")) != 0 {
+		t.Fatalf("expected workspace CPU request 2000m, got %s", got.String())
+	}
+	if got := workspace.Resources.Limits[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2000m")) != 0 {
+		t.Fatalf("expected workspace CPU limit 2000m, got %s", got.String())
+	}
+	if got := workspace.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("4096Mi")) != 0 {
+		t.Fatalf("expected workspace memory request 4096Mi, got %s", got.String())
+	}
+	if got := workspace.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("4096Mi")) != 0 {
+		t.Fatalf("expected workspace memory limit 4096Mi, got %s", got.String())
+	}
+	if got := workspace.Resources.Requests[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("20Gi")) != 0 {
+		t.Fatalf("expected workspace disk request 20Gi, got %s", got.String())
+	}
+	if got := workspace.Resources.Limits[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("20Gi")) != 0 {
+		t.Fatalf("expected workspace disk limit 20Gi, got %s", got.String())
+	}
+	if len(sidecar.Resources.Requests) != 0 || len(sidecar.Resources.Limits) != 0 {
+		t.Fatalf("expected sidecar resources to remain untouched, got requests=%v limits=%v", sidecar.Resources.Requests, sidecar.Resources.Limits)
+	}
+}
+
+func TestSandboxClaimCreateIgnoresWorkspaceResourcesWithoutWorkspaceContainer(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "pause", Image: "registry.k8s.io/pause:3.10"},
+					},
+				},
+			},
+		},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			WorkspaceResources: &extensionsv1alpha1.WorkspaceResources{
+				CPUMillicores: 2000,
+				MemoryMB:      4096,
+				DiskGB:        20,
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var sandbox sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+
+	if len(sandbox.Spec.PodTemplate.Spec.Containers) != 1 {
+		t.Fatalf("expected one container, got %d", len(sandbox.Spec.PodTemplate.Spec.Containers))
+	}
+	container := sandbox.Spec.PodTemplate.Spec.Containers[0]
+	if container.Name != "pause" {
+		t.Fatalf("expected pause container, got %q", container.Name)
+	}
+	if len(container.Resources.Requests) != 0 || len(container.Resources.Limits) != 0 {
+		t.Fatalf("expected non-workspace container resources to remain untouched, got requests=%v limits=%v", container.Resources.Requests, container.Resources.Limits)
+	}
+}
+
+func TestSandboxClaimAdoptionAppliesWorkspaceResources(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "workspace", Image: "workspace:latest"},
+						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+					},
+				},
+			},
+		},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			WorkspaceResources: &extensionsv1alpha1.WorkspaceResources{
+				CPUMillicores: 2000,
+				MemoryMB:      4096,
+				DiskGB:        20,
+			},
+		},
+	}
+
+	warmSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-sb",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxWarmPool",
+					Name:       "test-pool",
+					UID:        "pool-uid",
+					Controller: ptr.To(true),
+				},
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "workspace", Image: "workspace:latest"},
+						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+					},
+				},
+			},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, warmSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var adopted sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "warm-sb", Namespace: "default"}, &adopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+
+	var workspace, sidecar *corev1.Container
+	for i := range adopted.Spec.PodTemplate.Spec.Containers {
+		container := &adopted.Spec.PodTemplate.Spec.Containers[i]
+		switch container.Name {
+		case "workspace":
+			workspace = container
+		case "codewire-sidecar":
+			sidecar = container
+		}
+	}
+	if workspace == nil {
+		t.Fatal("workspace container not found in adopted sandbox")
+	}
+	if sidecar == nil {
+		t.Fatal("sidecar container not found in adopted sandbox")
+	}
+
+	if got := workspace.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2000m")) != 0 {
+		t.Fatalf("expected adopted workspace CPU request 2000m, got %s", got.String())
+	}
+	if got := workspace.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("4096Mi")) != 0 {
+		t.Fatalf("expected adopted workspace memory request 4096Mi, got %s", got.String())
+	}
+	if got := workspace.Resources.Requests[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("20Gi")) != 0 {
+		t.Fatalf("expected adopted workspace disk request 20Gi, got %s", got.String())
+	}
+	if len(sidecar.Resources.Requests) != 0 || len(sidecar.Resources.Limits) != 0 {
+		t.Fatalf("expected adopted sidecar resources to remain untouched, got requests=%v limits=%v", sidecar.Resources.Requests, sidecar.Resources.Limits)
 	}
 }
 

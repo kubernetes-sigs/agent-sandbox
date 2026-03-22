@@ -121,6 +121,24 @@ type EnvVar struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
+// WorkspaceResources defines per-claim resource overrides for the workspace container.
+type WorkspaceResources struct {
+	// cpuMillicores is the desired CPU request/limit for the workspace container.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	CPUMillicores int32 `json:"cpuMillicores,omitempty"`
+
+	// memoryMiB is the desired memory request/limit for the workspace container, in mebibytes (1 MiB = 1024*1024 B).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MemoryMiB int32 `json:"memoryMiB,omitempty"`
+
+	// diskGiB is the desired ephemeral-storage request/limit for the workspace container, in gibibytes (1 GiB = 1024*1024*1024 B).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	DiskGiB int32 `json:"diskGiB,omitempty"`
+}
+
 // SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
 	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
@@ -148,6 +166,10 @@ type SandboxClaimSpec struct {
 	// +listType=atomic
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
+
+	// workspaceResources overrides resource requests/limits for the workspace container at claim time.
+	// +optional
+	WorkspaceResources *WorkspaceResources `json:"workspaceResources,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

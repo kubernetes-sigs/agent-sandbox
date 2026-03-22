@@ -81,6 +81,21 @@ spec:
               warmpool:
                 default: default
                 type: string
+              workspaceResources:
+                properties:
+                  cpuMillicores:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  diskGiB:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  memoryMiB:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
             required:
             - sandboxTemplateRef
             type: object

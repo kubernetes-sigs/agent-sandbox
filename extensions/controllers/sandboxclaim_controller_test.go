@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -441,7 +441,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
 				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
 			}
 
@@ -598,7 +598,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
 				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
 			}
 
@@ -668,7 +668,7 @@ func TestSandboxProvisionEvent(t *testing.T) {
 		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
 	}
 
-	fakeRecorder := record.NewFakeRecorder(10)
+	fakeRecorder := events.NewFakeRecorder(10)
 	client := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(claim, template).
 		WithStatusSubresource(claim).Build()
@@ -961,7 +961,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			reconciler := &SandboxClaimReconciler{
 				Client:   fakeClient,
 				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
 			}
 
@@ -1092,7 +1092,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	reconciler := &SandboxClaimReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		Tracer:   asmetrics.NewNoOp(),
 	}
 
@@ -1217,7 +1217,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -1273,7 +1273,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 

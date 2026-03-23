@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -131,10 +132,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	if sandbox.Spec.Replicas == nil {
-		replicas := int32(1)
-		sandbox.Spec.Replicas = &replicas
-	}
+	sandbox.Spec.Replicas = ptr.To(ptr.Deref(sandbox.Spec.Replicas, int32(1)))
 
 	oldStatus := sandbox.Status.DeepCopy()
 	var err error

@@ -1,0 +1,19 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: aks-sandbox-spot
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: my-sandbox
+        image: busybox:1.37
+        command: ["sh", "-c", "echo 'Hello from Agent Sandbox on AKS spot!' && sleep 3600"]
+      # Schedule onto the AKS spot node pool created by setup.sh --enable-spot
+      tolerations:
+      - key: "kubernetes.azure.com/scalesetpriority"
+        operator: "Equal"
+        value: "spot"
+        effect: "NoSchedule"
+      nodeSelector:
+        sandbox: "true"

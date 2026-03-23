@@ -1,0 +1,31 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: aks-sandbox-storage
+spec:
+  volumeClaimTemplates:
+  - metadata:
+      name: sandbox-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: managed-csi
+      resources:
+        requests:
+          storage: 10Gi
+  podTemplate:
+    spec:
+      containers:
+      - name: my-sandbox
+        image: busybox:1.37
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "Hello from Agent Sandbox on AKS with persistent storage!"
+          echo "Data directory contents:"
+          ls -la /data
+          echo "Writing timestamp to /data/last-run.txt"
+          date > /data/last-run.txt
+          sleep 3600
+        volumeMounts:
+        - name: sandbox-data
+          mountPath: /data

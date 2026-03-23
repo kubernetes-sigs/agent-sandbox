@@ -2,6 +2,7 @@
 
 This directory contains examples of how to use the Agent Sandbox. Each subdirectory contains a different example.
 
+- [**aks-sandbox**](./aks-sandbox): An example of deploying agent-sandbox on Azure Kubernetes Service (AKS), including spot node pools and Azure Disk persistent storage.
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).

@@ -1,0 +1,11 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: aks-sandbox
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: my-sandbox
+        image: busybox:1.37
+        command: ["sh", "-c", "echo 'Hello from Agent Sandbox on AKS!' && sleep 3600"]

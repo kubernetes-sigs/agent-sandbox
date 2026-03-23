@@ -39,7 +39,7 @@ try:
     result = sandbox.agent("Navigate to https://www.example.com and tell me what the heading says.", timeout=180)
     print(f"Agent Output: {result.stdout}")
 finally:
-    client.delete_all()
+    sandbox.terminate()
 ```
 
 ## `test_computer_use_extension.py`

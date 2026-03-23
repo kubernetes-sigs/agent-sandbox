@@ -44,7 +44,7 @@ try:
     else:
         print(f"Snapshot failed: {response.error_reason}")
 finally:
-    client.delete_all()
+    sandbox.terminate()
 ```
 
 ## `test_podsnapshot_extension.py`

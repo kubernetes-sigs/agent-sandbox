@@ -1125,7 +1125,7 @@ func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{Name: "workspace", Image: "workspace:latest"},
-						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+						{Name: "extra-sidecar", Image: "sidecar:latest"},
 					},
 				},
 			},
@@ -1173,7 +1173,7 @@ func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
 		switch container.Name {
 		case "workspace":
 			workspace = container
-		case "codewire-sidecar":
+		case "extra-sidecar":
 			sidecar = container
 		}
 	}
@@ -1277,10 +1277,16 @@ func TestSandboxClaimAdoptionAppliesWorkspaceResources(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
 			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Annotations: map[string]string{
+						"example.com/workspace": "true",
+						"test-annotation":          "template",
+					},
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{Name: "workspace", Image: "workspace:latest"},
-						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+						{Name: "extra-sidecar", Image: "sidecar:latest"},
 					},
 				},
 			},
@@ -1320,10 +1326,15 @@ func TestSandboxClaimAdoptionAppliesWorkspaceResources(t *testing.T) {
 		Spec: sandboxv1alpha1.SandboxSpec{
 			Replicas: ptr.To(int32(1)),
 			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Annotations: map[string]string{
+						"example.com/workspace": "true",
+					},
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{Name: "workspace", Image: "workspace:latest"},
-						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+						{Name: "extra-sidecar", Image: "sidecar:latest"},
 					},
 				},
 			},
@@ -1366,7 +1377,7 @@ func TestSandboxClaimAdoptionAppliesWorkspaceResources(t *testing.T) {
 		switch container.Name {
 		case "workspace":
 			workspace = container
-		case "codewire-sidecar":
+		case "extra-sidecar":
 			sidecar = container
 		}
 	}
@@ -1388,6 +1399,12 @@ func TestSandboxClaimAdoptionAppliesWorkspaceResources(t *testing.T) {
 	}
 	if len(sidecar.Resources.Requests) != 0 || len(sidecar.Resources.Limits) != 0 {
 		t.Fatalf("expected adopted sidecar resources to remain untouched, got requests=%v limits=%v", sidecar.Resources.Requests, sidecar.Resources.Limits)
+	}
+	if got := adopted.Spec.PodTemplate.ObjectMeta.Annotations["example.com/workspace"]; got != "true" {
+		t.Fatalf("expected adopted workspace annotation to survive, got %q", got)
+	}
+	if got := adopted.Spec.PodTemplate.ObjectMeta.Annotations["test-annotation"]; got != "template" {
+		t.Fatalf("expected template annotation to be restored on adoption, got %q", got)
 	}
 }
 

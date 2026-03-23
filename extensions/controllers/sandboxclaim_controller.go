@@ -351,17 +351,17 @@ func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *ext
 		container.Resources.Limits = corev1.ResourceList{}
 	}
 	if overrides.CPUMillicores > 0 {
-		qty := resource.MustParse(fmt.Sprintf("%dm", overrides.CPUMillicores))
+		qty := *resource.NewMilliQuantity(int64(overrides.CPUMillicores), resource.DecimalSI)
 		container.Resources.Requests[corev1.ResourceCPU] = qty
 		container.Resources.Limits[corev1.ResourceCPU] = qty
 	}
 	if overrides.MemoryMB > 0 {
-		qty := resource.MustParse(fmt.Sprintf("%dMi", overrides.MemoryMB))
+		qty := *resource.NewQuantity(int64(overrides.MemoryMB)*1024*1024, resource.BinarySI)
 		container.Resources.Requests[corev1.ResourceMemory] = qty
 		container.Resources.Limits[corev1.ResourceMemory] = qty
 	}
 	if overrides.DiskGB > 0 {
-		qty := resource.MustParse(fmt.Sprintf("%dGi", overrides.DiskGB))
+		qty := *resource.NewQuantity(int64(overrides.DiskGB)*1024*1024*1024, resource.BinarySI)
 		container.Resources.Requests[corev1.ResourceEphemeralStorage] = qty
 		container.Resources.Limits[corev1.ResourceEphemeralStorage] = qty
 	}
@@ -379,8 +379,32 @@ func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensio
 		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
 	}
 }
+
+func mergeTemplatePodMetadata(target *v1alpha1.PodMetadata, template v1alpha1.PodMetadata) {
+	if len(template.Labels) > 0 {
+		if target.Labels == nil {
+			target.Labels = make(map[string]string, len(template.Labels))
+		}
+		for k, v := range template.Labels {
+			if _, exists := target.Labels[k]; !exists {
+				target.Labels[k] = v
+			}
+		}
+	}
+	if len(template.Annotations) > 0 {
+		if target.Annotations == nil {
+			target.Annotations = make(map[string]string, len(template.Annotations))
+		}
+		for k, v := range template.Annotations {
+			if _, exists := target.Annotations[k]; !exists {
+				target.Annotations[k] = v
+			}
+		}
+	}
+}
+
 // adoptSandboxFromCandidates picks the best candidate and transfers ownership to the claim.
-func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
+func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
 	log := log.FromContext(ctx)
 
 	// Sort: ready sandboxes first, then by creation time (oldest first)
@@ -439,6 +463,10 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		}
 		if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
 			adopted.Annotations[asmetrics.TraceContextAnnotation] = tc
+		}
+
+		if template != nil {
+			mergeTemplatePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, template.Spec.PodTemplate.ObjectMeta)
 		}
 
 		// Add sandbox ID label to pod template for NetworkPolicy targeting
@@ -650,7 +678,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	// Try to adopt from warm pool
 	if len(adoptionCandidates) > 0 {
-		adopted, err := r.adoptSandboxFromCandidates(ctx, claim, adoptionCandidates)
+		var template *extensionsv1alpha1.SandboxTemplate
+		template, err := r.getTemplate(ctx, claim)
+		if err != nil && !k8errors.IsNotFound(err) {
+			return nil, err
+		}
+		adopted, err := r.adoptSandboxFromCandidates(ctx, claim, template, adoptionCandidates)
 		if err != nil {
 			return nil, err
 		}

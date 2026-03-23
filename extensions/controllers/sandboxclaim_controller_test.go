@@ -1114,6 +1114,108 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimAdoptionPreservesPodTemplateAnnotations(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Annotations: map[string]string{
+						"io.codewire.sh/workspace": "true",
+						"test-annotation":          "template",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "workspace", Image: "workspace:latest"},
+						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+					},
+				},
+			},
+		},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	warmSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-sb",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxWarmPool",
+					Name:       "test-pool",
+					UID:        "pool-uid",
+					Controller: ptr.To(true),
+				},
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Annotations: map[string]string{
+						"io.codewire.sh/workspace": "true",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "workspace", Image: "workspace:latest"},
+						{Name: "codewire-sidecar", Image: "sidecar:latest"},
+					},
+				},
+			},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, warmSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var adopted sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "warm-sb", Namespace: "default"}, &adopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+
+	if got := adopted.Spec.PodTemplate.ObjectMeta.Annotations["io.codewire.sh/workspace"]; got != "true" {
+		t.Fatalf("expected adopted workspace annotation to survive, got %q", got)
+	}
+	if got := adopted.Spec.PodTemplate.ObjectMeta.Annotations["test-annotation"]; got != "template" {
+		t.Fatalf("expected template annotation to be restored on adoption, got %q", got)
+	}
+}
+
 func TestRecordCreationLatencyMetric(t *testing.T) {
 	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
 

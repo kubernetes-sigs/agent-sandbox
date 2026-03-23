@@ -1,0 +1,27 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: sandbox-example
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: devcontainer-main
+          image: ghcr.io/coder/envbuilder
+          env:
+            - name: ENVBUILDER_GIT_URL
+              value: "https://github.com/kubernetes-sigs/agent-sandbox.git"
+            - name: ENVBUILDER_DEVCONTAINER_DIR
+              value: "examples/vscode-sandbox"
+            - name: ENVBUILDER_GIT_CLONE_SINGLE_BRANCH
+              value: "true"
+            - name: ENVBUILDER_INIT_SCRIPT
+              value: "examples/vscode-sandbox/entrypoint-copilot.sh"
+            - name: ENVBUILDER_IGNORE_PATHS
+              value: "/var/run,/product_uuid,/product_name,/tokens"
+            # GH_TOKEN is used by gh CLI for authentication
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gh-copilot-token
+                  key: token

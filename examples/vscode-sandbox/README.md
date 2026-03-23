@@ -98,6 +98,44 @@ $ kubectl wait --for=condition=Ready sandbox sandbox-example
 $ kubectl get pods -o jsonpath=$'{range .items[*]}{.metadata.name}: {.spec.runtimeClassName}\n{end}'
 ```
 
+### Use GitHub Copilot CLI instead of Gemini CLI (Optional)
+
+You can swap Gemini CLI for [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli) by using the `copilot-cli` overlay. This replaces the Gemini API key with a GitHub token and installs the `gh copilot` extension.
+
+#### Create a GitHub token secret
+
+The token must include the `copilot` scope. First, refresh your local token to add it:
+
+```shell
+gh auth refresh --scopes copilot
+```
+
+Then create the Kubernetes secret:
+
+```shell
+kubectl create secret generic gh-copilot-token \
+  --from-literal=token=$(gh auth token)
+```
+
+#### Deploy with the Copilot CLI overlay
+
+```shell
+kubectl apply -k overlays/copilot-cli
+```
+
+#### Verify the sandbox is running
+
+```shell
+kubectl wait --for=condition=Ready sandbox sandbox-example
+```
+
+Once connected to VS Code (see [Accessing VSCode](#accessing-vscode) below), open a terminal and use Copilot CLI:
+
+```shell
+gh copilot suggest "write a kubernetes deployment yaml for nginx"
+gh copilot explain "kubectl get pods -o wide"
+```
+
 ## Accessing VSCode
 
 ### 1. Wait for VSCode to Start
@@ -204,4 +242,13 @@ Use the password and connect to vscode.
 
 ## Use gemini-cli
 
-Gemini cli is preinstalled. Open a teminal in vscode and use Gemini cli.
+Gemini cli is preinstalled. Open a terminal in vscode and use Gemini cli.
+
+## Use Copilot CLI
+
+If you deployed with the `copilot-cli` overlay, GitHub Copilot CLI is available in the VS Code terminal:
+
+```shell
+gh copilot suggest "list all pods in the default namespace"
+gh copilot explain "awk '{print $1}' file.txt"
+```

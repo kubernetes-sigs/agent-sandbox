@@ -1,0 +1,174 @@
+# The number of namespaces to create and spread the test load across.
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+# The maximum rate (Queries Per Second) for cluster loader to create objects during test phases.
+{{$qps := DefaultParam .CL2_QPS 100}}
+# The target number of pre-warmed, ready sandboxes to maintain in the warm pool.
+{{$warmpool_size := DefaultParam .CL2_WARMPOOL_SIZE 200}}
+# The prefix used for naming the test namespaces (e.g., "agent-sandbox-1").
+{{$namespacePrefix := DefaultParam .CL2_NAMESPACE_PREFIX "agent-sandbox"}}
+# The number of new SandboxClaims to create during each burst iteration.
+{{$burstSize := DefaultParam .CL2_BURST_SIZE 50}}
+# The total number of burst iterations to execute in the test.
+{{$totalBursts := DefaultParam .CL2_TOTAL_BURSTS 100}}
+
+name: agent-sandbox-rapid-burst
+
+namespace:
+  number: {{$namespaces}}
+  prefix: {{$namespacePrefix}}
+
+tuningSets:
+- name: BurstCreate
+  qpsLoad:
+    qps: {{$qps}}
+
+steps:
+- name: Start Startup Latency Measurement
+  measurements:
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: start
+      labelSelector: "app=agent-sandbox-load-test"
+  - Identifier: SandboxClaimStartupLatency
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      metricName: Agent Sandbox Claim Startup Latency (ms)
+      metricVersion: v1
+      unit: ms
+      queries:
+        - name: StartupLatency50
+          query: histogram_quantile(0.50, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))
+          threshold: 1000  # Equivalent to 1s
+          requireSamples: true
+        - name: StartupLatency90
+          query: histogram_quantile(0.90, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))
+          threshold: 1000  # Equivalent to 1s
+          requireSamples: true
+        - name: StartupLatency99
+          query: histogram_quantile(0.99, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))
+          threshold: 5000  # Equivalent to 5s
+          requireSamples: true
+
+- name: Setup Sandbox Template
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: template
+      objectTemplatePath: cluster-loader-sandbox-template.yaml
+
+- name: Setup Sandbox Warm Pool
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: cluster-loader-sandbox-warmpool.yaml
+
+- name: Wait for Warm Pool Sandboxes to be Ready
+  measurements:
+  - Identifier: WaitForWarmPoolSandboxes
+    Method: WaitForGenericK8sObjects
+    Params:
+      action: start
+      objectGroup: "agents.x-k8s.io"
+      objectVersion: "v1alpha1"
+      objectResource: "sandboxes"
+      labelSelector: "agents.x-k8s.io/warm-pool-sandbox"
+      namespaceRange: {min: 1, max: {{$namespaces}}}
+      successfulConditions: ["Ready=True"]
+      failedConditions: []
+      minDesiredObjectCount: {{MultiplyInt $warmpool_size $namespaces}}
+      maxFailedObjectCount: 0
+      timeout: 15m
+
+# --- START BURST LOOP ---
+{{range $i := Loop $totalBursts}}
+{{$burstIteration := AddInt $i 1}}
+{{$replicaCount := MultiplyInt $burstIteration $burstSize}}
+
+- name: Create Burst {{$burstIteration}} Sandbox Claims ({{$burstSize}})
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: {{$replicaCount}}
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+
+- name: Wait for Burst {{$burstIteration}} Sandbox Claims to be Ready
+  measurements:
+  - Identifier: WaitForBurst{{$burstIteration}}SandboxClaims
+    Method: WaitForGenericK8sObjects
+    Params:
+      action: start
+      objectGroup: extensions.agents.x-k8s.io
+      objectVersion: v1alpha1
+      objectResource: sandboxclaims
+      namespaceRange: {min: 1, max: {{$namespaces}}}
+      successfulConditions: ["Ready=True"]
+      failedConditions: []
+      minDesiredObjectCount: {{MultiplyInt $replicaCount $namespaces}}
+      maxFailedObjectCount: 0
+      timeout: 60m
+      refreshInterval: 20ms
+
+- name: Pause 20 Seconds After Burst {{$burstIteration}}
+  measurements:
+  - Identifier: WaitAfterBurst{{$burstIteration}}
+    Method: Sleep
+    Params:
+      duration: 20s
+{{end}}
+# --- END BURST LOOP ---
+
+- name: Pause 1m to allow Prometheus to scrape the metrics
+  measurements:
+  - Identifier: WaitAfterTest
+    Method: Sleep
+    Params:
+      duration: 1m
+
+- name: Gather Results
+  measurements:
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
+      labelSelector: "app=agent-sandbox-load-test"
+  - Identifier: SandboxClaimStartupLatency
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+      enableViolations: true
+
+- name: Delete Sandbox Claims
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-claim
+      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+
+- name: Delete Sandbox Warm Pool
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: cluster-loader-sandbox-warmpool.yaml
+
+- name: Delete Sandbox Templates
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: template
+      objectTemplatePath: cluster-loader-sandbox-template.yaml

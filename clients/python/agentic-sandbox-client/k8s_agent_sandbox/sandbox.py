@@ -43,6 +43,7 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
+        pod_name: str | None = None,
     ):
         # Sandbox Related Configuration
         self.id = sandbox_id
@@ -52,6 +53,10 @@ class Sandbox:
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
         
+        self.pod_name = pod_name or self.id
+        if pod_name:
+            logging.info(f"Using pod name: {self.pod_name}")
+
         # Establish Sandbox Connection
         self.connector = SandboxConnector(
             sandbox_id=self.id,

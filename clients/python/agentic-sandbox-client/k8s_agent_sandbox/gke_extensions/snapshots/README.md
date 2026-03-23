@@ -2,32 +2,50 @@
 
 This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger snapshots of a running sandbox and restore a new sandbox from the recently created snapshot.
 
-## `podsnapshot_client.py`
+## Components
 
-This file defines the `PodSnapshotSandboxClient` class, which extends the base `SandboxClient` to provide snapshot capabilities.
+The snapshot functionality is driven by two main components:
 
 ### `PodSnapshotSandboxClient`
+The main entry point for the snapshot extension. It inherits from the base `SandboxClient` but automatically validates that the required GKE Pod Snapshot CRDs are installed on the cluster upon initialization. It ensures that all sandboxes created via this client are instantiated as `SandboxWithSnapshotSupport`.
 
-A specialized Sandbox client for interacting with the GKE Pod Snapshot Controller.
+### `SandboxWithSnapshotSupport`
+This class wraps the base `Sandbox` to seamlessly provide snapshot capabilities. It manages the sandbox lifecycle while granting access to the underlying snapshot operations via the `.snapshots` property.
 
-### Key Features:
+### `SnapshotEngine`
+The core engine responsible for interacting with the GKE Pod Snapshot Controller.
+*   Creates `PodSnapshotManualTrigger` custom resources.
+*   Watches for the snapshot controller to process the trigger and create a `PodSnapshot` resource.
+*   Returns a structured `SnapshotResponse` containing the success status, error details, and `snapshot_uid`.
+*   Ensures that manual trigger resources are cleanly deleted when the sandbox context exits.
 
-*   **`PodSnapshotSandboxClient(template_name: str, podsnapshot_timeout: int = 180, ...)`**:
-    *   Initializes the client with optional podsnapshot timeout.
-    *   If snapshot exists, the pod snapshot controller restores from the most recent snapshot matching the label of the `SandboxTemplate`, otherwise creates a fresh `Sandbox`.
-*   **`snapshot(self, trigger_name: str) -> SnapshotResponse`**:
-    *   Triggers a manual snapshot of the current sandbox pod by creating a `PodSnapshotManualTrigger` resource.
-    *   The `trigger_name` is suffixed with a timestamp and unique hash.
-    *   Waits for the snapshot to be processed.
-    *   The Pod Snapshot Controller creates a `PodSnapshot` resource automatically.
-    *   Returns the SnapshotResponse object(success, error_code, error_reason, trigger_name, snapshot_uid).
-*   **`is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult`**:
-    *   Checks if the sandbox pod was restored from the specified snapshot.
-    *   Verifies restoration by checking the 'PodRestored' condition in the pod status and confirming the message contains the expected snapshot UID.
-    *   Returns RestoreResult object(success, error_code, error_reason).
-*   **`__exit__(self)`**:
-    *   Cleans up the `PodSnapshotManualTrigger` resources.
-    *   Cleans up the `SandboxClaim` resources.
+## Usage Example
+
+Here is an example demonstrating how to initialize the client and trigger a snapshot:
+
+```python
+from k8s_agent_sandbox.gke_extensions.snapshots import PodSnapshotSandboxClient
+
+# Initialize the specialized snapshot client
+client = PodSnapshotSandboxClient()
+
+# Create a sandbox with snapshot capabilities enabled
+sandbox = client.create_sandbox(
+    template_name="python-counter-template", 
+    namespace="default"
+)
+
+try:
+    # Trigger a snapshot via the snapshots engine
+    response = sandbox.snapshots.create("my-first-snapshot")
+
+    if response.success:
+        print(f"Snapshot created successfully! UID: {response.snapshot_uid}")
+    else:
+        print(f"Snapshot failed: {response.error_reason}")
+finally:
+    client.delete_all()
+```
 
 ## `test_podsnapshot_extension.py`
 

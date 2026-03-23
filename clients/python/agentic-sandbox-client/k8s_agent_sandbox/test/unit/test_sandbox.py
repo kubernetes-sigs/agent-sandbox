@@ -68,6 +68,7 @@ class TestSandbox(unittest.TestCase):
 
         self.assertEqual(self.sandbox.id, self.sandbox_id)
         self.assertEqual(self.sandbox.namespace, self.namespace)
+        self.assertEqual(self.sandbox.pod_name, self.sandbox_id)
         self.assertFalse(self.sandbox._is_closed)
 
     @patch('k8s_agent_sandbox.sandbox.Filesystem')
@@ -88,11 +89,13 @@ class TestSandbox(unittest.TestCase):
             namespace="custom-ns",
             connection_config=mock_connection_config,
             tracer_config=mock_tracer_config,
-            k8s_helper=mock_k8s_helper_instance
+            k8s_helper=mock_k8s_helper_instance,
+            pod_name="custom-pod"
         )
 
         mock_k8s_helper.assert_not_called()
         self.assertEqual(sandbox.k8s_helper, mock_k8s_helper_instance)
+        self.assertEqual(sandbox.pod_name, "custom-pod")
 
         mock_connector.assert_called_once_with(
             sandbox_id="custom-id",

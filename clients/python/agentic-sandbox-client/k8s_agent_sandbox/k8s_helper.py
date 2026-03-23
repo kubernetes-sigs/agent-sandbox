@@ -38,6 +38,105 @@ class K8sHelper:
             config.load_kube_config()
         self.custom_objects_api = client.CustomObjectsApi()
 
+    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None):
+        """Creates a SandboxClaim custom resource."""
+        manifest = {
+            "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
+            "kind": "SandboxClaim",
+            "metadata": {
+                "name": name,
+                "annotations": annotations or {}
+            },
+            "spec": {
+                "sandboxTemplateRef": {
+                    "name": template
+                }
+            }
+        }
+        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'...")
+        self.custom_objects_api.create_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            body=manifest
+        )
+
+    def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int):
+        """Waits for the Sandbox custom resource to have a 'Ready' status."""
+        logging.info(f"Watching for Sandbox {name} to become ready...")
+        w = watch.Watch()
+        for event in w.stream(
+            func=self.custom_objects_api.list_namespaced_custom_object,
+            namespace=namespace,
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            plural=SANDBOX_PLURAL_NAME,
+            field_selector=f"metadata.name={name}",
+            timeout_seconds=timeout
+        ):
+            if event is None:
+                continue
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                sandbox_object = event['object']
+                status = sandbox_object.get('status', {})
+                conditions = status.get('conditions', [])
+                for cond in conditions:
+                    if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                        logging.info(f"Sandbox {name} is ready.")
+                        w.stop()
+                        return
+        raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
+
+    def delete_sandbox_claim(self, name: str, namespace: str):
+        """Deletes a SandboxClaim custom resource."""
+        try:
+            self.custom_objects_api.delete_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME,
+                name=name
+            )
+            logging.info(f"Terminated SandboxClaim: {name}")
+        except client.ApiException as e:
+            if e.status != 404:
+                logging.error(f"Error terminating sandbox {name}: {e}")
+                raise
+
+    def get_sandbox(self, name: str, namespace: str):
+        """Gets a Sandbox custom resource."""
+        try:
+            return self.custom_objects_api.get_namespaced_custom_object(
+                group=SANDBOX_API_GROUP,
+                version=SANDBOX_API_VERSION,
+                namespace=namespace,
+                plural=SANDBOX_PLURAL_NAME,
+                name=name
+            )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def list_sandboxes(self, namespace: str) -> list[str]:
+        """Lists all Sandbox custom resources in a namespace."""
+        try:
+            response = self.custom_objects_api.list_namespaced_custom_object(
+                group=SANDBOX_API_GROUP,
+                version=SANDBOX_API_VERSION,
+                namespace=namespace,
+                plural=SANDBOX_PLURAL_NAME
+            )
+            return [
+                item.get("metadata", {}).get("name") 
+                for item in response.get("items", []) 
+                if item.get("metadata", {}).get("name")
+            ]
+        except client.ApiException as e:
+            logging.error(f"Error listing sandboxes in namespace {namespace}: {e}")
+            raise
+        
     def delete_sandbox_claim(self, name: str, namespace: str):
         """Deletes a SandboxClaim custom resource."""
         try:

@@ -110,47 +110,65 @@ discovers the Gateway.
 
 ```python
 from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig
 
 # Connect via the GKE Gateway
-with SandboxClient(
-    template_name="python-sandbox-template",
-    gateway_name="external-http-gateway",  # Name of the Gateway resource
-    namespace="default"
-) as sandbox:
-    print(sandbox.run("echo 'Hello from Cloud!'").stdout)
+client = SandboxClient(
+    connection_config=SandboxGatewayConnectionConfig(
+        gateway_name="external-http-gateway",  # Name of the Gateway resource
+    )
+)
+
+sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+try:
+    print(sandbox.commands.run("echo 'Hello from Cloud!'").stdout)
+finally:
+    sandbox.terminate()
 ```
 
 ### 2. Developer Mode (Local Tunnel)
 
-Use this for local development or CI. If you omit `gateway_name`, the client automatically opens a
-secure tunnel to the Router Service using `kubectl`.
+Use this for local development or CI. The client automatically opens a secure tunnel to the
+Router Service using `kubectl`.
 
 ```python
 from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig
 
 # Automatically tunnels to svc/sandbox-router-svc
-with SandboxClient(
-    template_name="python-sandbox-template",
-    namespace="default"
-) as sandbox:
-    print(sandbox.run("echo 'Hello from Local!'").stdout)
+client = SandboxClient(
+    connection_config=SandboxLocalTunnelConnectionConfig()
+)
+
+sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+try:
+    print(sandbox.commands.run("echo 'Hello from Local!'").stdout)
+finally:
+    sandbox.terminate()
 ```
 
 ### 3. Advanced / Internal Mode
 
-Use `api_url` to bypass discovery entirely. Useful for:
+Use `SandboxDirectConnectionConfig` to bypass discovery entirely. Useful for:
 
 - **Internal Agents:** Running inside the cluster (connect via K8s DNS).
 - **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.example.com`).
 
 ```python
-with SandboxClient(
-    template_name="python-sandbox-template",
-    # Connect directly to a URL
-    api_url="http://sandbox-router-svc.default.svc.cluster.local:8080",
-    namespace="default"
-) as sandbox:
-    sandbox.run("ls -la")
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+client = SandboxClient(
+    connection_config=SandboxDirectConnectionConfig(
+       api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+    )
+)
+
+sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+try:
+    sandbox.commands.run("ls -la")
+finally:
+    sandbox.terminate()
 ```
 
 ### 4. Custom Ports
@@ -158,11 +176,14 @@ with SandboxClient(
 If your sandbox runtime listens on a port other than 8888 (e.g., a Node.js app on 3000), specify `server_port`.
 
 ```python
-with SandboxClient(
-    template_name="node-sandbox-template",
-    server_port=3000
-) as sandbox:
-    # ...
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig
+
+client = SandboxClient(
+    connection_config=SandboxLocalTunnelConnectionConfig(server_port=3000)
+)
+
+sandbox = client.create_sandbox(template="node-sandbox-template", namespace="default").
 ```
 
 ## Testing

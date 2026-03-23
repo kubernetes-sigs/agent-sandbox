@@ -5,6 +5,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
+- [**copilot-cli-sandbox**](./copilot-cli-sandbox): A coding agent using Azure OpenAI and Agent Sandbox for sandboxed code execution.
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
 - [**gemini-cu-sandbox**](./gemini-cu-sandbox): An example of a Python runtime sandbox for Gemini Computer Use Agent.
 - [**hello-world-sandbox**](./hello-world-sandbox): A simple "Hello World" sandbox example.

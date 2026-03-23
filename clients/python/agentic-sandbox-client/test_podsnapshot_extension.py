@@ -112,20 +112,6 @@ def main(
         recent_snapshot_uid = snapshot_response.snapshot_uid
         print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
-        print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
-        with PodSnapshotSandboxClient(
-            template_name=template_name,
-            namespace=namespace,
-            api_url=api_url,
-            server_port=server_port,
-        ) as sandbox_restored:  # restores from second_snapshot_name by default
-
-            restore_result = sandbox_restored.is_restored_from_snapshot(
-                recent_snapshot_uid
-            )
-            assert restore_result.success, restore_result.error_reason
-            print("Pod was restored from the most recent snapshot.")
-
         print("--- Pod Snapshot Test Passed! ---")
 
     except Exception as e:

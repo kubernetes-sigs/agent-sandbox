@@ -136,22 +136,6 @@ class K8sHelper:
         except client.ApiException as e:
             logging.error(f"Error listing sandboxes in namespace {namespace}: {e}")
             raise
-        
-    def delete_sandbox_claim(self, name: str, namespace: str):
-        """Deletes a SandboxClaim custom resource."""
-        try:
-            self.custom_objects_api.delete_namespaced_custom_object(
-                group=CLAIM_API_GROUP,
-                version=CLAIM_API_VERSION,
-                namespace=namespace,
-                plural=CLAIM_PLURAL_NAME,
-                name=name
-            )
-            logging.info(f"Terminated SandboxClaim: {name}")
-        except client.ApiException as e:
-            if e.status != 404:
-                logging.error(f"Error terminating sandbox {name}: {e}")
-                raise
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""

@@ -41,7 +41,10 @@ def main():
     os.chdir(repo_root)
 
     # Run each script in dev/tools/fix-*
-    for script in glob.glob("dev/tools/fix-*"):
+    for script in sorted(glob.glob("dev/tools/fix-*")):
+        print(f"\n{'='*60}")
+        print(f"Running: {script}")
+        print(f"{'='*60}")
         run_and_verify_no_changes([script])
 
 if __name__ == "__main__":

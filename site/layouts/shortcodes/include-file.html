@@ -11,5 +11,12 @@
 {{/* Fix all relative README.md and INSTALL.md links */}}
 {{- $content = replaceRE `\]\((\./)?README\.md(#[^)]+)?\)` (printf "](%s$1)" (strings.TrimSuffix "/" $sectionPath)) $content -}}
 {{- $content = replaceRE `\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)` "](/docs/getting_started/$2)" $content -}}
+{{- $content = replaceRE `src="site/assets/` `src="/assets/` $content -}}
 
-{{- $content | markdownify -}}
+{{/* Rewrite remaining relative links to point to the GitHub repo */}}
+{{- $ghBase := "https://github.com/kubernetes-sigs/agent-sandbox/blob/main/" -}}
+{{- $ghTree := "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/" -}}
+{{- $content = replaceRE `\]\(([a-zA-Z][a-zA-Z0-9_/.+-]*)/\)` (printf "](%s$1/)" $ghTree) $content -}}
+{{- $content = replaceRE `\]\(([a-zA-Z][a-zA-Z0-9_/.+-]*\.[a-zA-Z0-9]+)\)` (printf "](%s$1)" $ghBase) $content -}}
+
+{{- $content | .Page.RenderString -}}

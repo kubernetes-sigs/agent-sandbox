@@ -66,14 +66,16 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         with self.assertRaises(ApiException):
             PodSnapshotSandboxClient()
             
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     @patch.object(PodSnapshotSandboxClient, '_check_snapshot_crd_installed', return_value=True)
-    def test_sandbox_class(self, mock_check):
+    def test_sandbox_class(self, mock_check, mock_k8s_helper_cls):
         client = PodSnapshotSandboxClient()
         self.assertEqual(client.sandbox_class, SandboxWithSnapshotSupport)
         
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     @patch.object(PodSnapshotSandboxClient, '_check_snapshot_crd_installed', return_value=True)
     @patch('k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox')
-    def test_create_sandbox(self, mock_super_create, mock_check):
+    def test_create_sandbox(self, mock_super_create, mock_check, mock_k8s_helper_cls):
         client = PodSnapshotSandboxClient()
         mock_super_create.return_value = MagicMock(spec=SandboxWithSnapshotSupport)
         
@@ -82,9 +84,10 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         mock_super_create.assert_called_once_with("test-template", "test-ns")
         self.assertIsInstance(result, SandboxWithSnapshotSupport)
 
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     @patch.object(PodSnapshotSandboxClient, '_check_snapshot_crd_installed', return_value=True)
     @patch('k8s_agent_sandbox.sandbox_client.SandboxClient.get_sandbox')
-    def test_get_sandbox(self, mock_super_get, mock_check):
+    def test_get_sandbox(self, mock_super_get, mock_check, mock_k8s_helper_cls):
         client = PodSnapshotSandboxClient()
         mock_super_get.return_value = MagicMock(spec=SandboxWithSnapshotSupport)
         
@@ -93,9 +96,10 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         mock_super_get.assert_called_once_with("test-id", "test-ns")
         self.assertIsInstance(result, SandboxWithSnapshotSupport)
 
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     @patch.object(PodSnapshotSandboxClient, '_check_snapshot_crd_installed', return_value=True)
     @patch('k8s_agent_sandbox.sandbox_client.SandboxClient.list_active_sandboxes')
-    def test_list_active_sandboxes(self, mock_super_list, mock_check):
+    def test_list_active_sandboxes(self, mock_super_list, mock_check, mock_k8s_helper_cls):
         client = PodSnapshotSandboxClient()
         mock_super_list.return_value = ["test-id-1", "test-id-2"]
         

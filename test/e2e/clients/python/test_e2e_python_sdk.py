@@ -100,7 +100,7 @@ def sandbox_template(tc, temp_namespace):
 
 
 @pytest.fixture(scope="function")
-def sandbox_warmpool(tc, temp_namespace):
+def sandbox_warmpool(tc, temp_namespace, sandbox_template):
     """Deploys the sandbox warmpool into the test namespace"""
     with open(WARMPOOL_YAML_PATH, "r") as f:
         manifest = f.read()

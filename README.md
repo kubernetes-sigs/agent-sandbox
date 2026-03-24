@@ -1,4 +1,9 @@
-# Agent Sandbox
+<div align="center">
+  <img src="site/assets/icons/color_logo.svg" alt="Agent Sandbox logo" width="150" />
+
+  <h1>Agent Sandbox</h1>
+</div>
+
 
 <p>
   <a href="https://github.com/kubernetes-sigs/agent-sandbox/releases"><img src="https://img.shields.io/github/v/release/kubernetes-sigs/agent-sandbox" alt="GitHub release"></a>

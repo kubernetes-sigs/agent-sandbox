@@ -132,6 +132,9 @@ module:
   - disableWatch: false
     source: assets
     target: assets
+  - disableWatch: false
+    source: assets
+    target: static/assets
   - disableWatch: true
     source: ../
     target: assets/additional

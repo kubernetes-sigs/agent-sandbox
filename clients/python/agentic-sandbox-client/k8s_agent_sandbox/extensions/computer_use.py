@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 from ..sandbox_client import SandboxClient
 from ..sandbox import Sandbox
 from ..models import ExecutionResult
+from ..trace_manager import trace_span
 
 class SandboxWithComputerUseSupport(Sandbox):
+    @trace_span("agent_query")
     def agent(self, query: str, timeout: int = 60) -> ExecutionResult:
         """Executes a query using the agent."""
         if not self.is_active:
@@ -28,11 +29,8 @@ class SandboxWithComputerUseSupport(Sandbox):
         response = self.connector.send_request("POST", "agent", json=payload, timeout=timeout)
 
         response_data = response.json()
-        return ExecutionResult(
-            stdout=response_data.get('stdout', ''),
-            stderr=response_data.get('stderr', ''),
-            exit_code=response_data.get('exit_code', -1)
-        )
+        # Pydantic safely falls back to defaults for any missing keys
+        return ExecutionResult(**(response_data or {}))
 
 class ComputerUseSandboxClient(SandboxClient[SandboxWithComputerUseSupport]):
     """

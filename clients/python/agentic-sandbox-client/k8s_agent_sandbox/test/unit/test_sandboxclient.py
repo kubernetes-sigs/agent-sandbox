@@ -63,8 +63,10 @@ class TestSandboxClient(unittest.TestCase):
         client.sandbox_class = MockSandbox
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
-        client._active_connection_sandboxes["test-id"] = mock_sandbox
+        client._active_connection_sandboxes[("test-namespace", "test-id")] = mock_sandbox
         
+        client.k8s_helper.get_sandbox.return_value = {"metadata": {}}
+
         sandbox = client.get_sandbox("test-id", "test-namespace")
         
         self.assertEqual(sandbox, mock_sandbox)
@@ -79,7 +81,7 @@ class TestSandboxClient(unittest.TestCase):
         # Setup inactive sandbox in registry
         mock_inactive_sandbox = MagicMock()
         mock_inactive_sandbox.is_active = False
-        client._active_connection_sandboxes["test-id"] = mock_inactive_sandbox
+        client._active_connection_sandboxes[("test-namespace", "test-id")] = mock_inactive_sandbox
         
         # Mock K8s helper to confirm the sandbox resource still exists in K8s
         client.k8s_helper.get_sandbox.return_value = {"metadata": {}}
@@ -91,7 +93,7 @@ class TestSandboxClient(unittest.TestCase):
         sandbox = client.get_sandbox("test-id", "test-namespace")
         
         self.assertEqual(sandbox, mock_new_sandbox)
-        self.assertEqual(client._active_connection_sandboxes["test-id"], mock_new_sandbox)
+        self.assertEqual(client._active_connection_sandboxes[("test-namespace", "test-id")], mock_new_sandbox)
         client.k8s_helper.get_sandbox.assert_called_once_with("test-id", "test-namespace")
         MockSandbox.assert_called_once()
 
@@ -111,17 +113,17 @@ class TestSandboxClient(unittest.TestCase):
         
         mock_active = MagicMock()
         mock_active.is_active = True
-        client._active_connection_sandboxes["active-id"] = mock_active
+        client._active_connection_sandboxes[("ns1", "active-id")] = mock_active
         
         mock_inactive = MagicMock()
         mock_inactive.is_active = False
-        client._active_connection_sandboxes["inactive-id"] = mock_inactive
+        client._active_connection_sandboxes[("ns2", "inactive-id")] = mock_inactive
         
         active_list = client.list_active_sandboxes()
         
-        self.assertEqual(active_list, ["active-id"])
+        self.assertEqual(active_list, [("ns1", "active-id")])
         # Ensure inactive sandbox is lazily cleaned up from the registry
-        self.assertNotIn("inactive-id", client._active_connection_sandboxes)
+        self.assertNotIn(("ns2", "inactive-id"), client._active_connection_sandboxes)
 
     @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     def test_list_all_sandboxes(self, MockK8sHelper):
@@ -139,11 +141,11 @@ class TestSandboxClient(unittest.TestCase):
         
         mock_sandbox1 = MagicMock()
         mock_sandbox1.namespace = "ns1"
-        client._active_connection_sandboxes["id1"] = mock_sandbox1
+        client._active_connection_sandboxes[("ns1", "id1")] = mock_sandbox1
         
         mock_sandbox2 = MagicMock()
         mock_sandbox2.namespace = "ns2"
-        client._active_connection_sandboxes["id2"] = mock_sandbox2
+        client._active_connection_sandboxes[("ns2", "id2")] = mock_sandbox2
         
         with patch.object(client, 'delete_sandbox') as mock_delete:
             client.delete_all()
@@ -166,8 +168,8 @@ class TestSandboxClient(unittest.TestCase):
 
     @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     def test_wait_for_sandbox_ready(self, MockK8sHelper):
-        client = SandboxClient(sandbox_ready_timeout=45)
-        client._wait_for_sandbox_ready("test-claim", "test-namespace")
+        client = SandboxClient()
+        client._wait_for_sandbox_ready("test-claim", "test-namespace", 45)
         
         client.k8s_helper.wait_for_sandbox_ready.assert_called_once_with(
             "test-claim", "test-namespace", 45

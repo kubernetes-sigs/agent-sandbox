@@ -53,6 +53,7 @@ class Sandbox:
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
         
+        # Save Pod name
         self.pod_name = pod_name or self.id
         if pod_name:
             logging.info(f"Using pod name: {self.pod_name}")

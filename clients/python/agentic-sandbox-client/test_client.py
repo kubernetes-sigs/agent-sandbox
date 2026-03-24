@@ -145,8 +145,8 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     print("\n--- Verifying Active Sandboxes ---")
     active_sandboxes = client.list_active_sandboxes()
     print(f"Active sandboxes: {active_sandboxes}")
-    assert sandbox.id in active_sandboxes
-    assert sandbox2.id in active_sandboxes
+    assert (sandbox.namespace, sandbox.id) in active_sandboxes
+    assert (sandbox2.namespace, sandbox2.id) in active_sandboxes
 
     # Test get_sandbox
     print("\n--- Testing get_sandbox ---")
@@ -190,7 +190,7 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
 
     print("\n--- Testing delete_all ---")
     # Ensure sandbox2 is still active
-    assert sandbox2.id in client.list_active_sandboxes()
+    assert (sandbox2.namespace, sandbox2.id) in client.list_active_sandboxes()
     
     print("Calling client.delete_all()...")
     client.delete_all()

@@ -13,28 +13,8 @@
 # limitations under the License.
 
 import logging
-import uuid
-import os
-from datetime import datetime, timezone
-from typing import Any
-from dataclasses import dataclass
-from kubernetes import client, watch
-from kubernetes.client import ApiException
 from .snapshot_engine import SnapshotEngine
-from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.sandbox import Sandbox
-from k8s_agent_sandbox.constants import (
-    PODSNAPSHOT_API_GROUP,
-    PODSNAPSHOT_API_VERSION,
-    PODSNAPSHOT_API_KIND,
-    PODSNAPSHOTMANUALTRIGGER_API_KIND,
-    PODSNAPSHOTMANUALTRIGGER_PLURAL,
-    POD_NAME_ANNOTATION,
-)
-from .utils import SnapshotResult, wait_for_snapshot_to_be_completed
-
-SNAPSHOT_SUCCESS_CODE = 0
-SNAPSHOT_ERROR_CODE = 1
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +39,12 @@ class SandboxWithSnapshotSupport(Sandbox):
     
     def terminate(self):
         """
-        Closes the client side connections and cleans up the user generated trigger resources.
+        Cleans up the manually generated trigger resources and terminates the Sandbox.
         """
-        super()._close_connection()
-        
-        if self._snapshots:
-            self._snapshots.delete_manual_triggers()
+        try:
+            if self._snapshots:
+                self._snapshots.delete_manual_triggers()
+        finally:
             self._snapshots = None
-        super().terminate()
+            super().terminate()
         

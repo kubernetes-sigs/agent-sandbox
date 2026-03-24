@@ -91,7 +91,6 @@ def main(
         client = PodSnapshotSandboxClient(connection_config=connection_config)
 
         print("\n======= Testing Pod Snapshot Extension =======")
-        assert client.snapshot_crd_installed, "Pod Snapshot CRD is not installed."
         
         sandbox = client.create_sandbox(template_name, namespace=namespace)
 

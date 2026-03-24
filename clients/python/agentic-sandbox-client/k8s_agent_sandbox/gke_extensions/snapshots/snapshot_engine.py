@@ -64,7 +64,9 @@ class SnapshotEngine:
         """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         suffix = uuid.uuid4().hex[:8]
-        trigger_name = f"{trigger_name}-{timestamp}-{suffix}"
+        # Sanitize to comply with Kubernetes resource name rules
+        safe_trigger_name = trigger_name.lower().replace("_", "-")
+        trigger_name = f"{safe_trigger_name}-{timestamp}-{suffix}"
 
         manifest = {
             "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
@@ -82,7 +84,20 @@ class SnapshotEngine:
                 body=manifest,
             )
             self.created_manual_triggers.append(trigger_name)
-
+        except ApiException as e:
+            logger.exception(
+                f"Failed to create PodSnapshotManualTrigger '{trigger_name}': {e}"
+            )
+            return SnapshotResponse(
+                success=False,
+                trigger_name=trigger_name,
+                snapshot_uid=None,
+                snapshot_timestamp=None,
+                error_reason=f"Failed to create PodSnapshotManualTrigger: {e}",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+            
+        try:
             # Start watching from the version we just created to avoid missing updates
             resource_version = pod_snapshot_manual_trigger_cr.get("metadata", {}).get("resourceVersion")
             snapshot_result = wait_for_snapshot_to_be_completed(
@@ -100,18 +115,6 @@ class SnapshotEngine:
                 snapshot_timestamp=snapshot_result.snapshot_timestamp,
                 error_reason="",
                 error_code=SNAPSHOT_SUCCESS_CODE,
-            )
-        except ApiException as e:
-            logger.exception(
-                f"Failed to create PodSnapshotManualTrigger '{trigger_name}': {e}"
-            )
-            return SnapshotResponse(
-                success=False,
-                trigger_name=trigger_name,
-                snapshot_uid=None,
-                snapshot_timestamp=None,
-                error_reason=f"Failed to create PodSnapshotManualTrigger: {e}",
-                error_code=SNAPSHOT_ERROR_CODE,
             )
         except TimeoutError as e:
             logger.exception(
@@ -151,7 +154,7 @@ class SnapshotEngine:
             )
 
     def delete_manual_triggers(self):
-        """Cleans up the manual trigger related resources."""
+        """Cleans up the manual trigger related resources created by this Sandbox."""
         for trigger_name in self.created_manual_triggers:
             try:
                 self.k8s_helper.custom_objects_api.delete_namespaced_custom_object(
@@ -168,5 +171,9 @@ class SnapshotEngine:
                     continue
                 logger.error(
                     f"Failed to delete PodSnapshotManualTrigger '{trigger_name}': {e}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error while deleting PodSnapshotManualTrigger '{trigger_name}': {e}"
                 )
         self.created_manual_triggers.clear()

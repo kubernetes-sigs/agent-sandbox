@@ -153,11 +153,11 @@ class TestComputerUseSandbox(unittest.TestCase):
         template_name = "sandbox-python-computeruse-template"
         connection_config = SandboxLocalTunnelConnectionConfig(server_port=8888)
         # Set a shorter timeout to speed up the failure test
-        sandbox_client = ComputerUseSandboxClient(connection_config=connection_config, sandbox_ready_timeout=30)
+        sandbox_client = ComputerUseSandboxClient(connection_config=connection_config)
 
         try:
             with self.assertRaises(TimeoutError) as cm:
-                sandbox_client.create_sandbox(template_name, "default")
+                sandbox_client.create_sandbox(template_name, "default", sandbox_ready_timeout=30)
             self.assertIn("did not become ready within", str(cm.exception))
         finally:
             sandbox_client.delete_all()

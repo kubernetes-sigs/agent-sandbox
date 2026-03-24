@@ -30,7 +30,8 @@ A specialized Sandbox client for interacting with the GKE Pod Snapshot Controlle
     *   If `ready_only` is True, only returns snapshots that are in the 'Ready' state.
     *   Returns a `ListSnapshotResult` object (success, error_code, error_reason, snapshots) containing the mapped snapshots sorted by creation timestamp (newest first).
 *   **`delete_snapshots(self, grouping_labels: dict[str, str] | None = None, snapshot_uid: str | None = None) -> DeleteSnapshotResult`**:
-    *   Deletes snapshots based on provided parameters: a specific snapshot if `snapshot_uid` is provided, all matching `grouping_labels`, or all snapshots for the pod if neither is provided.
+    *   Deletes snapshots based on provided parameters. **Note:** `snapshot_uid` and `grouping_labels` are mutually exclusive—provide only one.
+    *   Targets a specific snapshot if `snapshot_uid` is provided or all matching `grouping_labels`, or all snapshots for the pod if neither is provided.
     *   Returns a `DeleteSnapshotResult` object (success, error_code, error_reason, deleted_snapshots) containing the list of successfully deleted snapshot UIDs.
 *   **`__exit__(self)`**:
     *   Cleans up the `PodSnapshotManualTrigger` resources.

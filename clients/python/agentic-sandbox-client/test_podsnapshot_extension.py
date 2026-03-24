@@ -32,10 +32,6 @@ def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: s
     ), "snapshot response missing 'trigger_name' attribute"
 
     print(f"Trigger Name: {snapshot_response.trigger_name}")
-    print(f"Snapshot UID: {snapshot_response.snapshot_uid}")
-    print(f"Success: {snapshot_response.success}")
-    print(f"Error Code: {snapshot_response.error_code}")
-    print(f"Error Reason: {snapshot_response.error_reason}")
 
     assert snapshot_response.trigger_name.startswith(
         snapshot_name
@@ -67,8 +63,8 @@ def main(
     except config.ConfigException:
         config.load_kube_config()
 
-    first_snapshot_name = "test-snapshot-10"
-    second_snapshot_name = "test-snapshot-20"
+    first_snapshot_trigger_name = "test-snapshot-10"
+    second_snapshot_trigger_name = "test-snapshot-20"
 
     # grouping labels used in PodSnapshotPolicy to group snapshots - tenant-id and user-id
     grouping_labels = {"tenant-id": "test-tenant", "user-id": "test-user"}
@@ -86,18 +82,24 @@ def main(
             assert sandbox.snapshot_crd_installed, "Pod Snapshot CRD is not installed."
             time.sleep(WAIT_TIME_SECONDS)
             print(
-                f"Creating first pod snapshot '{first_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+                f"Creating first pod snapshot '{first_snapshot_trigger_name}' after {WAIT_TIME_SECONDS} seconds..."
             )
-            snapshot_response = sandbox.snapshot(first_snapshot_name)
-            test_snapshot_response(snapshot_response, first_snapshot_name)
+            snapshot_response = sandbox.snapshot(
+                trigger_name=first_snapshot_trigger_name
+            )
+            test_snapshot_response(snapshot_response, first_snapshot_trigger_name)
+            first_snapshot_uid = snapshot_response.snapshot_uid
+            print(f"First snapshot UID: {first_snapshot_uid}")
 
             time.sleep(WAIT_TIME_SECONDS)
 
             print(
-                f"\nCreating second pod snapshot '{second_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+                f"\nCreating second pod snapshot '{second_snapshot_trigger_name}' after {WAIT_TIME_SECONDS} seconds..."
             )
-            snapshot_response = sandbox.snapshot(second_snapshot_name)
-            test_snapshot_response(snapshot_response, second_snapshot_name)
+            snapshot_response = sandbox.snapshot(
+                trigger_name=second_snapshot_trigger_name
+            )
+            test_snapshot_response(snapshot_response, second_snapshot_trigger_name)
             recent_snapshot_uid = snapshot_response.snapshot_uid
             print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
@@ -106,14 +108,20 @@ def main(
             )
             list_result = sandbox.list_snapshots(grouping_labels=grouping_labels)
             assert list_result.success, list_result.error_reason
-            if list_result.snapshots:
-                for snap in list_result.snapshots:
-                    print(
-                        f"Snapshot ID: {snap['snapshot_id']}, Source Pod: {snap['source_pod']}, Creation Time: {snap['creationTimestamp']}"
-                    )
-            else:
+            assert (
+                len(list_result.snapshots) == 2
+            ), f"Expected 2 snapshots, but got {len(list_result.snapshots)}"
+            # list_snapshots returns snapshots sorted by creation timestamp descending
+            assert (
+                list_result.snapshots[0].snapshot_uid == recent_snapshot_uid
+            ), f"Expected most recent snapshot UID to be {recent_snapshot_uid}, but got {list_result.snapshots[0].snapshot_uid}"
+            assert (
+                list_result.snapshots[1].snapshot_uid == first_snapshot_uid
+            ), f"Expected oldest snapshot UID to be {first_snapshot_uid}, but got {list_result.snapshots[1].snapshot_uid}"
+
+            for snap in list_result.snapshots:
                 print(
-                    f"No ready snapshots found or failed: {list_result.error_reason if list_result else ''}"
+                    f"Snapshot UID: {snap.snapshot_uid}, Source Pod: {snap.source_pod}, Creation Time: {snap.creation_timestamp}"
                 )
 
             print(
@@ -124,7 +132,7 @@ def main(
                 namespace=namespace,
                 api_url=api_url,
                 server_port=server_port,
-            ) as sandbox_restored:  # restores from second_snapshot_name by default
+            ) as sandbox_restored:  # restores from latest snapshot by default
 
                 restore_result = sandbox_restored.is_restored_from_snapshot(
                     recent_snapshot_uid
@@ -137,6 +145,15 @@ def main(
                     grouping_labels=grouping_labels
                 )
                 assert delete_result.success, delete_result.error_reason
+                assert (
+                    len(delete_result.deleted_snapshots) == 2
+                ), f"Expected 2 snapshots to be deleted, but got {len(delete_result.deleted_snapshots)}"
+                assert (
+                    delete_result.deleted_snapshots[0] == recent_snapshot_uid
+                ), f"Expected most recent snapshot UID to be {recent_snapshot_uid}, but got {delete_result.deleted_snapshots[0]}"
+                assert (
+                    delete_result.deleted_snapshots[1] == first_snapshot_uid
+                ), f"Expected oldest snapshot UID to be {first_snapshot_uid}, but got {delete_result.deleted_snapshots[1]}"
                 print(f"Deleted Snapshots: {delete_result.deleted_snapshots}")
 
         print("--- Pod Snapshot Test Passed! ---")

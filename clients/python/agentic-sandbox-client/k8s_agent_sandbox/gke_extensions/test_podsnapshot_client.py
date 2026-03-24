@@ -20,6 +20,7 @@ from k8s_agent_sandbox.gke_extensions.podsnapshot_client import (
     SNAPSHOT_ERROR_CODE,
     SNAPSHOT_SUCCESS_CODE,
     ListSnapshotResult,
+    SnapshotDetail,
 )
 from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_KIND,
@@ -612,17 +613,9 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         mock_condition = MagicMock()
         mock_condition.type = "PodRestored"
         mock_condition.status = "False"
+        mock_condition.reason = "FailedToRestore"
+        mock_condition.message = "Snapshot not found"
 
-        # We also need to simulate condition.get('reason') and condition.get('message')
-        # since it's a MagicMock, we can set side_effect for get
-        def mock_get(key):
-            if key == "reason":
-                return "FailedToRestore"
-            elif key == "message":
-                return "Snapshot not found"
-            return None
-
-        mock_condition.get.side_effect = mock_get
         mock_pod.status.conditions = [mock_condition]
 
         self.client.core_v1_api.read_namespaced_pod.return_value = mock_pod
@@ -805,8 +798,8 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(len(result.snapshots), 2)
         # Verify it sorted by creationTimestamp newest first
-        self.assertEqual(result.snapshots[0]["snapshot_id"], "snap-1")
-        self.assertEqual(result.snapshots[1]["snapshot_id"], "snap-2")
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-1")
+        self.assertEqual(result.snapshots[1].snapshot_uid, "snap-2")
         self.client.custom_objects_api.list_namespaced_custom_object.assert_called_once_with(
             group=PODSNAPSHOT_API_GROUP,
             version=PODSNAPSHOT_API_VERSION,
@@ -814,6 +807,81 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             plural=PODSNAPSHOT_PLURAL,
             label_selector="podsnapshot.gke.io/pod-name=test-pod,test-label=test-value",
         )
+
+    def test_list_snapshots_ready_only_false(self):
+        """Test list_snapshots with ready_only=False includes non-ready snapshots."""
+        self.client.pod_name = "test-pod"
+        self.client.namespace = "test-ns"
+
+        mock_response = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "ready-snap",
+                        "uid": "uid1",
+                        "creationTimestamp": "2023-01-01T00:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+                {
+                    "metadata": {
+                        "name": "not-ready-snap",
+                        "uid": "uid2",
+                        "creationTimestamp": "2023-01-02T00:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "False"}]},
+                },
+            ]
+        }
+        self.client.custom_objects_api.list_namespaced_custom_object.return_value = (
+            mock_response
+        )
+
+        result = self.client.list_snapshots(ready_only=False)
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 2)
+        # Sorted by creationTimestamp descending
+        self.assertEqual(result.snapshots[0].snapshot_uid, "not-ready-snap")
+        self.assertEqual(result.snapshots[1].snapshot_uid, "ready-snap")
+
+    def test_list_snapshots_none_timestamp(self):
+        """Test list_snapshots doesn't crash when creationTimestamp is None."""
+        self.client.namespace = "test-ns"
+        self.client.pod_name = "test-pod"
+
+        mock_response = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "snap-1",
+                        "uid": "uid-1",
+                        "creationTimestamp": None,  # Test Case: None
+                        "labels": {"podsnapshot.gke.io/pod-name": "test-pod"},
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+                {
+                    "metadata": {
+                        "name": "snap-2",
+                        "uid": "uid-2",
+                        "creationTimestamp": "2023-01-01T00:00:00Z",
+                        "labels": {"podsnapshot.gke.io/pod-name": "test-pod"},
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+            ]
+        }
+        self.client.custom_objects_api.list_namespaced_custom_object.return_value = (
+            mock_response
+        )
+
+        result = self.client.list_snapshots()
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 2)
+        # Verify it sorted correctly even with None (None/empty string should come last in reverse sort)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-2")
+        self.assertEqual(result.snapshots[1].snapshot_uid, "snap-1")
 
     def test_list_snapshots_no_results(self):
         """Test list_snapshots returns successfully with empty list if none found."""
@@ -874,13 +942,31 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
             name="target-snap",
         )
 
+    def test_delete_snapshots_mutually_exclusive(self):
+        """Test delete_snapshots raising ValueError for both snapshot_uid and grouping_labels."""
+        with self.assertRaises(ValueError) as context:
+            self.client.delete_snapshots(
+                snapshot_uid="target-snap1", grouping_labels={"foo": "bar"}
+            )
+        self.assertIn(
+            "snapshot_uid and grouping_labels are mutually exclusive",
+            str(context.exception),
+        )
+
     def test_delete_snapshots_with_list(self):
         """Test delete_snapshots fetching list of snapshots when uid is not provided."""
 
         with patch.object(self.client, "list_snapshots") as mock_list:
             mock_list.return_value = ListSnapshotResult(
                 success=True,
-                snapshots=[{"snapshot_id": "snap-a"}],
+                snapshots=[
+                    SnapshotDetail(
+                        snapshot_uid="snap-a",
+                        source_pod="test-pod",
+                        creation_timestamp="2023-01-01T00:00:00Z",
+                        status="Ready",
+                    )
+                ],
                 error_reason="",
                 error_code=SNAPSHOT_SUCCESS_CODE,
             )
@@ -913,6 +999,57 @@ class TestPodSnapshotSandboxClient(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.deleted_snapshots, [])
         self.assertIn("Failed to delete PodSnapshot", result.error_reason)
+
+    def test_delete_snapshots_partial_failure(self):
+        """Test delete_snapshots continuing loop and aggregating errors on partial failure."""
+        self.client.namespace = "test-ns"
+
+        # Mock list_snapshots to return 3 snapshots
+        with patch.object(self.client, "list_snapshots") as mock_list:
+            mock_list.return_value = ListSnapshotResult(
+                success=True,
+                snapshots=[
+                    SnapshotDetail("snap-1", "pod", "ts", "Ready"),
+                    SnapshotDetail("snap-2", "pod", "ts", "Ready"),
+                    SnapshotDetail("snap-3", "pod", "ts", "Ready"),
+                ],
+                error_reason="",
+                error_code=0,
+            )
+
+            # Mock delete calls:
+            # snap-1: Success
+            # snap-2: ApiException (500)
+            # snap-3: Success
+            def mock_delete(group, version, namespace, plural, name):
+                if name == "snap-2":
+                    raise ApiException(500, "Internal error")
+                return {}
+
+            self.client.custom_objects_api.delete_namespaced_custom_object.side_effect = (
+                mock_delete
+            )
+
+            result = self.client.delete_snapshots()
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.deleted_snapshots, ["snap-1", "snap-3"])
+            self.assertIn("Failed to delete PodSnapshot 'snap-2'", result.error_reason)
+            self.assertEqual(
+                self.client.custom_objects_api.delete_namespaced_custom_object.call_count,
+                3,
+            )
+
+    def test_delete_snapshots_generic_exception(self):
+        """Test delete_snapshots handling generic Exception during deletion."""
+        self.client.namespace = "test-ns"
+        self.client.custom_objects_api.delete_namespaced_custom_object.side_effect = (
+            Exception("Generic error")
+        )
+
+        result = self.client.delete_snapshots(snapshot_uid="target-snap")
+        self.assertFalse(result.success)
+        self.assertIn("Unexpected error deleting PodSnapshot", result.error_reason)
 
     def test_delete_snapshots_api_exception_404(self):
         """Test delete_snapshots interpreting 404 as successful (already deleted)."""

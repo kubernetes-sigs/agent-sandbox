@@ -65,11 +65,21 @@ class RestoreCheckResult:
 
 
 @dataclass
+class SnapshotDetail:
+    """Detailed information about a snapshot."""
+
+    snapshot_uid: str
+    source_pod: str
+    creation_timestamp: str
+    status: str
+
+
+@dataclass
 class ListSnapshotResult:
     """Result of a list snapshots operation."""
 
     success: bool
-    snapshots: list[dict[str, str]]
+    snapshots: list[SnapshotDetail]
     error_reason: str
     error_code: int
 
@@ -168,10 +178,11 @@ class PodSnapshotSandboxClient(SandboxClient):
                     snapshot_uid=snapshot_uid,
                     snapshot_timestamp=snapshot_timestamp,
                 )
-            elif condition.get("status") == "False" and condition.get("reason") in [
-                "Failed",
-                "Error",
-            ]:
+            elif (
+                condition.get("type") == "Triggered"
+                and condition.get("status") == "False"
+                and condition.get("reason") in ["Failed", "Error"]
+            ):
                 raise RuntimeError(
                     f"Snapshot failed. Condition: {condition.get('message', 'Unknown error')}"
                 )
@@ -395,8 +406,8 @@ class PodSnapshotSandboxClient(SandboxClient):
                                 error_code=SNAPSHOT_ERROR_CODE,
                             )
                     else:
-                        reason_val = condition.get("reason") or ""
-                        msg_val = condition.get("message") or ""
+                        reason_val = condition.reason or ""
+                        msg_val = condition.message or ""
                         reason = f" reason: '{reason_val}'"
                         msg = f" message: '{msg_val}'"
                         return RestoreCheckResult(
@@ -505,15 +516,14 @@ class PodSnapshotSandboxClient(SandboxClient):
                 continue
 
             valid_snapshots.append(
-                {
-                    "snapshot_id": metadata.get("name"),
-                    "source_pod": metadata.get("labels", {}).get(
+                SnapshotDetail(
+                    snapshot_uid=metadata.get("name"),
+                    source_pod=metadata.get("labels", {}).get(
                         "podsnapshot.gke.io/pod-name", "Unknown"
                     ),
-                    "uid": metadata.get("uid"),
-                    "creationTimestamp": metadata.get("creationTimestamp", ""),
-                    "status": "Ready" if is_ready else "NotReady",
-                }
+                    creation_timestamp=metadata.get("creationTimestamp", ""),
+                    status="Ready" if is_ready else "NotReady",
+                )
             )
 
         if not valid_snapshots:
@@ -526,8 +536,8 @@ class PodSnapshotSandboxClient(SandboxClient):
             )
 
         # Sort snapshots by creation timestamp descending
-        valid_snapshots.sort(key=lambda x: x["creationTimestamp"], reverse=True)
-        logger.info(f"Found {len(valid_snapshots)} ready snapshots.")
+        valid_snapshots.sort(key=lambda x: x.creation_timestamp or "", reverse=True)
+        logger.info(f"Found {len(valid_snapshots)} snapshots.")
         return ListSnapshotResult(
             success=True,
             snapshots=valid_snapshots,
@@ -545,16 +555,29 @@ class PodSnapshotSandboxClient(SandboxClient):
         - If snapshot_uid is provided, deletes that specific snapshot.
         - If grouping_labels is provided, deletes all snapshots matching the grouping labels.
         - If not provided, deletes ALL snapshots for this pod.
+
+        Note: snapshot_uid and grouping_labels are mutually exclusive.
+
         Returns a DeleteSnapshotResult containing the list of successfully deleted snapshots.
         """
+        if snapshot_uid and grouping_labels:
+            raise ValueError(
+                "snapshot_uid and grouping_labels are mutually exclusive. "
+                "Provide only one of them."
+            )
+
         snapshots_to_delete = []
 
         if snapshot_uid:
             snapshots_to_delete.append(snapshot_uid)
         else:
-            logger.info(
-                "No snapshot_uid provided. Deleting ALL snapshots for this pod."
-            )
+            if grouping_labels:
+                logger.info(
+                    f"No snapshot_uid provided. Deleting snapshots based on pod name and grouping_labels: {grouping_labels}"
+                )
+            else:
+                logger.info("No filters provided. Deleting ALL snapshots for this pod.")
+
             # Fetch all snapshots using list_snapshots without filtering by ready status
             snapshots_result = self.list_snapshots(
                 grouping_labels=grouping_labels, ready_only=False
@@ -566,13 +589,9 @@ class PodSnapshotSandboxClient(SandboxClient):
                     error_reason=f"Failed to list snapshots before deletion: {snapshots_result.error_reason}",
                     error_code=SNAPSHOT_ERROR_CODE,
                 )
-            if (
-                snapshots_result
-                and snapshots_result.success
-                and snapshots_result.snapshots
-            ):
+            if snapshots_result.snapshots:
                 snapshots_to_delete = [
-                    s["snapshot_id"] for s in snapshots_result.snapshots
+                    s.snapshot_uid for s in snapshots_result.snapshots
                 ]
         logger.info(f"Snapshots to delete: {snapshots_to_delete}")
 
@@ -586,6 +605,7 @@ class PodSnapshotSandboxClient(SandboxClient):
             )
 
         deleted_snapshots = []
+        errors = []
         for uid in snapshots_to_delete:
             # Delete PodSnapshot
             try:
@@ -605,25 +625,29 @@ class PodSnapshotSandboxClient(SandboxClient):
                         f"PodSnapshot '{uid}' not found in K8s (already deleted?)."
                     )
                 else:
-                    logger.error(f"Failed to delete PodSnapshot '{uid}': {e}")
-                    return DeleteSnapshotResult(
-                        success=False,
-                        deleted_snapshots=deleted_snapshots,
-                        error_reason=f"Failed to delete PodSnapshot '{uid}': {e}",
-                        error_code=SNAPSHOT_ERROR_CODE,
-                    )
+                    msg = f"Failed to delete PodSnapshot '{uid}': {e}"
+                    logger.error(msg)
+                    errors.append(msg)
             except Exception as e:
-                logger.exception(f"Unexpected error deleting PodSnapshot '{uid}': {e}")
-                return DeleteSnapshotResult(
-                    success=False,
-                    deleted_snapshots=deleted_snapshots,
-                    error_reason=f"Unexpected error deleting PodSnapshot '{uid}': {e}",
-                    error_code=SNAPSHOT_ERROR_CODE,
-                )
+                msg = f"Unexpected error deleting PodSnapshot '{uid}': {e}"
+                logger.exception(msg)
+                errors.append(msg)
 
         logger.info(
             f"Snapshot deletion process completed. Deleted {len(deleted_snapshots)} snapshots."
         )
+
+        if errors:
+            error_msg = "; ".join(errors)
+            if deleted_snapshots:
+                error_msg = f"Partial failure: deleted {len(deleted_snapshots)}/{len(snapshots_to_delete)} snapshots. Errors: {error_msg}"
+            return DeleteSnapshotResult(
+                success=False,
+                deleted_snapshots=deleted_snapshots,
+                error_reason=error_msg,
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
         return DeleteSnapshotResult(
             success=True,
             deleted_snapshots=deleted_snapshots,

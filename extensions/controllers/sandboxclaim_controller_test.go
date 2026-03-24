@@ -1039,6 +1039,11 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
 				}
 
+				// 4. Verify the adopted sandbox records the adopted pod name
+				if val := adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; val != adoptedSandbox.Name {
+					t.Errorf("expected adopted sandbox to have %q annotation %q, got %q", sandboxv1alpha1.SandboxPodNameAnnotation, adoptedSandbox.Name, val)
+				}
+
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
 				var sandbox sandboxv1alpha1.Sandbox

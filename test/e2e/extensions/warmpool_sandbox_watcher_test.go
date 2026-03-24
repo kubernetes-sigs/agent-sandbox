@@ -15,6 +15,7 @@
 package extensions
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -22,7 +23,9 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
@@ -137,4 +140,108 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 		}
 		return false
 	}, 15*time.Second, 500*time.Millisecond, "sandbox should become not-ready after pod deletion")
+}
+
+func TestWarmPoolPodNameAnnotationBeforeReady(t *testing.T) {
+	tc := framework.NewTestContext(t)
+
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("warmpool-ready-annotation-test-%d", time.Now().UnixNano())
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+	template := &extensionsv1alpha1.SandboxTemplate{}
+	template.Name = "test-template"
+	template.Namespace = ns.Name
+	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "pause",
+					Image: "registry.k8s.io/pause:3.10",
+				},
+			},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
+	warmPool.Name = "test-warmpool"
+	warmPool.Namespace = ns.Name
+	warmPool.Spec.TemplateRef.Name = template.Name
+	warmPool.Spec.Replicas = 1
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
+	require.Eventually(t, func() bool {
+		sandboxList := &sandboxv1alpha1.SandboxList{}
+		if err := tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)); err != nil {
+			return false
+		}
+		for _, sb := range sandboxList.Items {
+			if sb.DeletionTimestamp.IsZero() && metav1.IsControlledBy(&sb, warmPool) {
+				for _, cond := range sb.Status.Conditions {
+					if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}, 60*time.Second, 2*time.Second, "warm pool sandbox should become ready")
+
+	claim := &extensionsv1alpha1.SandboxClaim{}
+	claim.Name = "test-claim"
+	claim.Namespace = ns.Name
+	claim.Spec.TemplateRef.Name = template.Name
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	doneCh := make(chan struct {
+		done bool
+		err  error
+	}, 1)
+	go func() {
+		// Ensure Pod-name annotation precedes Ready status to avoid race conditions
+		done, err := framework.Watch[*sandboxv1alpha1.Sandbox](
+			ctx,
+			tc.ClusterClient,
+			schema.GroupVersionResource{
+				Group:    "agents.x-k8s.io",
+				Version:  "v1alpha1",
+				Resource: "sandboxes",
+			},
+			framework.WatchFilter{Namespace: ns.Name},
+			func(event watch.Event, sb *sandboxv1alpha1.Sandbox) (bool, error) {
+				if event.Type == watch.Deleted {
+					return false, nil
+				}
+
+				controllerRef := metav1.GetControllerOf(sb)
+				if controllerRef == nil || controllerRef.Kind != "SandboxClaim" || controllerRef.Name != claim.Name {
+					return false, nil
+				}
+
+				for _, cond := range sb.Status.Conditions {
+					if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+						if sb.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation] == "" {
+							return false, fmt.Errorf("observed adopted sandbox %s Ready=True without %s annotation", sb.Name, sandboxv1alpha1.SandboxPodNameAnnotation)
+						}
+						return true, nil
+					}
+				}
+
+				return false, nil
+			},
+		)
+		doneCh <- struct {
+			done bool
+			err  error
+		}{done: done, err: err}
+	}()
+
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
+
+	result := <-doneCh
+	require.NoError(t, result.err)
+	require.True(t, result.done, "expected to observe adopted sandbox becoming ready with pod-name annotation already set")
 }

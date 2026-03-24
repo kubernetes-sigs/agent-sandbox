@@ -11,7 +11,7 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
 
 1.  (If using Kind) Load the image into Kind:
     ```bash
-    kind load docker-image ghcr.io/openclaw/openclaw:latest
+    kind load docker-image ghcr.io/openclaw/openclaw:2026.3.23
     ```
 
 2.  Generate a secure token:
@@ -36,12 +36,7 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
 ## CLI Operations
 
 You can run OpenClaw CLI commands directly inside the sandbox container.
-Note: The entry point is `dist/index.mjs` in newer versions.
 
 ```bash
-# Check status
-kubectl exec -it openclaw-sandbox -- node dist/index.mjs channels status
-
-# Send a message (example)
-kubectl exec -it openclaw-sandbox -- node dist/index.mjs message send --channel discord --to <USER_ID> "Hello from Sandbox"
+kubectl exec -it openclaw-sandbox -- openclaw --help
 ```

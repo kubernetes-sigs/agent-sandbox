@@ -15,7 +15,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: openclaw
-          image: ghcr.io/openclaw/openclaw:latest
+          image: ghcr.io/openclaw/openclaw:2026.3.23
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

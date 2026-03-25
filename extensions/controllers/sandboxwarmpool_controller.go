@@ -434,14 +434,14 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 ) bool {
 	sandboxHash := sandbox.Labels[sandboxPodTemplateHash]
 
-	// If hashes match, it's fresh.
-	if sandboxHash == currentTemplateHash {
-		return false
-	}
-
 	// If the templateRefHash doesn't match, it's stale.
 	if sandbox.Labels[sandboxTemplateRefHash] != sandboxcontrollers.NameHash(template.Name) {
 		return true
+	}
+
+	// If hashes match, it's fresh.
+	if sandboxHash == currentTemplateHash {
+		return false
 	}
 
 	// Check if we've already evaluated this specific old version.

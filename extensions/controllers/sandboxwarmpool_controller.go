@@ -231,9 +231,10 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 
 	vettedHashes := make(map[string]bool)
 
+	// Default to OnReplenish if not specified
 	updateStrategy := warmPool.Spec.UpdateStrategy.Type
 	if updateStrategy == "" {
-		updateStrategy = extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType
+		updateStrategy = extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType
 	}
 
 	for _, sb := range sandboxes {
@@ -444,9 +445,16 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 		return false
 	}
 
+	// If the templateRefHash doesn't match, it's stale.
+	if sandbox.Labels[sandboxTemplateRefHash] != sandboxcontrollers.NameHash(template.Name) {
+		return true
+	}
+
 	// Check if we've already evaluated this specific old version.
-	if isStale, found := vettedHashes[sandboxHash]; found {
-		return isStale
+	if sandboxHash != "" {
+		if isStale, found := vettedHashes[sandboxHash]; found {
+			return isStale
+		}
 	}
 
 	// Perform Semantic DeepEqual on the Pod Spec only.
@@ -454,7 +462,9 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	isStale := !equality.Semantic.DeepEqual(&template.Spec.PodTemplate.Spec, &sandbox.Spec.PodTemplate.Spec)
 
 	// Save the result for the next sandbox with this same hash.
-	vettedHashes[sandboxHash] = isStale
+	if sandboxHash != "" {
+		vettedHashes[sandboxHash] = isStale
+	}
 
 	return isStale
 }
@@ -484,6 +494,7 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 
 // findWarmPoolsForTemplate returns a list of reconcile.Requests for all SandboxWarmPools that reference the template.
 func (r *SandboxWarmPoolReconciler) findWarmPoolsForTemplate(ctx context.Context, obj client.Object) []reconcile.Request {
+	log := log.FromContext(ctx)
 	template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
 	if !ok {
 		return nil
@@ -491,6 +502,7 @@ func (r *SandboxWarmPoolReconciler) findWarmPoolsForTemplate(ctx context.Context
 
 	warmPools := &extensionsv1alpha1.SandboxWarmPoolList{}
 	if err := r.List(ctx, warmPools, client.InNamespace(template.Namespace), client.MatchingFields{templateRefField: template.Name}); err != nil {
+		log.Error(err, "Failed to list warm pools for template", "template", template.Name)
 		return nil
 	}
 

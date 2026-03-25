@@ -45,16 +45,16 @@ type SandboxWarmPoolUpdateStrategyType string
 const (
 	// RecreateSandboxWarmPoolUpdateStrategyType indicates that stale pods are deleted immediately to ensure the pool only contains fresh pods.
 	RecreateSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "Recreate"
-	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale pods are only replaced when they are manually deleted.
+	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale pods are only replaced when they are manually deleted or when these stale pods are adopted by sandboxclaims and hence replaced by fresh pods.
 	OnReplenishSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "OnReplenish"
 )
 
 // SandboxWarmPoolUpdateStrategy defines the update strategy for the SandboxWarmPool.
 type SandboxWarmPoolUpdateStrategy struct {
 	// type indicates the type of the SandboxWarmPoolUpdateStrategy.
-	// Default is Recreate.
+	// Default is OnReplenish.
 	// +kubebuilder:validation:Enum=Recreate;OnReplenish
-	// +kubebuilder:default=Recreate
+	// +kubebuilder:default=OnReplenish
 	// +optional
 	Type SandboxWarmPoolUpdateStrategyType `json:"type,omitempty"`
 }

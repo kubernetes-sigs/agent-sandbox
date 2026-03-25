@@ -386,6 +386,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 		delete(adopted.Labels, warmPoolSandboxLabel)
 		delete(adopted.Labels, sandboxTemplateRefHash)
+		delete(adopted.Labels, sandboxPodTemplateHash)
 
 		// Transfer ownership from SandboxWarmPool to SandboxClaim
 		adopted.OwnerReferences = nil

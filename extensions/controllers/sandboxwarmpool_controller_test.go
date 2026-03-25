@@ -675,9 +675,9 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			expectedUpdatedImage: false,
 		},
 		{
-			name:                 "Default strategy (empty string) behaves like Recreate and updates all immediately",
+			name:                 "Default strategy (empty string) behaves like OnReplenish and does not update all immediately",
 			strategy:             "",
-			expectedUpdatedImage: true,
+			expectedUpdatedImage: false,
 		},
 	}
 
@@ -781,7 +781,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 				}
 				t.Log("Verified: All sandboxes updated immediately with Recreate strategy")
 			} else {
-				// For OnReplenish, all should still be v1
+				// For OnReplenish (default), all should still be v1
 				for _, sb := range sandboxes.Items {
 					require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image")
 					require.Equal(t, initialHash, sb.Labels[sandboxPodTemplateHash], "Sandbox should retain original template hash label")
@@ -818,6 +818,117 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 				t.Log("Verified: New sandbox picking up updated template during replenishment in OnReplenish mode")
 			}
 		})
+	}
+}
+
+func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName1 := "test-template-1"
+	templateName2 := "test-template-2"
+	replicas := int32(2)
+
+	// Create initial SandboxTemplate
+	template1 := &extensionsv1alpha1.SandboxTemplate{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: extensionsv1alpha1.GroupVersion.String(),
+			Kind:       "SandboxTemplate",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName1,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "image-v1",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName1,
+			},
+			UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
+				Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+			},
+		},
+	}
+
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(template1, warmPool).
+			Build(),
+		Scheme: scheme,
+	}
+
+	ctx := context.Background()
+
+	// Initial reconcile
+	err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	sandboxes := &sandboxv1alpha1.SandboxList{}
+	err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+	require.NoError(t, err)
+	require.Len(t, sandboxes.Items, int(replicas))
+
+	initialSandboxNames := make(map[string]bool)
+	for _, sb := range sandboxes.Items {
+		initialSandboxNames[sb.Name] = true
+	}
+
+	// Create new SandboxTemplate with SAME spec
+	template2 := &extensionsv1alpha1.SandboxTemplate{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: extensionsv1alpha1.GroupVersion.String(),
+			Kind:       "SandboxTemplate",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName2,
+			Namespace: poolNamespace,
+		},
+		Spec: *template1.Spec.DeepCopy(),
+	}
+	err = r.Create(ctx, template2)
+	require.NoError(t, err)
+
+	// Update WarmPool to point to template2
+	warmPool.Spec.TemplateRef.Name = templateName2
+	err = r.Update(ctx, warmPool)
+	require.NoError(t, err)
+
+	// Reconcile again to trigger rollout
+	err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	// Verify state after update
+	err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+	require.NoError(t, err)
+	require.Len(t, sandboxes.Items, int(replicas))
+
+	for _, sb := range sandboxes.Items {
+		// Sandboxes should be recreated (new names) because TemplateRef changed
+		require.False(t, initialSandboxNames[sb.Name], "Sandbox should have been recreated with new name")
+		require.Equal(t, sandboxcontrollers.NameHash(templateName2), sb.Labels[sandboxTemplateRefHash], "Sandbox should have updated template ref hash label")
+		// The pod spec is identical, so the image remains image-v1
+		require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image since spec is identical")
 	}
 }
 

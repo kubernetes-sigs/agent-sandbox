@@ -70,7 +70,7 @@ class SandboxClient(Generic[T]):
         # Downstream Kubernetes Configuration
         self.k8s_helper = K8sHelper()
         
-        # Tracks all the active client side connections to the Sandbox
+        # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         
         # Register global cleanup for all tracked sandboxes.
@@ -78,7 +78,8 @@ class SandboxClient(Generic[T]):
         atexit.register(self.delete_all)
 
     def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180) -> T:
-        """Provisions new infra and returns a tracked Sandbox handle.
+        """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
+           the underlying infrastructure.
         
         Example:
         
@@ -90,31 +91,33 @@ class SandboxClient(Generic[T]):
         
         try:
             self._create_claim(claim_name, template, namespace)
-            self._wait_for_sandbox_ready(claim_name, namespace, sandbox_ready_timeout)
+            # Resolve the sandbox id from the sandbox claim object.
+            # In case of warmpool, sandbox id is not the same as claim name.
+            sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, sandbox_ready_timeout)
+            self._wait_for_sandbox_ready(sandbox_id, namespace, sandbox_ready_timeout)
+            
+            pod_name = self._get_sandbox_pod_name(sandbox_id, namespace)
+
+            sandbox = self.sandbox_class(
+                claim_name=claim_name,
+                sandbox_id=sandbox_id,
+                namespace=namespace,
+                connection_config=self.connection_config,
+                tracer_config=self.tracer_config,
+                k8s_helper=self.k8s_helper,
+                pod_name=pod_name
+            )
         except Exception:
             # If creation or waiting fails, ensure we don't leave an orphaned claim
             self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
             raise
 
-        sandbox_object = self.k8s_helper.get_sandbox(claim_name, namespace) or {}
-        annotations = sandbox_object.get('metadata', {}).get('annotations', {})
-        pod_name = annotations.get(POD_NAME_ANNOTATION)
-
-        sandbox = self.sandbox_class(
-            sandbox_id=claim_name,
-            namespace=namespace,
-            connection_config=self.connection_config,
-            tracer_config=self.tracer_config,
-            k8s_helper=self.k8s_helper,
-            pod_name=pod_name
-        )
-        
         self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
         return sandbox
 
-    def get_sandbox(self, sandbox_id: str, namespace: str = "default") -> T:
+    def get_sandbox(self, claim_name: str, namespace: str = "default") -> T:
         """
-        Retrieves an existing sandbox handle. 
+        Retrieves an existing sandbox handle given a sandbox claim name. 
         If the handle is closed or missing, it re-attaches to the infrastructure.
         
         Example:
@@ -123,14 +126,20 @@ class SandboxClient(Generic[T]):
             >>> sandbox = client.get_sandbox("sandbox-claim-1234abcd")
             >>> sandbox.commands.run("ls -la")
         """
-        key = (namespace, sandbox_id)
+        key = (namespace, claim_name)
         existing = self._active_connection_sandboxes.get(key)
 
         # Check if the sandbox actually exists in Kubernetes
-        sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
-        if not sandbox_object:
+        try:
+            sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=5)
+            sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
+            if not sandbox_object:
+                raise RuntimeError(f"Underlying Sandbox '{sandbox_id}' not found.")
+        except Exception as e:
+            if existing:
+                existing._close_connection()
             self._active_connection_sandboxes.pop(key, None)
-            raise RuntimeError(f"Sandbox '{sandbox_id}' not found in namespace '{namespace}'")
+            raise RuntimeError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}")
 
         # If it's already in the registry and active (and verified on K8s), return the existing object
         if existing and existing.is_active:
@@ -140,11 +149,11 @@ class SandboxClient(Generic[T]):
         if existing and not existing.is_active:
             self._active_connection_sandboxes.pop(key, None)
 
-        annotations = sandbox_object.get('metadata', {}).get('annotations', {})
-        pod_name = annotations.get(POD_NAME_ANNOTATION)
+        pod_name = self._get_sandbox_pod_name(sandbox_id, namespace)
 
         # Re-attach: Create a fresh handle for the existing ID
         new_handle = self.sandbox_class(
+            claim_name=claim_name,
             sandbox_id=sandbox_id,
             namespace=namespace,
             connection_config=self.connection_config,
@@ -157,7 +166,7 @@ class SandboxClient(Generic[T]):
         return new_handle
     
     def list_active_sandboxes(self) -> List[Tuple[str, str]]:
-        """Returns a list of tuples containing (namespace, sandbox_id) currently managed by this client.
+        """Returns a list of tuples containing (namespace, claim_name) currently managed by this client.
         
         Example:
         
@@ -174,7 +183,7 @@ class SandboxClient(Generic[T]):
       
     def list_all_sandboxes(self, namespace: str = "default") -> List[str]:
         """
-        Lists all Sandbox IDs currently existing in the Kubernetes cluster 
+        Lists all SandboxClaim names currently existing in the Kubernetes cluster 
         for the given namespace.
         
         Example:
@@ -183,25 +192,25 @@ class SandboxClient(Generic[T]):
             >>> print(client.list_all_sandboxes(namespace="default"))
             ['sandbox-claim-1234abcd', 'sandbox-claim-5678efgh']
         """
-        return self.k8s_helper.list_sandboxes(namespace)
+        return self.k8s_helper.list_sandbox_claims(namespace)
 
-    def delete_sandbox(self, sandbox_id: str, namespace: str = "default"):
+    def delete_sandbox(self, claim_name: str, namespace: str = "default"):
         """Stops the client side connection and deletes the Kubernetes resources.
         
         Example:
         
             >>> client = SandboxClient()
             >>> sandbox = client.create_sandbox("python-sandbox-template")
-            >>> client.delete_sandbox(sandbox.id)
+            >>> client.delete_sandbox(sandbox.claim_name)
         """
-        key = (namespace, sandbox_id)
+        key = (namespace, claim_name)
         sandbox = self._active_connection_sandboxes.get(key)
         if sandbox:
             sandbox.terminate()
             self._active_connection_sandboxes.pop(key, None)
         else:
             # If not in registry, attempt a blind delete via K8s helper
-            self.k8s_helper.delete_sandbox_claim(sandbox_id, namespace)
+            self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
             
     def delete_all(self):
         """
@@ -216,15 +225,21 @@ class SandboxClient(Generic[T]):
             >>> client.delete_all()
         """
         # We iterate over items to get access to the sandbox object's metadata
-        for (ns, sb_id), sandbox in list(self._active_connection_sandboxes.items()):
+        for (ns, claim_name), sandbox in list(self._active_connection_sandboxes.items()):
             try:
                 # We pass the specific namespace stored in the Sandbox handle
-                self.delete_sandbox(sb_id, namespace=sandbox.namespace)
+                self.delete_sandbox(claim_name, namespace=sandbox.namespace)
             except Exception as e:
                 # We use sandbox.namespace in the log for better debugging
                 logging.error(
-                    f"Cleanup failed for {sb_id} in namespace {sandbox.namespace}: {e}"
+                    f"Cleanup failed for {claim_name} in namespace {sandbox.namespace}: {e}"
                 )
+
+    def _get_sandbox_pod_name(self, sandbox_id: str, namespace: str) -> str:
+        """Fetches the Sandbox object from Kubernetes and retrieves its pod name."""
+        sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace) or {}
+        annotations = sandbox_object.get('metadata', {}).get('annotations', {})
+        return annotations.get(POD_NAME_ANNOTATION) or sandbox_id
     
     @trace_span("create_claim")
     def _create_claim(self, claim_name: str, template_name: str, namespace: str):
@@ -242,6 +257,6 @@ class SandboxClient(Generic[T]):
         self.k8s_helper.create_sandbox_claim(claim_name, template_name, namespace, annotations)
 
     @trace_span("wait_for_sandbox_ready")
-    def _wait_for_sandbox_ready(self, claim_name: str, namespace: str, timeout: int):
+    def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
-        self.k8s_helper.wait_for_sandbox_ready(claim_name, namespace, timeout)
+        self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)

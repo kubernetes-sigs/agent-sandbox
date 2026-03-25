@@ -9,7 +9,7 @@ Router, while maintaining a convenient **Developer Mode** for local testing.
 
 ## Architecture
 
-The client operates in two modes:
+The client operates in three modes:
 
 1.  **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
     -> Router Service -> Sandbox Pod. This supports high-scale deployments.
@@ -30,7 +30,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
 
 1.  **Build and Push the Router Image:**
 
-    For both Gateway Mode and Tunnel mode, follow the instructions in [sandbox-router](sandbox-router/README.md)
+    For both Gateway Mode and Tunnel Mode, follow the instructions in [sandbox-router](sandbox-router/README.md)
     to build, push, and apply the router image and resources.
 
 2.  **Create a Sandbox Template:**
@@ -51,55 +51,58 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     source .venv/bin/activate
     ```
 
-2.  **Option 1: Install from PyPI (Recommended):**
+2.  **Install Agent Sandbox Client**
+    
 
-    The package is available on [PyPI](https://pypi.org/project/k8s-agent-sandbox/) as `k8s-agent-sandbox`.
+    * **Option 1: Install from PyPI (Recommended):**
 
-    ```bash
-    pip install k8s-agent-sandbox
-    ```
+        The package is available on [PyPI](https://pypi.org/project/k8s-agent-sandbox/) as `k8s-agent-sandbox`.
 
-    If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
-    install with the optional tracing dependencies:
+        ```bash
+        pip install k8s-agent-sandbox
+        ```
 
-    ```bash
-    pip install "k8s-agent-sandbox[tracing]"
-    ```
+        If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace), install with the optional tracing dependencies:
 
-3.  **Option 2: Install from source via git:**
+        ```bash
+        pip install "k8s-agent-sandbox[tracing]"
+        ```
 
-    ```bash
-    # Replace "main" with a specific version tag (e.g., "v0.1.0") from
-    # https://github.com/kubernetes-sigs/agent-sandbox/releases to pin a version tag.
-    export VERSION="main"
 
-    pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
-    ```
+    * **Option 2: Install from source via git:**
 
-**Note**: This package uses `setuptools-scm` for dynamic versioning. For Option 2 and Option 3, when installing locally, you may notice the version increment if your local repository has uncommitted changes or is ahead of the last tagged release. This is expected behavior to ensure unique versioning during development.
+        ```bash
+        # Replace "main" with a specific version tag (e.g., "v0.1.0") from
+        # https://github.com/kubernetes-sigs/agent-sandbox/releases to pin a version tag.
+        export VERSION="main"
 
-4.  **Option 3: Install from source in editable mode:**
+        pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@${VERSION}#subdirectory=clients/python/agentic-sandbox-client"
+        ```
 
-    If you have not already done so, first clone this repository:
+        **Note**: This package uses `setuptools-scm` for dynamic versioning. For Option 2 and Option 3, when installing locally, you may notice the version increment if your local repository has uncommitted changes or is ahead of the last tagged release. This is expected behavior to ensure unique versioning during development.
 
-    ```bash
-    cd ~
-    git clone https://github.com/kubernetes-sigs/agent-sandbox.git
-    cd agent-sandbox/clients/python/agentic-sandbox-client
-    ```
+    * **Option 3: Install from source in editable mode:**
 
-    And then install the agentic-sandbox-client into your activated .venv:
+        If you have not already done so, first clone this repository:
 
-    ```bash
-    pip install -e .
-    ```
+        ```bash
+        cd ~
+        git clone https://github.com/kubernetes-sigs/agent-sandbox.git
+        cd agent-sandbox/clients/python/agentic-sandbox-client
+        ```
 
-    If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
-    install with the optional tracing dependencies:
+        And then install the agentic-sandbox-client into your activated .venv:
 
-    ```
-    pip install -e ".[tracing]"
-    ```
+        ```bash
+        pip install -e .
+        ```
+
+        If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
+        install with the optional tracing dependencies:
+
+        ```
+        pip install -e ".[tracing]"
+        ```
 
 ## Usage Examples
 

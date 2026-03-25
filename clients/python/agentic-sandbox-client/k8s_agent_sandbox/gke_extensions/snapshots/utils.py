@@ -14,6 +14,7 @@
 
 import logging
 from typing import Any
+from kubernetes.client import ApiException
 from kubernetes import watch
 from pydantic import BaseModel
 from k8s_agent_sandbox.constants import (
@@ -24,6 +25,14 @@ from k8s_agent_sandbox.constants import (
 
 logger = logging.getLogger(__name__)
 
+SNAPSHOT_SUCCESS_CODE = 0
+SNAPSHOT_ERROR_CODE = 1
+
+class RestoreCheckResult(BaseModel):
+    """Result of a restore check operation."""
+    success: bool
+    error_reason: str
+    error_code: int
 
 class SnapshotResult(BaseModel):
     """Result of a snapshot processing operation."""
@@ -120,3 +129,70 @@ def wait_for_snapshot_to_be_completed(
     raise TimeoutError(
         f"Snapshot manual trigger '{trigger_name}' was not processed within {podsnapshot_timeout} seconds."
     )
+
+def check_pod_restored_from_snapshot(
+    k8s_helper,
+    namespace: str,
+    pod_name: str,
+    snapshot_uid: str,
+) -> RestoreCheckResult:
+    """Checks if a pod was restored from the provided snapshot."""
+    try:
+        pod = k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
+
+        if not pod.status or not pod.status.conditions:
+            return RestoreCheckResult(
+                success=False,
+                error_reason="Pod status or conditions not found.",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+
+        for condition in pod.status.conditions:
+            if condition.type == "PodRestored":
+                if condition.status == "True":
+                    # Check if Snapshot UID is present in the condition.message
+                    if condition.message and snapshot_uid in condition.message:
+                        return RestoreCheckResult(
+                            success=True,
+                            error_reason="",
+                            error_code=SNAPSHOT_SUCCESS_CODE,
+                        )
+                    else:
+                        return RestoreCheckResult(
+                            success=False,
+                            error_reason="Pod was not restored from the given snapshot",
+                            error_code=SNAPSHOT_ERROR_CODE,
+                        )
+                else:
+                    reason_val = condition.reason or ""
+                    msg_val = condition.message or ""
+                    reason = f" reason: '{reason_val}'"
+                    msg = f" message: '{msg_val}'"
+                    return RestoreCheckResult(
+                        success=False,
+                        error_reason=f"Restore attempted but pending or failed (status: '{condition.status}'{reason}{msg})",
+                        error_code=SNAPSHOT_ERROR_CODE,
+                    )
+
+        return RestoreCheckResult(
+            success=False,
+            error_reason="Pod was started as a fresh instance",
+            error_code=SNAPSHOT_ERROR_CODE,
+        )
+
+    except ApiException as e:
+        logger.error(f"Failed to check pod restore status: {e}")
+        return RestoreCheckResult(
+            success=False,
+            error_reason=f"Failed to check pod restore status: {e}",
+            error_code=SNAPSHOT_ERROR_CODE,
+        )
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error during restore check for snapshot UID '{snapshot_uid}': {e}"
+        )
+        return RestoreCheckResult(
+            success=False,
+            error_reason=f"Unexpected error: {e}",
+            error_code=SNAPSHOT_ERROR_CODE,
+        )

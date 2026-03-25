@@ -136,22 +136,22 @@ def run_sandbox_tests(sandbox: Sandbox):
 def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
     sandbox = client.create_sandbox(template_name, namespace=namespace)
-    print(f"Sandbox created with ID: {sandbox.id}")
+    print(f"Sandbox created with claim name: {sandbox.claim_name}")
 
     print(f"Creating second sandbox with template '{template_name}' in namespace '{namespace}'...")
     sandbox2 = client.create_sandbox(template_name, namespace=namespace)
-    print(f"Sandbox 2 created with ID: {sandbox2.id}")
+    print(f"Sandbox 2 created with claim name: {sandbox2.claim_name}")
 
     print("\n--- Verifying Active Sandboxes ---")
     active_sandboxes = client.list_active_sandboxes()
     print(f"Active sandboxes: {active_sandboxes}")
-    assert (sandbox.namespace, sandbox.id) in active_sandboxes
-    assert (sandbox2.namespace, sandbox2.id) in active_sandboxes
+    assert (sandbox.namespace, sandbox.claim_name) in active_sandboxes
+    assert (sandbox2.namespace, sandbox2.claim_name) in active_sandboxes
 
     # Test get_sandbox
     print("\n--- Testing get_sandbox ---")
-    reattached_sandbox = client.get_sandbox(sandbox.id, namespace=namespace)
-    print(f"Re-attached to sandbox: {reattached_sandbox.id}")
+    reattached_sandbox = client.get_sandbox(sandbox.claim_name, namespace=namespace)
+    print(f"Re-attached to sandbox: {reattached_sandbox.claim_name}")
 
     # Verify it is the same sandbox
     assert sandbox is reattached_sandbox, "Expected same sandbox objects"
@@ -167,30 +167,30 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     run_sandbox_tests(sandbox)
 
     print("\n--- Testing Termination and Get ---")
-    print(f"Terminating sandbox {sandbox.id}...")
+    print(f"Terminating sandbox {sandbox.claim_name}...")
     sandbox.terminate()
     
-    client.delete_sandbox(sandbox.id, namespace=namespace)
+    client.delete_sandbox(sandbox.claim_name, namespace=namespace)
     
-    print(f"Attempting to get terminated sandbox {sandbox.id}...")
+    print(f"Attempting to get terminated sandbox {sandbox.claim_name}...")
     # Wait for K8s to fully delete the resource
     start_time = time.time()
     while True:
         try:
-            client.get_sandbox(sandbox.id, namespace=namespace)
+            client.get_sandbox(sandbox.claim_name, namespace=namespace)
             if time.time() - start_time > 60:
-                raise AssertionError(f"Sandbox {sandbox.id} was not deleted within timeout")
+                raise AssertionError(f"Sandbox {sandbox.claim_name} was not deleted within timeout")
             print("Sandbox still exists, waiting...")
             time.sleep(2)
         except RuntimeError as e:
             print(f"Caught expected RuntimeError: {e}")
-            assert f"Sandbox '{sandbox.id}' not found" in str(e)
+            assert "not found" in str(e)
             break
     print("--- Termination and Get Test Passed ---")
 
     print("\n--- Testing delete_all ---")
     # Ensure sandbox2 is still active
-    assert (sandbox2.namespace, sandbox2.id) in client.list_active_sandboxes()
+    assert (sandbox2.namespace, sandbox2.claim_name) in client.list_active_sandboxes()
     
     print("Calling client.delete_all()...")
     client.delete_all()
@@ -217,14 +217,14 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     start_time = time.time()
     while True:
         try:
-            client.get_sandbox(sandbox2.id, namespace=namespace)
+            client.get_sandbox(sandbox2.claim_name, namespace=namespace)
             if time.time() - start_time > 60:
-                raise AssertionError(f"Sandbox {sandbox2.id} was not deleted within timeout")
+                raise AssertionError(f"Sandbox {sandbox2.claim_name} was not deleted within timeout")
             print("Sandbox still exists, waiting...")
             time.sleep(2)
         except RuntimeError as e:
             print(f"Caught expected RuntimeError: {e}")
-            assert f"Sandbox '{sandbox2.id}' not found" in str(e)
+            assert "not found" in str(e)
             break
     print("--- Sandbox 2 Retrieval Failure Verified ---")
 

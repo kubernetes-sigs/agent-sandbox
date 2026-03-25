@@ -38,6 +38,7 @@ class Sandbox:
     """
     def __init__(
         self,
+        claim_name: str,
         sandbox_id: str,
         namespace: str = "default",
         connection_config: SandboxConnectionConfig | None = None,
@@ -46,21 +47,20 @@ class Sandbox:
         pod_name: str | None = None,
     ):
         # Sandbox Related Configuration
-        self.id = sandbox_id
+        self.claim_name = claim_name
+        self.sandbox_id = sandbox_id
+        self.pod_name = pod_name or sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
         
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
         
-        # Save Pod name
-        self.pod_name = pod_name or self.id
-        if pod_name:
-            logging.info(f"Using pod name: {self.pod_name}")
+        logging.info(f"Using pod name: {self.pod_name}")
 
         # Establish Sandbox Connection
         self.connector = SandboxConnector(
-            sandbox_id=self.id,
+            sandbox_id=self.sandbox_id,
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper
@@ -113,7 +113,7 @@ class Sandbox:
                 logging.error(f"Failed to end tracing span: {e}")
         
         self._is_closed = True
-        logging.info(f"Connection to sandbox '{self.id}' has been closed.")
+        logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
     def terminate(self):
         """Permanent deletion of all server side infrastructure and client side connection."""
@@ -121,6 +121,6 @@ class Sandbox:
         self._close_connection()
         
         # Delete this Sandbox
-        self.k8s_helper.delete_sandbox_claim(self.id, self.namespace)
+        self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
  

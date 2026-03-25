@@ -47,12 +47,10 @@ class SnapshotEngine:
 
     def __init__(
         self,
-        sandbox_id: str,
         namespace: str,
         k8s_helper,
         pod_name: str,
     ):
-        self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.k8s_helper = k8s_helper
         self.pod_name = pod_name
@@ -155,6 +153,7 @@ class SnapshotEngine:
 
     def delete_manual_triggers(self):
         """Cleans up the manual trigger related resources created by this Sandbox."""
+        remaining_triggers = []
         for trigger_name in self.created_manual_triggers:
             try:
                 self.k8s_helper.custom_objects_api.delete_namespaced_custom_object(
@@ -172,8 +171,10 @@ class SnapshotEngine:
                 logger.error(
                     f"Failed to delete PodSnapshotManualTrigger '{trigger_name}': {e}"
                 )
+                remaining_triggers.append(trigger_name)
             except Exception as e:
                 logger.error(
                     f"Unexpected error while deleting PodSnapshotManualTrigger '{trigger_name}': {e}"
                 )
-        self.created_manual_triggers.clear()
+                remaining_triggers.append(trigger_name)
+        self.created_manual_triggers = remaining_triggers

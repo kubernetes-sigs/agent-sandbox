@@ -43,8 +43,10 @@ class TestSandbox(unittest.TestCase):
 
         self.sandbox_id = "test-sandbox"
         self.namespace = "test-namespace"
+        self.claim_name = "test-claim"
 
         self.sandbox = Sandbox(
+            claim_name=self.claim_name,
             sandbox_id=self.sandbox_id,
             namespace=self.namespace,
         )
@@ -66,7 +68,8 @@ class TestSandbox(unittest.TestCase):
         self.mock_command_executor_cls.assert_called_once_with(self.mock_connector, self.mock_tracer, 'sandbox-client')
         self.mock_filesystem_cls.assert_called_once_with(self.mock_connector, self.mock_tracer, 'sandbox-client')
 
-        self.assertEqual(self.sandbox.id, self.sandbox_id)
+        self.assertEqual(self.sandbox.claim_name, self.claim_name)
+        self.assertEqual(self.sandbox.sandbox_id, self.sandbox_id)
         self.assertEqual(self.sandbox.namespace, self.namespace)
         self.assertEqual(self.sandbox.pod_name, self.sandbox_id)
         self.assertFalse(self.sandbox._is_closed)
@@ -87,6 +90,7 @@ class TestSandbox(unittest.TestCase):
         sandbox = Sandbox(
             sandbox_id="custom-id",
             namespace="custom-ns",
+            claim_name="custom-claim",
             connection_config=mock_connection_config,
             tracer_config=mock_tracer_config,
             k8s_helper=mock_k8s_helper_instance,
@@ -150,7 +154,7 @@ class TestSandbox(unittest.TestCase):
             self.sandbox.terminate()
             mock_close.assert_called_once()
 
-        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(self.sandbox_id, self.namespace)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(self.claim_name, self.namespace)
 
 if __name__ == '__main__':
     unittest.main()

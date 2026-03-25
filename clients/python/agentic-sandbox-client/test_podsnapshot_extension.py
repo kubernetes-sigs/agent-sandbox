@@ -111,6 +111,15 @@ def main(
         recent_snapshot_uid = snapshot_response.snapshot_uid
         print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
+        print(f"\nChecking if sandbox was restored from snapshot '{recent_snapshot_uid}'...")
+        restored_sandbox = client.create_sandbox(template_name, namespace=namespace)
+        restore_result = restored_sandbox.is_restored_from_snapshot(recent_snapshot_uid)
+        assert restore_result.success, restore_result.error_reason
+        print("Pod was restored from the most recent snapshot.")
+
+        # The sandbox wasn't restored from this newly created snapshot, so we expect success=False
+        assert not restore_result.success, "Expected sandbox to NOT be restored from the newly created snapshot"
+
         print("--- Pod Snapshot Test Passed! ---")
 
     except Exception as e:

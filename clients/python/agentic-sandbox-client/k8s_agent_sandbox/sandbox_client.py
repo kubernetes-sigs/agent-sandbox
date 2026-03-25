@@ -205,12 +205,18 @@ class SandboxClient(Generic[T]):
         """
         key = (namespace, claim_name)
         sandbox = self._active_connection_sandboxes.get(key)
-        if sandbox:
+        try:
+            if not sandbox:
+                sandbox = self.get_sandbox(claim_name, namespace=namespace)
             sandbox.terminate()
-            self._active_connection_sandboxes.pop(key, None)
-        else:
-            # If not in registry, attempt a blind delete via K8s helper
+        except Exception as e:
+            # If we cannot retrieve the full sandbox handle, attempt a blind delete via K8s helper
+            logging.warning(
+                f"Could not retrieve full sandbox handle for '{claim_name}', attempting blind delete: {e}"
+            )
             self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
+        finally:
+            self._active_connection_sandboxes.pop(key, None)
             
     def delete_all(self):
         """

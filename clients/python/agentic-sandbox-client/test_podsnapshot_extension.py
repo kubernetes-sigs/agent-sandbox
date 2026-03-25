@@ -18,6 +18,7 @@ Integration test for PodSnapshotSandboxClient.
 
 import argparse
 import time
+import logging
 from kubernetes import config
 from k8s_agent_sandbox.gke_extensions.snapshots.podsnapshot_client import PodSnapshotSandboxClient
 from k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine import SnapshotResponse
@@ -29,7 +30,7 @@ from k8s_agent_sandbox.models import (
 
 WAIT_TIME_SECONDS = 10
 
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: str):
     assert hasattr(
         snapshot_response, "trigger_name"

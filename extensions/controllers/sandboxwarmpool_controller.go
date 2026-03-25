@@ -280,7 +280,7 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	template, tmplErr := r.getTemplate(ctx, warmPool)
 	var currentPodTemplateHash string
 	if tmplErr == nil {
-		currentPodTemplateHash = r.computePodTemplateHash(template)
+		currentPodTemplateHash = r.computePodTemplateHash(ctx, template)
 	} else {
 		log.Error(tmplErr, "Failed to get sandbox template", "templateRef", warmPool.Spec.TemplateRef.Name)
 	}
@@ -413,17 +413,11 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 	return template, nil
 }
 
-// computePodTemplateHash computes a hash of the sandbox template's PodTemplate.
-func (r *SandboxWarmPoolReconciler) computePodTemplateHash(template *extensionsv1alpha1.SandboxTemplate) string {
-	data := struct {
-		Name        string                      `json:"name"`
-		PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate"`
-	}{
-		Name:        template.Name,
-		PodTemplate: template.Spec.PodTemplate,
-	}
-	specJSON, err := json.Marshal(data)
+// computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
+func (r *SandboxWarmPoolReconciler) computePodTemplateHash(ctx context.Context, template *extensionsv1alpha1.SandboxTemplate) string {
+	specJSON, err := json.Marshal(template.Spec.PodTemplate)
 	if err != nil {
+		log.FromContext(ctx).Error(err, "Failed to marshal pod template for hashing")
 		return ""
 	}
 	return sandboxcontrollers.NameHash(string(specJSON))

@@ -229,8 +229,6 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 	var activeSandboxes []sandboxv1alpha1.Sandbox
 	var allErrors error
 
-	vettedHashes := make(map[string]bool)
-
 	// Default to OnReplenish if not specified
 	updateStrategy := warmPool.Spec.UpdateStrategy.Type
 	if updateStrategy == "" {
@@ -251,7 +249,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 			continue
 		}
 
-		if updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType && tmplErr == nil && r.isSandboxStale(&sb, template, currentPodTemplateHash, vettedHashes) {
+		if updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType && tmplErr == nil && r.isSandboxStale(&sb, template, currentPodTemplateHash) {
 			log.Info("Deleting stale sandbox from pool", "sandbox", sb.Name)
 			if err := r.Delete(ctx, &sb); err != nil {
 				log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
@@ -424,13 +422,10 @@ func (r *SandboxWarmPoolReconciler) computePodTemplateHash(ctx context.Context, 
 }
 
 // isSandboxStale checks if the sandbox version matches the current template.
-// It uses a cache (vettedHashes) to avoid repeated expensive DeepEqual calls
-// for sandboxes with the same hash.
 func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	sandbox *sandboxv1alpha1.Sandbox,
 	template *extensionsv1alpha1.SandboxTemplate,
 	currentTemplateHash string,
-	vettedHashes map[string]bool,
 ) bool {
 	sandboxHash := sandbox.Labels[sandboxPodTemplateHash]
 
@@ -439,28 +434,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 		return true
 	}
 
-	// If hashes match, it's fresh.
-	if sandboxHash == currentTemplateHash {
-		return false
-	}
-
-	// Check if we've already evaluated this specific old version.
-	if sandboxHash != "" {
-		if isStale, found := vettedHashes[sandboxHash]; found {
-			return isStale
-		}
-	}
-
-	// Perform Semantic DeepEqual on the Pod Spec only.
-	// We ignore metadata/labels here to avoid false positives from runtime labels.
-	isStale := !equality.Semantic.DeepEqual(&template.Spec.PodTemplate.Spec, &sandbox.Spec.PodTemplate.Spec)
-
-	// Save the result for the next sandbox with this same hash.
-	if sandboxHash != "" {
-		vettedHashes[sandboxHash] = isStale
-	}
-
-	return isStale
+	return sandboxHash != currentTemplateHash
 }
 
 // SetupWithManager sets up the controller with the Manager

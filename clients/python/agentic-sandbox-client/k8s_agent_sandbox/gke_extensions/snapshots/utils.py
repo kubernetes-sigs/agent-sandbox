@@ -160,7 +160,7 @@ def check_pod_restored_from_snapshot(
                     else:
                         return RestoreCheckResult(
                             success=False,
-                            error_reason="Pod was not restored from the given snapshot",
+                            error_reason=f"Pod was not restored from the given snapshot '{snapshot_uid}'. Actual condition message: '{condition.message}'",
                             error_code=SNAPSHOT_ERROR_CODE,
                         )
                 else:

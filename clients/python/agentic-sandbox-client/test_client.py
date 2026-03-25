@@ -14,6 +14,7 @@
 
 import argparse
 import time
+import logging
 from unittest.mock import MagicMock
 from pydantic import ValidationError
 from k8s_agent_sandbox import SandboxClient
@@ -27,7 +28,8 @@ from k8s_agent_sandbox.models import (
 )
 from k8s_agent_sandbox.sandbox import Sandbox
 
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+ 
 def run_sandbox_tests(sandbox: Sandbox):
     """Tests methods on the Sandbox object (execution, files, etc)."""
     print("\n--- Testing Command Execution ---")

@@ -48,9 +48,6 @@ const (
 
 	// sandboxPodTemplateHash tracks the specific version/content of the template.
 	sandboxPodTemplateHash = "agents.x-k8s.io/sandbox-pod-template-hash"
-
-	// templateRefField is the field used for indexing SandboxWarmPools by their template reference name.
-	templateRefField = ".spec.templateRef.Name"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
@@ -171,11 +168,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	warmPool.Status.ReadyReplicas = readyReplicas
 
 	// Create new sandboxes if we need more
-	if currentReplicas < desiredReplicas {
-		if tmplErr != nil {
-			return errors.Join(allErrors, tmplErr)
-		}
-
+	if currentReplicas < desiredReplicas && tmplErr == nil {
 		sandboxesToCreate := desiredReplicas - currentReplicas
 		log.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 
@@ -212,6 +205,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 
+	if tmplErr != nil && !k8serrors.IsNotFound(tmplErr) {
+		allErrors = errors.Join(allErrors, tmplErr)
+	}
+
 	return allErrors
 }
 
@@ -231,9 +228,20 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 
 	vettedHashes := make(map[string]bool)
 
-	// Default to OnReplenish if not specified
-	updateStrategy := warmPool.Spec.UpdateStrategy.Type
-	if updateStrategy == "" {
+	// Determine the update strategy, defaulting to OnReplenish if not specified or unknown.
+	var updateStrategyType extensionsv1alpha1.SandboxWarmPoolUpdateStrategyType
+	if warmPool.Spec.UpdateStrategy != nil {
+		updateStrategyType = warmPool.Spec.UpdateStrategy.Type
+	}
+
+	var updateStrategy extensionsv1alpha1.SandboxWarmPoolUpdateStrategyType
+	switch updateStrategyType {
+	case extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType:
+		updateStrategy = extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType
+	case extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType, "":
+		updateStrategy = extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	default:
+		log.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", updateStrategyType)
 		updateStrategy = extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType
 	}
 
@@ -251,7 +259,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 			continue
 		}
 
-		if updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType && tmplErr == nil && r.isSandboxStale(&sb, template, currentPodTemplateHash, vettedHashes) {
+		if updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType && tmplErr == nil && r.isSandboxStale(ctx, &sb, template, currentPodTemplateHash, vettedHashes) {
 			log.Info("Deleting stale sandbox from pool", "sandbox", sb.Name)
 			if err := r.Delete(ctx, &sb); err != nil {
 				log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
@@ -280,9 +288,11 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	template, tmplErr := r.getTemplate(ctx, warmPool)
 	var currentPodTemplateHash string
 	if tmplErr == nil {
-		currentPodTemplateHash = r.computePodTemplateHash(ctx, template)
-	} else {
-		log.Error(tmplErr, "Failed to get sandbox template", "templateRef", warmPool.Spec.TemplateRef.Name)
+		currentPodTemplateHash, tmplErr = r.computePodTemplateHash(template)
+	}
+
+	if tmplErr != nil {
+		log.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
 	}
 	return template, currentPodTemplateHash, tmplErr
 }
@@ -333,23 +343,8 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 		},
 	}
 
-	// Enforce a secure-by-default policy by disabling the automatic mounting
-	// of the service account token for warm pool sandboxes.
-	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
-		automount := false
-		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
-	}
-
-	// Enforce DNS secure-by-default for warm pool sandboxes.
-	management := template.Spec.NetworkPolicyManagement
-	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
-	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
-	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
-		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
-		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
-			Nameservers: []string{"8.8.8.8", "1.1.1.1"},
-		}
-	}
+	// Apply secure defaults to the sandbox pod spec
+	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
 	// Set controller reference so the Sandbox is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, sandbox, r.Scheme); err != nil {
@@ -414,22 +409,22 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 }
 
 // computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
-func (r *SandboxWarmPoolReconciler) computePodTemplateHash(ctx context.Context, template *extensionsv1alpha1.SandboxTemplate) string {
+func (r *SandboxWarmPoolReconciler) computePodTemplateHash(template *extensionsv1alpha1.SandboxTemplate) (string, error) {
 	specJSON, err := json.Marshal(template.Spec.PodTemplate)
 	if err != nil {
-		log.FromContext(ctx).Error(err, "Failed to marshal pod template for hashing")
-		return ""
+		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
 	}
-	return sandboxcontrollers.NameHash(string(specJSON))
+	return sandboxcontrollers.NameHash(string(specJSON)), nil
 }
 
 // isSandboxStale checks if the sandbox version matches the current template.
 // It uses a cache (vettedHashes) to avoid repeated expensive DeepEqual calls
 // for sandboxes with the same hash.
 func (r *SandboxWarmPoolReconciler) isSandboxStale(
+	ctx context.Context,
 	sandbox *sandboxv1alpha1.Sandbox,
 	template *extensionsv1alpha1.SandboxTemplate,
-	currentTemplateHash string,
+	currentPodTemplateHash string,
 	vettedHashes map[string]bool,
 ) bool {
 	sandboxHash := sandbox.Labels[sandboxPodTemplateHash]
@@ -440,7 +435,15 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	}
 
 	// If hashes match, it's fresh.
-	if sandboxHash == currentTemplateHash {
+	if sandboxHash != "" && sandboxHash == currentPodTemplateHash {
+		return false
+	}
+
+	// If currentPodTemplateHash is empty, it means we failed to compute it.
+	// In this case, we should log an error and treat it as NOT stale to avoid
+	// mass-deleting existing sandboxes due to a marshal failure.
+	if currentPodTemplateHash == "" {
+		log.FromContext(ctx).Error(nil, "currentPodTemplateHash is empty, skipping staleness check", "sandbox", sandbox.Name)
 		return false
 	}
 
@@ -452,8 +455,9 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	}
 
 	// Perform Semantic DeepEqual on the Pod Spec only.
-	// We ignore metadata/labels here to avoid false positives from runtime labels.
-	isStale := !equality.Semantic.DeepEqual(&template.Spec.PodTemplate.Spec, &sandbox.Spec.PodTemplate.Spec)
+	// We normalize the pod spec by applying the same secure defaults
+	// used during creation to avoid false positives from controller-injected fields.
+	isStale := !r.comparePodSpecs(template, &sandbox.Spec.PodTemplate.Spec)
 
 	// Save the result for the next sandbox with this same hash.
 	if sandboxHash != "" {
@@ -463,9 +467,22 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	return isStale
 }
 
+// comparePodSpecs checks if the pod spec in the sandbox is semantically equal to the template,
+// normalizing for fields that the controller populates by default.
+func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1alpha1.SandboxTemplate, actualSandboxSpec *corev1.PodSpec) bool {
+	// Create what the sandbox SHOULD look like if it were created from the current template.
+	expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+	ApplySandboxSecureDefaults(template, expectedSpec)
+
+	// Compare the actual sandbox spec to the expected "perfect" spec.
+	// Since both have now undergone the exact same defaulting logic,
+	// any remaining difference is a TRUE template drift.
+	return equality.Semantic.DeepEqual(expectedSpec, actualSandboxSpec)
+}
+
 // SetupWithManager sets up the controller with the Manager
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxWarmPool{}, templateRefField, func(rawObj client.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxWarmPool{}, extensionsv1alpha1.TemplateRefField, func(rawObj client.Object) []string {
 		wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)
 		if wp.Spec.TemplateRef.Name == "" {
 			return nil
@@ -495,12 +512,12 @@ func (r *SandboxWarmPoolReconciler) findWarmPoolsForTemplate(ctx context.Context
 	}
 
 	warmPools := &extensionsv1alpha1.SandboxWarmPoolList{}
-	if err := r.List(ctx, warmPools, client.InNamespace(template.Namespace), client.MatchingFields{templateRefField: template.Name}); err != nil {
+	if err := r.List(ctx, warmPools, client.InNamespace(template.Namespace), client.MatchingFields{extensionsv1alpha1.TemplateRefField: template.Name}); err != nil {
 		log.Error(err, "Failed to list warm pools for template", "template", template.Name)
 		return nil
 	}
 
-	var requests []reconcile.Request
+	requests := make([]reconcile.Request, 0, len(warmPools.Items))
 	for _, wp := range warmPools.Items {
 		requests = append(requests, reconcile.Request{
 			NamespacedName: types.NamespacedName{

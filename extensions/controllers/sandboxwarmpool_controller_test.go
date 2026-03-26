@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func newTestScheme() *runtime.Scheme {
 func createPoolSandbox(poolName, namespace, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, suffix string) *sandboxv1alpha1.Sandbox {
 	replicas := int32(1)
 	templateRefHash := ""
-	podTemplateHash := "initial-pod-hash" // Default placeholder for tests
+	var podTemplateHash string
 	var podSpec corev1.PodSpec
 
 	if template != nil {
@@ -54,6 +55,9 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 		// If template has a version label, we could use it as part of the hash placeholder
 		if v, ok := template.Spec.PodTemplate.ObjectMeta.Labels["version"]; ok {
 			podTemplateHash = "pod-hash-" + v
+		} else {
+			specJSON, _ := json.Marshal(template.Spec.PodTemplate)
+			podTemplateHash = sandboxcontrollers.NameHash(string(specJSON))
 		}
 	} else {
 		// Fallback for tests that don't provide a template
@@ -65,6 +69,8 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 				},
 			},
 		}
+		specJSON, _ := json.Marshal(sandboxv1alpha1.PodTemplate{Spec: podSpec})
+		podTemplateHash = sandboxcontrollers.NameHash(string(specJSON))
 	}
 
 	return &sandboxv1alpha1.Sandbox{
@@ -718,7 +724,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
 						Name: templateName,
 					},
-					UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
+					UpdateStrategy: &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
 						Type: tc.strategy,
 					},
 				},
@@ -863,7 +869,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
 				Name: templateName1,
 			},
-			UpdateStrategy: extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
+			UpdateStrategy: &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
 				Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
 			},
 		},
@@ -971,7 +977,7 @@ func TestFindWarmPoolsForTemplate(t *testing.T) {
 	r := SandboxWarmPoolReconciler{
 		Client: fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithIndex(&extensionsv1alpha1.SandboxWarmPool{}, templateRefField, func(rawObj client.Object) []string {
+			WithIndex(&extensionsv1alpha1.SandboxWarmPool{}, extensionsv1alpha1.TemplateRefField, func(rawObj client.Object) []string {
 				wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)
 				return []string{wp.Spec.TemplateRef.Name}
 			}).
@@ -985,4 +991,193 @@ func TestFindWarmPoolsForTemplate(t *testing.T) {
 	require.Len(t, requests, 1)
 	require.Equal(t, "pool-1", requests[0].Name)
 	require.Equal(t, namespace, requests[0].Namespace)
+}
+
+func TestComparePodSpecsNormalization(t *testing.T) {
+	falseVal := false
+	trueVal := true
+
+	tests := []struct {
+		name           string
+		templateSpec   corev1.PodSpec
+		actualSpec     corev1.PodSpec
+		secureByDef    bool
+		expectedResult bool // true if they should be considered equal
+	}{
+		{
+			name: "Identical specs should match",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test", Image: "img"}},
+			},
+			actualSpec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test", Image: "img"}},
+			},
+			secureByDef:    true,
+			expectedResult: true,
+		},
+		{
+			name: "AutomountServiceAccountToken nil in template vs false in actual should match",
+			templateSpec: corev1.PodSpec{
+				AutomountServiceAccountToken: nil,
+			},
+			actualSpec: corev1.PodSpec{
+				AutomountServiceAccountToken: &falseVal,
+			},
+			secureByDef:    true,
+			expectedResult: true,
+		},
+		{
+			name: "AutomountServiceAccountToken true in template vs false in actual should NOT match (drift)",
+			templateSpec: corev1.PodSpec{
+				AutomountServiceAccountToken: &trueVal,
+			},
+			actualSpec: corev1.PodSpec{
+				AutomountServiceAccountToken: &falseVal,
+			},
+			secureByDef:    true,
+			expectedResult: false,
+		},
+		{
+			name: "DNSPolicy empty in template vs DNSNone in actual (SecureByDefault) should match",
+			templateSpec: corev1.PodSpec{
+				DNSPolicy: "",
+			},
+			actualSpec: corev1.PodSpec{
+				DNSPolicy: corev1.DNSNone,
+				DNSConfig: &corev1.PodDNSConfig{
+					Nameservers: []string{"8.8.8.8", "1.1.1.1"},
+				},
+			},
+			secureByDef:    true,
+			expectedResult: true,
+		},
+		{
+			name: "DNSPolicy drift from Default to ClusterFirst should NOT match",
+			templateSpec: corev1.PodSpec{
+				DNSPolicy: corev1.DNSClusterFirst,
+			},
+			actualSpec: corev1.PodSpec{
+				DNSPolicy: corev1.DNSDefault,
+			},
+			secureByDef:    false,
+			expectedResult: false,
+		},
+	}
+
+	r := &SandboxWarmPoolReconciler{}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			template := &extensionsv1alpha1.SandboxTemplate{
+				Spec: extensionsv1alpha1.SandboxTemplateSpec{
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: tt.templateSpec,
+					},
+				},
+			}
+			if tt.secureByDef {
+				template.Spec.NetworkPolicyManagement = extensionsv1alpha1.NetworkPolicyManagementManaged
+			} else {
+				template.Spec.NetworkPolicyManagement = extensionsv1alpha1.NetworkPolicyManagementUnmanaged
+			}
+
+			// We need to apply the SAME defaults to the 'actual' spec in the test
+			// if we want to simulate a sandbox that was created with those defaults.
+			actualSpecCopy := tt.actualSpec.DeepCopy()
+			// Only apply if it's NOT a drift test case where we WANT them to be different
+			if tt.expectedResult {
+				ApplySandboxSecureDefaults(template, actualSpecCopy)
+			}
+
+			result := r.comparePodSpecs(template, actualSpecCopy)
+			if result != tt.expectedResult {
+				t.Errorf("comparePodSpecs() = %v, want %v", result, tt.expectedResult)
+			}
+		})
+	}
+}
+
+func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	// Create initial SandboxTemplate with default DNS
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "test", Image: "img"},
+					},
+					DNSPolicy: corev1.DNSDefault,
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+			UpdateStrategy: &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
+				Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+			},
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(template, warmPool).
+			Build(),
+		Scheme: scheme,
+	}
+
+	// Initial reconcile to create sandboxes
+	err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	// Verify initial state
+	sandboxes := &sandboxv1alpha1.SandboxList{}
+	err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+	require.NoError(t, err)
+	require.Len(t, sandboxes.Items, int(replicas))
+	for _, sb := range sandboxes.Items {
+		require.Equal(t, corev1.DNSDefault, sb.Spec.PodTemplate.Spec.DNSPolicy)
+	}
+
+	// Update SandboxTemplate to change DNSPolicy
+	updatedTemplate := template.DeepCopy()
+	updatedTemplate.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSClusterFirst
+	err = r.Update(ctx, updatedTemplate)
+	require.NoError(t, err)
+
+	// Reconcile again, should trigger rollout (deletion and recreation)
+	err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	// Verify that sandboxes now have the updated DNSPolicy
+	err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+	require.NoError(t, err)
+	require.Len(t, sandboxes.Items, int(replicas))
+	for _, sb := range sandboxes.Items {
+		require.Equal(t, corev1.DNSClusterFirst, sb.Spec.PodTemplate.Spec.DNSPolicy, "Sandbox should have updated DNSPolicy")
+	}
 }

@@ -77,6 +77,6 @@ class SandboxWithSnapshotSupport(Sandbox):
             if self._snapshots:
                 self._snapshots.delete_manual_triggers()
         finally:
-            self._snapshots = None
             super().terminate()
+            self._snapshots = None
         

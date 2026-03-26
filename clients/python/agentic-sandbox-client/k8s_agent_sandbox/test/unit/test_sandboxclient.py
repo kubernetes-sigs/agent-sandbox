@@ -48,7 +48,7 @@ class TestSandboxClient(unittest.TestCase):
             
             mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace")
             self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
-            mock_wait.assert_called_once_with("resolved-id", "test-namespace", 180)
+            mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
             
             # Verify the new sandbox is tracked in the registry
@@ -148,19 +148,11 @@ class TestSandboxClient(unittest.TestCase):
         self.assertNotIn(("test-namespace", "test-claim"), self.client._active_connection_sandboxes)
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
-    def test_delete_sandbox_not_in_registry_with_fallback(self):
-        with patch.object(self.client, 'get_sandbox', side_effect=Exception("Not found")):
-            self.client.delete_sandbox("test-claim", "test-namespace")
-            
-        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("test-claim", "test-namespace")
-        
     def test_delete_sandbox_not_in_registry_success(self):
-        mock_retrieved_sandbox = MagicMock()
-        with patch.object(self.client, 'get_sandbox', return_value=mock_retrieved_sandbox):
+        with patch.object(self.client, '_delete_claim') as mock_delete_claim:
             self.client.delete_sandbox("test-claim", "test-namespace")
             
-        mock_retrieved_sandbox.terminate.assert_called_once()
-        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+        mock_delete_claim.assert_called_once_with("test-claim", "test-namespace")
 
     def test_delete_all(self):
         mock_sandbox1 = MagicMock()

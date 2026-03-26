@@ -14,6 +14,7 @@
 
 import logging
 import uuid
+import time
 from datetime import datetime, timezone
 from kubernetes.client import ApiException
 from pydantic import BaseModel
@@ -64,6 +65,13 @@ class SnapshotEngine:
         suffix = uuid.uuid4().hex[:8]
         # Sanitize to comply with Kubernetes resource name rules
         safe_trigger_name = trigger_name.lower().replace("_", "-")
+
+        # Truncate to avoid exceeding Kubernetes 63-character limit for resource names
+        # "-{timestamp}-{suffix}" is 25 chars long, leaving a max of 38 chars for safe_trigger_name
+        safe_trigger_name = safe_trigger_name[:38].strip("-")
+        if not safe_trigger_name:
+            safe_trigger_name = "snap"
+
         trigger_name = f"{safe_trigger_name}-{timestamp}-{suffix}"
 
         manifest = {
@@ -151,30 +159,49 @@ class SnapshotEngine:
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-    def delete_manual_triggers(self):
+    def delete_manual_triggers(self, max_retries: int = 3):
         """Cleans up the manual trigger related resources created by this Sandbox."""
-        remaining_triggers = []
-        for trigger_name in self.created_manual_triggers:
-            try:
-                self.k8s_helper.custom_objects_api.delete_namespaced_custom_object(
-                    group=PODSNAPSHOT_API_GROUP,
-                    version=PODSNAPSHOT_API_VERSION,
-                    namespace=self.namespace,
-                    plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
-                    name=trigger_name,
-                )
-                logger.info(f"Deleted PodSnapshotManualTrigger '{trigger_name}'")
-            except ApiException as e:
-                if e.status == 404:
-                    # Ignore if the resource is already deleted
-                    continue
-                logger.error(
-                    f"Failed to delete PodSnapshotManualTrigger '{trigger_name}': {e}"
-                )
-                remaining_triggers.append(trigger_name)
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error while deleting PodSnapshotManualTrigger '{trigger_name}': {e}"
-                )
-                remaining_triggers.append(trigger_name)
+        remaining_triggers = list(self.created_manual_triggers)
+
+        for attempt in range(1, max_retries + 1):
+            if not remaining_triggers:
+                break
+
+            current_batch = remaining_triggers
+            remaining_triggers = []
+
+            for trigger_name in current_batch:
+                try:
+                    self.k8s_helper.custom_objects_api.delete_namespaced_custom_object(
+                        group=PODSNAPSHOT_API_GROUP,
+                        version=PODSNAPSHOT_API_VERSION,
+                        namespace=self.namespace,
+                        plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
+                        name=trigger_name,
+                    )
+                    logger.info(f"Deleted PodSnapshotManualTrigger '{trigger_name}'")
+                except ApiException as e:
+                    if e.status == 404:
+                        # Ignore if the resource is already deleted
+                        continue
+                    logger.error(
+                        f"Attempt {attempt}/{max_retries}: Failed to delete PodSnapshotManualTrigger '{trigger_name}': {e}"
+                    )
+                    remaining_triggers.append(trigger_name)
+                except Exception as e:
+                    logger.error(
+                        f"Attempt {attempt}/{max_retries}: Unexpected error while deleting PodSnapshotManualTrigger '{trigger_name}': {e}"
+                    )
+                    remaining_triggers.append(trigger_name)
+
+            if remaining_triggers and attempt < max_retries:
+                time.sleep(1)  # Brief pause before retrying
+
         self.created_manual_triggers = remaining_triggers
+
+        if self.created_manual_triggers:
+            logger.warning(
+                f"Failed to delete {len(self.created_manual_triggers)} PodSnapshotManualTrigger(s) "
+                f"after {max_retries} attempts: {', '.join(self.created_manual_triggers)}. "
+                "These resources may be leaked in Kubernetes and require manual cleanup."
+            )

@@ -81,6 +81,7 @@ class K8sHelper:
             timeout_seconds=timeout
         ):
             if event["type"] == "DELETED":
+                w.stop()
                 raise RuntimeError(
                     f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
             if event["type"] in ["ADDED", "MODIFIED"]:

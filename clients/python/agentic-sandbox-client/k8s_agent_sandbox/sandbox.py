@@ -60,7 +60,7 @@ class Sandbox:
 
         # Establish Sandbox Connection
         self.connector = SandboxConnector(
-            sandbox_id=self.sandbox_id,
+            sandbox_id=self.sandbox_id, # Pass the base sandbox id to connect to.
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper

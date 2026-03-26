@@ -169,29 +169,6 @@ class TestSandboxClient(unittest.TestCase):
             mock_delete.assert_any_call("claim1", namespace="ns1")
             mock_delete.assert_any_call("claim2", namespace="ns2")
 
-    def test_get_sandbox_pod_name_with_annotation(self):
-        self.mock_k8s_helper.get_sandbox.return_value = {
-            "metadata": {
-                "annotations": {
-                    POD_NAME_ANNOTATION: "annotated-pod-name"
-                }
-            }
-        }
-        pod_name = self.client._get_sandbox_pod_name("sandbox-id", "test-namespace")
-        self.assertEqual(pod_name, "annotated-pod-name")
-
-    def test_get_sandbox_pod_name_without_annotation(self):
-        self.mock_k8s_helper.get_sandbox.return_value = {
-            "metadata": {}
-        }
-        pod_name = self.client._get_sandbox_pod_name("sandbox-id", "test-namespace")
-        self.assertEqual(pod_name, "sandbox-id")
-
-    def test_get_sandbox_pod_name_no_sandbox(self):
-        self.mock_k8s_helper.get_sandbox.return_value = None
-        pod_name = self.client._get_sandbox_pod_name("sandbox-id", "test-namespace")
-        self.assertEqual(pod_name, "sandbox-id")
-
     def test_create_claim(self):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"

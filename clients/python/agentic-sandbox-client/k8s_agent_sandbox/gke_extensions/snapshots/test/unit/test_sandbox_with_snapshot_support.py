@@ -45,12 +45,13 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.sandbox = SandboxWithSnapshotSupport(
             namespace="test-ns",
             k8s_helper=self.mock_k8s_helper,
-            pod_name="test-pod",
             claim_name="test-claim",
             sandbox_id="test-id",
         )
+        self.sandbox.get_pod_name = MagicMock(return_value="test-pod")
         # Access the underlying engine
         self.engine = self.sandbox.snapshots
+        self.engine.get_pod_name_func = self.sandbox.get_pod_name
 
     @patch("k8s_agent_sandbox.gke_extensions.snapshots.utils.watch.Watch")
     def test_snapshots_create_success(self, mock_watch_cls):
@@ -80,9 +81,11 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         result = self.engine.create("test-trigger")
 
-        self.assertEqual(result.error_code, 0)
+        self.sandbox.get_pod_name.assert_called_once()
+        self.assertEqual(result.error_code, SNAPSHOT_SUCCESS_CODE)
         self.assertTrue(result.success)
         self.assertEqual(result.snapshot_uid, "snapshot-uid")
+        self.assertEqual(result.snapshot_timestamp, "2023-01-01T00:00:00Z")
         self.assertIn("test-trigger", result.trigger_name)
 
         self.mock_k8s_helper.custom_objects_api.create_namespaced_custom_object.assert_called_once()
@@ -283,8 +286,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_success(self):
         """Test successful identification of restore from snapshot."""
         logging.info("Starting test_is_restored_from_snapshot_success...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         mock_pod = MagicMock()
         mock_condition = MagicMock()
@@ -316,8 +317,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_pending_or_failed(self):
         """Test is_restored_from_snapshot when PodRestored condition is not True."""
         logging.info("Starting test_is_restored_from_snapshot_pending_or_failed...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         mock_pod = MagicMock()
         mock_condition = MagicMock()
@@ -342,12 +341,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_no_pod_name(self):
         """Test is_restored_from_snapshot when pod name is missing."""
         logging.info("Starting test_is_restored_from_snapshot_no_pod_name...")
-        self.sandbox.pod_name = None
-        try:
-            self.sandbox.pod_name = None
-        except AttributeError:
-            pass
-
+        self.sandbox.get_pod_name.return_value = None
         result = self.sandbox.is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, SNAPSHOT_ERROR_CODE)
@@ -357,8 +351,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_no_status(self):
         """Test is_restored_from_snapshot when pod status is None."""
         logging.info("Starting test_is_restored_from_snapshot_no_status...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         mock_pod = MagicMock()
         mock_pod.status = None
@@ -373,8 +365,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_no_conditions(self):
         """Test is_restored_from_snapshot when pod has no conditions."""
         logging.info("Starting test_is_restored_from_snapshot_no_conditions...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         mock_pod = MagicMock()
         mock_pod.status.conditions = None
@@ -389,8 +379,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_wrong_uid(self):
         """Test is_restored_from_snapshot when restored from a different snapshot."""
         logging.info("Starting test_is_restored_from_snapshot_wrong_uid...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         mock_pod = MagicMock()
         mock_condition = MagicMock()
@@ -410,8 +398,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_not_restored(self):
         """Test is_restored_from_snapshot when not restored from any snapshot."""
         logging.info("Starting test_is_restored_from_snapshot_not_restored...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         mock_pod = MagicMock()
         mock_condition = MagicMock()
@@ -430,8 +416,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_api_exception(self):
         """Test is_restored_from_snapshot handling ApiException."""
         logging.info("Starting test_is_restored_from_snapshot_api_exception...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.side_effect = ApiException(
             status=500, reason="Internal Server Error"
@@ -452,8 +436,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         - Threading/Async context errors within the underlying kubernetes client library
         """
         logging.info("Starting test_is_restored_from_snapshot_generic_exception...")
-        self.sandbox.pod_name = "test-pod"
-        self.sandbox.namespace = "test-ns"
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.side_effect = ValueError(
             "Deserialization error"

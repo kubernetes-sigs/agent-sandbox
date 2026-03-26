@@ -15,6 +15,7 @@
 import logging
 import uuid
 import time
+from typing import Callable
 from datetime import datetime, timezone
 from kubernetes.client import ApiException
 from pydantic import BaseModel
@@ -50,11 +51,11 @@ class SnapshotEngine:
         self,
         namespace: str,
         k8s_helper,
-        pod_name: str,
+        get_pod_name_func: Callable[[], str],
     ):
         self.namespace = namespace
         self.k8s_helper = k8s_helper
-        self.pod_name = pod_name
+        self.get_pod_name_func = get_pod_name_func
         self.created_manual_triggers = []
 
     def create(self, trigger_name: str, podsnapshot_timeout: int = 60) -> SnapshotResponse:
@@ -78,7 +79,7 @@ class SnapshotEngine:
             "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
             "kind": f"{PODSNAPSHOTMANUALTRIGGER_API_KIND}",
             "metadata": {"name": trigger_name, "namespace": self.namespace},
-            "spec": {"targetPod": self.pod_name},
+            "spec": {"targetPod": self.get_pod_name_func()},
         }
 
         try:

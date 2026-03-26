@@ -71,7 +71,6 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(self.sandbox.claim_name, self.claim_name)
         self.assertEqual(self.sandbox.sandbox_id, self.sandbox_id)
         self.assertEqual(self.sandbox.namespace, self.namespace)
-        self.assertEqual(self.sandbox.pod_name, self.sandbox_id)
         self.assertFalse(self.sandbox._is_closed)
 
     @patch('k8s_agent_sandbox.sandbox.Filesystem')
@@ -93,13 +92,11 @@ class TestSandbox(unittest.TestCase):
             claim_name="custom-claim",
             connection_config=mock_connection_config,
             tracer_config=mock_tracer_config,
-            k8s_helper=mock_k8s_helper_instance,
-            pod_name="custom-pod"
+            k8s_helper=mock_k8s_helper_instance
         )
 
         mock_k8s_helper.assert_not_called()
         self.assertEqual(sandbox.k8s_helper, mock_k8s_helper_instance)
-        self.assertEqual(sandbox.pod_name, "custom-pod")
 
         mock_connector.assert_called_once_with(
             sandbox_id="custom-id",
@@ -111,6 +108,20 @@ class TestSandbox(unittest.TestCase):
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
         mock_command_executor.assert_called_once_with(mock_connector.return_value, mock_tracer, "custom-tracer")
         mock_filesystem.assert_called_once_with(mock_connector.return_value, mock_tracer, "custom-tracer")
+
+    def test_get_pod_name_with_annotation(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "metadata": {
+                "annotations": {
+                    'agents.x-k8s.io/pod-name': "annotated-pod-name"
+                }
+            }
+        }
+        self.assertEqual(self.sandbox.get_pod_name(), "annotated-pod-name")
+
+    def test_get_pod_name_fallback(self):
+        self.mock_k8s_helper.get_sandbox.return_value = None
+        self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
 
     def test_properties(self):
         """Tests the commands and files properties."""

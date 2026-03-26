@@ -25,6 +25,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
+from .constants import POD_NAME_ANNOTATION
 
 class Sandbox:
     """
@@ -44,19 +45,15 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
-        pod_name: str | None = None,
     ):
         # Sandbox Related Configuration
         self.claim_name = claim_name
         self.sandbox_id = sandbox_id
-        self.pod_name = pod_name or sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
         
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
-        
-        logging.info(f"Using pod name: {self.pod_name}")
 
         # Establish Sandbox Connection
         self.connector = SandboxConnector(
@@ -78,6 +75,13 @@ class Sandbox:
         # Internal state tracking
         self._is_closed = False
         
+    def get_pod_name(self) -> str:
+        """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        metadata = sandbox_object.get('metadata') or {}
+        annotations = metadata.get('annotations') or {}
+        return annotations.get(POD_NAME_ANNOTATION) or self.sandbox_id
+
     @property
     def commands(self) -> CommandExecutor | None:
         return self._commands

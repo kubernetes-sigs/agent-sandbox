@@ -39,7 +39,6 @@ from .models import (
     SandboxTracerConfig
 )
 from .k8s_helper import K8sHelper
-from .constants import POD_NAME_ANNOTATION
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -105,17 +104,13 @@ class SandboxClient(Generic[T]):
                 raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
             self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
             
-            # Resolve the pod name from the sandbox id
-            pod_name = self._get_sandbox_pod_name(sandbox_id, namespace)
-
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
                 sandbox_id=sandbox_id,
                 namespace=namespace,
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
-                k8s_helper=self.k8s_helper,
-                pod_name=pod_name
+                k8s_helper=self.k8s_helper
             )
         except Exception:
             # If creation or waiting fails, ensure we don't leave an orphaned claim
@@ -159,8 +154,6 @@ class SandboxClient(Generic[T]):
         if existing and not existing.is_active:
             self._active_connection_sandboxes.pop(key, None)
 
-        pod_name = self._get_sandbox_pod_name(sandbox_id, namespace)
-
         # Re-attach: Create a fresh handle for the existing ID
         new_handle = self.sandbox_class(
             claim_name=claim_name,
@@ -168,8 +161,7 @@ class SandboxClient(Generic[T]):
             namespace=namespace,
             connection_config=self.connection_config,
             tracer_config=self.tracer_config,
-            k8s_helper=self.k8s_helper,
-            pod_name=pod_name
+            k8s_helper=self.k8s_helper
         )
         
         self._active_connection_sandboxes[key] = new_handle
@@ -244,12 +236,6 @@ class SandboxClient(Generic[T]):
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
 
-    def _get_sandbox_pod_name(self, sandbox_id: str, namespace: str) -> str:
-        """Fetches the Sandbox object from Kubernetes and retrieves its pod name."""
-        sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace) or {}
-        metadata = sandbox_object.get('metadata') or {}
-        annotations = metadata.get('annotations') or {}
-        return annotations.get(POD_NAME_ANNOTATION) or sandbox_id
     
     @trace_span("create_claim")
     def _create_claim(self, claim_name: str, template_name: str, namespace: str):

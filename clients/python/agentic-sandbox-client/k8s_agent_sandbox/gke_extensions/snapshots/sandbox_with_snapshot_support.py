@@ -29,7 +29,7 @@ class SandboxWithSnapshotSupport(Sandbox):
         self._snapshots = SnapshotEngine(
             namespace=self.namespace,
             k8s_helper=self.k8s_helper,
-            pod_name=self.pod_name,
+            get_pod_name_func=self.get_pod_name,
         )
 
     @property
@@ -54,7 +54,8 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-        if not self.pod_name:
+        pod_name = self.get_pod_name()
+        if not pod_name:
             logger.warning("Cannot check restore status: pod_name is unknown.")
             return RestoreCheckResult(
                 success=False,
@@ -65,7 +66,7 @@ class SandboxWithSnapshotSupport(Sandbox):
         return check_pod_restored_from_snapshot(
             k8s_helper=self.k8s_helper,
             namespace=self.namespace,
-            pod_name=self.pod_name,
+            pod_name=pod_name,
             snapshot_uid=snapshot_uid,
         )
     

@@ -336,6 +336,7 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
+		claim.Status.SandboxStatus.PodIP = sandbox.Status.PodIP
 	}
 }
 

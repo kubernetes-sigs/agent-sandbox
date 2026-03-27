@@ -92,6 +92,10 @@ type SandboxStatus struct {
 	// TODO: change `Name` to `name`
 	// +optional
 	Name string `json:"Name,omitempty"` //nolint:kubeapilinter
+
+	// podIP is the IP address of the underlying pod
+	// +optional
+	PodIP string `json:"podIP,omitempty"`
 }
 
 // +genclient

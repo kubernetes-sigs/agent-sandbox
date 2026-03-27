@@ -411,6 +411,73 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "sandbox with existing pod propagates PodIP",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{
+						PodIP: "10.244.0.5",
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Service:       sandboxName,
+				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
+				Replicas:      1,
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				PodIP:         "10.244.0.5",
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             "DependenciesReady",
+						Message:            "Pod is Ready; Service Exists",
+					},
+				},
+			},
+			wantObjs: []client.Object{
+				// Verifying Service exists (Pod was verified indirectly via state, and owner reference is added in reconcilePod test suite)
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						Selector: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						ClusterIP: "None",
+					},
+				},
+			},
+		},
+		{
 			name: "sandbox expired with retain policy",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{

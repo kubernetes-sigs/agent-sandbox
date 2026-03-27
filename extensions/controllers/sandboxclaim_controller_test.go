@@ -213,6 +213,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Reason:  "SandboxReady",
 		Message: "Sandbox is ready",
 	}}
+	readySandbox.Status.PodIP = "10.244.0.6"
 
 	// Validation Functions
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
@@ -251,6 +252,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		expectSandbox     bool
 		expectError       bool
 		expectedCondition metav1.Condition
+		expectedPodIP     string
 		validateSandbox   func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
 	}{
 		{
@@ -311,6 +313,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
+			expectedPodIP:   "10.244.0.6",
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
@@ -321,6 +324,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
+			expectedPodIP:   "10.244.0.6",
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
@@ -490,6 +494,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					t.Errorf("expected condition reason %q, got %q", "ReconcilerError", condition.Reason)
 				}
 			} else {
+				if tc.expectedPodIP != "" {
+					if updatedClaim.Status.SandboxStatus.PodIP != tc.expectedPodIP {
+						t.Errorf("expected PodIP %q, got %q", tc.expectedPodIP, updatedClaim.Status.SandboxStatus.PodIP)
+					}
+				}
 				if diff := cmp.Diff(tc.expectedCondition, condition, cmp.Comparer(ignoreTimestamp)); diff != "" {
 					t.Errorf("unexpected condition:\n%s", diff)
 				}

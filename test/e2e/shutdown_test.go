@@ -102,7 +102,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 					Type:               string(sandboxv1alpha1.SandboxConditionReady),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
-					Reason:             sandboxv1alpha1.SandboxReasonSystemTermination,
+					Reason:             sandboxv1alpha1.SandboxReasonExpired,
 					Message:            "Sandbox has expired",
 				},
 			},

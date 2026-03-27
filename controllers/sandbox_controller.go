@@ -174,7 +174,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			Type:               string(sandboxv1alpha1.SandboxConditionReady),
 			ObservedGeneration: sandbox.Generation,
 			Status:             metav1.ConditionFalse,
-			Reason:             sandboxv1alpha1.SandboxReasonUserTermination,
+			Reason:             sandboxv1alpha1.SandboxReasonDeleting,
 			Message:            "Sandbox is terminating",
 		})
 		if err := r.updateStatus(ctx, oldStatus, sandbox); err != nil {
@@ -335,11 +335,11 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 
 	if !sandbox.DeletionTimestamp.IsZero() {
 		ready.Status = metav1.ConditionFalse
-		ready.Reason = sandboxv1alpha1.SandboxReasonUserTermination
+		ready.Reason = sandboxv1alpha1.SandboxReasonDeleting
 		ready.Message = "Sandbox is terminating"
 	} else if expired {
 		ready.Status = metav1.ConditionFalse
-		ready.Reason = sandboxv1alpha1.SandboxReasonSystemTermination
+		ready.Reason = sandboxv1alpha1.SandboxReasonExpired
 		ready.Message = "Sandbox has expired"
 	} else if initialized.Status == metav1.ConditionFalse {
 		ready.Status = metav1.ConditionFalse
@@ -1063,7 +1063,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 			Type:               string(sandboxv1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: sandbox.Generation,
-			Reason:             sandboxv1alpha1.SandboxReasonSystemTermination,
+			Reason:             sandboxv1alpha1.SandboxReasonExpired,
 			Message:            "Sandbox has expired",
 		})
 	}
@@ -1105,7 +1105,7 @@ func setSandboxExpiredCondition(sandbox *sandboxv1alpha1.Sandbox) {
 // sandboxMarkedExpired checks if the sandbox is already marked as expired.
 func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
-	return cond != nil && (cond.Reason == sandboxv1alpha1.SandboxReasonExpired || cond.Reason == sandboxv1alpha1.SandboxReasonSystemTermination)
+	return cond != nil && (cond.Reason == sandboxv1alpha1.SandboxReasonExpired)
 }
 
 // SetupWithManager sets up the controller with the Manager.

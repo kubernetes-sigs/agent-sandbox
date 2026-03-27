@@ -315,7 +315,7 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "13. User Initiated Termination (DeletionTimestamp set)",
+			name: "13. Sandbox Deleting (DeletionTimestamp set)",
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Generation:        gen,
@@ -331,11 +331,11 @@ func TestComputeConditions(t *testing.T) {
 			expectedConditions: []metav1.Condition{
 				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "UserInitiatedTermination", Message: "Sandbox is terminating"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxDeleting", Message: "Sandbox is terminating"},
 			},
 		},
 		{
-			name: "14. System Initiated Termination (Expired)",
+			name: "14. Sandbox Expiration (Expired)",
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Generation: gen},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -353,7 +353,7 @@ func TestComputeConditions(t *testing.T) {
 			expectedConditions: []metav1.Condition{
 				{Type: "Initialized", Status: "True", ObservedGeneration: gen, Reason: "SandboxInitialized", Message: "Service and PVCs are provisioned"},
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is operational and not suspended"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SystemInitiatedTermination", Message: "Sandbox has expired"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxExpired", Message: "Sandbox has expired"},
 			},
 		},
 	}
@@ -775,7 +775,7 @@ func TestReconcile(t *testing.T) {
 						Type:               string(sandboxv1alpha1.SandboxConditionReady),
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             sandboxv1alpha1.SandboxReasonSystemTermination,
+						Reason:             sandboxv1alpha1.SandboxReasonExpired,
 						Message:            "Sandbox has expired",
 					},
 				},
@@ -881,9 +881,12 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 <<<<<<< HEAD
+<<<<<<< HEAD
 			name:           "sandbox expired skips deletion of pod owned by different controller",
 			reconcileCount: 2,
 =======
+=======
+>>>>>>> 91028f7 (Address comments.)
 <<<<<<< HEAD
 			name: "sandbox expired skips deletion of pod owned by different controller",
 >>>>>>> daba23d (Add a KEP to discuss the status field of Sandbox.)
@@ -902,6 +905,9 @@ func TestReconcile(t *testing.T) {
 								BlockOwnerDeletion: new(true),
 =======
 			name:              "user initiated termination (DeletionTimestamp set)",
+=======
+			name:              "Sandbox deleting (DeletionTimestamp set)",
+>>>>>>> e3f32c1 (Address comments.)
 			deletionTimestamp: ptr.To(metav1.Now()),
 			sandboxSpec: sandboxv1alpha1.SandboxSpec{
 				PodTemplate: sandboxv1alpha1.PodTemplate{
@@ -1030,7 +1036,7 @@ func TestReconcile(t *testing.T) {
 						Type:               string(sandboxv1alpha1.SandboxConditionReady),
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
-						Reason:             sandboxv1alpha1.SandboxReasonUserTermination,
+						Reason:             sandboxv1alpha1.SandboxReasonDeleting,
 						Message:            "Sandbox is terminating",
 >>>>>>> 94fa3f1 (Add a KEP to discuss the status field of Sandbox.)
 					},

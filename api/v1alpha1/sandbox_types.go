@@ -38,7 +38,7 @@ const (
 	SandboxReasonPendingEvaluation = "PendingEvaluation"
 	// SandboxReasonUserSuspended indicates the sandbox has been suspended by the user
 	SandboxReasonUserSuspended = "UserSuspended"
-	// SandboxReasonNotSuspended indicates the sandbox is actively running and not suspended
+	// SandboxReasonNotSuspended indicates the sandbox is operational and not suspended
 	SandboxReasonNotSuspended = "NotSuspended"
 
 	// SandboxConditionReady indicates readiness for Sandbox
@@ -51,13 +51,10 @@ const (
 	SandboxReasonSuspended = "SandboxSuspended"
 	// SandboxReasonUnresponsive indicates the sandbox pod is in an unknown state
 	SandboxReasonUnresponsive = "SandboxUnresponsive"
-	// SandboxReasonSystemTermination indicates the sandbox is being terminated by the system (e.g., expiry)
-	SandboxReasonSystemTermination = "SystemInitiatedTermination"
-	// SandboxReasonUserTermination indicates the sandbox is being terminated by user request
-	SandboxReasonUserTermination = "UserInitiatedTermination"
-
-	// SandboxReasonExpired indicates expired state for Sandbox (Legacy)
+	// SandboxReasonExpired indicates the sandbox is being terminated due to expiration.
 	SandboxReasonExpired = "SandboxExpired"
+	// SandboxReasonDeleting indicates the sandbox is being terminated due to deletion.
+	SandboxReasonDeleting = "SandboxDeleting"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"

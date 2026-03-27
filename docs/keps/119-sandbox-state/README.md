@@ -31,15 +31,15 @@ The overarching signal for whether the sandbox is currently usable. It is derive
 
 The controller evaluates the hierarchy top-down. The "Gap" between `Initialized` and `Ready` represents the time taken to schedule and start the agent Pod.
 
-| Scenario | `Initialized` | `Suspended`  | Pod | **`Ready` (Root)** | Reason |
+| Scenario | `Initialized` | `Suspended`  | Pod | **`Ready` (Root)** | Ready Reason |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Provisioning** | `False` | `Unknown` | None | **`False`** | `SandboxInitializing` |
 | **Pod Starting** | `True` | `False` | Pending | **`False`** | `PodProvisioning` |
 | **Operational** | `True` | `False` | Running & Ready | **`True`** | `SandboxReady` |
 | **Suspended** | `True` | `True` | None/Terminating | **`False`** | `SandboxSuspended` |
 | **Unresponsive** | `True` | `False` | Unknown | **`Unknown`** | `SandboxUnresponsive` |
-| **Expired** | `True` | `Any` | Any | **`False`** | `SystemInitiatedTermination` |
-| **Terminating** | `True` | `Any` | Any | **`False`** | `UserInitiatedTermination` |
+| **Expired** | `True` | `Any` | Any | **`False`** | `SandboxExpired` |
+| **Terminating** | `True` | `Any` | Any | **`False`** | `SandboxDeleting` |
 
 ---
 

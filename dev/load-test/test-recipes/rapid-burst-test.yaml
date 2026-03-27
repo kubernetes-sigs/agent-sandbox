@@ -10,8 +10,9 @@
 {{$burstSize := DefaultParam .CL2_BURST_SIZE 50}}
 # The total number of burst iterations to execute in the test.
 {{$totalBursts := DefaultParam .CL2_TOTAL_BURSTS 100}}
+{{$runtimeClass := DefaultParam .CL2_RUNTIME_CLASS "gvisor"}}
 
-name: agent-sandbox-rapid-burst
+name: rapid-burst-test
 
 namespace:
   number: {{$namespaces}}
@@ -58,7 +59,10 @@ steps:
     tuningSet: BurstCreate
     objectBundle:
     - basename: template
-      objectTemplatePath: cluster-loader-sandbox-template.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-template.yaml
+      templateFillMap:
+        LatencyType: rapid-burst
+        RuntimeClass: {{$runtimeClass}}
 
 - name: Setup Sandbox Warm Pool
   phases:
@@ -67,7 +71,10 @@ steps:
     tuningSet: BurstCreate
     objectBundle:
     - basename: warmpool
-      objectTemplatePath: cluster-loader-sandbox-warmpool.yaml
+      objectTemplatePath: templates/cluster-loader-warmpool.yaml
+      templateFillMap:
+        TemplateName: template-0
+        Replicas: {{$warmpool_size}}
 
 - name: Wait for Warm Pool Sandboxes to be Ready
   measurements:
@@ -98,7 +105,9 @@ steps:
     tuningSet: BurstCreate
     objectBundle:
     - basename: agent-claim
-      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
+      templateFillMap:
+        TemplateName: template-0
 
 - name: Wait for Burst {{$burstIteration}} Sandbox Claims to be Ready
   measurements:
@@ -153,7 +162,7 @@ steps:
     tuningSet: BurstCreate
     objectBundle:
     - basename: agent-claim
-      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
 
 - name: Delete Sandbox Warm Pool
   phases:
@@ -162,7 +171,7 @@ steps:
     tuningSet: BurstCreate
     objectBundle:
     - basename: warmpool
-      objectTemplatePath: cluster-loader-sandbox-warmpool.yaml
+      objectTemplatePath: templates/cluster-loader-warmpool.yaml
 
 - name: Delete Sandbox Templates
   phases:
@@ -171,4 +180,4 @@ steps:
     tuningSet: BurstCreate
     objectBundle:
     - basename: template
-      objectTemplatePath: cluster-loader-sandbox-template.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-template.yaml

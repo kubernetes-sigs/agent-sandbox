@@ -48,7 +48,7 @@ Run the job using the [Prow Job on Kind utility script (pj-on-kind.sh)](https://
 
 
 ```bash
-./config/pj-on-kind.sh ci-agent-sandbox-perf-load-test-every-6-hours
+./config/pj-on-kind.sh periodic-agent-sandbox-perf-load-test
 ```
 
 
@@ -79,6 +79,6 @@ Prow jobs are transient. Once the test completes, navigate to the local artifact
 
 
 ```bash
-cd <OUT_DIR>/ci-agent-sandbox-perf-load-test-every-6-hours/<POD_NAME>
+cd <OUT_DIR>/periodic-agent-sandbox-perf-load-test/<POD_NAME>
 cat finished.json
 ```

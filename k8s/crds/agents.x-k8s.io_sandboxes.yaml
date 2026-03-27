@@ -3978,6 +3978,10 @@ spec:
                   - type
                   type: object
                 type: array
+              podIPs:
+                items:
+                  type: string
+                type: array
               replicas:
                 format: int32
                 minimum: 0

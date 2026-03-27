@@ -78,7 +78,8 @@ func TestComputeReadyCondition(t *testing.T) {
 			svc: &corev1.Service{},
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
 					Conditions: []corev1.PodCondition{
 						{
 							Type:   corev1.PodReady,
@@ -89,6 +90,29 @@ func TestComputeReadyCondition(t *testing.T) {
 			},
 			expectedStatus: metav1.ConditionTrue,
 			expectedReason: "DependenciesReady",
+		},
+		{
+			name: "pod ready but no IP yet",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+				},
+			},
+			err: nil,
+			svc: &corev1.Service{},
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   corev1.PodReady,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectedStatus: metav1.ConditionFalse,
+			expectedReason: "DependenciesNotReady",
 		},
 		{
 			name: "error",
@@ -413,6 +437,73 @@ func TestReconcile(t *testing.T) {
 								"storage": resource.MustParse("10Gi"),
 							},
 						},
+					},
+				},
+			},
+		},
+		{
+			name: "sandbox with existing pod propagates PodIPs",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{
+						PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}, {IP: "fd00::5"}},
+						Phase:  corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Service:       sandboxName,
+				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
+				Replicas:      1,
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				PodIPs:        []string{"10.244.0.5", "fd00::5"},
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             "DependenciesReady",
+						Message:            "Pod is Ready; Service Exists",
+					},
+				},
+			},
+			wantObjs: []client.Object{
+				// Verifying Service exists (Pod was verified indirectly via state, and owner reference is added in reconcilePod test suite)
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						Selector: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						ClusterIP: "None",
 					},
 				},
 			},

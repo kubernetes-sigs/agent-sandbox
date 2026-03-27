@@ -177,9 +177,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	if pod == nil {
 		sandbox.Status.Replicas = 0
 		sandbox.Status.LabelSelector = ""
+		sandbox.Status.PodIPs = nil
 	} else {
 		sandbox.Status.Replicas = 1
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 	}
 
 	// Reconcile Service
@@ -218,8 +220,12 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 			for _, condition := range pod.Status.Conditions {
 				if condition.Type == corev1.PodReady {
 					if condition.Status == corev1.ConditionTrue {
-						message = "Pod is Ready"
-						podReady = true
+						if len(pod.Status.PodIPs) == 0 {
+							message = "Pod is Ready but has no IP yet"
+						} else {
+							message = "Pod is Ready"
+							podReady = true
+						}
 					}
 					break
 				}
@@ -250,6 +256,18 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 	}
 
 	return readyCondition
+}
+
+// podIPsFromStatus converts the K8s PodIP slice to a plain string slice.
+func podIPsFromStatus(podIPs []corev1.PodIP) []string {
+	if len(podIPs) == 0 {
+		return nil
+	}
+	ips := make([]string, len(podIPs))
+	for i, pip := range podIPs {
+		ips[i] = pip.IP
+	}
+	return ips
 }
 
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) error {

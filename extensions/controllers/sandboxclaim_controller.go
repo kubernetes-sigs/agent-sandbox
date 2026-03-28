@@ -606,6 +606,89 @@ func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensio
 	}
 }
 
+// reconcileWorkspaceResources patches the pod's workspace container resources
+// in-place if the claim's WorkspaceResources differ from the pod's current values.
+// This triggers Kubernetes InPlacePodVerticalScaling (K8s 1.27+).
+func (r *SandboxClaimReconciler) reconcileWorkspaceResources(ctx context.Context, sandbox *v1alpha1.Sandbox, claim *extensionsv1alpha1.SandboxClaim) error {
+	if claim.Spec.WorkspaceResources == nil {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+
+	// Find the pod owned by this sandbox.
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, pod); err != nil {
+		return nil // Pod may not exist yet (still starting).
+	}
+	if pod.Status.Phase != corev1.PodRunning {
+		return nil // Only resize running pods.
+	}
+
+	for i, c := range pod.Spec.Containers {
+		if c.Name != "workspace" {
+			continue
+		}
+		patch := buildResizePatch(c.Resources, claim.Spec.WorkspaceResources)
+		if patch == nil {
+			return nil // No change needed.
+		}
+
+		// Patch pod resources in-place. On K8s 1.27+ with InPlacePodVerticalScaling,
+		// the kubelet detects the resource change and calls UpdateContainerResources
+		// on the container runtime (e.g., isol8-runtime update).
+		podPatch := pod.DeepCopy()
+		podPatch.Spec.Containers[i].Resources = *patch
+		if err := r.Patch(ctx, podPatch, client.StrategicMergeFrom(pod)); err != nil {
+			return fmt.Errorf("patch pod resources: %w", err)
+		}
+		logger.Info("resized workspace container", "pod", pod.Name,
+			"cpuMillicores", claim.Spec.WorkspaceResources.CPUMillicores,
+			"memoryMiB", claim.Spec.WorkspaceResources.MemoryMiB)
+		return nil
+	}
+	return nil
+}
+
+// buildResizePatch compares current container resources with the desired
+// WorkspaceResources and returns updated ResourceRequirements if they differ.
+// Returns nil if no change is needed. DiskGiB is intentionally excluded
+// because ephemeral storage cannot be resized in-place.
+func buildResizePatch(current corev1.ResourceRequirements, desired *extensionsv1alpha1.WorkspaceResources) *corev1.ResourceRequirements {
+	target := corev1.ResourceRequirements{
+		Requests: current.Requests.DeepCopy(),
+		Limits:   current.Limits.DeepCopy(),
+	}
+	if target.Requests == nil {
+		target.Requests = corev1.ResourceList{}
+	}
+	if target.Limits == nil {
+		target.Limits = corev1.ResourceList{}
+	}
+	changed := false
+
+	if desired.CPUMillicores > 0 {
+		qty := *resource.NewMilliQuantity(int64(desired.CPUMillicores), resource.DecimalSI)
+		if !current.Limits[corev1.ResourceCPU].Equal(qty) {
+			target.Requests[corev1.ResourceCPU] = qty
+			target.Limits[corev1.ResourceCPU] = qty
+			changed = true
+		}
+	}
+	if desired.MemoryMiB > 0 {
+		qty := *resource.NewQuantity(int64(desired.MemoryMiB)<<20, resource.BinarySI)
+		if !current.Limits[corev1.ResourceMemory].Equal(qty) {
+			target.Requests[corev1.ResourceMemory] = qty
+			target.Limits[corev1.ResourceMemory] = qty
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+	return &target
+}
+
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, templateHash string) (*v1alpha1.Sandbox, queue.SandboxKey, error) {
 	logger := log.FromContext(ctx)
 	policy := getWarmPoolPolicy(claim)
@@ -1103,11 +1186,14 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	if sandbox != nil {
-		logger.Info("sandbox already exists, skipping update", "name", sandbox.Name)
 		if !metav1.IsControlledBy(sandbox, claim) {
 			err := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", sandbox.Name, claim.Name)
 			logger.Error(err, "Sandbox controller mismatch")
 			return nil, err
+		}
+		// Reconcile workspace resources on the existing pod (in-place resize).
+		if err := r.reconcileWorkspaceResources(ctx, sandbox, claim); err != nil {
+			logger.Error(err, "failed to reconcile workspace resources")
 		}
 		return sandbox, nil
 	}

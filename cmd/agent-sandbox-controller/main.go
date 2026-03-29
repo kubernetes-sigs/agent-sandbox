@@ -27,6 +27,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/felixge/fgprof"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -182,6 +183,7 @@ func main() {
 			metricsOpts.ExtraHandlers["/debug/pprof/block"] = pprof.Handler("block")
 			metricsOpts.ExtraHandlers["/debug/pprof/mutex"] = pprof.Handler("mutex")
 			metricsOpts.ExtraHandlers["/debug/pprof/trace"] = http.HandlerFunc(pprof.Trace)
+			metricsOpts.ExtraHandlers["/debug/fgprof"] = fgprof.Handler()
 		}
 	}
 

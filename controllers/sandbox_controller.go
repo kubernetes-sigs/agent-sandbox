@@ -132,7 +132,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	sandbox.Spec.Replicas = ptr.To(ptr.Deref(sandbox.Spec.Replicas, int32(1)))
+	if sandbox.Spec.Replicas == nil {
+		sandbox.Spec.Replicas = ptr.To[int32](1)
+	}
 
 	oldStatus := sandbox.Status.DeepCopy()
 	var err error

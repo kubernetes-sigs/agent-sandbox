@@ -30,9 +30,9 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
 
-    @patch('os.urandom')
-    def test_create_sandbox_success(self, mock_urandom):
-        mock_urandom.return_value = b'\x12\x34\xab\xcd'
+    @patch('uuid.uuid4')
+    def test_create_sandbox_success(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
         self.mock_k8s_helper.get_sandbox.return_value = {
             "metadata": {"annotations": {POD_NAME_ANNOTATION: "custom-pod-name"}}
@@ -55,9 +55,9 @@ class TestSandboxClient(unittest.TestCase):
             self.assertEqual(len(self.client._active_connection_sandboxes), 1)
             self.assertEqual(self.client._active_connection_sandboxes[("test-namespace", "sandbox-claim-1234abcd")], mock_sandbox_instance)
 
-    @patch('os.urandom')
-    def test_create_sandbox_failure_cleanup(self, mock_urandom):
-        mock_urandom.return_value = b'\x12\x34\xab\xcd'
+    @patch('uuid.uuid4')
+    def test_create_sandbox_failure_cleanup(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
         self.mock_k8s_helper.resolve_sandbox_name.side_effect = Exception("Timeout Error")
         
         with patch.object(self.client, '_create_claim') as mock_create_claim:

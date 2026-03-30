@@ -623,6 +623,9 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1alpha1.SandboxPodNameAnnotation: sandboxName,
+			},
 		},
 		{
 			name:    "reconcilePod creates a new Pod",
@@ -650,7 +653,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 			},
 			wantSandboxAnnotations: map[string]string{
-				SandboxPodNameAnnotation: sandboxName,
+				sandboxv1alpha1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
 		{
@@ -866,13 +869,15 @@ func TestReconcilePod(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			sandbox := tc.sandbox.DeepCopy()
+
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
+				Client: newFakeClient(append(tc.initialObjs, sandbox)...),
 				Scheme: Scheme,
 				Tracer: asmetrics.NewNoOp(),
 			}
 
-			pod, err := r.reconcilePod(t.Context(), tc.sandbox, nameHash)
+			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
 			if tc.expectErr {
 				require.Error(t, err)
 			} else {
@@ -902,7 +907,7 @@ func TestReconcilePod(t *testing.T) {
 			if tc.wantSandboxAnnotations != nil {
 				// Fetch the sandbox to see if annotations were updated
 				liveSandbox := &sandboxv1alpha1.Sandbox{}
-				err = r.Get(t.Context(), types.NamespacedName{Name: tc.sandbox.Name, Namespace: tc.sandbox.Namespace}, liveSandbox)
+				err = r.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, liveSandbox)
 				require.NoError(t, err)
 
 				// Check if the annotations match what we expect

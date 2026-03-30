@@ -409,6 +409,33 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, nil
 	}
 
+	ensurePodNameAnnotation := func(podName string) error {
+		annotatedPodName := ""
+		if sandbox.Annotations != nil {
+			annotatedPodName = sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]
+		}
+
+		if annotatedPodName == podName {
+			return nil
+		}
+
+		if annotatedPodName != "" {
+			log.Info("Skipping pod name annotation update because sandbox already tracks a different pod", "trackedPodName", annotatedPodName, "podName", podName)
+			return nil
+		}
+
+		patch := client.MergeFrom(sandbox.DeepCopy())
+		if sandbox.Annotations == nil {
+			sandbox.Annotations = make(map[string]string)
+		}
+		sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation] = podName
+		if err := r.Patch(ctx, sandbox, patch); err != nil {
+			return fmt.Errorf("failed to set pod name annotation: %w", err)
+		}
+
+		return nil
+	}
+
 	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
@@ -448,6 +475,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			if err := r.Update(ctx, pod); err != nil {
 				return nil, fmt.Errorf("failed to update pod: %w", err)
 			}
+		}
+
+		if err := ensurePodNameAnnotation(pod.Name); err != nil {
+			return nil, err
 		}
 
 		// TODO - Do we enfore (change) spec if a pod exists ?
@@ -499,14 +530,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, err
 	}
 
-	// Create a patch to update only the annotations
-	patch := client.MergeFrom(sandbox.DeepCopy())
-	if sandbox.Annotations == nil {
-		sandbox.Annotations = make(map[string]string)
-	}
-	sandbox.Annotations[SandboxPodNameAnnotation] = pod.Name
-	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		return nil, fmt.Errorf("failed to set pod name annotation: %w", err)
+	if err := ensurePodNameAnnotation(pod.Name); err != nil {
+		return nil, err
 	}
 
 	if r.Tracer.IsRecording(ctx) {

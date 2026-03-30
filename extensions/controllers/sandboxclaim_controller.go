@@ -23,7 +23,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -271,15 +270,22 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 		return claim.Status.Conditions[i].Type < claim.Status.Conditions[j].Type
 	})
 
-	if equality.Semantic.DeepEqual(oldStatus, &claim.Status) {
-		return nil
-	}
+	// Create a copy of the claim to use as the base for the patch.
+	oldClaim := claim.DeepCopy()
+	// Set the status of the copy to the *original* status.
+	oldClaim.Status = *oldStatus
 
-	if err := r.Status().Update(ctx, claim); err != nil {
-		logger.Error(err, "Failed to update sandboxclaim status")
+	// Create a merge patch by comparing the oldClaim (with oldStatus)
+	// with the current state of claim (which has the new desired status).
+	patch := client.MergeFrom(oldClaim)
+
+	// Apply the patch to the status subresource.
+	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		log.Error(err, "Failed to patch sandboxclaim status")
 		return err
 	}
 
+	log.Info("Successfully patched sandboxclaim status")
 	return nil
 }
 

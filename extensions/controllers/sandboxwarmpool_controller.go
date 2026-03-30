@@ -325,25 +325,22 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		return nil
 	}
 
-	patch := &extensionsv1alpha1.SandboxWarmPool{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: extensionsv1alpha1.GroupVersion.String(),
-			Kind:       "SandboxWarmPool",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      warmPool.Name,
-			Namespace: warmPool.Namespace,
-		},
-		Status: warmPool.Status,
-	}
+	// Create a copy of the warmPool to use as the base for the patch.
+	oldWarmPool := warmPool.DeepCopy()
+	// Set the status of the copy to the *original* status.
+	oldWarmPool.Status = *oldStatus
 
-	// Send the Server-Side Apply request to update the status subresource
-	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil {
-		log.Error(err, "Failed to apply SandboxWarmPool status via SSA")
+	// Create a merge patch by comparing the oldWarmPool (with oldStatus)
+	// with the current state of warmPool (which has the new desired status).
+	patch := client.MergeFrom(oldWarmPool)
+
+	// Apply the patch to the status subresource.
+	if err := r.Status().Patch(ctx, warmPool, patch); err != nil {
+		log.Error(err, "Failed to patch SandboxWarmPool status")
 		return err
 	}
 
-	log.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
+	log.Info("Successfully patched SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
 	return nil
 }
 

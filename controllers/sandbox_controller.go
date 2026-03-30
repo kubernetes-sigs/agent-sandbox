@@ -19,10 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -254,16 +254,27 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) error {
 	log := log.FromContext(ctx)
 
-	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
+	// Use equality.Semantic.DeepEqual for robust comparison of Kubernetes objects
+	if equality.Semantic.DeepEqual(oldStatus, &sandbox.Status) {
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, sandbox); err != nil {
-		log.Error(err, "Failed to update sandbox status")
+	// Create a copy of the sandbox to use as the base for the patch.
+	oldSandbox := sandbox.DeepCopy()
+	// Set the status of the copy to the *original* status.
+	oldSandbox.Status = *oldStatus
+
+	// Create a merge patch by comparing the oldSandbox (with oldStatus)
+	// with the current state of sandbox (which has the new desired status).
+	patch := client.MergeFrom(oldSandbox)
+
+	// Apply the patch to the status subresource.
+	if err := r.Status().Patch(ctx, sandbox, patch); err != nil {
+		log.Error(err, "Failed to patch sandbox status")
 		return err
 	}
 
-	// Surface error
+	log.Info("Successfully patched sandbox status")
 	return nil
 }
 

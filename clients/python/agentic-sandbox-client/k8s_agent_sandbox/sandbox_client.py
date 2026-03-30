@@ -19,6 +19,7 @@ file I/O) via the Sandbox resource handle.
 
 import json
 import os
+import uuid
 import sys
 import subprocess
 import time
@@ -88,7 +89,10 @@ class SandboxClient(Generic[T]):
             >>> sandbox = client.create_sandbox(template="python-sandbox-template")
             >>> sandbox.commands.run("echo 'Hello World'")
         """
-        claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
+        if not template:
+            raise ValueError("Template name cannot be empty.")
+
+        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
         
         try:
             self._create_claim(claim_name, template, namespace)
@@ -151,7 +155,7 @@ class SandboxClient(Generic[T]):
             return existing
             
         # If the sandbox is not active, pop it out from the tracking list
-        if existing and not existing.is_active:
+        if existing:
             self._active_connection_sandboxes.pop(key, None)
 
         # Re-attach: Create a fresh handle for the existing ID
@@ -228,7 +232,7 @@ class SandboxClient(Generic[T]):
             >>> client.create_sandbox("python-sandbox-template")
             >>> client.delete_all()
         """
-        for ns, claim_name in list(self._active_connection_sandboxes.keys()):
+        for (ns, claim_name), _ in list(self._active_connection_sandboxes.items()):
             try:
                 self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:

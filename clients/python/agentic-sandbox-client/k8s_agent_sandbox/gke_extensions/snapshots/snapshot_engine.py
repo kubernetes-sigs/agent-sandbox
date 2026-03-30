@@ -58,7 +58,7 @@ class SnapshotEngine:
         self.get_pod_name_func = get_pod_name_func
         self.created_manual_triggers = []
 
-    def create(self, trigger_name: str, podsnapshot_timeout: int = 60) -> SnapshotResponse:
+    def create(self, trigger_name: str, podsnapshot_timeout: int = 180) -> SnapshotResponse:
         """
         Creates a snapshot of the Sandbox.
         """
@@ -92,15 +92,20 @@ class SnapshotEngine:
             )
             self.created_manual_triggers.append(trigger_name)
         except ApiException as e:
+            error_message = f"Failed to create PodSnapshotManualTrigger: {e}"
+            if e.status == 403:
+                error_message += " Check if the service account has RBAC permissions to create PodSnapshotManualTrigger resources."
+
             logger.exception(
                 f"Failed to create PodSnapshotManualTrigger '{trigger_name}': {e}"
             )
+
             return SnapshotResponse(
                 success=False,
                 trigger_name=trigger_name,
                 snapshot_uid=None,
                 snapshot_timestamp=None,
-                error_reason=f"Failed to create PodSnapshotManualTrigger: {e}",
+                error_reason=error_message,
                 error_code=SNAPSHOT_ERROR_CODE,
             )
             

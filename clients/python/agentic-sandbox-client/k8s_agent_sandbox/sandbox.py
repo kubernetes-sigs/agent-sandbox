@@ -74,13 +74,19 @@ class Sandbox:
         
         # Internal state tracking
         self._is_closed = False
+        self._pod_name = None
         
     def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
+        if self._pod_name is not None:
+            return self._pod_name
+            
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         metadata = sandbox_object.get('metadata') or {}
         annotations = metadata.get('annotations') or {}
-        return annotations.get(POD_NAME_ANNOTATION) or self.sandbox_id
+        pod_name = annotations.get(POD_NAME_ANNOTATION)
+        self._pod_name = pod_name if pod_name is not None else self.sandbox_id
+        return self._pod_name
 
     @property
     def commands(self) -> CommandExecutor | None:

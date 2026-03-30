@@ -176,11 +176,11 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     
     print(f"Attempting to get terminated sandbox {sandbox.claim_name}...")
     # Wait for K8s to fully delete the resource
-    start_time = time.time()
+    start_time = time.monotonic()
     while True:
         try:
             client.get_sandbox(sandbox.claim_name, namespace=namespace)
-            if time.time() - start_time > 60:
+            if time.monotonic() - start_time > 60:
                 raise AssertionError(f"Sandbox {sandbox.claim_name} was not deleted within timeout")
             print("Sandbox still exists, waiting...")
             time.sleep(2)
@@ -216,11 +216,11 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
 
     print("\n--- Verifying Sandbox 2 cannot be retrieved ---")
     # Wait for K8s to fully delete the resource
-    start_time = time.time()
+    start_time = time.monotonic()
     while True:
         try:
             client.get_sandbox(sandbox2.claim_name, namespace=namespace)
-            if time.time() - start_time > 60:
+            if time.monotonic() - start_time > 60:
                 raise AssertionError(f"Sandbox {sandbox2.claim_name} was not deleted within timeout")
             print("Sandbox still exists, waiting...")
             time.sleep(2)

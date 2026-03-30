@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from typing import List
 from kubernetes import client, config, watch
 
 # Constants for API Groups and Resources
@@ -159,7 +160,7 @@ class K8sHelper:
                 return None
             raise
 
-    def list_sandbox_claims(self, namespace: str) -> list[str]:
+    def list_sandbox_claims(self, namespace: str) -> List[str]:
         """Lists all SandboxClaim custom resources in a namespace."""
         try:
             response = self.custom_objects_api.list_namespaced_custom_object(

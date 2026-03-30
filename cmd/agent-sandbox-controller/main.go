@@ -27,12 +27,16 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
@@ -222,11 +226,24 @@ func main() {
 	}
 
 	if extensions {
+		// 1. Initialize the Assigner
+		assigner := &extensionscontrollers.WarmPoolAssigner{
+			Client: mgr.GetClient(),
+			Pools:  make(map[string]chan types.NamespacedName),
+		}
+
+		// 2. Add it to the Manager so it runs in the background
+		if err := mgr.Add(assigner); err != nil {
+			setupLog.Error(err, "unable to set up WarmPool Assigner")
+			os.Exit(1)
+		}
+
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
 			Tracer:   instrumenter,
+			Assigner: assigner,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
@@ -259,6 +276,35 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	// Index Sandboxes by their Phase and Ownership status
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &sandboxv1alpha1.Sandbox{}, "status.readyAndUnowned", func(rawObj client.Object) []string {
+		sandbox := rawObj.(*sandboxv1alpha1.Sandbox)
+
+		// 1. Check if it has an owner (already claimed)
+		if metav1.GetControllerOf(sandbox) != nil && metav1.GetControllerOf(sandbox).Kind == "SandboxClaim" {
+			return nil
+		}
+
+		// 2. Check if it's actually Ready
+		isReady := false
+		for _, cond := range sandbox.Status.Conditions {
+			if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+				isReady = true
+				break
+			}
+		}
+
+		if isReady {
+			// Return the template hash so we can query specific templates instantly
+			templateHash := sandbox.Labels["agents.x-k8s.io/sandbox-template-ref-hash"]
+			return []string{"true-" + templateHash}
+		}
+		return nil
+	}); err != nil {
+		setupLog.Error(err, "unable to set up field indexer for Sandboxes")
 		os.Exit(1)
 	}
 

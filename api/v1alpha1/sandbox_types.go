@@ -25,14 +25,32 @@ type ConditionType string
 func (c ConditionType) String() string { return string(c) }
 
 const (
-	// SandboxConditionReady indicates readiness for Sandbox.
+	// SandboxConditionInitialized represents the first-time setup of the sandbox dependencies
+	SandboxConditionInitialized ConditionType = "Initialized"
+	// SandboxReasonInitializing indicates the sandbox dependencies are being provisioned
+	SandboxReasonInitializing = "SandboxInitializing"
+	// SandboxReasonInitialized indicates the first-time setup of the sandbox is complete.
+	SandboxReasonInitialized = "SandboxInitialized"
+
+	// SandboxConditionSuspended indicates the sandbox is administratively suspended
+	SandboxConditionSuspended ConditionType = "Suspended"
+	// SandboxReasonPendingEvaluation indicates the reason hasn't been evaluated yet by the controller.
+	SandboxReasonPendingEvaluation = "PendingEvaluation"
+	// SandboxReasonSuspended indicates the sandbox has been suspended and is not operational
+	SandboxReasonSuspendedNotOperational = "Suspended"
+	// SandboxReasonNotSuspended indicates the sandbox is operational and not suspended
+	SandboxReasonNotSuspended = "NotSuspended"
+
+	// SandboxConditionReady indicates readiness for Sandbox
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
 	SandboxConditionFinished ConditionType = "Finished"
 	// SandboxReasonReady indicates the sandbox is fully operational
 	SandboxReasonReady = "SandboxReady"
-	// SandboxReasonPodProvisioning indicates the sandbox pod is being created or starting
-	SandboxReasonPodProvisioning = "PodProvisioning"
+	// SandboxReasonPodInitializing indicates the sandbox pod is being created or starting
+	SandboxReasonPodInitializing = "SandboxPodInitializing"
+	// SandboxReasonPodNotReady indicates the sandbox pod is not ready for application.
+	SandboxReasonPodNotReady = "SandboxPodNotReady"
 	// SandboxReasonSuspended indicates the sandbox is suspended and not ready
 	SandboxReasonSuspended = "SandboxSuspended"
 	// SandboxReasonUnresponsive indicates the sandbox pod is in an unknown state

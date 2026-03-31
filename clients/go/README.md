@@ -152,7 +152,7 @@ All options are documented on the `Options` struct in
 - `TemplateName` *(required)*: name of the `SandboxTemplate`.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
-- `EnableTracing` / `TracerProvider`: OpenTelemetry integration.
+- `TracerProvider`: OpenTelemetry integration (see `NewTracerProvider` helper).
 
 Any operation accepts `WithTimeout` to override the default request timeout,
 or `WithMaxAttempts` to control retry behavior:

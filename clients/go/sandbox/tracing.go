@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -45,23 +44,11 @@ var (
 	AttrRequestID        = attribute.Key("sandbox.request_id")
 )
 
-var (
-	globalProvider   *sdktrace.TracerProvider
-	globalShutdown   func(context.Context) error
-	globalProviderMu sync.Mutex
-)
-
-// InitTracer initializes a global OpenTelemetry TracerProvider with an
-// OTLP/gRPC exporter. Only the first call takes effect; subsequent calls
-// return the existing provider's shutdown function.
-func InitTracer(ctx context.Context, serviceName string) (shutdown func(context.Context) error, err error) {
-	globalProviderMu.Lock()
-	defer globalProviderMu.Unlock()
-
-	if globalProvider != nil {
-		return globalProvider.Shutdown, nil
-	}
-
+// NewTracerProvider creates a TracerProvider with an OTLP/gRPC exporter.
+// The endpoint is read from OTEL_EXPORTER_OTLP_ENDPOINT (default: localhost:4317).
+// serviceName becomes the service.name resource attribute.
+// The caller owns the returned provider and must call Shutdown when done.
+func NewTracerProvider(ctx context.Context, serviceName string) (*sdktrace.TracerProvider, error) {
 	exporter, err := otlptracegrpc.New(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: failed to create OTLP trace exporter: %w", err)
@@ -78,29 +65,10 @@ func InitTracer(ctx context.Context, serviceName string) (shutdown func(context.
 		return nil, fmt.Errorf("sandbox: failed to create OTel resource: %w", err)
 	}
 
-	provider := sdktrace.NewTracerProvider(
+	return sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-	)
-	otel.SetTracerProvider(provider)
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-	globalProvider = provider
-	globalShutdown = provider.Shutdown
-	return provider.Shutdown, nil
-}
-
-// ShutdownTracer shuts down the global TracerProvider initialized by
-// InitTracer. This is a no-op if InitTracer was never called.
-func ShutdownTracer(ctx context.Context) error {
-	globalProviderMu.Lock()
-	shutdown := globalShutdown
-	globalProvider = nil
-	globalShutdown = nil
-	globalProviderMu.Unlock()
-	if shutdown != nil {
-		return shutdown(ctx)
-	}
-	return nil
+	), nil
 }
 
 // startSpan creates a child span parented to whatever span is in ctx.

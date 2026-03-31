@@ -40,6 +40,8 @@ type Commands struct {
 }
 
 // Run executes a command in the sandbox and returns the result.
+// The combined JSON response (stdout + stderr + metadata) is limited to 16 MB;
+// commands producing more output will fail with ErrResponseTooLarge.
 //
 // Because command execution is not idempotent, Run defaults to a single
 // attempt (no retries). For idempotent commands that should retry on
@@ -79,9 +81,15 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 
 	result := ExecutionResult{ExitCode: -1}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxExecutionResponseSize)).Decode(&result); err != nil {
+	lr := io.LimitedReader{R: resp.Body, N: maxExecutionResponseSize}
+	if err := json.NewDecoder(&lr).Decode(&result); err != nil {
+		if lr.N <= 0 {
+			err = fmt.Errorf("%s: %w: command output too large", c.errPrefix(), ErrResponseTooLarge)
+		} else {
+			err = fmt.Errorf("%s: failed to decode run result: %w", c.errPrefix(), err)
+		}
 		recordError(span, err)
-		return nil, fmt.Errorf("%s: failed to decode run result: %w", c.errPrefix(), err)
+		return nil, err
 	}
 	span.SetAttributes(AttrExitCode.Int(result.ExitCode))
 	c.log.V(1).Info("run completed", "exitCode", result.ExitCode)

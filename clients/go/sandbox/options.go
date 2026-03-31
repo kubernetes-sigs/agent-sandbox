@@ -128,20 +128,13 @@ type Options struct {
 	// Use this for custom TLS, proxies, or other transport-level settings.
 	HTTPTransport http.RoundTripper
 
-	// EnableTracing auto-initializes a global OTLP/gRPC TracerProvider when
-	// no custom TracerProvider is supplied. The exporter endpoint is controlled
-	// by OTEL_EXPORTER_OTLP_ENDPOINT (default: localhost:4317). Default: false.
-	EnableTracing bool
-
 	// TraceServiceName is the OpenTelemetry service name used for the tracer's
 	// instrumentation scope and the resource's service.name attribute.
 	// Default: "sandbox-client".
 	TraceServiceName string
 
-	// TracerProvider overrides the OpenTelemetry TracerProvider used for span
-	// creation. If nil and EnableTracing is false, the global provider is used
-	// (noop by default). If nil and EnableTracing is true, a provider with an
-	// OTLP/gRPC exporter is auto-initialized.
+	// TracerProvider sets the OpenTelemetry TracerProvider for span creation.
+	// If nil, falls back to otel.GetTracerProvider (noop by default).
 	TracerProvider trace.TracerProvider
 }
 

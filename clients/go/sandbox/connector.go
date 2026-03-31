@@ -69,8 +69,9 @@ type connector struct {
 	mu           sync.Mutex
 	backoffScale float64 // test hook
 
-	log     logr.Logger
-	tracer  trace.Tracer
+	ownsTransport bool
+	log           logr.Logger
+	tracer        trace.Tracer
 	svcName string
 }
 
@@ -107,6 +108,7 @@ func newConnector(cfg connectorConfig) *connector {
 		serverPort:        cfg.ServerPort,
 		requestTimeout:    cfg.RequestTimeout,
 		perAttemptTimeout: cfg.PerAttemptTimeout,
+		ownsTransport:     cfg.HTTPTransport == nil,
 		httpClient: &http.Client{
 			Transport: transport,
 		},
@@ -154,7 +156,9 @@ func (c *connector) Close() error {
 	c.claimName = ""
 	c.mu.Unlock()
 	err := c.strategy.Close()
-	c.httpClient.CloseIdleConnections()
+	if c.ownsTransport {
+		c.httpClient.CloseIdleConnections()
+	}
 	return err
 }
 

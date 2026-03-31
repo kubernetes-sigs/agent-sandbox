@@ -47,6 +47,7 @@ var (
 	ErrRetriesExhausted = errors.New("retries exhausted")
 	ErrSandboxDeleted   = errors.New("sandbox was deleted before becoming ready")
 	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
+	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
 )
 
 // HTTPError represents a non-OK HTTP response from the sandbox.

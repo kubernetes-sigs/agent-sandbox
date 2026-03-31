@@ -16,8 +16,6 @@ package sandbox
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -126,14 +124,6 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
 	defer span.End()
 
-	randBytes := make([]byte, 4)
-	if _, err := rand.Read(randBytes); err != nil {
-		recordError(span, err)
-		return "", fmt.Errorf("sandbox: failed to generate random claim name: %w", err)
-	}
-	name := fmt.Sprintf("sandbox-claim-%s", hex.EncodeToString(randBytes))
-	span.SetAttributes(AttrClaimName.String(name))
-
 	var annotations map[string]string
 	if traceCtx := traceContextJSON(ctx); traceCtx != "" {
 		annotations = map[string]string{
@@ -143,9 +133,9 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 
 	claim := &extv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   namespace,
-			Annotations: annotations,
+			GenerateName: "sandbox-claim-",
+			Namespace:    namespace,
+			Annotations:  annotations,
 		},
 		Spec: extv1alpha1.SandboxClaimSpec{
 			TemplateRef: extv1alpha1.SandboxTemplateRef{
@@ -154,11 +144,14 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 		},
 	}
 
-	if _, err := h.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{}); err != nil {
+	created, err := h.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{})
+	if err != nil {
 		recordError(span, err)
 		return "", fmt.Errorf("%w: template=%s namespace=%s: %w", ErrClaimFailed, templateName, namespace, err)
 	}
 
+	name := created.Name
+	span.SetAttributes(AttrClaimName.String(name))
 	h.Log.Info("claim created", "claim", name, "namespace", namespace)
 	return name, nil
 }

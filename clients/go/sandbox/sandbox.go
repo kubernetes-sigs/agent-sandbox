@@ -48,7 +48,6 @@ type Sandbox struct {
 	openCancel   context.CancelFunc
 
 	tracer           trace.Tracer
-	ownsGlobalTracer bool
 	traceServiceName string
 	lifecycleSpan    trace.Span
 	lifecycleCtx     context.Context
@@ -66,15 +65,6 @@ func New(ctx context.Context, opts Options) (*Sandbox, error) {
 	opts.setDefaults()
 	if err := opts.validate(); err != nil {
 		return nil, err
-	}
-
-	var ownsGlobalTracer bool
-	if opts.EnableTracing && opts.TracerProvider == nil {
-		if _, err := InitTracer(ctx, opts.TraceServiceName); err != nil {
-			opts.Logger.Error(err, "failed to initialize tracing; continuing with noop tracer")
-		} else {
-			ownsGlobalTracer = true
-		}
 	}
 
 	k8s := opts.K8sHelper
@@ -142,7 +132,6 @@ func New(ctx context.Context, opts Options) (*Sandbox, error) {
 		lifecycleSem:     make(chan struct{}, 1),
 		inflightOps:      &sync.WaitGroup{},
 		tracer:           tracer,
-		ownsGlobalTracer: ownsGlobalTracer,
 		traceServiceName: svcName,
 	}
 
@@ -453,19 +442,6 @@ func (s *Sandbox) Close(ctx context.Context) error {
 		s.lifecycleCtx = nil
 	}
 	s.mu.Unlock()
-
-	if s.ownsGlobalTracer {
-		globalProviderMu.Lock()
-		p := globalProvider
-		globalProviderMu.Unlock()
-		if p != nil {
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer flushCancel()
-			if flushErr := p.ForceFlush(flushCtx); flushErr != nil {
-				s.log.Error(flushErr, "failed to flush trace spans; some spans may be lost")
-			}
-		}
-	}
 
 	if err != nil {
 		return fmt.Errorf("sandbox[%s/%s]: close: %w", s.opts.Namespace, name, err)

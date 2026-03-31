@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from typing import List
 from kubernetes import client, config, watch
 
 # Constants for API Groups and Resources
@@ -37,6 +38,96 @@ class K8sHelper:
         except config.ConfigException:
             config.load_kube_config()
         self.custom_objects_api = client.CustomObjectsApi()
+        self.core_v1_api = client.CoreV1Api()
+
+    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None):
+        """Creates a SandboxClaim custom resource."""
+        manifest = {
+            "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
+            "kind": "SandboxClaim",
+            "metadata": {
+                "name": name,
+                "annotations": annotations or {}
+            },
+            "spec": {
+                "sandboxTemplateRef": {
+                    "name": template
+                }
+            }
+        }
+        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'...")
+        self.custom_objects_api.create_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            body=manifest
+        )
+    
+    def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
+        """Resolves the actual Sandbox name from the SandboxClaim status.
+        With warm pool adoption, the sandbox name may differ from the claim
+        name. This method watches the SandboxClaim until the sandbox name
+        appears in the claim's status, then returns it.
+        """
+        w = watch.Watch()
+        logging.info(f"Resolving sandbox name from claim '{claim_name}'...")
+        for event in w.stream(
+            func=self.custom_objects_api.list_namespaced_custom_object,
+            namespace=namespace,
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            plural=CLAIM_PLURAL_NAME,
+            field_selector=f"metadata.name={claim_name}",
+            timeout_seconds=timeout
+        ):
+            if event["type"] == "DELETED":
+                w.stop()
+                raise RuntimeError(
+                    f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                claim_object = event['object']
+                sandbox_status = claim_object.get(
+                    'status', {}).get('sandbox', {})
+                name = sandbox_status.get('name', '')
+                if name:
+                    logging.info(
+                        f"Resolved sandbox name '{name}' from claim status")
+                    w.stop()
+                    return name
+        raise TimeoutError(
+            f"Could not resolve sandbox name from claim "
+            f"'{claim_name}' within {timeout} seconds.")
+
+    def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int):
+        """Waits for the Sandbox custom resource to have a 'Ready' status."""
+        logging.info(f"Watching for Sandbox {name} to become ready...")
+        w = watch.Watch()
+        for event in w.stream(
+            func=self.custom_objects_api.list_namespaced_custom_object,
+            namespace=namespace,
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            plural=SANDBOX_PLURAL_NAME,
+            field_selector=f"metadata.name={name}",
+            timeout_seconds=timeout
+        ):
+            if event is None:
+                continue
+            if event["type"] in ["ADDED", "MODIFIED"]:
+                sandbox_object = event['object']
+                status = sandbox_object.get('status', {})
+                conditions = status.get('conditions', [])
+                for cond in conditions:
+                    if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                        logging.info(f"Sandbox {name} is ready.")
+                        w.stop()
+                        return
+            elif event["type"] == "DELETED":
+                logging.error(f"Sandbox {name} was deleted before becoming ready.")
+                w.stop()
+                raise RuntimeError(f"Sandbox {name} was deleted before becoming ready.")
+        raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
 
     def delete_sandbox_claim(self, name: str, namespace: str):
         """Deletes a SandboxClaim custom resource."""
@@ -53,6 +144,39 @@ class K8sHelper:
             if e.status != 404:
                 logging.error(f"Error terminating sandbox {name}: {e}")
                 raise
+
+    def get_sandbox(self, name: str, namespace: str):
+        """Gets a Sandbox custom resource."""
+        try:
+            return self.custom_objects_api.get_namespaced_custom_object(
+                group=SANDBOX_API_GROUP,
+                version=SANDBOX_API_VERSION,
+                namespace=namespace,
+                plural=SANDBOX_PLURAL_NAME,
+                name=name
+            )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def list_sandbox_claims(self, namespace: str) -> List[str]:
+        """Lists all SandboxClaim custom resources in a namespace."""
+        try:
+            response = self.custom_objects_api.list_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME
+            )
+            return [
+                item.get("metadata", {}).get("name") 
+                for item in response.get("items", []) 
+                if item.get("metadata", {}).get("name")
+            ]
+        except client.ApiException as e:
+            logging.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
+            raise
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""

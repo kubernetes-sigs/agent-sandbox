@@ -102,15 +102,25 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// We calculate this upfront to decide the flow.
 	claimExpired, timeLeft := r.checkExpiration(claim)
 
-	// Handle "Delete" Policy immediately
+	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
 	// Continuing would try to update the status of a deleted object, causing a crash/error.
-	if claimExpired && claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDelete {
-		log.Info("Deleting Claim because ShutdownPolicy=Delete and time has expired")
+	if claimExpired && claim.Spec.Lifecycle != nil &&
+		(claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDelete ||
+			claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDeleteForeground) {
+
+		policy := claim.Spec.Lifecycle.ShutdownPolicy
+		log.Info("Deleting Claim because time has expired", "shutdownPolicy", policy)
 		if r.Recorder != nil {
-			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Deleting Claim (ShutdownPolicy=Delete)")
+			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
 		}
-		if err := r.Delete(ctx, claim); err != nil {
+
+		deleteOpts := []client.DeleteOption{}
+		if policy == extensionsv1alpha1.ShutdownPolicyDeleteForeground {
+			deleteOpts = append(deleteOpts, client.PropagationPolicy(metav1.DeletePropagationForeground))
+		}
+
+		if err := r.Delete(ctx, claim, deleteOpts...); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil

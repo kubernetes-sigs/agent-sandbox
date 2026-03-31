@@ -34,6 +34,7 @@ spec:
                     default: Retain
                     enum:
                     - Delete
+                    - DeleteForeground
                     - Retain
                     type: string
                   shutdownTime:
@@ -90,7 +91,7 @@ spec:
                 type: array
               sandbox:
                 properties:
-                  Name:
+                  name:
                     type: string
                 type: object
             type: object

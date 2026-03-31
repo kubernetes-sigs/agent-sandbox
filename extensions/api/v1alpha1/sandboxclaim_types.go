@@ -27,12 +27,18 @@ const (
 )
 
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
-// +kubebuilder:validation:Enum=Delete;Retain
+// +kubebuilder:validation:Enum=Delete;DeleteForeground;Retain
 type ShutdownPolicy string
 
 const (
 	// ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.
 	ShutdownPolicyDelete ShutdownPolicy = "Delete"
+
+	// ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground
+	// cascade deletion. The claim remains in the API (with a deletionTimestamp) until its
+	// underlying Sandbox and Pod are fully terminated. This allows external systems to observe
+	// shutdown progress by checking whether the claim still exists.
+	ShutdownPolicyDeleteForeground ShutdownPolicy = "DeleteForeground"
 
 	// ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).
 	// The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,
@@ -88,10 +94,9 @@ type SandboxClaimStatus struct {
 }
 
 type SandboxStatus struct {
-	// Name is the name of the Sandbox created from this claim
-	// TODO: change `Name` to `name`
+	// name is the name of the Sandbox created from this claim
 	// +optional
-	Name string `json:"Name,omitempty"` //nolint:kubeapilinter
+	Name string `json:"name,omitempty"`
 }
 
 // +genclient

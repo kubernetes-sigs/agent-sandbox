@@ -109,7 +109,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         local_port = self._get_free_port()
 
         logging.info(
-            f"Starting tunnel for Sandbox {self.sandbox_id}: localhost:{local_port} -> {ROUTER_SERVICE_NAME}:8080...")
+            f"Starting tunnel for Sandbox {self.sandbox_id}")
         self.port_forward_process = subprocess.Popen(
             [
                 "kubectl", "port-forward",

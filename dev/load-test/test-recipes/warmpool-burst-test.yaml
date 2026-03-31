@@ -23,12 +23,12 @@ steps:
     tuningSet: RampUp
     objectBundle:
     - basename: perf-template-warm
-      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      objectTemplatePath: "templates/cluster-loader-sandbox-template.yaml"
       templateFillMap:
         LatencyType: warm
         RuntimeClass: {{$runtimeClass}}
     - basename: perf-template-cold
-      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      objectTemplatePath: "templates/cluster-loader-sandbox-template.yaml"
       templateFillMap:
         LatencyType: cold
         RuntimeClass: {{$runtimeClass}}
@@ -40,7 +40,7 @@ steps:
     tuningSet: RampUp
     objectBundle:
     - basename: warmpool
-      objectTemplatePath: "cluster-loader-warmpool.yaml"
+      objectTemplatePath: "templates/cluster-loader-warmpool.yaml"
       templateFillMap:
         TemplateName: perf-template-warm-0
         Replicas: {{$replicas}}
@@ -58,7 +58,7 @@ steps:
     replicasPerNamespace: {{$replicas}} 
     objectBundle:
     - basename: warmpool-claim
-      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
       templateFillMap:
         TemplateName: perf-template-warm-0
         LatencyType: warm # Labeled as warm to stay out of cold metrics
@@ -86,7 +86,7 @@ steps:
     replicasPerNamespace: {{$replicas}} # Requesting {{$replicas}} specifically for the cold phase
     objectBundle:
     - basename: cold-claim
-      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
       templateFillMap:
         TemplateName: perf-template-cold-0
         LatencyType: cold # This matches the measurement selector
@@ -116,9 +116,9 @@ steps:
     tuningSet: RampDown
     objectBundle:
     - basename: warmpool-claim
-      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
     - basename: cold-claim
-      objectTemplatePath: cluster-loader-sandbox-claim.yaml
+      objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
     waits:
     - type: Deleted
       labelSelector: "agents.x-k8s.io/sandbox-name-hash"
@@ -130,8 +130,8 @@ steps:
     tuningSet: RampDown
     objectBundle:
     - basename: warmpool
-      objectTemplatePath: "cluster-loader-warmpool.yaml"
+      objectTemplatePath: "templates/cluster-loader-warmpool.yaml"
     - basename: perf-template-warm
-      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      objectTemplatePath: "templates/cluster-loader-sandbox-template.yaml"
     - basename: perf-template-cold
-      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+      objectTemplatePath: "templates/cluster-loader-sandbox-template.yaml"

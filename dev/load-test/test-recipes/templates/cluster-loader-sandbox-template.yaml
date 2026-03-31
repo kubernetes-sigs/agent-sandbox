@@ -9,7 +9,9 @@ spec:
         latency-type: {{.LatencyType}}
     spec:
       restartPolicy: Never 
+      {{if .RuntimeClass}}
       runtimeClassName: {{.RuntimeClass}}
+      {{end}}
       containers:
         - name: python-agent
           image: python:3.11-slim

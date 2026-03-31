@@ -94,6 +94,13 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	setupLog.Info("Concurrency settings",
+		"sandbox", sandboxConcurrentWorkers,
+		"sandboxClaim", sandboxClaimConcurrentWorkers,
+		"sandboxWarmPool", sandboxWarmPoolConcurrentWorkers,
+		"sandboxTemplate", sandboxTemplateConcurrentWorkers,
+	)
+
 	// Validation checks for concurrency flags
 	if sandboxConcurrentWorkers <= 0 || sandboxClaimConcurrentWorkers <= 0 || sandboxWarmPoolConcurrentWorkers <= 0 {
 		setupLog.Error(nil, "concurrent workers must be greater than 0")

@@ -19,6 +19,7 @@ file I/O) via the Sandbox resource handle.
 
 import json
 import os
+import re
 import uuid
 import sys
 import subprocess
@@ -79,7 +80,7 @@ class SandboxClient(Generic[T]):
         # Deletes all the sandboxes on program termination
         atexit.register(self.delete_all)
 
-    def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180) -> T:
+    def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None) -> T:
         """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
            the underlying infrastructure.
         
@@ -92,10 +93,13 @@ class SandboxClient(Generic[T]):
         if not template:
             raise ValueError("Template name cannot be empty.")
 
+        if labels:
+            self._validate_labels(labels)
+
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
         
         try:
-            self._create_claim(claim_name, template, namespace)
+            self._create_claim(claim_name, template, namespace, labels=labels)
             # Resolve the sandbox id from the sandbox claim object.
             # In case of warmpool, sandbox id is not the same as claim name.
             start_time = time.monotonic()
@@ -240,9 +244,55 @@ class SandboxClient(Generic[T]):
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
 
-    
+    # Kubernetes label validation: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+    _LABEL_NAME_RE = re.compile(r'^[A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9]$|^[A-Za-z0-9]$')
+    _LABEL_PREFIX_RE = re.compile(r'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
+    _LABEL_NAME_MAX_LENGTH = 63
+    _LABEL_PREFIX_MAX_LENGTH = 253
+
+    @staticmethod
+    def _validate_label_name(name: str, context: str):
+        """Validates a label name segment (key or value) against k8s constraints."""
+        if len(name) > SandboxClient._LABEL_NAME_MAX_LENGTH:
+            raise ValueError(
+                f"Label {context} '{name}' exceeds max length of {SandboxClient._LABEL_NAME_MAX_LENGTH} characters."
+            )
+        if not SandboxClient._LABEL_NAME_RE.match(name):
+            raise ValueError(
+                f"Label {context} '{name}' contains invalid characters. "
+                f"Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.]."
+            )
+
+    @staticmethod
+    def _validate_labels(labels: dict[str, str]):
+        """Validates label keys and values against Kubernetes constraints."""
+        for key, value in labels.items():
+            if not key:
+                raise ValueError("Label key cannot be empty.")
+
+            # Keys can have an optional prefix: "prefix/name"
+            if '/' in key:
+                prefix, name = key.split('/', 1)
+                if not prefix or len(prefix) > SandboxClient._LABEL_PREFIX_MAX_LENGTH:
+                    raise ValueError(
+                        f"Label key prefix '{prefix}' is invalid or exceeds {SandboxClient._LABEL_PREFIX_MAX_LENGTH} characters."
+                    )
+                if not SandboxClient._LABEL_PREFIX_RE.match(prefix):
+                    raise ValueError(
+                        f"Label key prefix '{prefix}' must be a valid DNS subdomain."
+                    )
+                if not name:
+                    raise ValueError(f"Label key '{key}' has an empty name after prefix.")
+                SandboxClient._validate_label_name(name, f"key name in '{key}'")
+            else:
+                SandboxClient._validate_label_name(key, f"key '{key}'")
+
+            # Values can be empty, but if non-empty must match the same name constraints
+            if value:
+                SandboxClient._validate_label_name(value, f"value '{value}' for key '{key}'")
+
     @trace_span("create_claim")
-    def _create_claim(self, claim_name: str, template_name: str, namespace: str):
+    def _create_claim(self, claim_name: str, template_name: str, namespace: str, labels: dict[str, str] | None = None):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
         if span.is_recording():
@@ -254,7 +304,7 @@ class SandboxClient(Generic[T]):
             if trace_context_str:
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
-        self.k8s_helper.create_sandbox_claim(claim_name, template_name, namespace, annotations)
+        self.k8s_helper.create_sandbox_claim(claim_name, template_name, namespace, annotations=annotations, labels=labels)
 
     @trace_span("wait_for_sandbox_ready")
     def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):

@@ -40,15 +40,19 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 
-    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None):
+    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None):
         """Creates a SandboxClaim custom resource."""
+        metadata = {
+            "name": name,
+            "annotations": annotations or {},
+        }
+        if labels:
+            metadata["labels"] = labels
+
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
             "kind": "SandboxClaim",
-            "metadata": {
-                "name": name,
-                "annotations": annotations or {}
-            },
+            "metadata": metadata,
             "spec": {
                 "sandboxTemplateRef": {
                     "name": template

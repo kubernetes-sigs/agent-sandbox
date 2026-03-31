@@ -46,7 +46,7 @@ class TestSandboxClient(unittest.TestCase):
             
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
             
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace")
+            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None)
             self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
@@ -169,6 +169,39 @@ class TestSandboxClient(unittest.TestCase):
             mock_delete.assert_any_call("claim1", namespace="ns1")
             mock_delete.assert_any_call("claim2", namespace="ns2")
 
+    @patch('uuid.uuid4')
+    def test_create_sandbox_with_labels(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        labels = {"agent": "code-agent", "team": "platform"}
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+
+            self.client.create_sandbox("test-template", "test-namespace", labels=labels)
+
+            mock_create_claim.assert_called_once_with(
+                "sandbox-claim-1234abcd", "test-template", "test-namespace",
+                labels={"agent": "code-agent", "team": "platform"},
+            )
+
+    def test_create_claim_with_labels(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
+
+        labels = {"agent": "code-agent"}
+        self.client._create_claim("test-claim", "test-template", "test-namespace", labels=labels)
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-template", "test-namespace",
+            annotations={"opentelemetry.io/trace-context": "trace-data"},
+            labels={"agent": "code-agent"},
+        )
+
     def test_create_claim(self):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
@@ -176,9 +209,52 @@ class TestSandboxClient(unittest.TestCase):
         self.client._create_claim("test-claim", "test-template", "test-namespace")
         
         self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
-            "test-claim", "test-template", "test-namespace", 
-            {"opentelemetry.io/trace-context": "trace-data"}
+            "test-claim", "test-template", "test-namespace",
+            annotations={"opentelemetry.io/trace-context": "trace-data"},
+            labels=None
         )
+
+    def test_validate_labels_rejects_invalid_value(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", labels={"agent": "invalid value!"})
+        self.assertIn("invalid characters", str(ctx.exception))
+
+    def test_validate_labels_rejects_too_long_value(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", labels={"agent": "a" * 64})
+        self.assertIn("exceeds max length", str(ctx.exception))
+
+    def test_validate_labels_rejects_empty_key(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", labels={"": "value"})
+        self.assertIn("Label key cannot be empty", str(ctx.exception))
+
+    def test_validate_labels_rejects_invalid_key(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", labels={"bad key!": "value"})
+        self.assertIn("invalid characters", str(ctx.exception))
+
+    def test_validate_labels_rejects_too_long_key(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", labels={"a" * 64: "value"})
+        self.assertIn("exceeds max length", str(ctx.exception))
+
+    def test_validate_labels_accepts_prefixed_key(self):
+        SandboxClient._validate_labels({"app.kubernetes.io/name": "my-app"})
+
+    def test_validate_labels_rejects_invalid_prefix(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", labels={"BAD PREFIX/name": "value"})
+        self.assertIn("valid DNS subdomain", str(ctx.exception))
+
+    def test_validate_labels_accepts_single_char_prefix(self):
+        SandboxClient._validate_labels({"a/name": "value"})
+
+    def test_validate_labels_accepts_empty_value(self):
+        SandboxClient._validate_labels({"key": ""})
+
+    def test_validate_labels_accepts_valid(self):
+        SandboxClient._validate_labels({"agent": "code-agent", "team": "platform-123"})
 
     def test_wait_for_sandbox_ready(self):
         self.client._wait_for_sandbox_ready("sandbox-id", "test-namespace", 45)

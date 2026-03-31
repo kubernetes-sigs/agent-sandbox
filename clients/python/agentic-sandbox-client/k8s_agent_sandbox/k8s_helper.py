@@ -82,6 +82,8 @@ class K8sHelper:
             field_selector=f"metadata.name={claim_name}",
             timeout_seconds=timeout
         ):
+            if event is None:
+                continue
             if event["type"] == "DELETED":
                 w.stop()
                 raise SandboxMetadataError(

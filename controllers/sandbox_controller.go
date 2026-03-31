@@ -1063,7 +1063,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 			Type:               string(sandboxv1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: sandbox.Generation,
-			Reason:             sandboxv1alpha1.SandboxReasonSystemTermination,
+			Reason:             sandboxv1alpha1.SandboxReasonExpired,
 			Message:            "Sandbox has expired",
 		})
 	}

@@ -239,11 +239,7 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
-<<<<<<< HEAD
 			name: "13. Sandbox Deleting (DeletionTimestamp set)",
-=======
-			name: "13. User Initiated Termination (DeletionTimestamp set)",
->>>>>>> 84dd30e (Add a KEP to discuss the status field of Sandbox.)
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Generation:        gen,
@@ -572,11 +568,7 @@ func TestReconcile(t *testing.T) {
 						Type:               string(sandboxv1alpha1.SandboxConditionReady),
 						Status:             "False",
 						ObservedGeneration: 1,
-<<<<<<< HEAD
 						Reason:             sandboxv1alpha1.SandboxReasonExpired,
-=======
-						Reason:             sandboxv1alpha1.SandboxReasonSystemTermination,
->>>>>>> 84dd30e (Add a KEP to discuss the status field of Sandbox.)
 						Message:            "Sandbox has expired",
 					},
 				},

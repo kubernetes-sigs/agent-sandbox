@@ -107,7 +107,7 @@ func TestSandboxReplicas(t *testing.T) {
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 2,
 					Reason:             sandboxv1alpha1.SandboxReasonSuspendedNotOperational,
-					Message:            "Sandbox has been suspended by the user",
+					Message:            "Sandbox has been suspended and is not operational",
 				},
 				{
 					Type:               "Ready",

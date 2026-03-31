@@ -102,15 +102,25 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// We calculate this upfront to decide the flow.
 	claimExpired, timeLeft := r.checkExpiration(claim)
 
-	// Handle "Delete" Policy immediately
+	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
 	// Continuing would try to update the status of a deleted object, causing a crash/error.
-	if claimExpired && claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDelete {
-		log.Info("Deleting Claim because ShutdownPolicy=Delete and time has expired")
+	if claimExpired && claim.Spec.Lifecycle != nil &&
+		(claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDelete ||
+			claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDeleteForeground) {
+
+		policy := claim.Spec.Lifecycle.ShutdownPolicy
+		log.Info("Deleting Claim because time has expired", "shutdownPolicy", policy)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Deleting", "Deleting Claim (ShutdownPolicy=Delete)")
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Deleting", fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
 		}
-		if err := r.Delete(ctx, claim); err != nil {
+
+		deleteOpts := []client.DeleteOption{}
+		if policy == extensionsv1alpha1.ShutdownPolicyDeleteForeground {
+			deleteOpts = append(deleteOpts, client.PropagationPolicy(metav1.DeletePropagationForeground))
+		}
+
+		if err := r.Delete(ctx, claim, deleteOpts...); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
@@ -476,6 +486,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 	}
 
+	// Track the sandbox template ref to be used by metrics collector
+	sandbox.Annotations[v1alpha1.SandboxTemplateRefAnnotation] = template.Name
+
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
@@ -731,7 +744,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// This is unlikely to happen; here for completeness only.
 	if sandbox == nil {
 		launchType = asmetrics.LaunchTypeUnknown
-	} else if sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "" {
+	} else if sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] != "" {
 		// Existence of the SandboxPodNameAnnotation implies the pod was adopted from a warm pool.
 		launchType = asmetrics.LaunchTypeWarm
 	}

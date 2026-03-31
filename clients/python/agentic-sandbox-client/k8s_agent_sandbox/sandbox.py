@@ -25,6 +25,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
+from .constants import POD_NAME_ANNOTATION
 
 class Sandbox:
     """
@@ -38,6 +39,7 @@ class Sandbox:
     """
     def __init__(
         self,
+        claim_name: str,
         sandbox_id: str,
         namespace: str = "default",
         connection_config: SandboxConnectionConfig | None = None,
@@ -45,16 +47,17 @@ class Sandbox:
         k8s_helper: K8sHelper | None = None,
     ):
         # Sandbox Related Configuration
-        self.id = sandbox_id
+        self.claim_name = claim_name
+        self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
         
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
-        
+
         # Establish Sandbox Connection
         self.connector = SandboxConnector(
-            sandbox_id=self.id,
+            sandbox_id=self.sandbox_id, # Pass the base sandbox id to connect to.
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper
@@ -71,7 +74,20 @@ class Sandbox:
         
         # Internal state tracking
         self._is_closed = False
+        self._pod_name = None
         
+    def get_pod_name(self) -> str:
+        """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
+        if self._pod_name is not None:
+            return self._pod_name
+            
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        metadata = sandbox_object.get('metadata') or {}
+        annotations = metadata.get('annotations') or {}
+        pod_name = annotations.get(POD_NAME_ANNOTATION)
+        self._pod_name = pod_name if pod_name is not None else self.sandbox_id
+        return self._pod_name
+
     @property
     def commands(self) -> CommandExecutor | None:
         return self._commands
@@ -107,7 +123,7 @@ class Sandbox:
                 logging.error(f"Failed to end tracing span: {e}")
         
         self._is_closed = True
-        logging.info(f"Connection to sandbox '{self.id}' has been closed.")
+        logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
     def terminate(self):
         """Permanent deletion of all server side infrastructure and client side connection."""
@@ -115,6 +131,6 @@ class Sandbox:
         self._close_connection()
         
         # Delete this Sandbox
-        self.k8s_helper.delete_sandbox_claim(self.id, self.namespace)
+        self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
  

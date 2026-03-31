@@ -585,6 +585,24 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			expectSandboxDeleted: false, // Same as above: FakeClient doesn't simulate GC.
 			expectStatus:         "",
 		},
+		{
+			name:               "Policy=DeleteForeground && Sandbox Running -> Should Delete Claim with foreground propagation",
+			claim:              createClaim("delete-fg-claim", extensionsv1alpha1.ShutdownPolicyDeleteForeground),
+			sandboxIsExpired:   false,
+			expectClaimDeleted: true,
+			// FakeClient doesn't simulate GC or foreground propagation,
+			// so the Sandbox will remain. The important thing is the Claim is deleted.
+			expectSandboxDeleted: false,
+			expectStatus:         "",
+		},
+		{
+			name:                 "Policy=DeleteForeground && Sandbox Expired -> Should Delete Claim with foreground propagation",
+			claim:                createClaim("delete-fg-claim-expired", extensionsv1alpha1.ShutdownPolicyDeleteForeground),
+			sandboxIsExpired:     true,
+			expectClaimDeleted:   true,
+			expectSandboxDeleted: false,
+			expectStatus:         "",
+		},
 	}
 
 	for _, tc := range testCases {

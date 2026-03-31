@@ -70,6 +70,28 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
 		Log:              opts.Logger,
 	}
+
+	// Simulate GenerateName: assign a name if only GenerateName is set.
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ca := action.(ktesting.CreateAction)
+		claim := ca.GetObject().(*extv1alpha1.SandboxClaim)
+		if claim.Name == "" && claim.GenerateName != "" {
+			claim.Name = claim.GenerateName + "test12345"
+		}
+		return false, nil, nil // fall through to default handler
+	})
+
+	// Default: claim status returns claim name as sandbox name.
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1alpha1.SandboxClaimStatus{
+				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+
 	s, err := New(context.Background(), opts)
 	if err != nil {
 		panic("newTestSandbox: " + err.Error())
@@ -86,6 +108,28 @@ func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClien
 		DynamicClient:    dynCS,
 		Log:              opts.Logger,
 	}
+
+	// Simulate GenerateName.
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ca := action.(ktesting.CreateAction)
+		claim := ca.GetObject().(*extv1alpha1.SandboxClaim)
+		if claim.Name == "" && claim.GenerateName != "" {
+			claim.Name = claim.GenerateName + "test12345"
+		}
+		return false, nil, nil
+	})
+
+	// Default: claim status returns claim name as sandbox name.
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1alpha1.SandboxClaimStatus{
+				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+
 	s, err := New(context.Background(), opts)
 	if err != nil {
 		panic("newTestSandboxWithDynamic: " + err.Error())
@@ -115,26 +159,45 @@ func readySandbox(name string) *sandboxv1alpha1.Sandbox {
 
 // setupWatchWithReactor wires a fake watcher that sends the sandbox once
 // the claim is created, eliminating time.Sleep-based coordination.
+// It also seeds the claim status with the sandbox name so that
+// resolveSandboxName succeeds.
 func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensions.Clientset, sb *sandboxv1alpha1.Sandbox) {
-	fakeWatcher := watch.NewFake()
-	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(fakeWatcher, nil))
+	// Track the last created claim name so the list reactor can return a
+	// matching ready sandbox.
+	var lastClaimName string
+	var lastClaimMu sync.Mutex
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
-				matched := sb.DeepCopy()
-				matched.Name = claim.Name
-				if matched.Annotations != nil {
-					if _, has := matched.Annotations[PodNameAnnotation]; has {
-						matched.Annotations[PodNameAnnotation] = claim.Name + "-pod"
-					}
+				// Simulate GenerateName.
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
 				}
-				go fakeWatcher.Add(matched)
-				return false, nil, nil
+				lastClaimMu.Lock()
+				lastClaimName = claim.Name
+				lastClaimMu.Unlock()
 			}
 		}
-		go fakeWatcher.Add(sb)
 		return false, nil, nil
+	})
+
+	// Return a ready sandbox on list. waitForSandboxReady calls list first.
+	agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		lastClaimMu.Lock()
+		name := lastClaimName
+		lastClaimMu.Unlock()
+		if name == "" {
+			return true, &sandboxv1alpha1.SandboxList{}, nil
+		}
+		matched := sb.DeepCopy()
+		matched.Name = name
+		if matched.Annotations != nil {
+			if _, has := matched.Annotations[PodNameAnnotation]; has {
+				matched.Annotations[PodNameAnnotation] = name + "-pod"
+			}
+		}
+		return true, &sandboxv1alpha1.SandboxList{Items: []sandboxv1alpha1.Sandbox{*matched}}, nil
 	})
 }
 
@@ -492,6 +555,9 @@ func TestModeSelection_Gateway(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				go sandboxWatcher.Add(readySandbox(claim.Name))
 				return false, nil, nil
 			}
@@ -549,6 +615,9 @@ func TestGatewayDiscovery_Timeout(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				go sandboxWatcher.Add(readySandbox(claim.Name))
 				return false, nil, nil
 			}
@@ -625,6 +694,9 @@ func TestGatewayDiscovery_WatchUsesCorrectFieldSelector(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				go sandboxWatcher.Add(readySandbox(claim.Name))
 				return false, nil, nil
 			}
@@ -686,6 +758,9 @@ func TestGatewayDiscovery_ListUsesCorrectFieldSelector(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				go sandboxWatcher.Add(readySandbox(claim.Name))
 				return false, nil, nil
 			}
@@ -902,6 +977,9 @@ func TestOpen_CloseReopens(t *testing.T) {
 		name := "sb"
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				name = claim.Name
 			}
 		}
@@ -1269,6 +1347,9 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 		ca := action.(ktesting.CreateAction)
 		claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim)
 		if ok {
+			if claim.Name == "" && claim.GenerateName != "" {
+				claim.Name = claim.GenerateName + "test12345"
+			}
 			capturedTemplate = claim.Spec.TemplateRef.Name
 			go fakeWatcher.Add(readySandbox(claim.Name))
 		}
@@ -1509,6 +1590,9 @@ func TestGatewayDiscovery_Timeout_CleansUpClaim(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				go sandboxWatcher.Add(readySandbox(claim.Name))
 				return false, nil, nil
 			}
@@ -1834,6 +1918,9 @@ func TestOpen_ReconnectsAfterTransportDeath_GatewayMode(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				lastSb = readySandbox(claim.Name)
 				go sandboxWatcher.Add(lastSb)
 				return false, nil, nil
@@ -1914,6 +2001,9 @@ func TestGatewayDiscovery_ListPath_AlreadyReady(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				go sandboxWatcher.Add(readySandbox(claim.Name))
 				return false, nil, nil
 			}
@@ -2529,7 +2619,7 @@ func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 
 	c.connector.mu.Lock()
 	c.connector.baseURL = server.URL
-	c.connector.claimName = "drain-test-claim"
+	c.connector.sandboxID = "drain-test-claim"
 	c.connector.mu.Unlock()
 	c.mu.Lock()
 	c.claimName = "drain-test-claim"

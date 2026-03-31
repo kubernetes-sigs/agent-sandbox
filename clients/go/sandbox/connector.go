@@ -57,7 +57,7 @@ type connector struct {
 	strategy   ConnectionStrategy
 	httpClient *http.Client
 
-	claimName  string
+	sandboxID  string // sandbox name, used as X-Sandbox-ID header
 	namespace  string
 	serverPort int
 	baseURL    string
@@ -72,7 +72,7 @@ type connector struct {
 	ownsTransport bool
 	log           logr.Logger
 	tracer        trace.Tracer
-	svcName string
+	svcName       string
 }
 
 // connectorConfig holds the parameters needed to construct a connector.
@@ -118,12 +118,11 @@ func newConnector(cfg connectorConfig) *connector {
 	}
 }
 
-// SetIdentity sets the claim name used in request headers. Called by Sandbox
-// after claim creation.
-func (c *connector) SetIdentity(claimName string) {
+// SetIdentity sets the sandbox name sent as X-Sandbox-ID.
+func (c *connector) SetIdentity(sandboxName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.claimName = claimName
+	c.sandboxID = sandboxName
 }
 
 // Connect delegates to the strategy to discover and set the base URL.
@@ -153,7 +152,7 @@ func (c *connector) Close() error {
 	c.mu.Lock()
 	c.baseURL = ""
 	c.lastError = nil
-	c.claimName = ""
+	c.sandboxID = ""
 	c.mu.Unlock()
 	err := c.strategy.Close()
 	if c.ownsTransport {
@@ -224,17 +223,17 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		c.mu.Lock()
 		if c.baseURL == "" {
 			pfErr := c.lastError
-			claimName := c.claimName
+			sandboxID := c.sandboxID
 			namespace := c.namespace
 			c.mu.Unlock()
 			if pfErr != nil {
-				return nil, fmt.Errorf("sandbox[%s/%s]: %w (reqID=%s): %w", namespace, claimName, ErrNotReady, reqID, pfErr)
+				return nil, fmt.Errorf("sandbox[%s/%s]: %w (reqID=%s): %w", namespace, sandboxID, ErrNotReady, reqID, pfErr)
 			}
-			return nil, fmt.Errorf("sandbox[%s/%s]: %w (reqID=%s)", namespace, claimName, ErrNotReady, reqID)
+			return nil, fmt.Errorf("sandbox[%s/%s]: %w (reqID=%s)", namespace, sandboxID, ErrNotReady, reqID)
 		}
 		reqURL := strings.TrimRight(c.baseURL, "/") + "/" + strings.TrimLeft(endpoint, "/")
 		lastURL = reqURL
-		claimName := c.claimName
+		sandboxID := c.sandboxID
 		namespace := c.namespace
 		port := c.serverPort
 		c.mu.Unlock()
@@ -263,7 +262,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			return nil, fmt.Errorf("sandbox: failed to create request: %w", err)
 		}
 
-		req.Header.Set(headerSandboxID, claimName)
+		req.Header.Set(headerSandboxID, sandboxID)
 		req.Header.Set(headerSandboxNamespace, namespace)
 		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
 		req.Header.Set(headerRequestID, reqID)
@@ -278,13 +277,13 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			attemptCancel()
 			lastErr = doErr
 			if ctx.Err() != nil {
-				return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, claimName, reqURL, reqID, ctx.Err())
+				return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, sandboxID, reqURL, reqID, ctx.Err())
 			}
 			if attempt < limit-1 {
 				c.log.V(1).Info("request failed, retrying", "attempt", attempt+1, "maxAttempts", limit, "method", method, "url", reqURL, "reqID", reqID, "error", doErr)
 				sleepWithContext(ctx, c.backoff(attempt))
 				if ctx.Err() != nil {
-					return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, claimName, reqURL, reqID, ctx.Err())
+					return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, sandboxID, reqURL, reqID, ctx.Err())
 				}
 			}
 			continue
@@ -298,7 +297,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 				attemptTimer.Stop()
 				attemptCancel()
 				httpErr := &HTTPError{StatusCode: resp.StatusCode, Body: string(errBody), Operation: method + " " + endpoint}
-				c.log.Error(httpErr, "retries exhausted", "method", method, "url", reqURL, "attempts", limit, "lastStatus", resp.StatusCode, "reqID", reqID, "claim", claimName, "namespace", namespace)
+				c.log.Error(httpErr, "retries exhausted", "method", method, "url", reqURL, "attempts", limit, "lastStatus", resp.StatusCode, "reqID", reqID, "sandbox", sandboxID, "namespace", namespace)
 				return nil, fmt.Errorf("%w: %s failed after %d attempts (url=%s reqID=%s): %w",
 					ErrRetriesExhausted, method, limit, reqURL, reqID, httpErr)
 			}
@@ -310,7 +309,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			c.log.V(1).Info("retryable status, retrying", "attempt", attempt+1, "maxAttempts", limit, "method", method, "url", reqURL, "status", resp.StatusCode, "reqID", reqID)
 			sleepWithContext(ctx, c.backoff(attempt))
 			if ctx.Err() != nil {
-				return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, claimName, reqURL, reqID, ctx.Err())
+				return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, sandboxID, reqURL, reqID, ctx.Err())
 			}
 			continue
 		}
@@ -324,14 +323,14 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			_ = resp.Body.Close()
 			attemptCancel()
 			if ctx.Err() != nil {
-				return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, claimName, reqURL, reqID, ctx.Err())
+				return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, sandboxID, reqURL, reqID, ctx.Err())
 			}
 			lastErr = fmt.Errorf("sandbox: per-attempt timeout raced with response receipt")
 			if attempt < limit-1 {
 				c.log.V(1).Info("per-attempt timeout race, retrying", "attempt", attempt+1, "maxAttempts", limit, "method", method, "url", reqURL, "reqID", reqID)
 				sleepWithContext(ctx, c.backoff(attempt))
 				if ctx.Err() != nil {
-					return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, claimName, reqURL, reqID, ctx.Err())
+					return nil, fmt.Errorf("sandbox[%s/%s]: request cancelled (url=%s reqID=%s): %w", namespace, sandboxID, reqURL, reqID, ctx.Err())
 				}
 			}
 			continue
@@ -348,10 +347,10 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 	}
 
 	c.mu.Lock()
-	finalClaim := c.claimName
+	finalSandbox := c.sandboxID
 	finalNS := c.namespace
 	c.mu.Unlock()
-	c.log.Error(lastErr, "retries exhausted", "method", method, "url", lastURL, "attempts", limit, "reqID", reqID, "claim", finalClaim, "namespace", finalNS)
+	c.log.Error(lastErr, "retries exhausted", "method", method, "url", lastURL, "attempts", limit, "reqID", reqID, "sandbox", finalSandbox, "namespace", finalNS)
 	return nil, fmt.Errorf("%w: %s failed after %d attempts (url=%s reqID=%s): %w", ErrRetriesExhausted, method, limit, lastURL, reqID, lastErr)
 }
 

@@ -69,6 +69,27 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *
 	agentsCS := fakeagents.NewSimpleClientset()
 	extensionsCS := fakeextensions.NewSimpleClientset()
 
+	// Simulate GenerateName: assign a name if only GenerateName is set.
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ca := action.(ktesting.CreateAction)
+		claim := ca.GetObject().(*extv1alpha1.SandboxClaim)
+		if claim.Name == "" && claim.GenerateName != "" {
+			claim.Name = claim.GenerateName + "test12345"
+		}
+		return false, nil, nil // fall through to default handler
+	})
+
+	// Default: claim status returns claim name as sandbox name.
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1alpha1.SandboxClaimStatus{
+				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+
 	opts := Options{
 		TemplateName:        "test-template",
 		APIURL:              srv.URL,
@@ -101,6 +122,9 @@ func setupTracedWatch(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensio
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
 			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+				if claim.Name == "" && claim.GenerateName != "" {
+					claim.Name = claim.GenerateName + "test12345"
+				}
 				captured = claim.DeepCopy()
 
 				sb := &sandboxv1alpha1.Sandbox{
@@ -284,6 +308,17 @@ func TestTracingNoopWithoutProvider(t *testing.T) {
 	agentsCS := fakeagents.NewSimpleClientset()
 	extensionsCS := fakeextensions.NewSimpleClientset()
 
+	// Default: claim status returns claim name as sandbox name.
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1alpha1.SandboxClaimStatus{
+				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+
 	opts := Options{
 		TemplateName:        "test-template",
 		APIURL:              srv.URL,
@@ -330,6 +365,17 @@ func TestTracingErrorRecording(t *testing.T) {
 
 	agentsCS := fakeagents.NewSimpleClientset()
 	extensionsCS := fakeextensions.NewSimpleClientset()
+
+	// Default: claim status returns claim name as sandbox name.
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1alpha1.SandboxClaimStatus{
+				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
 
 	opts := Options{
 		TemplateName:        "test-template",

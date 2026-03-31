@@ -61,7 +61,7 @@ var (
 
 // New creates a new Sandbox with the given options.
 // Call Open() to create a sandbox and establish connectivity.
-func New(ctx context.Context, opts Options) (*Sandbox, error) {
+func New(_ context.Context, opts Options) (*Sandbox, error) {
 	opts.setDefaults()
 	if err := opts.validate(); err != nil {
 		return nil, err
@@ -236,17 +236,30 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Create claim.
-	name, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.TemplateName, s.tracer, s.traceServiceName)
+	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.TemplateName, s.tracer, s.traceServiceName)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.claimName = name
+	s.claimName = claimName
 	s.mu.Unlock()
-	s.connector.SetIdentity(name)
 
-	// Wait for sandbox.
-	state, err := s.k8s.waitForSandboxReady(openCtx, name, s.opts.Namespace, s.opts.SandboxReadyTimeout, s.tracer, s.traceServiceName)
+	// Resolve sandbox name (may differ from claim name with warm pool).
+	resolveStart := time.Now()
+	sandboxName, err := s.k8s.resolveSandboxName(openCtx, claimName, s.opts.Namespace, s.opts.SandboxReadyTimeout, s.tracer, s.traceServiceName)
+	if err != nil {
+		return s.rollbackOpen(err)
+	}
+	s.connector.SetIdentity(sandboxName)
+
+	// Subtract resolution time from the ready timeout budget.
+	remainingTimeout := s.opts.SandboxReadyTimeout - time.Since(resolveStart)
+	if remainingTimeout <= 0 {
+		return s.rollbackOpen(fmt.Errorf("%w: sandbox name resolution consumed the entire timeout budget", ErrTimeout))
+	}
+
+	// Wait for sandbox to be ready.
+	state, err := s.k8s.waitForSandboxReady(openCtx, sandboxName, s.opts.Namespace, remainingTimeout, s.tracer, s.traceServiceName)
 	if err != nil {
 		return s.rollbackOpen(err)
 	}
@@ -312,7 +325,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 	}
 	s.setState(state)
 
-	s.connector.SetIdentity(claimName)
+	s.connector.SetIdentity(sandboxName)
 	if err := s.connector.Connect(reconnCtx); err != nil {
 		retErr := fmt.Errorf("sandbox: reconnect transport failed (sandbox is alive; retry Open): %w", err)
 		recordError(span, retErr)

@@ -41,19 +41,17 @@ Use this when running against a cluster with a public Gateway IP. The client aut
 discovers the Gateway address.
 
 ```go
-client, err := sandbox.New(ctx, sandbox.Options{
-    TemplateName:     "my-sandbox-template",
+client, err := sandbox.NewClient(ctx, sandbox.Options{
     GatewayName:      "external-http-gateway",
     GatewayNamespace: "default",
-    Namespace:        "default",
 })
 if err != nil { log.Fatal(err) }
-defer client.Close(context.Background())
+defer client.DeleteAll(ctx)
 
-ctx := context.Background()
-if err := client.Open(ctx); err != nil { log.Fatal(err) }
+sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+if err != nil { log.Fatal(err) }
 
-result, err := client.Run(ctx, "echo 'Hello from Cloud!'")
+result, err := sb.Run(ctx, "echo 'Hello from Cloud!'")
 if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
@@ -64,17 +62,14 @@ Use this for local development or CI. If you omit `GatewayName` and `APIURL`, th
 automatically establishes an SPDY port-forward tunnel to the Router Service.
 
 ```go
-client, err := sandbox.New(ctx, sandbox.Options{
-    TemplateName: "my-sandbox-template",
-    Namespace:    "default",
-})
+client, err := sandbox.NewClient(ctx, sandbox.Options{})
 if err != nil { log.Fatal(err) }
-defer client.Close(context.Background())
+defer client.DeleteAll(ctx)
 
-ctx := context.Background()
-if err := client.Open(ctx); err != nil { log.Fatal(err) }
+sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+if err != nil { log.Fatal(err) }
 
-result, err := client.Run(ctx, "echo 'Hello from Local!'")
+result, err := sb.Run(ctx, "echo 'Hello from Local!'")
 if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
@@ -87,18 +82,16 @@ Use `APIURL` to bypass discovery entirely. Useful for:
 - **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.example.com`).
 
 ```go
-client, err := sandbox.New(ctx, sandbox.Options{
-    TemplateName: "my-sandbox-template",
-    APIURL:       "http://sandbox-router-svc.default.svc.cluster.local:8080",
-    Namespace:    "default",
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    APIURL: "http://sandbox-router-svc.default.svc.cluster.local:8080",
 })
 if err != nil { log.Fatal(err) }
-defer client.Close(context.Background())
+defer client.DeleteAll(ctx)
 
-ctx := context.Background()
-if err := client.Open(ctx); err != nil { log.Fatal(err) }
+sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+if err != nil { log.Fatal(err) }
 
-entries, err := client.List(ctx, ".")
+entries, err := sb.List(ctx, ".")
 if err != nil { log.Fatal(err) }
 fmt.Println(entries)
 ```
@@ -108,9 +101,8 @@ fmt.Println(entries)
 If your sandbox runtime listens on a port other than 8888, specify `ServerPort`.
 
 ```go
-client, err := sandbox.New(ctx, sandbox.Options{
-    TemplateName: "my-sandbox-template",
-    ServerPort:   3000,
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    ServerPort: 3000,
 })
 ```
 
@@ -119,13 +111,13 @@ client, err := sandbox.New(ctx, sandbox.Options{
 ```go
 // Write a file (must be a plain filename, no directory separators).
 // Paths like "dir/script.py" are rejected with an error.
-err := client.Write(ctx, "script.py", []byte("print('hello')"))
+err := sb.Write(ctx, "script.py", []byte("print('hello')"))
 
 // Read a file
-data, err := client.Read(ctx, "script.py")
+data, err := sb.Read(ctx, "script.py")
 
 // Check existence
-exists, err := client.Exists(ctx, "script.py")
+exists, err := sb.Exists(ctx, "script.py")
 ```
 
 `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
@@ -136,12 +128,31 @@ If your Gateway uses HTTPS with a private CA, provide a custom transport:
 
 ```go
 tlsConfig := &tls.Config{RootCAs: myCAPool}
-client, err := sandbox.New(ctx, sandbox.Options{
-    TemplateName:  "my-sandbox-template",
+client, err := sandbox.NewClient(ctx, sandbox.Options{
     GatewayName:   "external-https-gateway",
     GatewayScheme: "https",
     HTTPTransport: &http.Transport{TLSClientConfig: tlsConfig},
 })
+```
+
+### Multi-Sandbox Management
+
+```go
+client, err := sandbox.NewClient(ctx, sandbox.Options{})
+stop := client.EnableAutoCleanup() // cleanup on SIGINT/SIGTERM
+defer stop()
+defer client.DeleteAll(ctx)
+
+sb1, _ := client.CreateSandbox(ctx, "python-template", "default")
+sb2, _ := client.CreateSandbox(ctx, "node-template", "default")
+
+// List tracked sandboxes
+for _, key := range client.ListActiveSandboxes() {
+    fmt.Printf("  %s/%s\n", key.Namespace, key.ClaimName)
+}
+
+// Re-attach to existing sandbox by claim name
+sb, _ := client.GetSandbox(ctx, sb1.ClaimName(), "default")
 ```
 
 ## Configuration
@@ -149,10 +160,10 @@ client, err := sandbox.New(ctx, sandbox.Options{
 All options are documented on the `Options` struct in
 [options.go](sandbox/options.go). Key fields:
 
-- `TemplateName` *(required)*: name of the `SandboxTemplate`.
+- `TemplateName`: passed per-sandbox to `CreateSandbox`.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
-- `TracerProvider`: OpenTelemetry integration (see `NewTracerProvider` helper).
+- `TracerProvider`: OpenTelemetry integration.
 
 Any operation accepts `WithTimeout` to override the default request timeout,
 or `WithMaxAttempts` to control retry behavior:

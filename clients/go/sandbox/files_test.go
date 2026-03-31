@@ -57,7 +57,7 @@ func newReadyTestSandbox(serverURL string) *Sandbox {
 	// Simulate being connected
 	sb.connector.mu.Lock()
 	sb.connector.baseURL = serverURL
-	sb.connector.claimName = "test-claim-abc123"
+	sb.connector.sandboxID = "test-claim-abc123"
 	sb.connector.backoffScale = 0.001 // near-instant retries in tests
 	sb.connector.mu.Unlock()
 	sb.mu.Lock()
@@ -437,7 +437,7 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 
 	c := newReadyTestSandbox(server.URL)
 	c.connector.mu.Lock()
-	c.connector.claimName = "my-claim"
+	c.connector.sandboxID = "my-claim"
 	c.connector.namespace = "my-ns"
 	c.connector.serverPort = 9999
 	c.connector.mu.Unlock()

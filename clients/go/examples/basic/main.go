@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// basic demonstrates minimal usage of the Go sandbox client in dev mode
-// (port-forward to sandbox-router-svc).
+// basic demonstrates minimal usage of the Go sandbox client.
 package main
 
 import (
@@ -25,43 +24,59 @@ import (
 )
 
 func main() {
-	client, err := sandbox.New(context.Background(), sandbox.Options{
-		TemplateName: "my-sandbox-template",
-		Namespace:    "default",
+	ctx := context.Background()
+
+	// Create client with shared configuration.
+	client, err := sandbox.NewClient(ctx, sandbox.Options{
+		Namespace: "default",
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close(context.Background())
+	stop := client.EnableAutoCleanup()
+	defer stop()
+	defer client.DeleteAll(ctx)
 
-	ctx := context.Background()
-	if err := client.Open(ctx); err != nil {
+	// Create a sandbox.
+	sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Sandbox ready: claim=%s pod=%s\n", client.ClaimName(), client.PodName())
+	fmt.Printf("Sandbox ready: claim=%s sandbox=%s pod=%s\n",
+		sb.ClaimName(), sb.SandboxName(), sb.PodName())
 
-	result, err := client.Run(ctx, "echo 'Hello from Go!'")
+	// Run a command.
+	result, err := sb.Run(ctx, "echo 'Hello from Go!'")
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("stdout: %s", result.Stdout)
 	fmt.Printf("exit_code: %d\n", result.ExitCode)
 
-	if err := client.Write(ctx, "hello.txt", []byte("Hello, world!")); err != nil {
+	// Write and read a file.
+	if err := sb.Write(ctx, "hello.txt", []byte("Hello, world!")); err != nil {
 		log.Fatal(err)
 	}
-
-	data, err := client.Read(ctx, "hello.txt")
+	data, err := sb.Read(ctx, "hello.txt")
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("file content: %s\n", string(data))
 
-	entries, err := client.List(ctx, ".")
+	// List files.
+	entries, err := sb.List(ctx, ".")
 	if err != nil {
 		log.Fatal(err)
 	}
 	for _, e := range entries {
 		fmt.Printf("  %s\t%s\t%d bytes\n", e.Type, e.Name, e.Size)
 	}
+
+	// Re-attach to the same sandbox.
+	sb2, err := client.GetSandbox(ctx, sb.ClaimName(), "default")
+	if err != nil {
+		log.Fatal(err)
+	}
+	result, _ = sb2.Run(ctx, "echo 're-attached!'")
+	fmt.Printf("re-attach stdout: %s", result.Stdout)
 }

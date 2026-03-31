@@ -173,11 +173,10 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 	return nil
 }
 
-// waitForSandboxReady watches the Sandbox resource until it becomes ready,
-// returning the sandbox state. The caller must provide a context with an
-// appropriate timeout.
-func (h *K8sHelper) waitForSandboxReady(ctx context.Context, claimName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (*sandboxState, error) {
-	ctx, span := startSpan(ctx, tracer, svcName, "wait_for_sandbox_ready")
+// resolveSandboxName watches SandboxClaim status until the sandbox name is
+// populated. With warm pool, the sandbox name may differ from the claim name.
+func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (string, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "resolve_sandbox_name")
 	defer span.End()
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -189,34 +188,126 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, claimName, namespac
 
 	watchBackoff := 100 * time.Millisecond
 	const maxWatchBackoff = 5 * time.Second
+
+	for {
+		claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+		if err == nil {
+			if name := claim.Status.SandboxStatus.Name; name != "" {
+				h.Log.Info("sandbox name resolved", "claim", claimName, "sandbox", name)
+				return name, nil
+			}
+		} else if k8serrors.IsNotFound(err) {
+			retErr := fmt.Errorf("%w: claim %s deleted during name resolution", ErrSandboxDeleted, claimName)
+			recordError(span, retErr)
+			return "", retErr
+		} else {
+			h.Log.V(1).Info("get claim failed, falling through to watch", "error", err, "claim", claimName)
+		}
+
+		watcher, err := h.ExtensionsClient.SandboxClaims(namespace).Watch(ctx, listOpts)
+		if err != nil {
+			if ctx.Err() != nil {
+				retErr := fmt.Errorf("%w: sandbox name not resolved for claim %s within %s", ErrTimeout, claimName, timeout)
+				recordError(span, retErr)
+				return "", retErr
+			}
+			h.Log.V(1).Info("claim watch creation failed, retrying", "error", err, "claim", claimName)
+			sleepWithContext(ctx, watchBackoff)
+			watchBackoff *= 2
+			if watchBackoff > maxWatchBackoff {
+				watchBackoff = maxWatchBackoff
+			}
+			continue
+		}
+
+		name, done, watchErr := h.drainClaimWatch(ctx, watcher, claimName, timeout)
+		watcher.Stop()
+		if done {
+			h.Log.Info("sandbox name resolved", "claim", claimName, "sandbox", name)
+			return name, nil
+		}
+		if watchErr != nil {
+			recordError(span, watchErr)
+			return "", watchErr
+		}
+		h.Log.V(1).Info("claim watch closed, re-establishing", "claim", claimName)
+
+		sleepWithContext(ctx, watchBackoff)
+		watchBackoff *= 2
+		if watchBackoff > maxWatchBackoff {
+			watchBackoff = maxWatchBackoff
+		}
+	}
+}
+
+func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface, claimName string, timeout time.Duration) (string, bool, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return "", false, fmt.Errorf("%w: sandbox name not resolved for claim %s within %s", ErrTimeout, claimName, timeout)
+		case event, ok := <-watcher.ResultChan():
+			if !ok {
+				return "", false, nil
+			}
+			if event.Type == watch.Error {
+				h.Log.V(1).Info("transient claim watch error, will re-list", "error", event.Object)
+				return "", false, nil
+			}
+			if event.Type == watch.Deleted {
+				return "", false, fmt.Errorf("%w: claim %s deleted during name resolution", ErrSandboxDeleted, claimName)
+			}
+			claim, ok := event.Object.(*extv1alpha1.SandboxClaim)
+			if !ok {
+				continue
+			}
+			if name := claim.Status.SandboxStatus.Name; name != "" {
+				return name, true, nil
+			}
+		}
+	}
+}
+
+// waitForSandboxReady watches the Sandbox resource until it becomes ready.
+func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (*sandboxState, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "wait_for_sandbox_ready")
+	defer span.End()
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	listOpts := metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("metadata.name=%s", sandboxName),
+	}
+
+	watchBackoff := 100 * time.Millisecond
+	const maxWatchBackoff = 5 * time.Second
 	var lastConditions string
 
 	for {
 		list, listErr := h.AgentsClient.Sandboxes(namespace).List(ctx, listOpts)
 		if listErr == nil {
 			for i := range list.Items {
-				if list.Items[i].Name != claimName {
+				if list.Items[i].Name != sandboxName {
 					continue
 				}
 				if isSandboxReady(&list.Items[i]) {
-					state := extractState(&list.Items[i])
-					return state, nil
+					return extractState(&list.Items[i]), nil
 				}
 				lastConditions = formatConditions(list.Items[i].Status.Conditions)
 			}
 			listOpts.ResourceVersion = list.ResourceVersion
 		} else {
-			h.Log.V(1).Info("list sandboxes failed, falling through to watch", "error", listErr, "claim", claimName)
+			h.Log.V(1).Info("list sandboxes failed, falling through to watch", "error", listErr, "sandbox", sandboxName)
 		}
 
 		watcher, err := h.AgentsClient.Sandboxes(namespace).Watch(ctx, listOpts)
 		if err != nil {
 			if ctx.Err() != nil {
-				retErr := fmt.Errorf("%w: sandbox did not become ready within %s (last conditions: %s)", ErrTimeout, timeout, lastConditions)
+				retErr := fmt.Errorf("%w: sandbox %s did not become ready within %s (last conditions: %s)", ErrTimeout, sandboxName, timeout, lastConditions)
 				recordError(span, retErr)
 				return nil, retErr
 			}
-			h.Log.V(1).Info("watch creation failed, retrying", "error", err, "claim", claimName)
+			h.Log.V(1).Info("watch creation failed, retrying", "error", err, "sandbox", sandboxName)
 			listOpts.ResourceVersion = ""
 			sleepWithContext(ctx, watchBackoff)
 			watchBackoff *= 2
@@ -226,7 +317,7 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, claimName, namespac
 			continue
 		}
 
-		state, done, watchErr := h.drainSandboxWatch(ctx, watcher, claimName, timeout, &lastConditions)
+		state, done, watchErr := h.drainSandboxWatch(ctx, watcher, sandboxName, timeout, &lastConditions)
 		watcher.Stop()
 		if done {
 			return state, nil
@@ -235,7 +326,7 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, claimName, namespac
 			recordError(span, watchErr)
 			return nil, watchErr
 		}
-		h.Log.V(1).Info("sandbox watch closed, re-establishing", "claim", claimName)
+		h.Log.V(1).Info("sandbox watch closed, re-establishing", "sandbox", sandboxName)
 		listOpts.ResourceVersion = ""
 
 		sleepWithContext(ctx, watchBackoff)
@@ -246,11 +337,11 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, claimName, namespac
 	}
 }
 
-func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, claimName string, timeout time.Duration, lastConditions *string) (*sandboxState, bool, error) {
+func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, sandboxName string, timeout time.Duration, lastConditions *string) (*sandboxState, bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, false, fmt.Errorf("%w: sandbox did not become ready within %s (last conditions: %s)", ErrTimeout, timeout, *lastConditions)
+			return nil, false, fmt.Errorf("%w: sandbox %s did not become ready within %s (last conditions: %s)", ErrTimeout, sandboxName, timeout, *lastConditions)
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				return nil, false, nil
@@ -266,7 +357,7 @@ func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interfa
 			if !ok {
 				continue
 			}
-			if sb.Name != claimName {
+			if sb.Name != sandboxName {
 				continue
 			}
 			*lastConditions = formatConditions(sb.Status.Conditions)
@@ -284,7 +375,7 @@ func (h *K8sHelper) verifyClaimExists(ctx context.Context, name, namespace strin
 
 	_, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		retErr := fmt.Errorf("sandbox: claim %s no longer exists: %w", name, err)
+		retErr := fmt.Errorf("%w: claim %s: %w", ErrSandboxDeleted, name, err)
 		recordError(span, retErr)
 		return retErr
 	}

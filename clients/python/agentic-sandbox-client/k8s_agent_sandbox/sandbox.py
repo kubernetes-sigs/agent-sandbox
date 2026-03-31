@@ -21,7 +21,8 @@ from .files.filesystem import Filesystem
 from .models import (
     SandboxConnectionConfig, 
     SandboxLocalTunnelConnectionConfig, 
-    SandboxTracerConfig
+    SandboxTracerConfig,
+    SandboxStatus,
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
@@ -124,6 +125,12 @@ class Sandbox:
         
         self._is_closed = True
         logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
+    
+    def status(self) -> SandboxStatus:
+        """Fetches the current status of the Sandbox custom resource, reflecting initialized, suspended, and ready conditions."""
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        status_dict = sandbox_object.get('status', {})
+        return SandboxStatus(**status_dict)
     
     def terminate(self):
         """Permanent deletion of all server side infrastructure and client side connection."""

@@ -32,6 +32,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
  
 def run_sandbox_tests(sandbox: Sandbox):
     """Tests methods on the Sandbox object (execution, files, etc)."""
+    print("\n--- Testing Sandbox Status ---")
+    status = sandbox.status()
+    print(f"Sandbox status conditions: {status.conditions}")
+    assert status.initialized == "True", f"Expected initialized='True', got {status.initialized}"
+    assert status.suspended == "False", f"Expected suspended='False', got {status.suspended}"
+    assert status.ready == "True", f"Expected ready='True', got {status.ready}"
+    print("--- Sandbox Status Test Passed! ---")
+
     print("\n--- Testing Command Execution ---")
     command_to_run = "echo 'Hello from the sandbox shruti!'"
     print(f"Executing command: '{command_to_run}'")

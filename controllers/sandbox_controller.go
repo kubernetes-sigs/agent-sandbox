@@ -239,8 +239,8 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 	isSuspended := sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0
 	if isSuspended {
 		suspended.Status = metav1.ConditionTrue
-		suspended.Reason = sandboxv1alpha1.SandboxReasonUserSuspended
-		suspended.Message = "Sandbox has been suspended by the user"
+		suspended.Reason = sandboxv1alpha1.SandboxReasonSuspendedNotOperational
+		suspended.Message = "Sandbox has been suspended and is not operational"
 	} else if pod != nil {
 		suspended.Status = metav1.ConditionFalse
 		suspended.Reason = sandboxv1alpha1.SandboxReasonNotSuspended
@@ -257,17 +257,7 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 		Message:            "Sandbox is initializing",
 	}
 
-	expired, _ := checkSandboxExpiry(sandbox)
-
-	if !sandbox.DeletionTimestamp.IsZero() {
-		ready.Status = metav1.ConditionFalse
-		ready.Reason = sandboxv1alpha1.SandboxReasonDeleting
-		ready.Message = "Sandbox is terminating"
-	} else if expired {
-		ready.Status = metav1.ConditionFalse
-		ready.Reason = sandboxv1alpha1.SandboxReasonExpired
-		ready.Message = "Sandbox has expired"
-	} else if initialized.Status == metav1.ConditionFalse {
+	if initialized.Status == metav1.ConditionFalse {
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = sandboxv1alpha1.SandboxReasonInitializing
 		ready.Message = "Waiting for Sandbox to be provisioned"
@@ -277,7 +267,7 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 		ready.Message = "Sandbox is suspended"
 	} else if pod == nil {
 		ready.Status = metav1.ConditionFalse
-		ready.Reason = sandboxv1alpha1.SandboxReasonPodProvisioning
+		ready.Reason = sandboxv1alpha1.SandboxReasonPodInitializing
 		ready.Message = "Pod is initializing"
 	} else {
 		// Pod exists
@@ -296,8 +286,8 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 				ready.Message = "Sandbox is operational"
 			} else {
 				ready.Status = metav1.ConditionFalse
-				ready.Reason = sandboxv1alpha1.SandboxReasonPodProvisioning
-				ready.Message = "Pod is Running but not Ready"
+				ready.Reason = sandboxv1alpha1.SandboxReasonPodNotReady
+				ready.Message = "Pod is not Ready"
 			}
 		case corev1.PodUnknown:
 			ready.Status = metav1.ConditionUnknown
@@ -305,7 +295,7 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 			ready.Message = "Pod status is unknown"
 		default:
 			ready.Status = metav1.ConditionFalse
-			ready.Reason = sandboxv1alpha1.SandboxReasonPodProvisioning
+			ready.Reason = sandboxv1alpha1.SandboxReasonPodNotReady
 			ready.Message = "Pod is in phase: " + string(pod.Status.Phase)
 		}
 	}

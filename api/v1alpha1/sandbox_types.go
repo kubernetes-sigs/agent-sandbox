@@ -36,8 +36,8 @@ const (
 	SandboxConditionSuspended ConditionType = "Suspended"
 	// SandboxReasonPendingEvaluation indicates the reason hasn't been evaluated yet by the controller.
 	SandboxReasonPendingEvaluation = "PendingEvaluation"
-	// SandboxReasonUserSuspended indicates the sandbox has been suspended by the user
-	SandboxReasonUserSuspended = "UserSuspended"
+	// SandboxReasonSuspended indicates the sandbox has been suspended and is not operational
+	SandboxReasonSuspendedNotOperational = "Suspended"
 	// SandboxReasonNotSuspended indicates the sandbox is operational and not suspended
 	SandboxReasonNotSuspended = "NotSuspended"
 
@@ -45,8 +45,10 @@ const (
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxReasonReady indicates the sandbox is fully operational
 	SandboxReasonReady = "SandboxReady"
-	// SandboxReasonPodProvisioning indicates the sandbox pod is being created or starting
-	SandboxReasonPodProvisioning = "PodProvisioning"
+	// SandboxReasonPodInitializing indicates the sandbox pod is being created or starting
+	SandboxReasonPodInitializing = "SandboxPodInitializing"
+	// SandboxReasonPodNotReady indicates the sandbox pod is not ready for application.
+	SandboxReasonPodNotReady = "SandboxPodNotReady"
 	// SandboxReasonSuspended indicates the sandbox is suspended and not ready
 	SandboxReasonSuspended = "SandboxSuspended"
 	// SandboxReasonUnresponsive indicates the sandbox pod is in an unknown state

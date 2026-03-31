@@ -23,6 +23,10 @@ class SandboxNotReadyError(SandboxError):
     """Raised when the sandbox is not ready for communication."""
 
 
+class SandboxNotFoundError(SandboxError):
+    """Raised when the sandbox or sandbox claim cannot be found or was deleted."""
+
+
 class SandboxPortForwardError(SandboxError):
     """Raised when the port-forward process crashes."""
 

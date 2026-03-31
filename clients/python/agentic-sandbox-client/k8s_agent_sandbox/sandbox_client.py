@@ -40,7 +40,7 @@ from .models import (
     SandboxTracerConfig
 )
 from .k8s_helper import K8sHelper
-from .exceptions import SandboxNotReadyError
+from .exceptions import SandboxNotFoundError
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -144,12 +144,12 @@ class SandboxClient(Generic[T]):
             sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout)
             sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
-                raise SandboxNotReadyError(f"Underlying Sandbox '{sandbox_id}' not found.")
+                raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
         except Exception as e:
             if existing:
                 existing.terminate()
             self._active_connection_sandboxes.pop(key, None)
-            raise SandboxNotReadyError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
+            raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
         # If it's already in the registry and active (and verified on K8s), return the existing object
         if existing and existing.is_active:

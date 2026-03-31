@@ -15,7 +15,7 @@
 import logging
 from typing import List
 from kubernetes import client, config, watch
-from .exceptions import SandboxMetadataError, SandboxNotReadyError
+from .exceptions import SandboxMetadataError, SandboxNotFoundError
 
 # Constants for API Groups and Resources
 CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
@@ -127,7 +127,7 @@ class K8sHelper:
             elif event["type"] == "DELETED":
                 logging.error(f"Sandbox {name} was deleted before becoming ready.")
                 w.stop()
-                raise SandboxNotReadyError(f"Sandbox {name} was deleted before becoming ready.")
+                raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
         raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
 
     def delete_sandbox_claim(self, name: str, namespace: str):

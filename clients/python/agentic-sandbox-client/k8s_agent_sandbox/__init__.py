@@ -15,6 +15,7 @@
 from .sandbox_client import SandboxClient
 from .exceptions import (
     SandboxError,
+    SandboxNotFoundError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,

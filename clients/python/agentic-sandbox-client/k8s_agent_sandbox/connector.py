@@ -131,7 +131,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             if self.port_forward_process.poll() is not None:
                 _, stderr = self.port_forward_process.communicate()
                 raise SandboxPortForwardError(
-                    f"Tunnel crashed: {stderr.decode(errors='ignore')}")
+                    f"Tunnel crashed: {stderr.decode(errors='replace')}")
 
             try:
                 with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
@@ -165,7 +165,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             _, stderr = self.port_forward_process.communicate()
             raise SandboxPortForwardError(
                 f"Kubectl Port-Forward crashed!\n"
-                f"Stderr: {stderr.decode(errors='ignore')}"
+                f"Stderr: {stderr.decode(errors='replace')}"
             )
 
 class SandboxConnector:

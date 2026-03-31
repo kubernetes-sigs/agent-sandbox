@@ -1133,6 +1133,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 }
 
 func TestRecordCreationLatencyMetric(t *testing.T) {
+	ctx := context.Background()
 	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
 
 	testCases := []struct {
@@ -1200,7 +1201,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			asmetrics.ClaimStartupLatency.Reset()
 			r := &SandboxClaimReconciler{}
 
-			r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox)
+			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)

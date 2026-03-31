@@ -17,16 +17,15 @@ import threading
 import unittest
 from http import HTTPStatus
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from kubernetes import config
 
-from k8s_agent_sandbox.sandbox_client import SandboxClient
+from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 from k8s_agent_sandbox.exceptions import (
-    SandboxMetadataError,
-    SandboxNotReadyError,
+    SandboxPortForwardError,
     SandboxRequestError,
 )
 
@@ -88,7 +87,7 @@ class SandboxHandler(BaseHTTPRequestHandler):
 
 
 class TestRequestExceptions(unittest.TestCase):
-    """Integration tests: real HTTP server + real SandboxClient._request()."""
+    """Integration tests: real HTTP server + SandboxConnector.send_request()."""
 
     @classmethod
     def setUpClass(cls):
@@ -104,139 +103,117 @@ class TestRequestExceptions(unittest.TestCase):
         cls.server.server_close()
         cls.server_thread.join(timeout=5)
 
-    def _make_sandbox(self) -> SandboxClient:
-        """Creates a barebones SandboxClient while mocking the k8s config."""
-        with patch("kubernetes.config.load_incluster_config", side_effect=config.ConfigException("not in cluster")), \
-            patch("kubernetes.config.load_kube_config"):
-            sandbox = SandboxClient(
-                template_name="test-template",
-                api_url=f"http://127.0.0.1:{self.port}",
-                server_port=self.port,
-            )
-        # set by __enter__ / _create_claim; but is mocked.
-        sandbox.claim_name = "test-claim"
-        
-        # we need immediate failures without counting retries
+    def _make_connector(self) -> SandboxConnector:
+        """Creates a SandboxConnector pointing at the local test server."""
+        config = SandboxDirectConnectionConfig(
+            api_url=f"http://127.0.0.1:{self.port}",
+            server_port=self.port,
+        )
+        k8s_helper = MagicMock()
+        connector = SandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=k8s_helper,
+        )
+        # Disable retries so errors surface immediately
         adapter = HTTPAdapter(max_retries=Retry(total=0))
-        sandbox.session.mount("http://", adapter)
-
-        return sandbox
+        connector.session.mount("http://", adapter)
+        return connector
 
     def test_run_accepted(self):
         """POST /run returns 202."""
-        sandbox = self._make_sandbox()
-        response = sandbox._request("POST", "run", json={"query": "test"})
+        connector = self._make_connector()
+        response = connector.send_request("POST", "run", json={"query": "test"})
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["status"], "accepted")
 
     def test_health_ok(self):
         """GET /health returns 200."""
-        sandbox = self._make_sandbox()
-        response = sandbox._request("GET", "health")
+        connector = self._make_connector()
+        response = connector.send_request("GET", "health")
         self.assertEqual(response.status_code, 200)
 
     def test_409_raises_sandbox_request_error(self):
-        """Validates 409 SandboxRequestError"""
-        sandbox = self._make_sandbox()
+        """Validates 409 SandboxRequestError."""
+        connector = self._make_connector()
 
         with self.assertRaises(SandboxRequestError) as ctx:
-            sandbox._request("POST", "run-busy")
+            connector.send_request("POST", "run-busy")
 
         self.assertEqual(ctx.exception.status_code, 409)
         body = ctx.exception.response.json()
         self.assertIn("already running", body["detail"])
 
     def test_409_is_catchable_as_runtime_error(self):
-        """Backwards compatability check to verify this isn't a breaking change, checking the SandboxRequestError is still a RuntimeError."""
-        sandbox = self._make_sandbox()
+        """Backwards compatibility: SandboxRequestError is still a RuntimeError."""
+        connector = self._make_connector()
 
         with self.assertRaises(RuntimeError):
-            sandbox._request("POST", "run-busy")
+            connector.send_request("POST", "run-busy")
 
     def test_503_raises_sandbox_request_error(self):
-        """Validates 503 SandboxRequestError"""
-        sandbox = self._make_sandbox()
+        """Validates 503 SandboxRequestError."""
+        connector = self._make_connector()
 
         with self.assertRaises(SandboxRequestError) as ctx:
-            sandbox._request("POST", "run-shutdown")
+            connector.send_request("POST", "run-shutdown")
 
         self.assertEqual(ctx.exception.status_code, 503)
         body = ctx.exception.response.json()
         self.assertIn("shutting down", body["detail"])
 
     def test_500_raises_sandbox_request_error(self):
-        """Validates 500 SandboxRequestError"""
-        sandbox = self._make_sandbox()
+        """Validates 500 SandboxRequestError."""
+        connector = self._make_connector()
 
         with self.assertRaises(SandboxRequestError) as ctx:
-            sandbox._request("POST", "run-500")
+            connector.send_request("POST", "run-500")
 
         self.assertEqual(ctx.exception.status_code, 500)
 
     def test_connection_refused_has_no_status_code(self):
-        """Validates no status_code does not raise an unhandled exception."""
-        sandbox = self._make_sandbox()
-        sandbox.base_url = "http://192.0.2.0"
+        """Validates no status_code when server is unreachable."""
+        config = SandboxDirectConnectionConfig(
+            api_url="http://192.0.2.0",
+            server_port=8888,
+        )
+        k8s_helper = MagicMock()
+        connector = SandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=k8s_helper,
+        )
+        adapter = HTTPAdapter(max_retries=Retry(total=0))
+        connector.session.mount("http://", adapter)
 
         with self.assertRaises(SandboxRequestError) as ctx:
-            sandbox._request("POST", "run", timeout=1)
+            connector.send_request("POST", "run", timeout=1)
 
         self.assertIsNone(ctx.exception.status_code)
 
-    def test_not_ready_raises_sandbox_not_ready_error(self):
-        """Validates SandboxNotReadyError is raised when base_url is None."""
-        sandbox = self._make_sandbox()
-        sandbox.base_url = None
-
-        with self.assertRaises(SandboxNotReadyError):
-            sandbox._request("GET", "health")
-
-
-    def test_missing_sandbox_name_raises_metadata_error(self):
-        """Validates SandboxMetadataError when sandbox object has no name."""
-        sandbox = self._make_sandbox()
-
-        fake_events = [
-            {
-                "type": "MODIFIED",
-                "object": {
-                    "metadata": {},
-                    "status": {
-                        "conditions": [{"type": "Ready", "status": "True"}]
-                    },
-                },
-            }
-        ]
+    def test_port_forward_crash_raises_sandbox_port_forward_error(self):
+        """Validates SandboxPortForwardError when verify_connection detects a crash."""
+        connector = self._make_connector()
 
         with patch.object(
-            sandbox.custom_objects_api,
-            "list_namespaced_custom_object",
-        ), patch("kubernetes.watch.Watch.stream", return_value=iter(fake_events)):
-            with self.assertRaises(SandboxMetadataError):
-                sandbox._wait_for_sandbox_ready()
+            connector.strategy, "verify_connection",
+            side_effect=SandboxPortForwardError("Kubectl Port-Forward crashed!"),
+        ):
+            with self.assertRaises(SandboxPortForwardError):
+                connector.send_request("GET", "health")
 
-    def test_metadata_error_is_catchable_as_runtime_error(self):
-        """Backwards compatibility: SandboxMetadataError is still a RuntimeError."""
-        sandbox = self._make_sandbox()
-
-        fake_events = [
-            {
-                "type": "MODIFIED",
-                "object": {
-                    "metadata": {},
-                    "status": {
-                        "conditions": [{"type": "Ready", "status": "True"}]
-                    },
-                },
-            }
-        ]
+    def test_port_forward_error_is_catchable_as_runtime_error(self):
+        """Backwards compatibility: SandboxPortForwardError is still a RuntimeError."""
+        connector = self._make_connector()
 
         with patch.object(
-            sandbox.custom_objects_api,
-            "list_namespaced_custom_object",
-        ), patch("kubernetes.watch.Watch.stream", return_value=iter(fake_events)):
+            connector.strategy, "verify_connection",
+            side_effect=SandboxPortForwardError("Kubectl Port-Forward crashed!"),
+        ):
             with self.assertRaises(RuntimeError):
-                sandbox._wait_for_sandbox_ready()
+                connector.send_request("GET", "health")
 
 
 if __name__ == "__main__":

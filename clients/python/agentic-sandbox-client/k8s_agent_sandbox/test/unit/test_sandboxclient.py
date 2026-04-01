@@ -26,7 +26,11 @@ from urllib3.util.retry import Retry
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+from k8s_agent_sandbox.models import (
+    SandboxDirectConnectionConfig,
+    SandboxInClusterConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+)
 from k8s_agent_sandbox.constants import POD_NAME_ANNOTATION
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
@@ -586,6 +590,70 @@ class TestK8sHelperWatchNoneEvents(unittest.TestCase):
 
         ip = self.helper.wait_for_gateway_ip("test-gateway", "default", timeout=10)
         self.assertEqual(ip, "10.0.0.1")
+
+
+class TestSandboxClientInClusterConfig(unittest.TestCase):
+    """Tests that SandboxClient stores and propagates SandboxInClusterConnectionConfig."""
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_in_cluster_config_stored(self, _):
+        config = SandboxInClusterConnectionConfig()
+        sc = SandboxClient(connection_config=config)
+        self.assertIsInstance(sc.connection_config, SandboxInClusterConnectionConfig)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_default_config_is_local_tunnel(self, _):
+        sc = SandboxClient()
+        self.assertIsInstance(sc.connection_config, SandboxLocalTunnelConnectionConfig)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_in_cluster_config_custom_port(self, _):
+        config = SandboxInClusterConnectionConfig(server_port=9000)
+        sc = SandboxClient(connection_config=config)
+        self.assertEqual(sc.connection_config.server_port, 9000)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_in_cluster_config_default_port(self, _):
+        config = SandboxInClusterConnectionConfig()
+        sc = SandboxClient(connection_config=config)
+        self.assertEqual(sc.connection_config.server_port, 8888)
+
+    @patch('uuid.uuid4')
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_sandbox_created_with_in_cluster_config(self, MockK8sHelper, mock_uuid):
+        mock_uuid.return_value.hex = 'aabbccdd'
+        in_cluster_config = SandboxInClusterConnectionConfig()
+        client = SandboxClient(connection_config=in_cluster_config)
+        client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
+
+        mock_sandbox_class = MagicMock()
+        mock_sandbox_class.return_value = MagicMock()
+        client.sandbox_class = mock_sandbox_class
+
+        with patch.object(client, '_create_claim'), \
+             patch.object(client, '_wait_for_sandbox_ready'):
+            client.create_sandbox('my-template')
+
+        call_kwargs = mock_sandbox_class.call_args.kwargs
+        self.assertIsInstance(call_kwargs['connection_config'], SandboxInClusterConnectionConfig)
+
+    @patch('uuid.uuid4')
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_sandbox_namespace_passed_correctly(self, MockK8sHelper, mock_uuid):
+        mock_uuid.return_value.hex = 'aabbccdd'
+        client = SandboxClient(connection_config=SandboxInClusterConnectionConfig())
+        client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
+
+        mock_sandbox_class = MagicMock()
+        mock_sandbox_class.return_value = MagicMock()
+        client.sandbox_class = mock_sandbox_class
+
+        with patch.object(client, '_create_claim'), \
+             patch.object(client, '_wait_for_sandbox_ready'):
+            client.create_sandbox('my-template', namespace='prod')
+
+        call_kwargs = mock_sandbox_class.call_args.kwargs
+        self.assertEqual(call_kwargs['namespace'], 'prod')
 
 
 if __name__ == '__main__':

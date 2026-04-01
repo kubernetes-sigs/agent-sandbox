@@ -409,7 +409,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 		delete(adopted.Labels, warmPoolSandboxLabel)
 		delete(adopted.Labels, sandboxTemplateRefHash)
-		delete(adopted.Labels, sandboxPodTemplateHash)
+		delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
 
 		// Transfer ownership from SandboxWarmPool to SandboxClaim
 		adopted.OwnerReferences = nil
@@ -587,6 +587,17 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+	template, err := r.getTemplate(ctx, claim)
+	if err != nil {
+		if k8errors.IsNotFound(err) {
+			return nil, ErrTemplateNotFound
+		}
+		return nil, fmt.Errorf("failed to get template: %w", err)
+	}
+	currentPodTemplateHash, err := computePodTemplateHash(template)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute pod template hash: %w", err)
+	}
 	var adoptionCandidates []*v1alpha1.Sandbox
 
 	for i := range allSandboxes.Items {
@@ -606,6 +617,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			continue
 		}
 		if sb.Labels[sandboxTemplateRefHash] != templateHash {
+			continue
+		}
+		if sb.Labels[v1alpha1.SandboxPodTemplateHashLabel] != "" && sb.Labels[v1alpha1.SandboxPodTemplateHashLabel] != currentPodTemplateHash {
 			continue
 		}
 		controllerRef := metav1.GetControllerOf(sb)

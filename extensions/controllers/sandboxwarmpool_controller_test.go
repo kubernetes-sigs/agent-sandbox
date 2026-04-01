@@ -79,9 +79,9 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 			Namespace:         namespace,
 			CreationTimestamp: metav1.Now(),
 			Labels: map[string]string{
-				warmPoolSandboxLabel:   poolNameHash,
-				sandboxTemplateRefHash: templateRefHash,
-				sandboxPodTemplateHash: podTemplateHash,
+				warmPoolSandboxLabel:                        poolNameHash,
+				sandboxTemplateRefHash:                      templateRefHash,
+				sandboxv1alpha1.SandboxPodTemplateHashLabel: podTemplateHash,
 			},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
@@ -89,9 +89,9 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				ObjectMeta: sandboxv1alpha1.PodMetadata{
 					Labels: map[string]string{
-						warmPoolSandboxLabel:   poolNameHash,
-						sandboxTemplateRefHash: templateRefHash,
-						sandboxPodTemplateHash: podTemplateHash,
+						warmPoolSandboxLabel:                        poolNameHash,
+						sandboxTemplateRefHash:                      templateRefHash,
+						sandboxv1alpha1.SandboxPodTemplateHashLabel: podTemplateHash,
 					},
 				},
 				Spec: podSpec,
@@ -756,7 +756,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			require.Len(t, sandboxes.Items, int(replicas))
 			for _, sb := range sandboxes.Items {
 				require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image)
-				require.Equal(t, initialHash, sb.Labels[sandboxPodTemplateHash], "Sandbox should have initial template hash label")
+				require.Equal(t, initialHash, sb.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel], "Sandbox should have initial template hash label")
 			}
 
 			// Update the SandboxTemplate content
@@ -783,14 +783,14 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 				// For Recreate strategy, all should be updated
 				for _, sb := range sandboxes.Items {
 					require.Equal(t, "image-v2", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should have updated image")
-					require.Equal(t, updatedHash, sb.Labels[sandboxPodTemplateHash], "Sandbox should have updated template hash label")
+					require.Equal(t, updatedHash, sb.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel], "Sandbox should have updated template hash label")
 				}
 				t.Log("Verified: All sandboxes updated immediately with Recreate strategy")
 			} else {
 				// For OnReplenish (default), all should still be v1
 				for _, sb := range sandboxes.Items {
 					require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image")
-					require.Equal(t, initialHash, sb.Labels[sandboxPodTemplateHash], "Sandbox should retain original template hash label")
+					require.Equal(t, initialHash, sb.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel], "Sandbox should retain original template hash label")
 				}
 				t.Log("Verified: Sandboxes retained original image after update with OnReplenish strategy")
 
@@ -813,10 +813,10 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					switch sb.Spec.PodTemplate.Spec.Containers[0].Image {
 					case "image-v1":
 						v1Count++
-						require.Equal(t, initialHash, sb.Labels[sandboxPodTemplateHash])
+						require.Equal(t, initialHash, sb.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel])
 					case "image-v2":
 						v2Count++
-						require.Equal(t, updatedHash, sb.Labels[sandboxPodTemplateHash])
+						require.Equal(t, updatedHash, sb.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel])
 					}
 				}
 				require.Equal(t, 1, v1Count, "Should have one remaining v1 sandbox")

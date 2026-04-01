@@ -16,7 +16,6 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -45,9 +44,6 @@ import (
 const (
 	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
 	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
-
-	// sandboxPodTemplateHash tracks the specific version/content of the template.
-	sandboxPodTemplateHash = "agents.x-k8s.io/sandbox-pod-template-hash"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
@@ -288,7 +284,7 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	template, tmplErr := r.getTemplate(ctx, warmPool)
 	var currentPodTemplateHash string
 	if tmplErr == nil {
-		currentPodTemplateHash, tmplErr = r.computePodTemplateHash(template)
+		currentPodTemplateHash, tmplErr = computePodTemplateHash(template)
 	}
 
 	if tmplErr != nil {
@@ -303,9 +299,9 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 
 	// Build labels for the Sandbox CR
 	sandboxLabels := map[string]string{
-		warmPoolSandboxLabel:   poolNameHash,
-		sandboxTemplateRefHash: sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name),
-		sandboxPodTemplateHash: currentPodTemplateHash,
+		warmPoolSandboxLabel:                        poolNameHash,
+		sandboxTemplateRefHash:                      sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name),
+		sandboxv1alpha1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
 	}
 
 	// Copy template pod labels into sandbox pod template
@@ -316,7 +312,7 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	// Propagate pool and template labels to pod template for consistency and targeting
 	podLabels[warmPoolSandboxLabel] = poolNameHash
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
-	podLabels[sandboxPodTemplateHash] = currentPodTemplateHash
+	podLabels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = currentPodTemplateHash
 
 	podAnnotations := make(map[string]string)
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Annotations {
@@ -408,15 +404,6 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 	return template, nil
 }
 
-// computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
-func (r *SandboxWarmPoolReconciler) computePodTemplateHash(template *extensionsv1alpha1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.PodTemplate)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
-	}
-	return sandboxcontrollers.NameHash(string(specJSON)), nil
-}
-
 // isSandboxStale checks if the sandbox version matches the current template.
 // It uses a cache (vettedHashes) to avoid repeated expensive DeepEqual calls
 // for sandboxes with the same hash.
@@ -427,7 +414,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	currentPodTemplateHash string,
 	vettedHashes map[string]bool,
 ) bool {
-	sandboxHash := sandbox.Labels[sandboxPodTemplateHash]
+	sandboxHash := sandbox.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel]
 
 	// If the templateRefHash doesn't match, it's stale.
 	if sandbox.Labels[sandboxTemplateRefHash] != sandboxcontrollers.NameHash(template.Name) {

@@ -128,3 +128,21 @@ func (n *NotDeletedPredicate) Matches(obj client.Object) (bool, error) {
 	}
 	return true, nil
 }
+
+// HasDeletionTimestamp verifies the object has a deletion timestamp set
+func HasDeletionTimestamp() ObjectPredicate {
+	return &HasDeletionTimestampPredicate{}
+}
+
+type HasDeletionTimestampPredicate struct{}
+
+func (h *HasDeletionTimestampPredicate) String() string {
+	return "HasDeletionTimestamp"
+}
+
+func (h *HasDeletionTimestampPredicate) Matches(obj client.Object) (bool, error) {
+	if obj == nil {
+		return false, fmt.Errorf("object is nil")
+	}
+	return obj.GetDeletionTimestamp() != nil, nil
+}

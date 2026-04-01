@@ -55,6 +55,7 @@ func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha
 // SandboxClaimReconciler reconciles a SandboxClaim object
 type SandboxClaimReconciler struct {
 	client.Client
+	APIReader               client.Reader // direct etcd reader, bypasses informer cache
 	Scheme                  *runtime.Scheme
 	Recorder                record.EventRecorder
 	Tracer                  asmetrics.Instrumenter
@@ -611,6 +612,21 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			return nil, err
 		}
 		return sandbox, nil
+	}
+
+	// Strong read: bypass informer cache to check if a sandbox already exists
+	// for this claim in etcd. Prevents TOCTOU race where stale cache causes
+	// duplicate sandbox creation under concurrent claims. See #418.
+	if r.APIReader != nil {
+		existing := &v1alpha1.Sandbox{}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Name}, existing); err == nil {
+			if metav1.IsControlledBy(existing, claim) {
+				logger.Info("strong read found existing sandbox (cache was stale)", "name", existing.Name)
+				return existing, nil
+			}
+		} else if !k8errors.IsNotFound(err) {
+			logger.V(1).Info("strong read failed, falling through to list path", "error", err)
+		}
 	}
 
 	// Single List: ownership guard + adoption candidate scan.

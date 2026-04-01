@@ -223,10 +223,11 @@ func main() {
 
 	if extensions {
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
-			Tracer:   instrumenter,
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Scheme:    mgr.GetScheme(),
+			Recorder:  mgr.GetEventRecorderFor("sandboxclaim-controller"),
+			Tracer:    instrumenter,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)

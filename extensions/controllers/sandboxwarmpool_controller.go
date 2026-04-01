@@ -255,13 +255,15 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 			continue
 		}
 
-		if updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType && tmplErr == nil && r.isSandboxStale(ctx, &sb, template, currentPodTemplateHash, vettedHashes) {
-			log.Info("Deleting stale sandbox from pool", "sandbox", sb.Name)
-			if err := r.Delete(ctx, &sb); err != nil {
-				log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
-				allErrors = errors.Join(allErrors, err)
+		if tmplErr == nil && (updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType || isOrphan) {
+			if r.isSandboxStale(ctx, &sb, template, currentPodTemplateHash, vettedHashes) {
+				log.Info("Deleting stale sandbox", "sandbox", sb.Name, "isOrphan", isOrphan)
+				if err := r.Delete(ctx, &sb); err != nil {
+					log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
+					allErrors = errors.Join(allErrors, err)
+				}
+				continue
 			}
-			continue
 		}
 
 		if isOrphan {

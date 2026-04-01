@@ -1310,6 +1310,146 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 	})
 }
 
+func TestSandboxClaimVolumeClaimTemplates(t *testing.T) {
+	templateWithPVC := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "pvc-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "app-image"}},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+						Name: "data-vol",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("10Gi"),
+							},
+						},
+					},
+				},
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+						Name: "cache-vol",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("5Gi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	templateNoPVC := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-pvc-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "app-image"}},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name             string
+		claim            *extensionsv1alpha1.SandboxClaim
+		template         *extensionsv1alpha1.SandboxTemplate
+		expectedVCTCount int
+		expectedVCTNames []string
+	}{
+		{
+			name: "volumeClaimTemplates are copied from template to sandbox",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-with-pvc", Namespace: "default", UID: "uid-pvc"},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "pvc-template"}},
+			},
+			template:         templateWithPVC,
+			expectedVCTCount: 2,
+			expectedVCTNames: []string{"data-vol", "cache-vol"},
+		},
+		{
+			name: "template without volumeClaimTemplates produces sandbox with no VCTs",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-no-pvc", Namespace: "default", UID: "uid-no-pvc"},
+				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "no-pvc-template"}},
+			},
+			template:         templateNoPVC,
+			expectedVCTCount: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tc.template, tc.claim).
+				WithStatusSubresource(tc.claim).
+				Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:   fakeClient,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(10),
+				Tracer:   asmetrics.NewNoOp(),
+			}
+
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: "default"},
+			}
+			_, err := reconciler.Reconcile(context.Background(), req)
+			if err != nil {
+				t.Fatalf("reconcile failed: %v", err)
+			}
+
+			var sandbox sandboxv1alpha1.Sandbox
+			err = fakeClient.Get(context.Background(), req.NamespacedName, &sandbox)
+			if err != nil {
+				t.Fatalf("get sandbox: %v", err)
+			}
+
+			if len(sandbox.Spec.VolumeClaimTemplates) != tc.expectedVCTCount {
+				t.Fatalf("expected %d volumeClaimTemplates, got %d",
+					tc.expectedVCTCount, len(sandbox.Spec.VolumeClaimTemplates))
+			}
+
+			for i, expectedName := range tc.expectedVCTNames {
+				if sandbox.Spec.VolumeClaimTemplates[i].Name != expectedName {
+					t.Errorf("expected VCT[%d].Name=%q, got %q",
+						i, expectedName, sandbox.Spec.VolumeClaimTemplates[i].Name)
+				}
+			}
+
+			// For the PVC case, verify resource quantities are deep-copied correctly
+			if tc.expectedVCTCount > 0 {
+				gotSize := sandbox.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests[corev1.ResourceStorage]
+				expectedSize := resource.MustParse("10Gi")
+				if !gotSize.Equal(expectedSize) {
+					t.Errorf("expected VCT[0] storage=%s, got %s", expectedSize.String(), gotSize.String())
+				}
+
+				// Verify deep copy: mutating the sandbox's VCT should not affect the template
+				sandbox.Spec.VolumeClaimTemplates[0].Name = "mutated"
+				if tc.template.Spec.VolumeClaimTemplates[0].Name != "data-vol" {
+					t.Errorf("template VCT was mutated by changing sandbox VCT, expected 'data-vol', got %q",
+						tc.template.Spec.VolumeClaimTemplates[0].Name)
+				}
+			}
+		})
+	}
+}
+
 func newScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	if err := sandboxv1alpha1.AddToScheme(scheme); err != nil {

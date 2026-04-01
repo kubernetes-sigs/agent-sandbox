@@ -67,6 +67,13 @@ type SandboxTemplateSpec struct {
 	// +required
 	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
 
+	// VolumeClaimTemplates is a list of claims that pods created from this template
+	// are allowed to reference. When a SandboxClaim or SandboxWarmPool creates a sandbox
+	// from this template, PVCs will be created from these templates.
+	// +optional
+	// +listType=atomic
+	VolumeClaimTemplates []sandboxv1alpha1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
+
 	// networkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template. A single shared NetworkPolicy is created per Template.
 	// Behavior is dictated by the NetworkPolicyManagement field:

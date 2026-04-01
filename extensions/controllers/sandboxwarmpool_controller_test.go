@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -623,5 +624,241 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 		}
 		require.Equal(t, replicas, poolCount)
 		require.Equal(t, replicas, warmPool.Status.Replicas)
+	})
+}
+
+func TestReconcilePoolVolumeClaimTemplates(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	scheme := newTestScheme()
+	ctx := context.Background()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	t.Run("volumeClaimTemplates are copied from template to sandbox", func(t *testing.T) {
+		templateWithPVC := &extensionsv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      templateName,
+				Namespace: poolNamespace,
+			},
+			Spec: extensionsv1alpha1.SandboxTemplateSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "test-image",
+							},
+						},
+					},
+				},
+				VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+							Name: "data-vol",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("10Gi"),
+								},
+							},
+						},
+					},
+					{
+						EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+							Name: "cache-vol",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("5Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		warmPool := &extensionsv1alpha1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: poolNamespace,
+				UID:       "warmpool-uid-vct",
+			},
+			Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+				Replicas: replicas,
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+					Name: templateName,
+				},
+			},
+		}
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithRuntimeObjects(templateWithPVC).
+				Build(),
+			Scheme: scheme,
+		}
+
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		list := &sandboxv1alpha1.SandboxList{}
+		err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, list.Items, int(replicas))
+
+		for _, sb := range list.Items {
+			require.Equal(t, poolNameHash, sb.Labels[warmPoolSandboxLabel],
+				"sandbox %s should have correct warm pool label", sb.Name)
+
+			// Verify volumeClaimTemplates were copied
+			require.Len(t, sb.Spec.VolumeClaimTemplates, 2,
+				"sandbox %s should have 2 volumeClaimTemplates", sb.Name)
+			require.Equal(t, "data-vol", sb.Spec.VolumeClaimTemplates[0].Name)
+			require.Equal(t, resource.MustParse("10Gi"),
+				sb.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests[corev1.ResourceStorage])
+			require.Equal(t, "cache-vol", sb.Spec.VolumeClaimTemplates[1].Name)
+			require.Equal(t, resource.MustParse("5Gi"),
+				sb.Spec.VolumeClaimTemplates[1].Spec.Resources.Requests[corev1.ResourceStorage])
+		}
+	})
+
+	t.Run("template without volumeClaimTemplates produces sandbox with no VCTs", func(t *testing.T) {
+		templateNoPVC := &extensionsv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      templateName,
+				Namespace: poolNamespace,
+			},
+			Spec: extensionsv1alpha1.SandboxTemplateSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "test-image",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		warmPool := &extensionsv1alpha1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: poolNamespace,
+				UID:       "warmpool-uid-novct",
+			},
+			Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+				Replicas: replicas,
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+					Name: templateName,
+				},
+			},
+		}
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithRuntimeObjects(templateNoPVC).
+				Build(),
+			Scheme: scheme,
+		}
+
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		list := &sandboxv1alpha1.SandboxList{}
+		err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, list.Items, int(replicas))
+
+		for _, sb := range list.Items {
+			require.Empty(t, sb.Spec.VolumeClaimTemplates,
+				"sandbox %s should have no volumeClaimTemplates", sb.Name)
+		}
+	})
+
+	t.Run("volumeClaimTemplates are deep-copied not shared", func(t *testing.T) {
+		templateWithPVC := &extensionsv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      templateName,
+				Namespace: poolNamespace,
+			},
+			Spec: extensionsv1alpha1.SandboxTemplateSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "test-image",
+							},
+						},
+					},
+				},
+				VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+							Name: "workspace",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("20Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		warmPool := &extensionsv1alpha1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: poolNamespace,
+				UID:       "warmpool-uid-deepcopy",
+			},
+			Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+				Replicas: replicas,
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+					Name: templateName,
+				},
+			},
+		}
+
+		r := SandboxWarmPoolReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithRuntimeObjects(templateWithPVC).
+				Build(),
+			Scheme: scheme,
+		}
+
+		err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		list := &sandboxv1alpha1.SandboxList{}
+		err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.Len(t, list.Items, int(replicas))
+
+		// Mutate the first sandbox's VCT and verify the second is unaffected
+		list.Items[0].Spec.VolumeClaimTemplates[0].Name = "mutated"
+		require.Equal(t, "workspace", list.Items[1].Spec.VolumeClaimTemplates[0].Name,
+			"second sandbox should not be affected by mutating the first")
+
+		// Also verify template is unaffected
+		require.Equal(t, "workspace", templateWithPVC.Spec.VolumeClaimTemplates[0].Name,
+			"template should not be affected by mutating a sandbox's VCT")
 	})
 }

@@ -287,6 +287,14 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 		},
 	}
 
+	// Copy volumeClaimTemplates from the template to the sandbox
+	if len(template.Spec.VolumeClaimTemplates) > 0 {
+		sandbox.Spec.VolumeClaimTemplates = make([]sandboxv1alpha1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
+		for i, vct := range template.Spec.VolumeClaimTemplates {
+			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
+		}
+	}
+
 	// Enforce a secure-by-default policy by disabling the automatic mounting
 	// of the service account token for warm pool sandboxes.
 	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {

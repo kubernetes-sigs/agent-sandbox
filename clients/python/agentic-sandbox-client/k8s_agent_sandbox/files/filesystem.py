@@ -41,6 +41,10 @@ class Filesystem:
             content = content.encode('utf-8')
 
         filename = os.path.basename(path)
+        if filename != path:
+            raise ValueError(
+                f"path must be a plain filename without directories, got {path!r}"
+            )
         files_payload = {'file': (filename, content)}
         self.connector.send_request("POST", "upload",
                       files=files_payload, timeout=timeout)

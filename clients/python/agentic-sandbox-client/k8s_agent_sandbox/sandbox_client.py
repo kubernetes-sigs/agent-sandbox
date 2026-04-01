@@ -18,7 +18,6 @@ file I/O) via the Sandbox resource handle.
 """
 
 import re
-import uuid
 import sys
 import time
 import atexit
@@ -27,7 +26,7 @@ from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
-    create_tracer_manager, initialize_tracer, trace_span, trace
+    create_tracer_manager, create_tracer_provider, trace_span, trace
 )
 from .sandbox import Sandbox
 from .models import (
@@ -63,9 +62,10 @@ class SandboxClient(Generic[T]):
         
         # Tracer configuration
         self.tracer_config = tracer_config or SandboxTracerConfig()
-        if self.tracer_config.enable_tracing:
-            initialize_tracer(self.tracer_config.trace_service_name)
-        self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
+        if self.tracer_config.enable_tracing and self.tracer_config.tracer_provider is None:
+            self.tracer_config.tracer_provider = create_tracer_provider(self.tracer_config.trace_service_name)
+        self.tracing_manager, self.tracer = create_tracer_manager(
+            self.tracer_config, self.tracer_config.tracer_provider)
 
         # Downstream Kubernetes Configuration
         self.k8s_helper = K8sHelper()
@@ -106,10 +106,8 @@ class SandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
-        
         try:
-            self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle)
+            claim_name = self._create_claim(template, namespace, labels=labels, lifecycle=lifecycle)
             # Resolve the sandbox id from the sandbox claim object.
             # In case of warmpool, sandbox id is not the same as claim name.
             start_time = time.monotonic()
@@ -302,8 +300,16 @@ class SandboxClient(Generic[T]):
                 SandboxClient._validate_label_name(value, f"value '{value}' for key '{key}'")
 
     @trace_span("create_claim")
-    def _create_claim(self, claim_name: str, template_name: str, namespace: str, labels: dict[str, str] | None = None, lifecycle: dict | None = None):
-        """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
+    def _create_claim(self, template_name: str, namespace: str, labels: dict[str, str] | None = None, lifecycle: dict | None = None) -> str:
+        """Creates the SandboxClaim and returns its generated name."""
+        annotations = {}
+        if self.tracing_manager:
+            trace_context_str = self.tracing_manager.get_trace_context_json()
+            if trace_context_str:
+                annotations["opentelemetry.io/trace-context"] = trace_context_str
+
+        claim_name = self.k8s_helper.create_sandbox_claim(template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle)
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", claim_name)
@@ -311,13 +317,7 @@ class SandboxClient(Generic[T]):
                 span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
                 span.set_attribute("sandbox.lifecycle.shutdown_policy", lifecycle["shutdownPolicy"])
 
-        annotations = {}
-        if self.tracing_manager:
-            trace_context_str = self.tracing_manager.get_trace_context_json()
-            if trace_context_str:
-                annotations["opentelemetry.io/trace-context"] = trace_context_str
-
-        self.k8s_helper.create_sandbox_claim(claim_name, template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle)
+        return claim_name
 
     @trace_span("wait_for_sandbox_ready")
     def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):

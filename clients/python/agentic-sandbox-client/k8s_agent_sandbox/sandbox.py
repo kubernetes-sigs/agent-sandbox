@@ -66,7 +66,8 @@ class Sandbox:
         # Tracer initialization
         self.tracer_config = tracer_config or SandboxTracerConfig()
         self.trace_service_name = self.tracer_config.trace_service_name
-        self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
+        self.tracing_manager, self.tracer = create_tracer_manager(
+            self.tracer_config, self.tracer_config.tracer_provider)
 
         # Initialisation of namespaced engines
         self._commands = CommandExecutor(self.connector, self.tracer, self.trace_service_name)

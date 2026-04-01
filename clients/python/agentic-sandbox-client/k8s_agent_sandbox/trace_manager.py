@@ -22,7 +22,6 @@ import atexit
 import functools
 import json
 import logging
-import threading
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
@@ -106,59 +105,26 @@ except ImportError:
     trace = TraceStub
     context = ContextStub
 
-# --- Global state for the singleton TracerProvider ---
-_TRACER_PROVIDER = None
-_TRACER_PROVIDER_LOCK = threading.Lock()
 
 
-def initialize_tracer(service_name: str):
+def create_tracer_provider(service_name: str) -> "TracerProvider | None":
+    """Creates a TracerProvider with an OTLP/gRPC exporter.
+
+    The endpoint is read from OTEL_EXPORTER_OTLP_ENDPOINT (default: localhost:4317).
+    The caller owns the returned provider and should pass it to SandboxTracerConfig.
     """
-    Initializes the global OpenTelemetry TracerProvider using the singleton pattern.
-
-    This function uses double-checked locking to ensure thread-safe, one-time initialization.
-
-    Behavior:
-    - If OpenTelemetry is not installed, this is a no-op.
-    - If the Provider is already initialized, it verifies that the requested 'service_name'
-      matches the existing global service name. If they differ, a warning is logged
-      indicating that the requested name will be ignored in favor of the existing one.
-    - Configures a BatchSpanProcessor and OTLPSpanExporter for sending traces.
-    """
-    global _TRACER_PROVIDER
-
     if not OPENTELEMETRY_AVAILABLE:
         logging.error(
-            "OpenTelemetry not installed; skipping tracer initialization.")
-        return
+            "OpenTelemetry not installed; cannot create TracerProvider.")
+        return None
 
-    # First check (no lock) for performance.
-    if _TRACER_PROVIDER is not None:
-        try:
-            existing_name = _TRACER_PROVIDER.resource.attributes.get(
-                "service.name")
-            if existing_name and existing_name != service_name:
-                logging.warning(
-                    f"Global TracerProvider already initialized with service name '{existing_name}'. "
-                    f"Ignoring request to initialize with '{service_name}'."
-                )
-        except Exception:
-            # Fallback if accessing attributes fails for any reason
-            pass
-        return
-
-    with _TRACER_PROVIDER_LOCK:
-        # Second check (with lock) to ensure thread safety.
-        if _TRACER_PROVIDER is None:
-            resource = Resource(attributes={"service.name": service_name})
-            _TRACER_PROVIDER = TracerProvider(resource=resource)
-            _TRACER_PROVIDER.add_span_processor(
-                BatchSpanProcessor(OTLPSpanExporter())
-            )
-            trace.set_tracer_provider(_TRACER_PROVIDER)
-            # Ensure shutdown is called only once when the process exits.
-            atexit.register(_TRACER_PROVIDER.shutdown)
-            logging.info(
-                f"Global OpenTelemetry TracerProvider configured for service '{service_name}'.")
+    resource = Resource(attributes={"service.name": service_name})
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter())
+    )
+    atexit.register(provider.shutdown)
+    return provider
 
 
 def trace_span(span_suffix):
@@ -226,9 +192,12 @@ class TracerManager:
     3. Handling the attachment/detachment of the OTel context to the current thread.
     """
 
-    def __init__(self, service_name: str):
+    def __init__(self, service_name: str, provider=None):
         instrumentation_scope_name = service_name.replace('-', '_')
-        self.tracer = trace.get_tracer(instrumentation_scope_name)
+        if provider is not None:
+            self.tracer = provider.get_tracer(instrumentation_scope_name)
+        else:
+            self.tracer = trace.get_tracer(instrumentation_scope_name)
         self.lifecycle_span_name = f"{service_name}.lifecycle"
         self.parent_span = None
         self.context_token = None
@@ -256,10 +225,8 @@ class TracerManager:
         self.propagator.inject(carrier)
         return json.dumps(carrier) if carrier else ""
 
-def create_tracer_manager(config: "SandboxTracerConfig"):
-    """
-    Creates and initializes a TracerManager based on the provided configuration.
-    """
+def create_tracer_manager(config: "SandboxTracerConfig", provider=None):
+    """Creates a TracerManager from config and an optional TracerProvider."""
     if not config.enable_tracing:
         return None, None
 
@@ -267,5 +234,5 @@ def create_tracer_manager(config: "SandboxTracerConfig"):
         logging.error("OpenTelemetry not installed; skipping tracer initialization.")
         return None, None
 
-    manager = TracerManager(service_name=config.trace_service_name)
+    manager = TracerManager(service_name=config.trace_service_name, provider=provider)
     return manager, manager.tracer

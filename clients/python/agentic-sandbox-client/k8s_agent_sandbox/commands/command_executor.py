@@ -17,6 +17,9 @@ from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import ExecutionResult
 from k8s_agent_sandbox.trace_manager import trace_span, trace
 
+# Maximum response size for command execution (16 MB).
+MAX_EXECUTION_RESPONSE_SIZE = 16 * 1024 * 1024
+
 class CommandExecutor:
     """
     Handles execution of commands within the sandbox.
@@ -28,6 +31,7 @@ class CommandExecutor:
 
     @trace_span("run")
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
+        """Executes a command. Rejects responses larger than 16 MB."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.command", command)
@@ -35,6 +39,12 @@ class CommandExecutor:
         payload = {"command": command}
         response = self.connector.send_request(
             "POST", "execute", json=payload, timeout=timeout)
+
+        body = response.content
+        if len(body) > MAX_EXECUTION_RESPONSE_SIZE:
+            raise RuntimeError(
+                f"Execution response exceeds {MAX_EXECUTION_RESPONSE_SIZE} byte limit"
+            )
 
         try:
             response_data = response.json()

@@ -38,7 +38,7 @@ The controller evaluates the hierarchy top-down. The "Gap" between `Initialized`
 | Scenario | `Initialized` | `Suspended`  | Pod | **`Ready` (Root)** | Ready Reason |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Provisioning** | `False` | `Unknown` | None | **`False`** | `SandboxInitializing` |
-| **Pod Starting** | `True` | `False` | Pending | **`False`** | `PodProvisioning` |
+| **Pod Starting** | `True` | `False` | Pending | **`False`** | `SandboxPodInitializing` |
 | **Operational** | `True` | `False` | Running & Ready | **`True`** | `SandboxReady` |
 | **Suspended** | `True` | `True` | None | **`True`** | `SandboxSuspended` |
 | **Unresponsive** | `True` | `False` | Unknown | **`Unknown`** | `SandboxUnresponsive` |

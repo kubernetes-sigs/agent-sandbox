@@ -618,41 +618,26 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
         sc = SandboxClient(connection_config=config)
         self.assertEqual(sc.connection_config.server_port, 8888)
 
-    @patch('uuid.uuid4')
-    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
-    def test_sandbox_created_with_in_cluster_config(self, MockK8sHelper, mock_uuid):
-        mock_uuid.return_value.hex = 'aabbccdd'
-        in_cluster_config = SandboxInClusterConnectionConfig()
-        client = SandboxClient(connection_config=in_cluster_config)
-        client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
+    def _create_sandbox_with_in_cluster_config(self, namespace='default'):
+        with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'), \
+             patch('uuid.uuid4') as mock_uuid:
+            mock_uuid.return_value.hex = 'aabbccdd'
+            client = SandboxClient(connection_config=SandboxInClusterConnectionConfig())
+            client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
+            mock_sandbox_class = MagicMock()
+            mock_sandbox_class.return_value = MagicMock()
+            client.sandbox_class = mock_sandbox_class
+            with patch.object(client, '_create_claim'), \
+                 patch.object(client, '_wait_for_sandbox_ready'):
+                client.create_sandbox('my-template', namespace=namespace)
+            return mock_sandbox_class.call_args.kwargs
 
-        mock_sandbox_class = MagicMock()
-        mock_sandbox_class.return_value = MagicMock()
-        client.sandbox_class = mock_sandbox_class
-
-        with patch.object(client, '_create_claim'), \
-             patch.object(client, '_wait_for_sandbox_ready'):
-            client.create_sandbox('my-template')
-
-        call_kwargs = mock_sandbox_class.call_args.kwargs
+    def test_sandbox_created_with_in_cluster_config(self):
+        call_kwargs = self._create_sandbox_with_in_cluster_config()
         self.assertIsInstance(call_kwargs['connection_config'], SandboxInClusterConnectionConfig)
 
-    @patch('uuid.uuid4')
-    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
-    def test_sandbox_namespace_passed_correctly(self, MockK8sHelper, mock_uuid):
-        mock_uuid.return_value.hex = 'aabbccdd'
-        client = SandboxClient(connection_config=SandboxInClusterConnectionConfig())
-        client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
-
-        mock_sandbox_class = MagicMock()
-        mock_sandbox_class.return_value = MagicMock()
-        client.sandbox_class = mock_sandbox_class
-
-        with patch.object(client, '_create_claim'), \
-             patch.object(client, '_wait_for_sandbox_ready'):
-            client.create_sandbox('my-template', namespace='prod')
-
-        call_kwargs = mock_sandbox_class.call_args.kwargs
+    def test_sandbox_namespace_passed_correctly(self):
+        call_kwargs = self._create_sandbox_with_in_cluster_config(namespace='prod')
         self.assertEqual(call_kwargs['namespace'], 'prod')
 
 

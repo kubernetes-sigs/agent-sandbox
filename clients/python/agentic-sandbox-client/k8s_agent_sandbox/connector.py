@@ -54,11 +54,7 @@ class ConnectionStrategy(ABC):
         pass
 
     def should_inject_router_headers(self) -> bool:
-        """Returns True if X-Sandbox-* router headers should be attached to requests.
-
-        Defaults to True. InClusterConnectionStrategy overrides to False because
-        requests go directly to the sandbox pod, which does not use those headers.
-        """
+        """Returns True if X-Sandbox-* router headers should be injected into requests."""
         return True
 
 class DirectConnectionStrategy(ConnectionStrategy):
@@ -190,15 +186,13 @@ class InClusterConnectionStrategy(ConnectionStrategy):
         namespace: str,
         config: SandboxInClusterConnectionConfig,
     ):
-        self.sandbox_id = sandbox_id
-        self.namespace = namespace
-        self.config = config
+        self._base_url = (
+            f"http://{sandbox_id}.{namespace}"
+            f".svc.cluster.local:{config.server_port}"
+        )
 
     def connect(self) -> str:
-        return (
-            f"http://{self.sandbox_id}.{self.namespace}"
-            f".svc.cluster.local:{self.config.server_port}"
-        )
+        return self._base_url
 
     def verify_connection(self):
         pass

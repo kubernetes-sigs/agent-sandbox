@@ -17,49 +17,11 @@ import os
 import subprocess
 import time
 import logging
-from k8s_agent_sandbox.extensions.computer_use import ComputerUseSandbox
+from k8s_agent_sandbox.extensions.computer_use import ComputerUseSandboxClient
+from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig
 from kubernetes import client, config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-class TestComputerUseSandbox(unittest.TestCase):
-
-    def setUp(self):
-        """Create the gemini-api-key secret before each test."""
-        logging.info("Setting up test...")
-        if not os.environ.get("GEMINI_API_KEY"):
-            logging.error("GEMINI_API_KEY environment variable not set or is empty.")
-            self.fail("GEMINI_API_KEY environment variable not set or is empty.")
-        
-        logging.info("Creating gemini-api-key secret using Python client...")
-        secret_name = "gemini-api-key"
-        api_key_value = os.environ['GEMINI_API_KEY']
-        
-        # Base64 encode the API key for Kubernetes secret
-        import base64
-        encoded_api_key = base64.b64encode(api_key_value.encode("utf-8")).decode("utf-8")
-
-        secret_body = client.V1Secret(
-            api_version="v1",
-            kind="Secret",
-            metadata=client.V1ObjectMeta(name=secret_name),
-            data={"key": encoded_api_key}
-        )
-        
-        try:
-            core_v1_api = client.CoreV1Api()
-            core_v1_api.create_namespaced_secret(namespace="default", body=secret_body)
-            logging.info(f"Secret {secret_name} created successfully in namespace 'default'.")
-        except client.ApiException as e:
-            if e.status == 409: # Already exists
-                logging.warning(f"Secret {secret_name} already exists in namespace 'default'. Attempting to update it.")
-                core_v1_api.replace_namespaced_secret(name=secret_name, namespace="default", body=secret_body)
-                logging.info(f"Secret {secret_name} updated successfully in namespace 'default'.")
-            else:
-                logging.error(f"Error creating/updating secret: {e}", exc_info=True)
-                raise
-        
-        logging.info("Waiting for secret to be created...")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 
 def load_kubernetes_config():
     """Loads Kubernetes configuration, prioritizing kubeconfig and falling back to an environment variable."""
@@ -149,8 +111,12 @@ class TestComputerUseSandbox(unittest.TestCase):
         logging.info("Starting test_agent_with_api_key...")
         template_name = "sandbox-python-computeruse-template"
         
-        with ComputerUseSandbox(template_name, "default", server_port=8080) as sandbox:
-            self.assertTrue(sandbox.is_ready())
+        connection_config = SandboxLocalTunnelConnectionConfig(server_port=8888)
+        sandbox_client = ComputerUseSandboxClient(connection_config=connection_config)
+        
+        try:
+            sandbox = sandbox_client.create_sandbox(template_name, "default")
+            self.assertTrue(sandbox.is_active)
             logging.info("Sandbox is ready.")
             
             query = "Navigate to https://www.example.com and tell me what the heading says."
@@ -160,6 +126,8 @@ class TestComputerUseSandbox(unittest.TestCase):
             logging.info(f"Received result: {result}")
             self.assertEqual(result.exit_code, 0)
             self.assertIn("Example Domain", result.stdout)
+        finally:
+            sandbox_client.delete_all()
         logging.info("Finished test_agent_with_api_key.")
 
     def test_agent_without_api_key(self):
@@ -183,11 +151,16 @@ class TestComputerUseSandbox(unittest.TestCase):
                 raise
 
         template_name = "sandbox-python-computeruse-template"
+        connection_config = SandboxLocalTunnelConnectionConfig(server_port=8888)
+        # Set a shorter timeout to speed up the failure test
+        sandbox_client = ComputerUseSandboxClient(connection_config=connection_config)
 
-        with self.assertRaises(TimeoutError) as cm:
-            with ComputerUseSandbox(template_name, "default", server_port=8080) as sandbox:
-                pass # Should not reach here
-        self.assertIn("Sandbox did not become ready within", str(cm.exception))
+        try:
+            with self.assertRaises(TimeoutError) as cm:
+                sandbox_client.create_sandbox(template_name, "default", sandbox_ready_timeout=30)
+            self.assertIn("did not become ready within", str(cm.exception))
+        finally:
+            sandbox_client.delete_all()
 
         logging.info("Attempting to create sandbox without API key, expecting failure.")
         # The agent call would also fail if the sandbox were to become ready,

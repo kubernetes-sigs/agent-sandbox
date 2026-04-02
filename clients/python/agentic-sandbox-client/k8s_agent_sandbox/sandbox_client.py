@@ -14,521 +14,308 @@
 """
 This module provides the SandboxClient for interacting with the Agentic Sandbox.
 It handles lifecycle management (claiming, waiting) and interaction (execution,
-file I/O) with the sandbox environment, including optional OpenTelemetry tracing.
+file I/O) via the Sandbox resource handle.
 """
 
 import json
 import os
+import re
+import uuid
 import sys
-import time
-import socket
 import subprocess
+import time
+import atexit
 import logging
-import urllib.parse
-from typing import List, Literal
-
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from kubernetes import client, config, watch
+from typing import List, Literal, Dict, Tuple, TypeVar, Generic, Type
 from pydantic import BaseModel
-from .models import ExecutionResult, FileEntry
+from kubernetes import client
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
-    initialize_tracer, TracerManager, trace_span, trace, OPENTELEMETRY_AVAILABLE
+    create_tracer_manager, initialize_tracer, trace_span, trace
 )
-
-from .constants import (
-    GATEWAY_API_GROUP, GATEWAY_API_VERSION, GATEWAY_PLURAL,
-    CLAIM_API_GROUP, CLAIM_API_VERSION, CLAIM_PLURAL_NAME,
-    SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME,
-    POD_NAME_ANNOTATION,
+from .sandbox import Sandbox
+from .models import (
+    SandboxConnectionConfig, 
+    SandboxLocalTunnelConnectionConfig, 
+    SandboxTracerConfig
 )
+from .k8s_helper import K8sHelper
+from .exceptions import SandboxNotFoundError
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     stream=sys.stdout)
 
-class SandboxClient:
+T = TypeVar('T', bound=Sandbox)
+
+class SandboxClient(Generic[T]):
     """
-    A client for creating and interacting with a stateful Sandbox via a router.
+    A registry-based client for managing Sandbox lifecycles.
+    Tracks all active handles to ensure flat code structure and safe cleanup.
     """
+
+    sandbox_class: Type[T] = Sandbox  # type: ignore
 
     def __init__(
         self,
-        template_name: str,
-        namespace: str = "default",  # Where Sandbox lives
-        gateway_name: str | None = None,  # Name of the Gateway
-        gateway_namespace: str = "default",  # Where Gateway lives
-        api_url: str | None = None,  # Allow custom URL (DNS or Localhost)
-        server_port: int = 8888,     # The port the runtime inside the sandbox listens on
-        sandbox_ready_timeout: int = 180,
-        gateway_ready_timeout: int = 180,
-        port_forward_ready_timeout: int = 30,
-        enable_tracing: bool = False,
-        trace_service_name: str = "sandbox-client",
+        connection_config: SandboxConnectionConfig | None = None,
+        tracer_config: SandboxTracerConfig | None = None,
     ):
-        self.trace_service_name = trace_service_name
-        self.tracing_manager = None
-        self.tracer = None
-        if enable_tracing:
-            if not OPENTELEMETRY_AVAILABLE:
-                logging.error(
-                    "OpenTelemetry not installed; skipping tracer initialization.")
-            else:
-                initialize_tracer(service_name=trace_service_name)
-                self.tracing_manager = TracerManager(
-                    service_name=trace_service_name)
-                self.tracer = self.tracing_manager.tracer
+        # Sandbox related configuration
+        self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
+        
+        # Tracer configuration
+        self.tracer_config = tracer_config or SandboxTracerConfig()
+        if self.tracer_config.enable_tracing:
+            initialize_tracer(self.tracer_config.trace_service_name)
+        self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.template_name = template_name
-        self.namespace = namespace
-        self.gateway_name = gateway_name
-        self.gateway_namespace = gateway_namespace
-        self.base_url = api_url  # If provided, we skip discovery
-        self.server_port = server_port
-        self.sandbox_ready_timeout = sandbox_ready_timeout
-        self.gateway_ready_timeout = gateway_ready_timeout
-        self.port_forward_ready_timeout = port_forward_ready_timeout
+        # Downstream Kubernetes Configuration
+        self.k8s_helper = K8sHelper()
+        
+        # Tracks all the active client side connections to the created sandbox claims
+        self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
+        
+        # Register global cleanup for all tracked sandboxes.
+        # Deletes all the sandboxes on program termination
+        atexit.register(self.delete_all)
 
-        self.port_forward_process: subprocess.Popen | None = None
+    def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None) -> T:
+        """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
+           the underlying infrastructure.
+        
+        Example:
+        
+            >>> client = SandboxClient()
+            >>> sandbox = client.create_sandbox(template="python-sandbox-template")
+            >>> sandbox.commands.run("echo 'Hello World'")
+        """
+        if not template:
+            raise ValueError("Template name cannot be empty.")
 
-        self.claim_name: str | None = None
-        self.sandbox_name: str | None = None
-        self.pod_name: str | None = None
-        self.annotations: dict | None = None
+        if labels:
+            self._validate_labels(labels)
 
+        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        
         try:
-            config.load_incluster_config()
-        except config.ConfigException:
-            config.load_kube_config()
+            self._create_claim(claim_name, template, namespace, labels=labels)
+            # Resolve the sandbox id from the sandbox claim object.
+            # In case of warmpool, sandbox id is not the same as claim name.
+            start_time = time.monotonic()
+            sandbox_id = self.k8s_helper.resolve_sandbox_name(
+                claim_name, namespace, sandbox_ready_timeout
+            )
+            elapsed_time = time.monotonic() - start_time
+            remaining_timeout = max(0, int(sandbox_ready_timeout - elapsed_time))
+            if remaining_timeout <= 0:
+                raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
+            self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
+            
+            sandbox = self.sandbox_class(
+                claim_name=claim_name,
+                sandbox_id=sandbox_id,
+                namespace=namespace,
+                connection_config=self.connection_config,
+                tracer_config=self.tracer_config,
+                k8s_helper=self.k8s_helper
+            )
+        except Exception:
+            # If creation or waiting fails, ensure we don't leave an orphaned claim
+            self._delete_claim(claim_name, namespace)
+            raise
 
-        self.custom_objects_api = client.CustomObjectsApi()
+        self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
+        return sandbox
 
-        # HTTP session with retries
-        self.session = requests.Session()
-        retries = Retry(
-            total=5,
-            backoff_factor=0.5,
-            status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "POST", "PUT", "DELETE"]
+    def get_sandbox(self, claim_name: str, namespace: str = "default", resolve_timeout: int = 30) -> T:
+        """
+        Retrieves an existing sandbox handle given a sandbox claim name. 
+        If the handle is closed or missing, it re-attaches to the infrastructure.
+        
+        Example:
+        
+            >>> client = SandboxClient()
+            >>> sandbox = client.get_sandbox("sandbox-claim-1234abcd")
+            >>> sandbox.commands.run("ls -la")
+        """
+        key = (namespace, claim_name)
+        existing = self._active_connection_sandboxes.get(key)
+
+        # Check if the sandbox actually exists in Kubernetes
+        try:
+            sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout)
+            sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
+            if not sandbox_object:
+                raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
+        except Exception as e:
+            if existing:
+                existing.terminate()
+            self._active_connection_sandboxes.pop(key, None)
+            raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
+
+        # If it's already in the registry and active (and verified on K8s), return the existing object
+        if existing and existing.is_active:
+            return existing
+            
+        # If the sandbox is not active, pop it out from the tracking list
+        if existing:
+            self._active_connection_sandboxes.pop(key, None)
+
+        # Re-attach: Create a fresh handle for the existing ID
+        new_handle = self.sandbox_class(
+            claim_name=claim_name,
+            sandbox_id=sandbox_id,
+            namespace=namespace,
+            connection_config=self.connection_config,
+            tracer_config=self.tracer_config,
+            k8s_helper=self.k8s_helper
         )
-        self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        
+        self._active_connection_sandboxes[key] = new_handle
+        return new_handle
+    
+    def list_active_sandboxes(self) -> List[Tuple[str, str]]:
+        """Returns a list of tuples containing (namespace, claim_name) currently managed by this client.
+        
+        Example:
+        
+            >>> client = SandboxClient()
+            >>> client.create_sandbox("python-sandbox-template")
+            >>> print(client.list_active_sandboxes())
+            [('default', 'sandbox-claim-1234abcd')]
+        """
+        # We only return IDs that are still active/initialized, and clean up inactive ones.
+        for key, obj in list(self._active_connection_sandboxes.items()):
+            if not obj.is_active:
+                self._active_connection_sandboxes.pop(key, None)
+        return list(self._active_connection_sandboxes.keys())
+      
+    def list_all_sandboxes(self, namespace: str = "default") -> List[str]:
+        """
+        Lists all SandboxClaim names currently existing in the Kubernetes cluster 
+        for the given namespace.
+        
+        Example:
+        
+            >>> client = SandboxClient()
+            >>> print(client.list_all_sandboxes(namespace="default"))
+            ['sandbox-claim-1234abcd', 'sandbox-claim-5678efgh']
+        """
+        return self.k8s_helper.list_sandbox_claims(namespace)
 
-    def is_ready(self) -> bool:
-        """Returns True if the sandbox is ready and the Gateway IP has been found."""
-        return self.base_url is not None
+    def delete_sandbox(self, claim_name: str, namespace: str = "default"):
+        """Stops the client side connection and deletes the Kubernetes resources.
+        
+        Example:
+        
+            >>> client = SandboxClient()
+            >>> sandbox = client.create_sandbox("python-sandbox-template")
+            >>> client.delete_sandbox(sandbox.claim_name)
+        """
+        key = (namespace, claim_name)
+        sandbox = self._active_connection_sandboxes.get(key)
+        try:
+            if sandbox:
+                sandbox.terminate()
+                self._active_connection_sandboxes.pop(key, None)
+            else:
+                self._delete_claim(claim_name, namespace)
+        except Exception as e:
+            logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
+            
+    def delete_all(self):
+        """
+        Cleanup all tracked sandboxes managed by this client.
+        Triggered automatically on script exit via atexit.
+        
+        Example:
+        
+            >>> client = SandboxClient()
+            >>> client.create_sandbox("python-sandbox-template")
+            >>> client.create_sandbox("python-sandbox-template")
+            >>> client.delete_all()
+        """
+        for (ns, claim_name), _ in list(self._active_connection_sandboxes.items()):
+            try:
+                self.delete_sandbox(claim_name, namespace=ns)
+            except Exception as e:
+                logging.error(
+                    f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
+                )
+
+    # Kubernetes label validation: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+    _LABEL_NAME_RE = re.compile(r'^[A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9]$|^[A-Za-z0-9]$')
+    _LABEL_PREFIX_RE = re.compile(r'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
+    _LABEL_NAME_MAX_LENGTH = 63
+    _LABEL_PREFIX_MAX_LENGTH = 253
+
+    @staticmethod
+    def _validate_label_name(name: str, context: str):
+        """Validates a label name segment (key or value) against k8s constraints."""
+        if len(name) > SandboxClient._LABEL_NAME_MAX_LENGTH:
+            raise ValueError(
+                f"Label {context} '{name}' exceeds max length of {SandboxClient._LABEL_NAME_MAX_LENGTH} characters."
+            )
+        if not SandboxClient._LABEL_NAME_RE.match(name):
+            raise ValueError(
+                f"Label {context} '{name}' contains invalid characters. "
+                f"Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.]."
+            )
+
+    @staticmethod
+    def _validate_labels(labels: dict[str, str]):
+        """Validates label keys and values against Kubernetes constraints."""
+        for key, value in labels.items():
+            if not key:
+                raise ValueError("Label key cannot be empty.")
+
+            # Keys can have an optional prefix: "prefix/name"
+            if '/' in key:
+                prefix, name = key.split('/', 1)
+                if not prefix or len(prefix) > SandboxClient._LABEL_PREFIX_MAX_LENGTH:
+                    raise ValueError(
+                        f"Label key prefix '{prefix}' is invalid or exceeds {SandboxClient._LABEL_PREFIX_MAX_LENGTH} characters."
+                    )
+                if not SandboxClient._LABEL_PREFIX_RE.match(prefix):
+                    raise ValueError(
+                        f"Label key prefix '{prefix}' must be a valid DNS subdomain."
+                    )
+                if not name:
+                    raise ValueError(f"Label key '{key}' has an empty name after prefix.")
+                SandboxClient._validate_label_name(name, f"key name in '{key}'")
+            else:
+                SandboxClient._validate_label_name(key, f"key '{key}'")
+
+            # Values can be empty, but if non-empty must match the same name constraints
+            if value:
+                SandboxClient._validate_label_name(value, f"value '{value}' for key '{key}'")
 
     @trace_span("create_claim")
-    def _create_claim(self, trace_context_str: str = ""):
+    def _create_claim(self, claim_name: str, template_name: str, namespace: str, labels: dict[str, str] | None = None):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
-        self.claim_name = f"sandbox-claim-{os.urandom(4).hex()}"
-
         span = trace.get_current_span()
         if span.is_recording():
-            span.set_attribute("sandbox.claim.name", self.claim_name)
+            span.set_attribute("sandbox.claim.name", claim_name)
 
         annotations = {}
-        if trace_context_str:
-            annotations["opentelemetry.io/trace-context"] = trace_context_str
+        if self.tracing_manager:
+            trace_context_str = self.tracing_manager.get_trace_context_json()
+            if trace_context_str:
+                annotations["opentelemetry.io/trace-context"] = trace_context_str
 
-        manifest = {
-            "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
-            "kind": "SandboxClaim",
-            "metadata": {"name": self.claim_name,
-                         "annotations": annotations
-                         },
-            "spec": {"sandboxTemplateRef": {"name": self.template_name}}
-        }
-        logging.info(
-            f"Creating SandboxClaim '{self.claim_name}' "
-            f"in namespace '{self.namespace}' "
-            f"using template '{self.template_name}'..."
-        )
-        self.custom_objects_api.create_namespaced_custom_object(
-            group=CLAIM_API_GROUP,
-            version=CLAIM_API_VERSION,
-            namespace=self.namespace,
-            plural=CLAIM_PLURAL_NAME,
-            body=manifest
-        )
+        self.k8s_helper.create_sandbox_claim(claim_name, template_name, namespace, annotations=annotations, labels=labels)
 
     @trace_span("wait_for_sandbox_ready")
-    def _wait_for_sandbox_ready(self):
+    def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
-        if not self.claim_name:
-            raise RuntimeError(
-                "Cannot wait for sandbox; a sandboxclaim has not been created.")
+        self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
-        # First, discover the sandbox name from the SandboxClaim status.
-        # With warm pool adoption, the sandbox name may differ from the claim name.
-        sandbox_name = self._resolve_sandbox_name()
-
-        w = watch.Watch()
-        logging.info(f"Watching for Sandbox '{sandbox_name}' to become ready...")
-        for event in w.stream(
-            func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=self.namespace,
-            group=SANDBOX_API_GROUP,
-            version=SANDBOX_API_VERSION,
-            plural=SANDBOX_PLURAL_NAME,
-            field_selector=f"metadata.name={sandbox_name}",
-            timeout_seconds=self.sandbox_ready_timeout
-        ):
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                sandbox_object = event['object']
-                status = sandbox_object.get('status', {})
-                conditions = status.get('conditions', [])
-                is_ready = False
-                for cond in conditions:
-                    if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                        is_ready = True
-                        break
-
-                if is_ready:
-                    self.sandbox_name = sandbox_name
-                    logging.info(f"Sandbox {self.sandbox_name} is ready.")
-
-                    self.annotations = sandbox_object.get(
-                        'metadata', {}).get('annotations', {})
-                    pod_name = self.annotations.get(POD_NAME_ANNOTATION)
-                    if pod_name:
-                        self.pod_name = pod_name
-                        logging.info(
-                            f"Found pod name from annotation: {self.pod_name}")
-                    else:
-                        self.pod_name = self.sandbox_name
-                    w.stop()
-                    return
-
-        self.__exit__(None, None, None)
-        raise TimeoutError(
-            f"Sandbox did not become ready within {self.sandbox_ready_timeout} seconds.")
-
-    def _resolve_sandbox_name(self) -> str:
-        """Resolves the actual Sandbox name from the SandboxClaim status.
-
-        With warm pool adoption, the sandbox name may differ from the claim
-        name. This method watches the SandboxClaim until the sandbox name
-        appears in the claim's status, then returns it.
-        """
-        w = watch.Watch()
-        logging.info(f"Resolving sandbox name from claim '{self.claim_name}'...")
-        for event in w.stream(
-            func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=self.namespace,
-            group=CLAIM_API_GROUP,
-            version=CLAIM_API_VERSION,
-            plural=CLAIM_PLURAL_NAME,
-            field_selector=f"metadata.name={self.claim_name}",
-            timeout_seconds=self.sandbox_ready_timeout
-        ):
-            if event["type"] == "DELETED":
-                raise RuntimeError(
-                    f"SandboxClaim '{self.claim_name}' was deleted while resolving sandbox name")
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                claim_object = event['object']
-                sandbox_status = claim_object.get(
-                    'status', {}).get('sandbox', {})
-                name = sandbox_status.get('Name', '')
-                if name:
-                    logging.info(
-                        f"Resolved sandbox name '{name}' from claim status")
-                    w.stop()
-                    return name
-
-        raise TimeoutError(
-            f"Could not resolve sandbox name from claim "
-            f"'{self.claim_name}' within {self.sandbox_ready_timeout} seconds.")
-
-    def _get_free_port(self):
-        """Finds a free port on localhost."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', 0))
-            return s.getsockname()[1]
-
-    @trace_span("dev_mode_tunnel")
-    def _start_and_wait_for_port_forward(self):
-        """
-        Starts 'kubectl port-forward' to the Router Service.
-        This allows 'Dev Mode' without needing a public Gateway IP.
-        """
-        local_port = self._get_free_port()
-
-        # Assumes the router service name from sandbox_router.yaml
-        router_svc = "svc/sandbox-router-svc"
-
-        logging.info(
-            f"Starting Dev Mode tunnel: localhost:{local_port} -> {router_svc}:8080...")
-
-        self.port_forward_process = subprocess.Popen(
-            [
-                "kubectl", "port-forward",
-                router_svc,
-                # Tunnel to Router (8080), not Sandbox (8888)
-                f"{local_port}:8080",
-                # The router lives in the sandbox NS (no gateway)
-                "-n", self.namespace
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-
-        logging.info("Waiting for port-forwarding to be ready...")
-        start_time = time.monotonic()
-        while time.monotonic() - start_time < self.port_forward_ready_timeout:
-            if self.port_forward_process.poll() is not None:
-                _, stderr = self.port_forward_process.communicate()
-                raise RuntimeError(
-                    f"Tunnel crashed: {stderr.decode(errors='ignore')}")
-
-            try:
-                # Connect to localhost
-                with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
-                    self.base_url = f"http://127.0.0.1:{local_port}"
-                    logging.info(
-                        f"Dev Mode ready. Tunneled to Router at {self.base_url}")
-                    # No need for huge sleeps; the Router service is stable.
-                    time.sleep(0.5)
-                    return
-            except (socket.timeout, ConnectionRefusedError):
-                time.sleep(0.5)
-
-        self.__exit__(None, None, None)
-        raise TimeoutError("Failed to establish tunnel to Router Service.")
-
-    @trace_span("wait_for_gateway")
-    def _wait_for_gateway_ip(self):
-        """Waits for the Gateway to be assigned an external IP."""
-        span = trace.get_current_span()
-        if span.is_recording():
-            span.set_attribute("sandbox.gateway.name", self.gateway_name)
-            span.set_attribute(
-                "sandbox.gateway.namespace", self.gateway_namespace)
-
-        # Check if we already have a manually provided URL
-        if self.base_url:
-            logging.info(f"Using configured API URL: {self.base_url}")
-            return
-
-        logging.info(
-            f"Waiting for Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}'...")
-
-        w = watch.Watch()
-        for event in w.stream(
-            func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=self.gateway_namespace, group=GATEWAY_API_GROUP,
-            version=GATEWAY_API_VERSION, plural=GATEWAY_PLURAL,
-            field_selector=f"metadata.name={self.gateway_name}",
-            timeout_seconds=self.gateway_ready_timeout,
-        ):
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                gateway_object = event['object']
-                status = gateway_object.get('status', {})
-                addresses = status.get('addresses', [])
-                if addresses:
-                    ip_address = addresses[0].get('value')
-                    if ip_address:
-                        self.base_url = f"http://{ip_address}"
-                        logging.info(
-                            f"Gateway is ready. Base URL set to: {self.base_url}")
-                        w.stop()
-                        return
-
-        if not self.base_url:
-            raise TimeoutError(
-                f"Gateway '{self.gateway_name}' in namespace '{self.gateway_namespace}' did not get"
-                f" an IP within {self.gateway_ready_timeout} seconds."
-            )
-
-    def __enter__(self) -> 'SandboxClient':
-        trace_context_str = ""
-        # We can't use the "with trace..." context management. This is the equivalent.
-        # https://github.com/open-telemetry/opentelemetry-python/issues/2787
-        if self.tracing_manager:
-            self.tracing_manager.start_lifecycle_span()
-            trace_context_str = self.tracing_manager.get_trace_context_json()
-
-        self._create_claim(trace_context_str)
-        self._wait_for_sandbox_ready()
-
-        # STRATEGY SELECTION
-        if self.base_url:
-            # Case 1: API URL provided manually (DNS / Internal) -> Do nothing, just use it.
-            logging.info(f"Using configured API URL: {self.base_url}")
-
-        elif self.gateway_name:
-            # Case 2: Gateway Name provided -> Production Mode (Discovery)
-            self._wait_for_gateway_ip()
-
-        else:
-            # Case 3: No Gateway, No URL -> Developer Mode (Port Forward to Router)
-            self._start_and_wait_for_port_forward()
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        # Cleanup Port Forward if it exists
-        if self.port_forward_process:
-            try:
-                logging.info("Stopping port-forwarding...")
-                self.port_forward_process.terminate()
-                try:
-                    self.port_forward_process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.port_forward_process.kill()
-            # Unlikely to fail, but catch just in case.
-            except Exception as e:
-                logging.error(f"Failed to stop port-forwarding: {e}")
-
-        # Delete the SandboxClaim
-        if self.claim_name:
-            logging.info(f"Deleting SandboxClaim: {self.claim_name}")
-            try:
-                self.custom_objects_api.delete_namespaced_custom_object(
-                    group=CLAIM_API_GROUP,
-                    version=CLAIM_API_VERSION,
-                    namespace=self.namespace,
-                    plural=CLAIM_PLURAL_NAME,
-                    name=self.claim_name
-                )
-            except client.ApiException as e:
-                if e.status != 404:
-                    logging.error(
-                        f"Error deleting sandbox claim: {e}", exc_info=True)
-            except Exception as e:
-                logging.error(
-                    f"Unexpected error deleting sandbox claim: {e}", exc_info=True)
-
-        # Cleanup Trace if it exists
-        if self.tracing_manager:
-            try:
-                self.tracing_manager.end_lifecycle_span()
-            except Exception as e:
-                logging.error(f"Failed to end tracing span: {e}")
-
-    def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
-        if not self.is_ready():
-            raise RuntimeError("Sandbox is not ready for communication.")
-
-        # Check if port-forward died silently
-        if self.port_forward_process and self.port_forward_process.poll() is not None:
-            _, stderr = self.port_forward_process.communicate()
-            raise RuntimeError(
-                f"Kubectl Port-Forward crashed BEFORE request!\n"
-                f"Stderr: {stderr.decode(errors='ignore')}"
-            )
-
-        url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-
-        headers = kwargs.get("headers", {})
-        headers["X-Sandbox-ID"] = self.sandbox_name or self.claim_name
-        headers["X-Sandbox-Namespace"] = self.namespace
-        headers["X-Sandbox-Port"] = str(self.server_port)
-        kwargs["headers"] = headers
-
+    @trace_span("delete_claim")
+    def _delete_claim(self, claim_name: str, namespace: str):
+        """Deletes the SandboxClaim custom resource from the Kubernetes cluster."""
         try:
-            response = self.session.request(method, url, **kwargs)
-            response.raise_for_status()
-            return response
-        except requests.exceptions.RequestException as e:
-            # Check if port-forward died DURING request
-            if self.port_forward_process and self.port_forward_process.poll() is not None:
-                _, stderr = self.port_forward_process.communicate()
-                raise RuntimeError(
-                    f"Kubectl Port-Forward crashed DURING request!\n"
-                    f"Stderr: {stderr.decode(errors='ignore')}"
-                ) from e
-
-            logging.error(f"Request to gateway router failed: {e}")
-            raise RuntimeError(
-                f"Failed to communicate with the sandbox via the gateway at {url}.") from e
-
-    @trace_span("run")
-    def run(self, command: str, timeout: int = 60) -> ExecutionResult:
-        span = trace.get_current_span()
-        if span.is_recording():
-            span.set_attribute("sandbox.command", command)
-
-        payload = {"command": command}
-        response = self._request(
-            "POST", "execute", json=payload, timeout=timeout)
-
-        response_data = response.json()
-        result = ExecutionResult(**response_data)
-
-        if span.is_recording():
-            span.set_attribute("sandbox.exit_code", result.exit_code)
-        return result
-
-    @trace_span("write")
-    def write(self, path: str, content: bytes | str, timeout: int = 60):
-        span = trace.get_current_span()
-        if span.is_recording():
-            span.set_attribute("sandbox.file.path", path)
-            span.set_attribute("sandbox.file.size", len(content))
-
-        if isinstance(content, str):
-            content = content.encode('utf-8')
-
-        filename = os.path.basename(path)
-        files_payload = {'file': (filename, content)}
-        self._request("POST", "upload",
-                      files=files_payload, timeout=timeout)
-        logging.info(f"File '{filename}' uploaded successfully.")
-
-    @trace_span("read")
-    def read(self, path: str, timeout: int = 60) -> bytes:
-        span = trace.get_current_span()
-        if span.is_recording():
-            span.set_attribute("sandbox.file.path", path)
-
-        encoded_path = urllib.parse.quote(path, safe='')
-        response = self._request(
-            "GET", f"download/{encoded_path}", timeout=timeout)
-        content = response.content
-
-        if span.is_recording():
-            span.set_attribute("sandbox.file.size", len(content))
-
-        return content
-    
-    @trace_span("list")
-    def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
-        """
-        Lists the contents of a directory in the sandbox.
-        Returns a list of FileEntry objects containing name, size, type, and mod_time.
-        """
-        span = trace.get_current_span()
-        if span.is_recording():
-            span.set_attribute("sandbox.file.path", path)
-        encoded_path = urllib.parse.quote(path, safe='')
-        response = self._request("GET", f"list/{encoded_path}", timeout=timeout)
-        
-        entries = response.json()
-        if not entries:
-            return []
-
-        file_entries = [FileEntry(**e) for e in entries]
-        
-        if span.is_recording():
-            span.set_attribute("sandbox.file.count", len(file_entries))
-        return file_entries
-
-    @trace_span("exists")
-    def exists(self, path: str, timeout: int = 60) -> bool:
-        """
-        Checks if a file or directory exists at the given path.
-        """
-        span = trace.get_current_span()
-        if span.is_recording():
-            span.set_attribute("sandbox.file.path", path)
-        encoded_path = urllib.parse.quote(path, safe='')
-        response = self._request("GET", f"exists/{encoded_path}", timeout=timeout)
-        exists = response.json().get("exists", False)
-        if span.is_recording():
-            span.set_attribute("sandbox.file.exists", exists)
-        return exists
-
+            self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
+        except Exception as e:
+            logging.error(f"Failed to cleanup SandboxClaim '{claim_name}': {e}")

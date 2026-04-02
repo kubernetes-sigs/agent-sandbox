@@ -18,14 +18,19 @@ Integration test for PodSnapshotSandboxClient.
 
 import argparse
 import time
+import logging
 from kubernetes import config
-from k8s_agent_sandbox.gke_extensions import PodSnapshotSandboxClient
-from k8s_agent_sandbox.gke_extensions.podsnapshot_client import SnapshotResponse
+from k8s_agent_sandbox.gke_extensions.snapshots.podsnapshot_client import PodSnapshotSandboxClient
+from k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine import SnapshotResponse
+from k8s_agent_sandbox.models import (
+    SandboxDirectConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+)
 
 
 WAIT_TIME_SECONDS = 10
 
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: str):
     assert hasattr(
         snapshot_response, "trigger_name"
@@ -70,54 +75,60 @@ def main(
     first_snapshot_name = "test-snapshot-10"
     second_snapshot_name = "test-snapshot-20"
 
+    client = None
     try:
         print("\n***** Phase 1: Starting Counter *****")
 
-        with PodSnapshotSandboxClient(
-            template_name=template_name,
-            namespace=namespace,
-            api_url=api_url,
-            server_port=server_port,
-        ) as sandbox:
-            print("\n======= Testing Pod Snapshot Extension =======")
-            assert sandbox.snapshot_crd_installed, "Pod Snapshot CRD is not installed."
-            time.sleep(WAIT_TIME_SECONDS)
-            print(
-                f"Creating first pod snapshot '{first_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+        if api_url:
+            connection_config = SandboxDirectConnectionConfig(
+                api_url=api_url,
+                server_port=server_port
             )
-            snapshot_response = sandbox.snapshot(first_snapshot_name)
-            test_snapshot_response(snapshot_response, first_snapshot_name)
-
-            time.sleep(WAIT_TIME_SECONDS)
-
-            print(
-                f"\nCreating second pod snapshot '{second_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+        else:
+            connection_config = SandboxLocalTunnelConnectionConfig(
+                server_port=server_port
             )
-            snapshot_response = sandbox.snapshot(second_snapshot_name)
-            test_snapshot_response(snapshot_response, second_snapshot_name)
-            recent_snapshot_uid = snapshot_response.snapshot_uid
-            print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
-        print("\n***** Phase 2: Restoring from most recent snapshot & Verifying *****")
-        with PodSnapshotSandboxClient(
-            template_name=template_name,
-            namespace=namespace,
-            api_url=api_url,
-            server_port=server_port,
-        ) as sandbox_restored:  # restores from second_snapshot_name by default
+        client = PodSnapshotSandboxClient(connection_config=connection_config)
 
-            restore_result = sandbox_restored.is_restored_from_snapshot(
-                recent_snapshot_uid
-            )
-            assert restore_result.success, restore_result.error_reason
-            print("Pod was restored from the most recent snapshot.")
+        print("\n======= Testing Pod Snapshot Extension =======")
+        
+        sandbox = client.create_sandbox(template_name, namespace=namespace)
+
+        time.sleep(WAIT_TIME_SECONDS)
+        print(
+            f"Creating first pod snapshot '{first_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+        )
+        snapshot_response = sandbox.snapshots.create(first_snapshot_name)
+        test_snapshot_response(snapshot_response, first_snapshot_name)
+
+        time.sleep(WAIT_TIME_SECONDS)
+
+        print(
+            f"\nCreating second pod snapshot '{second_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+        )
+        snapshot_response = sandbox.snapshots.create(second_snapshot_name)
+        test_snapshot_response(snapshot_response, second_snapshot_name)
+        recent_snapshot_uid = snapshot_response.snapshot_uid
+        print(f"Recent snapshot UID: {recent_snapshot_uid}")
+
+        # Wait a moment for the PodSnapshotPolicy controller's cache to recognize the new snapshot as the latest
+        time.sleep(WAIT_TIME_SECONDS)
+        
+        print(f"\nChecking if sandbox was restored from snapshot '{recent_snapshot_uid}'...")
+        restored_sandbox = client.create_sandbox(template_name, namespace=namespace)
+        restore_result = restored_sandbox.is_restored_from_snapshot(recent_snapshot_uid)
+        assert restore_result.success, restore_result.error_reason
+        print("Pod was restored from the most recent snapshot.")
 
         print("--- Pod Snapshot Test Passed! ---")
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")
-        # The __exit__ method of the Sandbox class will handle cleanup.
     finally:
+        print("Cleaning up all sandboxes...")
+        if client:
+           client.delete_all()
         print("\n--- Sandbox Client Test Finished ---")
 
 

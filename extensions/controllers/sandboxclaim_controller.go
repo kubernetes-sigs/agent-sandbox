@@ -44,6 +44,14 @@ import (
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
+// getWarmPoolPolicy returns the effective warm pool policy for a claim.
+func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
+	if claim.Spec.WarmPool != nil {
+		return *claim.Spec.WarmPool
+	}
+	return extensionsv1alpha1.WarmPoolPolicyDefault
+}
+
 // SandboxClaimReconciler reconciles a SandboxClaim object
 type SandboxClaimReconciler struct {
 	client.Client
@@ -604,6 +612,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
 	}
 
+	policy := getWarmPoolPolicy(claim)
 	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 	var adoptionCandidates []*v1alpha1.Sandbox
 
@@ -619,6 +628,11 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			return sb, nil
 		}
 
+		// Skip warm pool adoption entirely if policy is "none"
+		if policy == extensionsv1alpha1.WarmPoolPolicyNone {
+			continue
+		}
+
 		// Collect adoption candidates from warm pool
 		if _, ok := sb.Labels[warmPoolSandboxLabel]; !ok {
 			continue
@@ -630,11 +644,26 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 			continue
 		}
+
+		// If a specific pool is requested, only consider sandboxes from that pool
+		if policy.IsSpecificPool() {
+			specificPoolHash := sandboxcontrollers.NameHash(string(policy))
+			if sb.Labels[warmPoolSandboxLabel] != specificPoolHash {
+				continue
+			}
+		}
+
 		adoptionCandidates = append(adoptionCandidates, sb)
+	}
+
+	if policy == extensionsv1alpha1.WarmPoolPolicyNone {
+		logger.Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
+		return nil, nil
 	}
 
 	// Try to adopt from warm pool
 	if len(adoptionCandidates) > 0 {
+		logger.V(1).Info("Found warm pool adoption candidates", "count", len(adoptionCandidates), "claim", claim.Name, "warmpool", policy)
 		adopted, err := r.adoptSandboxFromCandidates(ctx, claim, adoptionCandidates)
 		if err != nil {
 			return nil, err
@@ -642,6 +671,8 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if adopted != nil {
 			return adopted, nil
 		}
+	} else if policy.IsSpecificPool() {
+		logger.Info("No available sandboxes in specified warm pool", "warmPool", string(policy), "claim", claim.Name)
 	}
 
 	// No warm pool sandbox available; caller decides whether to create

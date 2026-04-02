@@ -88,6 +88,26 @@ func resolvePodName(sandbox *sandboxv1alpha1.Sandbox) string {
 	return sandbox.Name
 }
 
+// MergeVolumeClaimVolumes merges PVC-backed volumes into an existing volume
+// list, replacing any volumes with matching names. This follows StatefulSet
+// semantics where volumeClaimTemplate volumes take priority.
+func MergeVolumeClaimVolumes(existing []corev1.Volume, pvcVolumes []corev1.Volume) []corev1.Volume {
+	if len(pvcVolumes) == 0 {
+		return existing
+	}
+	vctNames := make(map[string]struct{}, len(pvcVolumes))
+	for _, v := range pvcVolumes {
+		vctNames[v.Name] = struct{}{}
+	}
+	filtered := make([]corev1.Volume, 0, len(existing))
+	for _, v := range existing {
+		if _, ok := vctNames[v.Name]; !ok {
+			filtered = append(filtered, v)
+		}
+	}
+	return append(filtered, pvcVolumes...)
+}
+
 var (
 	// Scheme for use by sandbox controllers. Registers required types for client.
 	Scheme = runtime.NewScheme()
@@ -208,7 +228,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	var allErrors error
 
-	// Reconcile PVCs
+	// Reconcile PVCs from volumeClaimTemplates
 	err := r.reconcilePVCs(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
@@ -474,8 +494,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
-			log.Error(err, "Pod not found")
-			return nil, fmt.Errorf("pod in annotation get failed: %w", err)
+			log.Info("Pod from annotation not found, will recreate with same name",
+				"podName", podName, "namespace", sandbox.Namespace, "sandbox", sandbox.Name)
 		}
 		pod = nil
 	}
@@ -627,9 +647,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 
+	// Build PVC volumes from volumeClaimTemplates
+	var pvcVolumes []corev1.Volume
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name
-		mutatedSpec.Volumes = append(mutatedSpec.Volumes, corev1.Volume{
+		pvcVolumes = append(pvcVolumes, corev1.Volume{
 			Name: pvcTemplate.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -638,6 +660,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			},
 		})
 	}
+	mutatedSpec.Volumes = MergeVolumeClaimVolumes(mutatedSpec.Volumes, pvcVolumes)
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sandbox.Name,
@@ -652,6 +675,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			log.Info("Pod already exists, fetching existing pod",
+				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			existingPod := &corev1.Pod{}
+			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
+				return nil, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
+			}
+			return existingPod, nil
+		}
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
@@ -912,7 +944,7 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) 
 	remainingTime := time.Until(expiryTime)
 
 	// TODO(barney-s): Do we need a inverse exponential backoff here ?
-	//requeueAfter := max(remainingTime/2, 2*time.Second)
+	// requeueAfter := max(remainingTime/2, 2*time.Second)
 
 	// Requeue at expiry time or in 2 seconds whichever is later
 	requeueAfter := max(remainingTime, 2*time.Second)

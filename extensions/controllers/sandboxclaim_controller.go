@@ -726,6 +726,13 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Annotations[v1alpha1.SandboxTemplateRefAnnotation] = template.Name
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
+	// Copy volumeClaimTemplates from template to sandbox
+	if len(template.Spec.VolumeClaimTemplates) > 0 {
+		sandbox.Spec.VolumeClaimTemplates = make([]v1alpha1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
+		for i, vct := range template.Spec.VolumeClaimTemplates {
+			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
+		}
+	}
 
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)

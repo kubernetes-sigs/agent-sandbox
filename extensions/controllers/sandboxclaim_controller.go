@@ -18,7 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -264,11 +264,17 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1alpha1.SandboxClaimStatus, claim *extensionsv1alpha1.SandboxClaim) error {
 	logger := log.FromContext(ctx)
 
-	sort.Slice(oldStatus.Conditions, func(i, j int) bool {
-		return oldStatus.Conditions[i].Type < oldStatus.Conditions[j].Type
+	slices.SortFunc(oldStatus.Conditions, func(a, b metav1.Condition) int {
+		if a.Type < b.Type {
+			return -1
+		}
+		return 1
 	})
-	sort.Slice(claim.Status.Conditions, func(i, j int) bool {
-		return claim.Status.Conditions[i].Type < claim.Status.Conditions[j].Type
+	slices.SortFunc(claim.Status.Conditions, func(a, b metav1.Condition) int {
+		if a.Type < b.Type {
+			return -1
+		}
+		return 1
 	})
 
 	if equality.Semantic.DeepEqual(oldStatus, &claim.Status) {
@@ -367,13 +373,16 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	logger := log.FromContext(ctx)
 
 	// Sort: ready sandboxes first, then by creation time (oldest first)
-	sort.Slice(candidates, func(i, j int) bool {
-		iReady := isSandboxReady(candidates[i])
-		jReady := isSandboxReady(candidates[j])
-		if iReady != jReady {
-			return iReady
+	slices.SortFunc(candidates, func(a, b *v1alpha1.Sandbox) int {
+		aReady := isSandboxReady(a)
+		bReady := isSandboxReady(b)
+		if aReady != bReady {
+			if aReady {
+				return -1 // a ready, b not ready -> a first
+			}
+			return 1 // b ready, a not ready -> b first
 		}
-		return candidates[i].CreationTimestamp.Before(&candidates[j].CreationTimestamp)
+		return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
 	})
 
 	if len(candidates) == 0 {

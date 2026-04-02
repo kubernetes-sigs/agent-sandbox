@@ -99,6 +99,7 @@ class AsyncSandboxClient(Generic[T]):
                     await sandbox._close_connection()
                 except Exception as e:
                     logging.error(f"Failed to close sandbox connection: {e}")
+            self._active_connection_sandboxes.clear()
         await self.k8s_helper.close()
 
     async def create_sandbox(

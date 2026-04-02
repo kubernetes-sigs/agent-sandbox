@@ -24,30 +24,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func validateSandbox(obj client.Object) (*sandboxv1alpha1.Sandbox, error) {
+func asSandbox(obj client.Object) (*sandboxv1alpha1.Sandbox, error) {
 	if obj == nil {
 		return nil, fmt.Errorf("sandbox object is nil")
 	}
-	sandbox, ok := obj.(*sandboxv1alpha1.Sandbox)
-	if !ok {
-		return nil, fmt.Errorf("got %T, want %T", obj, &sandboxv1alpha1.Sandbox{})
+	sandbox, err := asTyped[*sandboxv1alpha1.Sandbox](obj)
+	if err != nil {
+		return nil, err
 	}
 	return sandbox, nil
 }
 
 // SandboxHasStatus verifies that the Sandbox object has the specified status
 func SandboxHasStatus(status sandboxv1alpha1.SandboxStatus) ObjectPredicate {
-	return func(obj client.Object) (bool, error) {
-		sandbox, err := validateSandbox(obj)
-		if err != nil {
-			return false, err
-		}
-		opts := []cmp.Option{
-			cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
-		}
-		if diff := cmp.Diff(status, sandbox.Status, opts...); diff != "" {
-			return false, nil
-		}
-		return true, nil
+	return &sandboxHasStatusPredicate{
+		WantStatus: status,
 	}
+}
+
+type sandboxHasStatusPredicate struct {
+	WantStatus sandboxv1alpha1.SandboxStatus
+}
+
+func (s *sandboxHasStatusPredicate) String() string {
+	return fmt.Sprintf("SandboxHasStatus(%v)", s.WantStatus)
+}
+
+func (s *sandboxHasStatusPredicate) Matches(obj client.Object) (bool, error) {
+	sandbox, err := asSandbox(obj)
+	if err != nil {
+		return false, err
+	}
+	opts := []cmp.Option{
+		cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
+	}
+	if diff := cmp.Diff(s.WantStatus, sandbox.Status, opts...); diff != "" {
+		return false, nil
+	}
+	return true, nil
 }

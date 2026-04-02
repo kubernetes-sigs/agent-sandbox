@@ -10,5 +10,5 @@ __pycache__/
 logs/
 *.log
 
-agentic_sandbox.egg-info/
+k8s_agent_sandbox.egg-info/
 dist/

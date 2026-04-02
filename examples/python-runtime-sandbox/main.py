@@ -16,6 +16,7 @@ import subprocess
 import os
 import shlex
 import logging
+import urllib.parse
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
@@ -30,6 +31,18 @@ class ExecuteResponse(BaseModel):
     stdout: str
     stderr: str
     exit_code: int
+
+def get_safe_path(file_path: str) -> str:
+    """Sanitizes the file path to ensure it stays within /app."""
+    base_dir = os.path.realpath("/app")
+    # Remove leading slashes to ensure path is relative
+    clean_path = file_path.lstrip("/")
+    full_path = os.path.realpath(os.path.join(base_dir, clean_path))
+
+    if os.path.commonpath([base_dir, full_path]) != base_dir:
+        raise ValueError("Access denied: Path must be within /app")
+    
+    return full_path
 
 app = FastAPI(
     title="Agentic Sandbox Runtime",
@@ -94,12 +107,62 @@ async def upload_file(file: UploadFile = File(...)):
             content={"message": f"File upload failed: {str(e)}"}
         )
 
-@app.get("/download/{file_path:path}", summary="Download a file from the sandbox")
-async def download_file(file_path: str):
+@app.get("/download/{encoded_file_path:path}", summary="Download a file from the sandbox")
+async def download_file(encoded_file_path: str):
     """
     Downloads a specified file from the /app directory in the sandbox.
     """
-    full_path = os.path.join("/app", file_path)
+    decoded_path = urllib.parse.unquote(encoded_file_path)
+    try:
+        full_path = get_safe_path(decoded_path)
+    except ValueError:
+        return JSONResponse(status_code=403, content={"message": "Access denied"})
+
     if os.path.isfile(full_path):
-        return FileResponse(path=full_path, media_type='application/octet-stream', filename=file_path)
+        return FileResponse(path=full_path, media_type='application/octet-stream', filename=decoded_path)
     return JSONResponse(status_code=404, content={"message": "File not found"})
+
+@app.get("/list/{encoded_file_path:path}", summary="List files in a directory")
+async def list_files(encoded_file_path: str):
+    """
+    Lists the contents of a directory under the /app directory in the sandbox.
+    """
+    decoded_path = urllib.parse.unquote(encoded_file_path)
+    try:
+        full_path = get_safe_path(decoded_path)
+    except ValueError:
+        return JSONResponse(status_code=403, content={"message": "Access denied"})
+
+    if not os.path.isdir(full_path):
+        return JSONResponse(status_code=404, content={"message": "Path is not a directory"})
+    
+    try:
+        entries = []
+        with os.scandir(full_path) as it:
+            for entry in it:
+                stats = entry.stat()
+                entries.append({
+                    "name": entry.name,
+                    "size": stats.st_size,
+                    "type": "directory" if entry.is_dir() else "file",
+                    "mod_time": stats.st_mtime
+                })
+        return JSONResponse(status_code=200, content=entries)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"message": f"List files failed: {str(e)}"})
+
+@app.get("/exists/{encoded_file_path:path}", summary="Check if the relative path exists")
+async def exists(encoded_file_path: str):
+    """
+    Checks if a specified file or directory exists under the /app directory in the sandbox.
+    """
+    decoded_path = urllib.parse.unquote(encoded_file_path)
+    try:
+        full_path = get_safe_path(decoded_path)
+    except ValueError:
+        return JSONResponse(status_code=403, content={"message": "Access denied"})
+
+    return JSONResponse(status_code=200, content={
+        "path": decoded_path,
+        "exists": os.path.exists(full_path)
+    })

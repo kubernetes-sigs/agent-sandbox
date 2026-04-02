@@ -1,0 +1,71 @@
+# Link replacement rules for include-file shortcode
+# Each rule consists of a pattern (regex) and a replacement URL
+# Rules are applied in the order they appear
+
+replacements:
+  # Python SDK README - redirect to GitHub
+  - pattern: '\]\(clients/python/agentic-sandbox-client/README\.md(#[^)]+)?\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
+    description: "Python SDK README to GitHub"
+
+  # Examples link - redirect to /docs/examples/
+  - pattern: '\]\(examples/\)'
+    replacement: '](/docs/examples/)'
+    description: "Examples directory to docs/examples"
+
+  # Extensions examples - redirect to GitHub
+  - pattern: '\]\(extensions/examples/\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/extensions/examples)'
+    description: "Extensions examples to GitHub"
+
+  # Agentic-sandbox-client Python SDK (relative paths) - redirect to GitHub
+  - pattern: '\]\(\.\./\.\./clients/python/agentic-sandbox-client/\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/)'
+    description: "Agentic-sandbox-client relative path to GitHub"
+
+  # JupyterLab installation guide - specific to experiment.md
+  - pattern: '\]\(\./README\.md\)'
+    replacement: '](/docs/examples/jupyterlab/)'
+    description: "JupyterLab README to docs page"
+
+  # Installation section from getting started
+  - pattern: '\]\(/README\.md/#installation\)'
+    replacement: '](/docs/overview/#installation)'
+    description: "Root README installation to docs/overview"
+
+  # Agent sandbox router - redirect to GitHub
+  - pattern: '\]\(/clients/python/agentic-sandbox-client/README\.md(#[^)]+)\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
+    description: "Agent sandbox router README to GitHub"
+
+  # Sandbox-router README - redirect to GitHub
+  - pattern: '\]\(sandbox-router/README\.md(#[^)]+)?\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
+    description: "Sandbox-router README to GitHub"
+
+  # test_client.py - redirect to GitHub
+  - pattern: '\]\(test_client\.py\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/test_client.py)'
+    description: "test_client.py to GitHub"
+
+  # Python-runtime-sandbox - redirect to /docs/runtime-templates/python/
+  - pattern: '\]\(\.\./\.\./\.\./examples/python-runtime-sandbox/\)'
+    replacement: '](/docs/runtime-templates/python/)'
+    description: "Python runtime sandbox to docs page"
+
+  # Tracing with GCP - redirect to GitHub
+  - pattern: '\]\(GCP\.md(#[^)]+)\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/GCP.md$1)'
+    description: "GCP.md to GitHub"
+
+  # Generic relative README.md links (must come after specific rules)
+  - pattern: '\]\(README\.md(#[^)]+)?\)'
+    replacement: null  # Will be dynamically replaced with current section path
+    description: "Generic README links to current section"
+    dynamic: true
+
+
+  # Generic ../../README.md or ../../INSTALL.md links
+  - pattern: '\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)'
+    replacement: '](/docs/overview/$2)'
+    description: "Parent directory README/INSTALL to docs/overview"

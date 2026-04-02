@@ -1,0 +1,16 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: {{.Name}}
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        group: {{.Group}}
+    spec:
+      terminationGracePeriodSeconds: 1
+      restartPolicy: Never
+      containers:
+      - name: sample-sandbox
+        image: alpine
+        command: ["/bin/sh", "-c", "echo 'Hello from the Agent Sandbox!'; sleep 3600"]

@@ -1,0 +1,65 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: openclaw-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: openclaw-sandbox
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:2026.3.23
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: OPENCLAW_GATEWAY_TOKEN
+              value: "dummy-token-for-sandbox"
+            - name: OPENCLAW_CONFIG_PATH
+              value: "/etc/openclaw/openclaw.json"
+          command:
+            - node
+            - dist/index.js
+            - gateway
+            - --bind=lan
+            - --port
+            - "18789"
+            - --allow-unconfigured
+            - --verbose
+          ports:
+            - containerPort: 18789
+            - containerPort: 18790
+          volumeMounts:
+            - mountPath: /home/node/.openclaw/workspace
+              name: workspaces-pvc
+            - mountPath: /home/node/.openclaw
+              name: config-volume
+            - mountPath: /etc/openclaw
+              name: cm-volume
+      volumes:
+        - name: config-volume
+          emptyDir: {}
+        - name: cm-volume
+          configMap:
+            name: openclaw-config
+  volumeClaimTemplates:
+    - metadata:
+        name: workspaces-pvc
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi

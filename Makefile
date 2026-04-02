@@ -1,5 +1,5 @@
 .PHONY: all
-all: fix-go-generate build lint-go test-unit toc-verify
+all: fix-go-generate build lint-go lint-api test-unit toc-verify
 
 .PHONY: fix-go-generate
 fix-go-generate:
@@ -19,7 +19,7 @@ deploy-kind:
 
 	@if [ "$(EXTENSIONS)" = "true" ]; then \
 		echo "🔧 Patching controller to enable extensions..."; \
-		kubectl patch statefulset agent-sandbox-controller \
+		kubectl patch deployment agent-sandbox-controller \
 			-n agent-sandbox-system \
 			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
 	fi
@@ -44,9 +44,17 @@ test-unit:
 test-e2e:
 	./dev/ci/presubmits/test-e2e
 
+.PHONY: test-e2e-benchmarks
+test-e2e-benchmarks:
+	./dev/ci/presubmits/test-e2e --suite benchmarks
+
 .PHONY: lint-go
 lint-go:
 	./dev/tools/lint-go
+
+.PHONY: lint-api
+lint-api:
+	./dev/tools/lint-api
 
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
@@ -84,17 +92,8 @@ release-manifests:
 # make release-python-sdk TAG=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
 .PHONY: release-python-sdk
 release-python-sdk:
-	ifndef TAG
-		$(info ❌ ERROR: TAG is undefined.)
-		$(info )
-		$(info Usage Examples:)
-		$(info    • Release: 					make release-python-sdk TAG=v0.1.1)
-		$(info    • Patch Release:        		make release-python-sdk TAG=v0.1.1.post1)
-		$(info    • Release to TestPyPI only:	make release-python-sdk TAG=v0.1.1rc1)
-		$(info )
-		$(error 🛑 Aborting release)
-	endif
-		./dev/tools/release-python --tag=${TAG} --remote=${REMOTE_UPSTREAM}
+	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-python-sdk TAG=vX.Y.Z.postN)"; exit 1; fi
+	./dev/tools/release-python --tag=${TAG} --remote=${REMOTE_UPSTREAM}
 
 .PHONY: toc-update
 toc-update:
@@ -103,3 +102,8 @@ toc-update:
 .PHONY: toc-verify
 toc-verify:
 	./dev/tools/verify-toc
+
+.PHONY: clean
+clean:
+	rm -rf dev/tools/tmp
+	rm -rf bin/manager

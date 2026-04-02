@@ -29,17 +29,18 @@ The guide walks you through the process of creating a simple [ADK](https://googl
 
    ```sh
    from google.adk.agents.llm_agent import Agent
-   from agentic_sandbox import SandboxClient
+   from k8s_agent_sandbox import SandboxClient
    
    
    def execute_python(code: str):
-       with SandboxClient(
-           template_name="python-sandbox-template",
-           namespace="default"
-       ) as sandbox:
-           sandbox.write("run.py", code)
-           result = sandbox.run("python3 run.py")
-           return result.stdout
+       sb = SandboxClient()
+       sandbox = sb.create_sandbox(template="python-sandbox-template", namespace="default")
+       try:
+        sandbox.files.write("run.py", code)
+        result = sandbox.commands.run("python3 run.py")
+        return result.stdout
+       finally:
+         sandbox.terminate()
    
    
    root_agent = Agent(

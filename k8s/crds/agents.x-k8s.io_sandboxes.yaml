@@ -3979,6 +3979,7 @@ spec:
                 type: array
               replicas:
                 format: int32
+                minimum: 0
                 type: integer
               selector:
                 type: string
@@ -3986,8 +3987,6 @@ spec:
                 type: string
               serviceFQDN:
                 type: string
-            required:
-            - replicas
             type: object
         required:
         - spec

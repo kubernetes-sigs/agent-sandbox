@@ -26,13 +26,43 @@ const (
 	ClaimExpiredReason = "ClaimExpired"
 )
 
+// WarmPoolPolicy describes the policy for using warm pools.
+// It can be one of the following:
+//   - "none": Do not use any warm pool, always create fresh sandboxes
+//   - "default": Select from all available warm pools that match the template (default)
+//   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+type WarmPoolPolicy string
+
+const (
+	// WarmPoolPolicyNone indicates that no warm pool should be used.
+	// A fresh sandbox will always be created.
+	WarmPoolPolicyNone WarmPoolPolicy = "none"
+
+	// WarmPoolPolicyDefault indicates the default behavior: select from all
+	// available warm pools that match the template. This is the default behavior
+	// if warmpool is not specified.
+	WarmPoolPolicyDefault WarmPoolPolicy = "default"
+)
+
+// IsSpecificPool returns true if the policy specifies a specific warm pool name
+// (not "none" or "default").
+func (p WarmPoolPolicy) IsSpecificPool() bool {
+	return p != WarmPoolPolicyNone && p != WarmPoolPolicyDefault && p != ""
+}
+
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
-// +kubebuilder:validation:Enum=Delete;Retain
+// +kubebuilder:validation:Enum=Delete;DeleteForeground;Retain
 type ShutdownPolicy string
 
 const (
 	// ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.
 	ShutdownPolicyDelete ShutdownPolicy = "Delete"
+
+	// ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground
+	// cascade deletion. The claim remains in the API (with a deletionTimestamp) until its
+	// underlying Sandbox and Pod are fully terminated. This allows external systems to observe
+	// shutdown progress by checking whether the claim still exists.
+	ShutdownPolicyDeleteForeground ShutdownPolicy = "DeleteForeground"
 
 	// ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).
 	// The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,
@@ -42,7 +72,7 @@ const (
 
 // Lifecycle defines the lifecycle management for the SandboxClaim.
 type Lifecycle struct {
-	// ShutdownTime is the absolute time when the SandboxClaim expires.
+	// shutdownTime is the absolute time when the SandboxClaim expires.
 	// This time governs the lifecycle of the claim. It is not propagated to the
 	// underlying Sandbox. Instead, the SandboxClaim controller enforces this
 	// expiration by deleting the Sandbox resources when the time is reached.
@@ -52,7 +82,7 @@ type Lifecycle struct {
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
-	// ShutdownPolicy determines the behavior when the SandboxClaim expires.
+	// shutdownPolicy determines the behavior when the SandboxClaim expires.
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
@@ -61,36 +91,47 @@ type Lifecycle struct {
 // SandboxTemplateRef references a SandboxTemplate
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
-	// +kubebuilder:validation:Required
+	// +required
 	Name string `json:"name,omitempty" protobuf:"bytes,1,name=name"`
 }
 
 // SandboxClaimSpec defines the desired state of Sandbox
 type SandboxClaimSpec struct {
-	// SandboxTemplateRefName - name of the SandboxTemplate to be used for creating a Sandbox
-	// +kubebuilder:validation:Required
+	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
+	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
 
-	// Lifecycle defines when and how the SandboxClaim should be shut down.
+	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+
+	// warmpool specifies the warm pool policy for sandbox adoption.
+	// - "none": Do not use any warm pool, always create fresh sandboxes
+	// - "default": Use default behavior, select from all matching warm pools (default)
+	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+	// +optional
+	// +kubebuilder:default=default
+	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatus struct {
-	// Conditions represent the latest available observations of a Sandbox's current state.
+	// conditions represent the latest available observations of a Sandbox's current state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" protobuf:"bytes,1,rep,name=conditions"`
 
+	// sandbox defines the state of Sandbox
+	// +optional
 	SandboxStatus SandboxStatus `json:"sandbox,omitempty" protobuf:"bytes,2,opt,name=sandboxStatus"`
 }
 
 type SandboxStatus struct {
-	// SandboxName is the name of the Sandbox created from this claim
+	// name is the name of the Sandbox created from this claim
 	// +optional
-	Name string `json:"Name,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
+// +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim

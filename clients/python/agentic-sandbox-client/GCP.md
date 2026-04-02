@@ -60,16 +60,16 @@ To run the client and generate traces, instantiate the SandboxClient with the `e
 flag in your Python script.
 
 ```python
-from agentic_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient
 
 def main():
     # ...
-    with SandboxClient(
-        template_name="python-sandbox-template",
-        enable_tracing=True
-    ) as sandbox:
-        # Run any client operations here
-        sandbox.run("echo 'Hello, Traced World!'")
+    sb = SandboxClient(tracer_config=SandboxTracerConfig(enable_tracing=True))
+    sandbox = sb.create_sandbox(template="python-sandbox-template")
+    try:
+        sandbox.commands.run("echo 'Hello, World!'")
+    finally:
+        sandbox.terminate()
 
 if __name__ == "__main__":
     main()

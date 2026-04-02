@@ -1,15 +1,44 @@
-run:
-  timeout: 5m
-
+version: "2"
 linters:
   enable:
-  - gofmt
-  - goimports
-  - govet
-  - revive
-  - staticcheck
-  - unconvert
-  - unparam
-  - misspell
-  - errcheck
-  - ineffassign
+    - depguard
+    - govet
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - misspell
+    - errcheck
+    - ineffassign
+  settings:
+    depguard:
+      rules:
+        forbid-pkg-errors:
+          deny:
+            - pkg: sort
+              desc: Should be replaced with slices package
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+    rules:
+      - linters:
+          - staticcheck
+        text: "QF1008"
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

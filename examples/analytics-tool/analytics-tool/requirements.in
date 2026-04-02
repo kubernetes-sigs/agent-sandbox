@@ -1,0 +1,10 @@
+# For the API server
+fastapi
+uvicorn
+python-multipart
+
+# For the ML agent's tasks
+pandas
+scikit-learn
+lightgbm
+matplotlib

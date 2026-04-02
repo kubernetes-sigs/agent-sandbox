@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -16,19 +16,33 @@ classifiers = [
 dependencies = [
     "kubernetes",
     "requests",
+    "pydantic",
 ]
 
 [project.urls]
 "Homepage" = "https://github.com/kubernetes-sigs/agent-sandbox"
 "Bug Tracker" = "https://github.com/kubernetes-sigs/agent-sandbox/issues"
 
-[tool.setuptools]
-# This line tells setuptools to only include the 'agentic_sandbox'
-# package and to ignore other directories like 'sandbox_router'.
-packages = ["agentic_sandbox"]
+[tool.setuptools.packages.find]
+# This tells setuptools to include the 'k8s_agent_sandbox'
+# package, ignore other directories like 'sandbox_router', and exclude tests.
+include = ["k8s_agent_sandbox*"]
+exclude = [
+    "*.test",
+    "*.test.*",
+    "*.tests",
+    "*.tests.*",
+    "k8s_agent_sandbox.test*",
+    "k8s_agent_sandbox.*.test*"
+]
 
-[tool.setuptools.dynamic]
-version = {file = "VERSION"}
+[tool.setuptools.exclude-package-data]
+# setuptools_scm automatically bundles tracked files as package data.
+# We need to explicitly exclude test directories and files from being bundled.
+"*" = ["test/*", "tests/*", "*/test/*", "*/tests/*", "test_*.py", "*_test.py"]
+
+[tool.setuptools_scm]
+root = "../../.."
 
 [project.optional-dependencies]
 test = [
@@ -41,3 +55,6 @@ tracing = [
     "opentelemetry-exporter-otlp~=1.39.0",
     "opentelemetry-instrumentation-requests~=0.60b0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["k8s_agent_sandbox"]

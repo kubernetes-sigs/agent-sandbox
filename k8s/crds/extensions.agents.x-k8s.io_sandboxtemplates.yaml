@@ -213,6 +213,12 @@ spec:
                       type: object
                     type: array
                 type: object
+              networkPolicyManagement:
+                default: Managed
+                enum:
+                - Managed
+                - Unmanaged
+                type: string
               podTemplate:
                 properties:
                   metadata:

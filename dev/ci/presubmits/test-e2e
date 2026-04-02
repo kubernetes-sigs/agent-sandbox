@@ -15,42 +15,38 @@
 
 import os
 import shutil
-import sys
 import subprocess
+import sys
 
-from shared import utils
+# Add the repository root to sys.path to allow importing from dev.*
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
+from dev.ci.shared.runner import TestRunner
 
-def main():
-    """ invokes e2e tests in kind cluster and outputs a junit report in the ARTIFACTS dir
+class E2ETestRunner(TestRunner):
+    def __init__(self):
+        super().__init__("e2e-test", "invokes e2e tests in kind cluster and outputs a junit report in the ARTIFACTS dir")
+        self.parser.add_argument(
+            "--suite",
+            dest="suite",
+            help="which suite of tests to run",
+            type=str,
+            choices=["all", "tests", "benchmarks"],
+            default="all",
+        )
 
-    The ARTIFACTS environment variable is set by prow.
-    """
-    repo_root = utils.get_repo_root()
+    def run_tests(self, args):
+        return subprocess.run([f"{self.repo_root}/dev/tools/test-e2e", "--image-prefix", args.image_prefix, "--suite", args.suite])
 
-    result = subprocess.run([f"{repo_root}/dev/tools/create-kind-cluster", "e2e-test", "--recreate", "--kubeconfig", f"{repo_root}/bin/KUBECONFIG"])
-    if result.returncode != 0:
-        return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/push-images", "--kind-cluster-name", "e2e-test", "--image-prefix", "kind.local/"])
-    if result.returncode != 0:
-        return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/deploy-to-kube", "--image-prefix", "kind.local/"])
-    if result.returncode != 0:
-        return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/deploy-cloud-provider"])
-    if result.returncode != 0:
-        return result.returncode
-    result = subprocess.run([f"{repo_root}/dev/tools/test-e2e", "--image-prefix", "kind.local/"])
-
-    # Always create junit file whether tests pass or fail
-    artifact_dir = os.getenv("ARTIFACTS")
-    if artifact_dir:
-        shutil.copy(f"{repo_root}/bin/e2e-go-junit.xml", f"{artifact_dir}/junit_go.xml")
-        shutil.copy(f"{repo_root}/bin/e2e-python-sdk-junit.xml", f"{artifact_dir}/junit_python_sdk.xml")
-        shutil.copy(f"{repo_root}/bin/e2e-ts-sdk-junit.xml", f"{artifact_dir}/junit_ts_sdk.xml")
-
-    return result.returncode
-
+    def copy_artifacts(self):
+        artifact_dir = os.getenv("ARTIFACTS")
+        if artifact_dir:
+            shutil.copy(f"{self.repo_root}/bin/e2e-go-junit.xml", f"{artifact_dir}/junit_go.xml")
+            shutil.copy(f"{self.repo_root}/bin/e2e-python-sdk-junit.xml", f"{artifact_dir}/junit_python_sdk.xml")
+            shutil.copy(f"{self.repo_root}/bin/e2e-ts-sdk-junit.xml", f"{artifact_dir}/junit_ts_sdk.xml")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    runner = E2ETestRunner()
+    runner.main()

@@ -611,6 +611,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -706,7 +707,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "adopted-pod-name",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -780,6 +781,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
 					},
 					// Should still have the original controller reference
 					OwnerReferences: []metav1.OwnerReference{
@@ -810,7 +812,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "non-existent-pod",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "non-existent-pod",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -845,8 +847,8 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						SandboxPodNameAnnotation: "annotated-pod-name",
-						"other-annotation":       "other-value",
+						sandboxv1alpha1.SandboxPodNameAnnotation: "annotated-pod-name",
+						"other-annotation":                       "other-value",
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
@@ -886,7 +888,7 @@ func TestReconcilePod(t *testing.T) {
 				livePod := &corev1.Pod{}
 				podName := sandboxName
 				// Check if there's an annotation with a non-empty value
-				if annotatedPod, exists := tc.sandbox.Annotations[SandboxPodNameAnnotation]; exists && annotatedPod != "" {
+				if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
 					podName = annotatedPod
 				}
 				err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)

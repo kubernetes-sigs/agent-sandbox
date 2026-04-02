@@ -9,10 +9,15 @@ To run all unit tests:
 ```shell
 make test-unit
 ```
-## Running the e2e tests
+## Running the e2e tests (including benchmarks)
 To run all e2e tests:
 ```shell
 make test-e2e
+```
+## Running only e2e benchmarks
+To run only e2e benchmarks:
+```shell
+make test-e2e --suite=benchmarks
 ```
 ## Remove the kind cluster
 ```shell

@@ -27,9 +27,10 @@ Managed programmatically via the Agent Sandbox Python SDK to save and restore th
 ### High-Level Design
 
 The model allows `SandboxClaim` to pass unique metadata down the stack:
-1.  **SandboxClaim**: Introduce `additionalSandboxMetadata` and `additionalPodMetadata`.
+1.  **SandboxClaim**: Introduce `additionalPodMetadata`.
 2.  **Sandbox**: Introduce `additionalPodMetadata` to store values from the Claim.
-3.  **Sandbox**: Add `SandboxClaim`’s `additionalSandboxMetadata` into its own labels and annotations.
+3.  **Sandbox**: Add `SandboxClaim`’s `additionalPodMetadata` into its own labels and annotations.
+4.  **Pod**: Add `Sandbox`’s `additionalPodMetadata` into its own labels and annotations. 
 
 #### Safety Principle: No Overrides
 To ensure predictability, the controller will not allow overrides. If a key exists in both the Template and the Claim with different values, the request will be rejected with an error.
@@ -46,18 +47,16 @@ type PodMetadata struct {
 
 type SandboxSpec struct {
     // ...
+
+    // New
     AdditionalPodMetadata PodMetadata `json:"additionalPodMetadata,omitempty"`
 }
 
 // sandboxclaim_types.go:
-type AdditionalSandboxMetadata struct {
-    Labels      map[string]string `json:"labels,omitempty" protobuf:"bytes,1,rep,name=labels"`
-    Annotations map[string]string `json:"annotations,omitempty" protobuf:"bytes,2,rep,name=annotations"`
-}
-
 type SandboxClaimSpec struct {
     // ...
-    AdditionalSandboxMetadata AdditionalSandboxMetadata `json:"additionalSandboxMetadata,omitempty"`
+
+    // New
     // Another option is to create AdditionalPodMetadata instead of depending on sandboxv1alpha1.
     AdditionalPodMetadata     sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 }
@@ -77,8 +76,8 @@ This scenario occurs when a user requests a sandbox environment without utilizin
 ##### Scenario B: Warmpool
 This scenario involves the use of a `SandboxWarmPool` to provide rapid resource assignment.
 
-1.  **New Pod Claim (Adoption/Injection)**: When a `SandboxClaim` is first assigned that "adopts" a Sandbox from the Warmpool, the `SandboxClaim` controller performs an **in-place update** to inject the `additionalSandboxMetadata` into the Sandbox's labels and annotations and add the `additionalPodMetadata`. This achieves sub-millisecond dispatch latency without restarting the container or re-creating the resource.
-2.  **After Pod Claimed (Metadata Update)**: If the `SandboxClaim` is updated after the Sandbox has already been adopted from the Warmpool, the `SandboxClaim` controller watches the changes and performs an **in-place update** to inject the `additionalSandboxMetadata` into the Sandbox's labels and annotations and add the `additionalPodMetadata` to reflect the changes, ensuring continuous consistency without resource re-creation.
+1.  **New Pod Claim (Adoption/Injection)**: When a `SandboxClaim` is first assigned that "adopts" a Sandbox from the Warmpool, the `SandboxClaim` controller performs an **in-place update** to inject the `additionalPodMetadata` into the Sandbox's labels and annotations and add the `additionalPodMetadata`. This achieves sub-millisecond dispatch latency without restarting the container or re-creating the resource.
+2.  **After Pod Claimed (Metadata Update)**: If the `SandboxClaim` is updated after the Sandbox has already been adopted from the Warmpool, the `SandboxClaim` controller watches the changes and performs an **in-place update** to inject the `additionalPodMetadata` into the Sandbox's labels and annotations and add the `additionalPodMetadata` to reflect the changes, ensuring continuous consistency without resource re-creation.
 
 ## Scalability
 

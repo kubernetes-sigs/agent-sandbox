@@ -20,3 +20,16 @@ from .exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
 )
+
+
+def __getattr__(name: str):
+    if name == "AsyncSandboxClient":
+        try:
+            from .async_sandbox_client import AsyncSandboxClient
+        except ImportError as e:
+            raise ImportError(
+                "AsyncSandboxClient requires the 'async' extras. "
+                "Install with: pip install k8s-agent-sandbox[async]"
+            ) from e
+        return AsyncSandboxClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

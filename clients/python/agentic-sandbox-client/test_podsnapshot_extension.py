@@ -20,7 +20,9 @@ import argparse
 import time
 import logging
 from kubernetes import config
-from k8s_agent_sandbox.gke_extensions.snapshots.podsnapshot_client import PodSnapshotSandboxClient
+from k8s_agent_sandbox.gke_extensions.snapshots.podsnapshot_client import (
+    PodSnapshotSandboxClient,
+)
 from k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine import SnapshotResponse
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -30,7 +32,11 @@ from k8s_agent_sandbox.models import (
 
 WAIT_TIME_SECONDS = 10
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
+)
+
+
 def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: str):
     assert hasattr(
         snapshot_response, "trigger_name"
@@ -80,8 +86,7 @@ def main(
 
         if api_url:
             connection_config = SandboxDirectConnectionConfig(
-                api_url=api_url,
-                server_port=server_port
+                api_url=api_url, server_port=server_port
             )
         else:
             connection_config = SandboxLocalTunnelConnectionConfig(
@@ -91,34 +96,80 @@ def main(
         client = PodSnapshotSandboxClient(connection_config=connection_config)
 
         print("\n======= Testing Pod Snapshot Extension =======")
-        
+
         sandbox = client.create_sandbox(template_name, namespace=namespace)
 
         time.sleep(WAIT_TIME_SECONDS)
         print(
-            f"Creating first pod snapshot '{first_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+            f"Creating first pod snapshot '{first_snapshot_trigger_name}' after {WAIT_TIME_SECONDS} seconds..."
         )
-        snapshot_response = sandbox.snapshots.create(first_snapshot_name)
-        test_snapshot_response(snapshot_response, first_snapshot_name)
+        snapshot_response = sandbox.snapshots.create(first_snapshot_trigger_name)
+        test_snapshot_response(snapshot_response, first_snapshot_trigger_name)
+        first_snapshot_uid = snapshot_response.snapshot_uid
+        print(f"First snapshot UID: {first_snapshot_uid}")
 
         time.sleep(WAIT_TIME_SECONDS)
 
         print(
-            f"\nCreating second pod snapshot '{second_snapshot_name}' after {WAIT_TIME_SECONDS} seconds..."
+            f"\nCreating second pod snapshot '{second_snapshot_trigger_name}' after {WAIT_TIME_SECONDS} seconds..."
         )
-        snapshot_response = sandbox.snapshots.create(second_snapshot_name)
-        test_snapshot_response(snapshot_response, second_snapshot_name)
+        snapshot_response = sandbox.snapshots.create(second_snapshot_trigger_name)
+        test_snapshot_response(snapshot_response, second_snapshot_trigger_name)
         recent_snapshot_uid = snapshot_response.snapshot_uid
         print(f"Recent snapshot UID: {recent_snapshot_uid}")
 
         # Wait a moment for the PodSnapshotPolicy controller's cache to recognize the new snapshot as the latest
         time.sleep(WAIT_TIME_SECONDS)
-        
-        print(f"\nChecking if sandbox was restored from snapshot '{recent_snapshot_uid}'...")
+
+        print(
+            f"\nChecking if sandbox was restored from snapshot '{recent_snapshot_uid}'..."
+        )
         restored_sandbox = client.create_sandbox(template_name, namespace=namespace)
         restore_result = restored_sandbox.is_restored_from_snapshot(recent_snapshot_uid)
         assert restore_result.success, restore_result.error_reason
         print("Pod was restored from the most recent snapshot.")
+
+        print(f"\nListing all snapshots for sandbox '{sandbox.sandbox_id}'...")
+        list_result = sandbox.snapshots.list(grouping_labels=grouping_labels)
+        assert list_result.success, list_result.error_reason
+
+        for snap in list_result.snapshots:
+            print(
+                f"Snapshot UID: {snap.snapshot_uid}, Source Pod: {snap.source_pod}, Creation Time: {snap.creation_timestamp}"
+            )
+        assert (
+            len(list_result.snapshots) == 2
+        ), f"Expected 2 snapshots, but got {len(list_result.snapshots)}"
+        assert (
+            list_result.snapshots[0].snapshot_uid == recent_snapshot_uid
+        ), f"Expected most recent snapshot UID '{recent_snapshot_uid}', but got '{list_result.snapshots[0].snapshot_uid}'"
+        assert (
+            list_result.snapshots[1].snapshot_uid == first_snapshot_uid
+        ), f"Expected older snapshot UID '{first_snapshot_uid}', but got '{list_result.snapshots[1].snapshot_uid}'"
+
+        print(
+            f"\nDeleting snapshot '{recent_snapshot_uid}' of the sandbox '{sandbox.sandbox_id}'..."
+        )
+        delete_result = sandbox.snapshots.delete(snapshot_uid=recent_snapshot_uid)
+        assert delete_result.success, delete_result.error_reason
+        assert (
+            len(delete_result.deleted_snapshots) == 1
+        ), f"Expected 1 deleted snapshot, but got {len(delete_result.deleted_snapshots)}"
+        assert (
+            delete_result.deleted_snapshots[0] == recent_snapshot_uid
+        ), f"Expected deleted snapshot UID '{recent_snapshot_uid}', but got '{delete_result.deleted_snapshots[0]}''"
+        print(f"Snapshot '{recent_snapshot_uid}' deleted successfully.")
+
+        print(f"\nDeleting all snapshots for sandbox '{sandbox.sandbox_id}'...")
+        delete_result = sandbox.snapshots.delete(grouping_labels=grouping_labels)
+        assert delete_result.success, delete_result.error_reason
+        assert (
+            len(delete_result.deleted_snapshots) == 1
+        ), f"Expected 1 deleted snapshot, but got {len(delete_result.deleted_snapshots)}"
+        assert (
+            delete_result.deleted_snapshots[0] == first_snapshot_uid
+        ), f"Expected deleted snapshot UID '{first_snapshot_uid}', but got '{delete_result.deleted_snapshots[0]}''"
+        print(f"Snapshot '{first_snapshot_uid}' deleted successfully.")
 
         print("--- Pod Snapshot Test Passed! ---")
 
@@ -127,7 +178,7 @@ def main(
     finally:
         print("Cleaning up all sandboxes...")
         if client:
-           client.delete_all()
+            client.delete_all()
         print("\n--- Sandbox Client Test Finished ---")
 
 

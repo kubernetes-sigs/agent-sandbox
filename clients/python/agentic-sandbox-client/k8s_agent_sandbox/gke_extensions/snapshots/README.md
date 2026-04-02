@@ -1,6 +1,6 @@
 # Agentic Sandbox Pod Snapshot Extension
 
-This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger snapshots of a running sandbox and restore a new sandbox from the recently created snapshot.
+This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger snapshots of a running sandbox and restore a new sandbox from a recently created snapshot.
 
 ## Components
 
@@ -14,10 +14,10 @@ This class wraps the base `Sandbox` to seamlessly provide snapshot capabilities.
 
 ### `SnapshotEngine`
 The core engine responsible for interacting with the GKE Pod Snapshot Controller.
-*   Creates `PodSnapshotManualTrigger` custom resources.
-*   Watches for the snapshot controller to process the trigger and create a `PodSnapshot` resource.
-*   Returns a structured `SnapshotResponse` containing the success status, error details, and `snapshot_uid`.
-*   Ensures that manual trigger resources are cleanly deleted when the sandbox context exits.
+*   **Create**: Creates `PodSnapshotManualTrigger` custom resources and waits for the snapshot to be completed.
+*   **List**: Lists existing snapshots for a sandbox, with optional filtering by grouping labels and ready state.
+*   **Delete**: Deletes snapshots associated with the sandbox, either by specific UID or by grouping labels.
+*   **Cleanup**: Ensures that manual trigger resources are cleanly deleted when the sandbox context exits.
 
 ## Usage Example
 
@@ -59,7 +59,7 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
     *   Takes a snapshot (`test-snapshot-20`) after ~20 seconds.
 2.  **Phase 2: Restoring from Recent Snapshot**:
     *   Restores a sandbox from the second snapshot.
-    *   Verifies that sandbox has been restored from the recent snapshot. 
+    *   Verifies that the sandbox has been restored from the recent snapshot. 
 
 ### Prerequisites
 
@@ -79,7 +79,7 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
    * For detailed setup instructions, refer to the [GKE Pod Snapshots public documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots).
    * Ensure a GCS bucket is configured to store the pod snapshot states and that the necessary IAM permissions are applied.
 
-4.  **CRDs**: `PodSnapshotStorageConfig`, `PodSnapshotPolicy` CRDs must be applied. `PodSnapshotPolicy` should specify the selector match labels.
+4.  **CRDs**: `PodSnapshotStorageConfig`, `PodSnapshotPolicy` CRDs must be applied. `PodSnapshotPolicy` should specify the selector match labels. (Note: For the test file to work, `maxSnapshotCountPerGroup` in `PodSnapshotPolicy` must be set to 2 or more, and the grouping labels must include `tenant-id` and `user-id`.)
 
 5.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 

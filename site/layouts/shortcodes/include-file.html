@@ -22,6 +22,9 @@
   {{- end -}}
 {{- end -}}
 
+{{/* Fix image paths that reference site/assets/ to use the static mount */}}
+{{- $content = replaceRE `src="site/assets/` `src="/assets/` $content -}}
+
 {{/* Rewrite remaining relative links to point to the GitHub repo */}}
 {{- $ghBase := "https://github.com/kubernetes-sigs/agent-sandbox/blob/main/" -}}
 {{- $ghTree := "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/" -}}

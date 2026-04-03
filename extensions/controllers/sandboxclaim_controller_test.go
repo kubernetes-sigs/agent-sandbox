@@ -1440,7 +1440,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   fakeClient,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -1496,7 +1496,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   fakeClient,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -1557,7 +1557,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   fakeClient,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -1608,7 +1608,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   fakeClient,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -1658,7 +1658,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   fakeClient,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 

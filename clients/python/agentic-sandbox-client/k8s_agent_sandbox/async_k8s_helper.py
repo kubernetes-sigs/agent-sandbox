@@ -14,7 +14,6 @@
 
 import asyncio
 import logging
-from typing import List
 
 from kubernetes_asyncio import client, config, watch
 
@@ -202,7 +201,7 @@ class AsyncK8sHelper:
                 return None
             raise
 
-    async def list_sandbox_claims(self, namespace: str) -> List[str]:
+    async def list_sandbox_claims(self, namespace: str) -> list[str]:
         """Lists all SandboxClaim custom resources in a namespace."""
         await self._ensure_initialized()
 

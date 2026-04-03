@@ -22,10 +22,9 @@ Requires the ``async`` optional dependencies::
 import asyncio
 import logging
 import re
-import sys
 import time
 import uuid
-from typing import Dict, Generic, List, Tuple, Type, TypeVar
+from typing import Generic, TypeVar
 
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
@@ -33,11 +32,7 @@ from .exceptions import SandboxNotFoundError
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    stream=sys.stdout,
-)
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=AsyncSandbox)
 
@@ -56,7 +51,7 @@ class AsyncSandboxClient(Generic[T]):
     ``SandboxLocalTunnelConnectionConfig``.
     """
 
-    sandbox_class: Type[T] = AsyncSandbox  # type: ignore
+    sandbox_class: type[T] = AsyncSandbox  # type: ignore
 
     def __init__(
         self,
@@ -79,7 +74,7 @@ class AsyncSandboxClient(Generic[T]):
 
         self.k8s_helper = AsyncK8sHelper()
 
-        self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
+        self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "AsyncSandboxClient[T]":
@@ -98,7 +93,7 @@ class AsyncSandboxClient(Generic[T]):
                 try:
                     await sandbox._close_connection()
                 except Exception as e:
-                    logging.error(f"Failed to close sandbox connection: {e}")
+                    logger.error(f"Failed to close sandbox connection: {e}")
             self._active_connection_sandboxes.clear()
         await self.k8s_helper.close()
 
@@ -145,9 +140,7 @@ class AsyncSandboxClient(Generic[T]):
                 tracer_config=self.tracer_config,
                 k8s_helper=self.k8s_helper,
             )
-        except BaseException:
-            # BaseException catches asyncio.CancelledError (which is not an
-            # Exception subclass) to prevent orphaned claims on cancellation.
+        except (Exception, asyncio.CancelledError):
             await asyncio.shield(self._delete_claim(claim_name, namespace))
             raise
 
@@ -207,7 +200,7 @@ class AsyncSandboxClient(Generic[T]):
             self._active_connection_sandboxes[key] = new_handle
         return new_handle
 
-    async def list_active_sandboxes(self) -> List[Tuple[str, str]]:
+    async def list_active_sandboxes(self) -> list[tuple[str, str]]:
         """Returns a list of ``(namespace, claim_name)`` tuples currently managed."""
         async with self._lock:
             for key, obj in list(self._active_connection_sandboxes.items()):
@@ -215,7 +208,7 @@ class AsyncSandboxClient(Generic[T]):
                     self._active_connection_sandboxes.pop(key, None)
             return list(self._active_connection_sandboxes.keys())
 
-    async def list_all_sandboxes(self, namespace: str = "default") -> List[str]:
+    async def list_all_sandboxes(self, namespace: str = "default") -> list[str]:
         """Lists all SandboxClaim names in the Kubernetes cluster for a namespace."""
         return await self.k8s_helper.list_sandbox_claims(namespace)
 
@@ -232,7 +225,7 @@ class AsyncSandboxClient(Generic[T]):
             else:
                 await self._delete_claim(claim_name, namespace)
         except Exception as e:
-            logging.error(
+            logger.error(
                 f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}"
             )
 
@@ -245,7 +238,7 @@ class AsyncSandboxClient(Generic[T]):
             try:
                 await self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
-                logging.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
+                logger.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
 
     # --- Label validation (shared with sync client) ---
 
@@ -326,4 +319,4 @@ class AsyncSandboxClient(Generic[T]):
         try:
             await self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
         except Exception as e:
-            logging.error(f"Failed to cleanup SandboxClaim '{claim_name}': {e}")
+            logger.error(f"Failed to cleanup SandboxClaim '{claim_name}': {e}")

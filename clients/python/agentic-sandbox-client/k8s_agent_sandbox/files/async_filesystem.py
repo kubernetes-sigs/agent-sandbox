@@ -15,7 +15,6 @@
 import logging
 import os
 import urllib.parse
-from typing import List
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.models import FileEntry
@@ -67,7 +66,7 @@ class AsyncFilesystem:
         return content
 
     @async_trace_span("list")
-    async def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
+    async def list(self, path: str, timeout: int = 60) -> list[FileEntry]:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)

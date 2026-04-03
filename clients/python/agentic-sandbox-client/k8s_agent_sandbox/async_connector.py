@@ -91,7 +91,7 @@ class AsyncSandboxConnector:
         headers["X-Sandbox-Namespace"] = self.namespace
         headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
 
-        last_exc: Exception | None = None
+        last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
                 response = await self.client.request(
@@ -103,25 +103,16 @@ class AsyncSandboxConnector:
                         f"Retryable status {response.status_code} from {url}, "
                         f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
                     )
+                    last_response = response
                     await asyncio.sleep(delay)
                     continue
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:
-                status_code = e.response.status_code
-                if status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
-                    delay = BACKOFF_FACTOR * (2 ** attempt)
-                    logging.warning(
-                        f"Retryable status {status_code} from {url}, "
-                        f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
-                    )
-                    await asyncio.sleep(delay)
-                    last_exc = e
-                    continue
                 logging.error(f"Request to sandbox failed: {e}")
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
-                    status_code=status_code,
+                    status_code=e.response.status_code,
                     response=e.response,
                 ) from e
             except httpx.HTTPError as e:
@@ -133,13 +124,12 @@ class AsyncSandboxConnector:
                     response=None,
                 ) from e
 
-        # All retries exhausted
         logging.error(f"All {MAX_RETRIES + 1} attempts failed for {url}")
         raise SandboxRequestError(
             f"Failed to communicate with the sandbox at {url} after {MAX_RETRIES + 1} attempts.",
-            status_code=getattr(getattr(last_exc, "response", None), "status_code", None),
-            response=getattr(last_exc, "response", None),
-        ) from last_exc
+            status_code=last_response.status_code if last_response else None,
+            response=last_response,
+        )
 
     async def close(self):
         await self.client.aclose()

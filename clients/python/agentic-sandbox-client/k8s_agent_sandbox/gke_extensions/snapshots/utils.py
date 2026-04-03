@@ -213,10 +213,9 @@ def wait_for_snapshot_deletion(
     namespace: str,
     snapshot_uid: str,
     timeout: int = 60,
+    resource_version: str | None = None,
 ) -> bool:
-    """
-    Waits for the PodSnapshot to be deleted from the cluster.
-    """
+    """Waits for the PodSnapshot to be deleted from the cluster."""
     # Check if already deleted
     try:
         k8s_helper.custom_objects_api.get_namespaced_custom_object(
@@ -235,6 +234,10 @@ def wait_for_snapshot_deletion(
     w = watch.Watch()
     logger.info(f"Waiting for PodSnapshot '{snapshot_uid}' to be deleted...")
 
+    kwargs = {}
+    if resource_version:
+        kwargs["resource_version"] = resource_version
+
     try:
         for event in w.stream(
             func=k8s_helper.custom_objects_api.list_namespaced_custom_object,
@@ -244,6 +247,7 @@ def wait_for_snapshot_deletion(
             plural=PODSNAPSHOT_PLURAL,
             field_selector=f"metadata.name={snapshot_uid}",
             timeout_seconds=timeout,
+            **kwargs,
         ):
             if event["type"] == "DELETED":
                 logger.info(f"PodSnapshot '{snapshot_uid}' confirmed deleted.")

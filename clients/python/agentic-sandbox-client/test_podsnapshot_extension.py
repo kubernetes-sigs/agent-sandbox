@@ -130,7 +130,9 @@ def main(
         print("Pod was restored from the most recent snapshot.")
 
         print(f"\nListing all snapshots for sandbox '{sandbox.sandbox_id}'...")
-        list_result = sandbox.snapshots.list(grouping_labels=grouping_labels)
+        list_result = sandbox.snapshots.list(
+            filter_by={"grouping_labels": grouping_labels}
+        )
         assert list_result.success, list_result.error_reason
 
         for snap in list_result.snapshots:
@@ -161,7 +163,9 @@ def main(
         print(f"Snapshot '{recent_snapshot_uid}' deleted successfully.")
 
         print(f"\nDeleting all snapshots for sandbox '{sandbox.sandbox_id}'...")
-        delete_result = sandbox.snapshots.delete(grouping_labels=grouping_labels)
+        delete_result = sandbox.snapshots.delete_all(
+            delete_by="labels", filter_value=grouping_labels
+        )
         assert delete_result.success, delete_result.error_reason
         assert (
             len(delete_result.deleted_snapshots) == 1

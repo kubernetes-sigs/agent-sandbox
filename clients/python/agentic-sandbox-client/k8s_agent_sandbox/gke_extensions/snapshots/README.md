@@ -15,8 +15,9 @@ This class wraps the base `Sandbox` to seamlessly provide snapshot capabilities.
 ### `SnapshotEngine`
 The core engine responsible for interacting with the GKE Pod Snapshot Controller.
 *   **Create**: Creates `PodSnapshotManualTrigger` custom resources and waits for the snapshot to be completed.
-*   **List**: Lists existing snapshots for a sandbox, with optional filtering by grouping labels and ready state.
-*   **Delete**: Deletes snapshots associated with the sandbox, either by specific UID or by grouping labels.
+*   **List**: Lists existing snapshots for a sandbox, with optional filtering by grouping labels and a flag to return ready-only snapshots.
+*   **Delete**: Deletes a specific snapshot by UID.
+*   **Delete All**: Deletes snapshots based on a strategy: either all snapshots for the pod, or filtered by grouping labels.
 *   **Cleanup**: Ensures that manual trigger resources are cleanly deleted when the sandbox context exits.
 
 ## Usage Example

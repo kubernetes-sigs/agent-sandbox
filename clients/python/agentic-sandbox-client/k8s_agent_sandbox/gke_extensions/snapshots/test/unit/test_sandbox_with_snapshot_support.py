@@ -504,7 +504,9 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             mock_response
         )
 
-        result = self.engine.list(grouping_labels={"test-label": "test-value"})
+        result = self.engine.list(
+            filter_by={"grouping_labels": {"test-label": "test-value"}}
+        )
 
         self.assertTrue(result.success)
         self.assertEqual(len(result.snapshots), 2)
@@ -519,8 +521,8 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             label_selector="podsnapshot.gke.io/pod-name=test-pod,test-label=test-value",
         )
 
-    def test_snapshots_list_ready_only_false(self):
-        """Test list snapshots with ready_only=False includes non-ready snapshots."""
+    def test_snapshots_list_filter_empty(self):
+        """Test list snapshots with filter_by={} includes non-ready snapshots."""
         mock_response = {
             "items": [
                 {
@@ -545,12 +547,44 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             mock_response
         )
 
-        result = self.engine.list(ready_only=False)
+        result = self.engine.list(filter_by={"ready_only": False})
         self.assertTrue(result.success)
         self.assertEqual(len(result.snapshots), 2)
         # Sorted by creationTimestamp descending
         self.assertEqual(result.snapshots[0].snapshot_uid, "not-ready-snap")
         self.assertEqual(result.snapshots[1].snapshot_uid, "ready-snap")
+
+    def test_snapshots_list_filter_incorrect_arguments(self):
+        """Test list snapshots with a incorrect arguments for filter_by."""
+        mock_response = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "ready-snap",
+                        "uid": "uid1",
+                        "creationTimestamp": "2023-01-01T00:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+                {
+                    "metadata": {
+                        "name": "not-ready-snap",
+                        "uid": "uid2",
+                        "creationTimestamp": "2023-01-02T00:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "False"}]},
+                },
+            ]
+        }
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = (
+            mock_response
+        )
+
+        # Passing a random dict should fail because extra fields are forbidden.
+        result = self.engine.list(filter_by={"random_key": "random_value"})
+        self.assertFalse(result.success)
+        self.assertEqual(len(result.snapshots), 0)
+        self.assertIn("Invalid filter parameters", result.error_reason)
 
     def test_snapshots_list_none_timestamp(self):
         """Test list snapshots doesn't crash when creationTimestamp is None."""
@@ -651,16 +685,15 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             k8s_helper=self.mock_k8s_helper,
             namespace="test-ns",
             snapshot_uid="target-snap",
+            resource_version=None,
         )
 
-    def test_snapshots_delete_mutually_exclusive(self):
-        """Test delete snapshots raising ValueError for both snapshot_uid and grouping_labels."""
+    def test_snapshots_delete_all_invalid_strategy(self):
+        """Test delete_all raises ValueError for unsupported strategy."""
         with self.assertRaises(ValueError) as context:
-            self.engine.delete(
-                snapshot_uid="target-snap1", grouping_labels={"foo": "bar"}
-            )
+            self.engine.delete_all(delete_by="invalid-strategy")
         self.assertIn(
-            "snapshot_uid and grouping_labels are mutually exclusive",
+            "Unsupported deletion strategy: invalid-strategy",
             str(context.exception),
         )
 
@@ -688,12 +721,14 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 {}
             )
 
-            result = self.engine.delete(grouping_labels={"foo": "bar"})
+            result = self.engine.delete_all(
+                delete_by="labels", filter_value={"foo": "bar"}
+            )
 
             self.assertTrue(result.success)
             self.assertEqual(result.deleted_snapshots, ["snap-a"])
             mock_list.assert_called_once_with(
-                grouping_labels={"foo": "bar"}, ready_only=False
+                filter_by={"grouping_labels": {"foo": "bar"}, "ready_only": False}
             )
             self.mock_k8s_helper.custom_objects_api.delete_namespaced_custom_object.assert_called_once_with(
                 group=PODSNAPSHOT_API_GROUP,
@@ -706,6 +741,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 k8s_helper=self.mock_k8s_helper,
                 namespace="test-ns",
                 snapshot_uid="snap-a",
+                resource_version=None,
             )
 
     @patch(
@@ -768,7 +804,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 mock_delete
             )
 
-            result = self.engine.delete()
+            result = self.engine.delete_all()
 
             self.assertFalse(result.success)
             self.assertEqual(result.deleted_snapshots, ["snap-1", "snap-3"])
@@ -785,11 +821,13 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         k8s_helper=self.mock_k8s_helper,
                         namespace="test-ns",
                         snapshot_uid="snap-1",
+                        resource_version=None,
                     ),
                     call(
                         k8s_helper=self.mock_k8s_helper,
                         namespace="test-ns",
                         snapshot_uid="snap-3",
+                        resource_version=None,
                     ),
                 ],
                 any_order=True,
@@ -830,11 +868,72 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_reason="Could not connect",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
-            result = self.engine.delete()
+            result = self.engine.delete_all()
             self.assertFalse(result.success)
             self.assertIn(
                 "Failed to list snapshots before deletion", result.error_reason
             )
+            self.assertEqual(result.deleted_snapshots, [])
+
+    def test_snapshots_delete_all(self):
+        """Test delete_all calls _execute_deletion with scope='global'."""
+        with patch.object(self.engine, "_execute_deletion") as mock_execute:
+            mock_execute.return_value = DeleteSnapshotResult(
+                success=True,
+                deleted_snapshots=["snap-x"],
+                error_reason="",
+                error_code=0,
+            )
+            self.engine.delete_all()
+            mock_execute.assert_called_once_with(scope="global")
+
+    def test_snapshots_delete_all_by_labels(self):
+        """Test delete_all calls _execute_deletion with labels."""
+        with patch.object(self.engine, "_execute_deletion") as mock_execute:
+            mock_execute.return_value = DeleteSnapshotResult(
+                success=True,
+                deleted_snapshots=["snap-x"],
+                error_reason="",
+                error_code=0,
+            )
+            self.engine.delete_all(delete_by="labels", filter_value={"foo": "bar"})
+            mock_execute.assert_called_once_with(labels={"foo": "bar"})
+
+    def test_snapshots_delete_empty_fails(self):
+        """Test delete raises TypeError if snapshot_uid is missing."""
+        with self.assertRaises(TypeError):
+            self.engine.delete()
+
+    @patch(
+        "k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine.wait_for_snapshot_deletion"
+    )
+    def test_snapshots_delete_timeout(self, mock_wait):
+        """Test delete snapshots handling timeout in wait."""
+        mock_wait.return_value = False
+
+        self.mock_k8s_helper.custom_objects_api.delete_namespaced_custom_object.return_value = (
+            {}
+        )
+
+        result = self.engine.delete(snapshot_uid="target-snap")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.deleted_snapshots, [])
+        self.assertIn("Timed out waiting for confirmation", result.error_reason)
+
+    def test_snapshots_delete_all_no_snapshots_found(self):
+        """Test delete_all returns success when no snapshots are found."""
+        with patch.object(self.engine, "list") as mock_list:
+            mock_list.return_value = ListSnapshotResult(
+                success=True,
+                snapshots=[],
+                error_reason="",
+                error_code=0,
+            )
+
+            result = self.engine.delete_all()
+
+            self.assertTrue(result.success)
             self.assertEqual(result.deleted_snapshots, [])
 
 

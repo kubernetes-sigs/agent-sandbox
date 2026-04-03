@@ -376,8 +376,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
-			log.Error(err, "Pod not found")
-			return nil, fmt.Errorf("pod in annotation get failed: %w", err)
+			log.Info("Tracked pod not found, clearing stale annotation", "podName", podName)
+			patch := client.MergeFrom(sandbox.DeepCopy())
+			delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
+			if patchErr := r.Patch(ctx, sandbox, patch); patchErr != nil {
+				return nil, fmt.Errorf("failed to clear stale pod name annotation: %w", patchErr)
+			}
 		}
 		pod = nil
 	}

@@ -818,33 +818,8 @@ func TestReconcilePod(t *testing.T) {
 				},
 			},
 		},
-		{
-			name:        "error when annotated pod does not exist",
-			initialObjs: []runtime.Object{},
-			sandbox: &sandboxv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxName,
-					Namespace: sandboxNs,
-					Annotations: map[string]string{
-						sandboxv1alpha1.SandboxPodNameAnnotation: "non-existent-pod",
-					},
-				},
-				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
-					PodTemplate: sandboxv1alpha1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name: "test-container",
-								},
-							},
-						},
-					},
-				},
-			},
-			wantPod:   nil,
-			expectErr: true,
-		},
+		// "clears stale annotation" test is a standalone test below (TestReconcilePodClearsStaleAnnotation)
+		// because the returned pod has an initialized annotations map that differs from the stored pod.
 		{
 			name: "remove pod name annotation when replicas is 0",
 			initialObjs: []runtime.Object{
@@ -976,4 +951,47 @@ func TestSandboxExpiry(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcilePodClearsStaleAnnotation(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := NameHash(sandboxName)
+
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+			Annotations: map[string]string{
+				sandboxv1alpha1.SandboxPodNameAnnotation: "non-existent-pod",
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+		},
+	}
+
+	r := SandboxReconciler{
+		Client: newFakeClient(sandbox),
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+
+	pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+	require.NoError(t, err)
+	require.NotNil(t, pod, "should have created a new pod after clearing stale annotation")
+	require.Equal(t, sandboxName, pod.Name)
+	require.Equal(t, nameHash, pod.Labels[sandboxLabel])
+
+	// Verify the stale annotation was replaced with the new pod name
+	liveSandbox := &sandboxv1alpha1.Sandbox{}
+	err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, liveSandbox)
+	require.NoError(t, err)
+	require.Equal(t, sandboxName, liveSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation],
+		"annotation should track the newly created pod, not the stale one")
 }

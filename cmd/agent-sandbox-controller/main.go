@@ -61,6 +61,7 @@ func main() {
 	var sandboxClaimConcurrentWorkers int
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
+	var clusterDomain string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -86,6 +87,7 @@ func main() {
 	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 1, "Max concurrent reconciles for the SandboxClaim controller")
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
+	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "The Kubernetes cluster domain used to construct service FQDNs (e.g. cluster.local)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -110,6 +112,11 @@ func main() {
 	totalWorkers := sandboxConcurrentWorkers + sandboxClaimConcurrentWorkers + sandboxWarmPoolConcurrentWorkers + sandboxTemplateConcurrentWorkers
 	if totalWorkers > 1000 {
 		setupLog.Info("Warning: total concurrent workers exceeds 1000, which could lead to resource exhaustion", "total", totalWorkers)
+	}
+
+	if clusterDomain == "" {
+		setupLog.Error(nil, "cluster-domain must not be empty")
+		os.Exit(1)
 	}
 
 	if kubeAPIBurst <= 0 {
@@ -213,9 +220,10 @@ func main() {
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
 	if err = (&controllers.SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Tracer: instrumenter,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Tracer:        instrumenter,
+		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

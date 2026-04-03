@@ -505,9 +505,10 @@ func TestReconcile(t *testing.T) {
 			sb.Generation = 1
 			sb.Spec = tc.sandboxSpec
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sb)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, sb)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			_, err := r.Reconcile(t.Context(), ctrl.Request{
@@ -958,6 +959,40 @@ func TestSandboxExpiry(t *testing.T) {
 			} else {
 				require.Equal(t, time.Duration(0), requeueAfter)
 			}
+		})
+	}
+}
+
+func TestSetServiceStatus(t *testing.T) {
+	tests := []struct {
+		name          string
+		clusterDomain string
+		wantFQDN      string
+	}{
+		{
+			name:          "default cluster domain",
+			clusterDomain: "cluster.local",
+			wantFQDN:      "my-sandbox.default.svc.cluster.local",
+		},
+		{
+			name:          "custom cluster domain",
+			clusterDomain: "my-company.local",
+			wantFQDN:      "my-sandbox.default.svc.my-company.local",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &SandboxReconciler{ClusterDomain: tc.clusterDomain}
+			sandbox := &sandboxv1alpha1.Sandbox{}
+			service := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-sandbox",
+					Namespace: "default",
+				},
+			}
+			r.setServiceStatus(sandbox, service)
+			require.Equal(t, "my-sandbox", sandbox.Status.Service)
+			require.Equal(t, tc.wantFQDN, sandbox.Status.ServiceFQDN)
 		})
 	}
 }

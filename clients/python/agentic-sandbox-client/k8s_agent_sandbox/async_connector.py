@@ -17,6 +17,8 @@ import logging
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 from .async_k8s_helper import AsyncK8sHelper
 from .exceptions import SandboxRequestError
 from .models import (
@@ -99,7 +101,7 @@ class AsyncSandboxConnector:
                 )
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
                     delay = BACKOFF_FACTOR * (2 ** attempt)
-                    logging.warning(
+                    logger.warning(
                         f"Retryable status {response.status_code} from {url}, "
                         f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
                     )
@@ -109,14 +111,14 @@ class AsyncSandboxConnector:
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:
-                logging.error(f"Request to sandbox failed: {e}")
+                logger.error(f"Request to sandbox failed: {e}")
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=e.response.status_code,
                     response=e.response,
                 ) from e
             except httpx.HTTPError as e:
-                logging.error(f"Request to sandbox failed: {e}")
+                logger.error(f"Request to sandbox failed: {e}")
                 self._base_url = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
@@ -124,7 +126,7 @@ class AsyncSandboxConnector:
                     response=None,
                 ) from e
 
-        logging.error(f"All {MAX_RETRIES + 1} attempts failed for {url}")
+        logger.error(f"All {MAX_RETRIES + 1} attempts failed for {url}")
         raise SandboxRequestError(
             f"Failed to communicate with the sandbox at {url} after {MAX_RETRIES + 1} attempts.",
             status_code=last_response.status_code if last_response else None,

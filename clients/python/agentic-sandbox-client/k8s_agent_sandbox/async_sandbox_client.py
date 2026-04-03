@@ -49,6 +49,11 @@ class AsyncSandboxClient(Generic[T]):
 
     ``connection_config`` is required — the async client does not support
     ``SandboxLocalTunnelConnectionConfig``.
+
+    Unlike the sync ``SandboxClient``, there is no ``atexit`` fallback because
+    async cleanup cannot run in an atexit handler. Use the ``async with``
+    context manager or explicitly call ``await client.delete_all()`` followed
+    by ``await client.close()`` to avoid orphaned claims.
     """
 
     sandbox_class: type[T] = AsyncSandbox  # type: ignore

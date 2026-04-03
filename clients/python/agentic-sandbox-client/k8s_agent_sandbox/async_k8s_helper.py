@@ -17,6 +17,8 @@ import logging
 
 from kubernetes_asyncio import client, config, watch
 
+logger = logging.getLogger(__name__)
+
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -82,7 +84,7 @@ class AsyncK8sHelper:
                 }
             },
         }
-        logging.info(
+        logger.info(
             f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'..."
         )
         await self.custom_objects_api.create_namespaced_custom_object(
@@ -102,7 +104,7 @@ class AsyncK8sHelper:
         await self._ensure_initialized()
 
         w = watch.Watch()
-        logging.info(f"Resolving sandbox name from claim '{claim_name}'...")
+        logger.info(f"Resolving sandbox name from claim '{claim_name}'...")
         try:
             async for event in w.stream(
                 func=self.custom_objects_api.list_namespaced_custom_object,
@@ -113,6 +115,8 @@ class AsyncK8sHelper:
                 field_selector=f"metadata.name={claim_name}",
                 timeout_seconds=timeout,
             ):
+                if event is None:
+                    continue
                 if event["type"] == "DELETED":
                     raise SandboxMetadataError(
                         f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name"
@@ -122,7 +126,7 @@ class AsyncK8sHelper:
                     sandbox_status = claim_object.get("status", {}).get("sandbox", {})
                     name = sandbox_status.get("name", "")
                     if name:
-                        logging.info(f"Resolved sandbox name '{name}' from claim status")
+                        logger.info(f"Resolved sandbox name '{name}' from claim status")
                         return name
         finally:
             await w.close()
@@ -135,7 +139,7 @@ class AsyncK8sHelper:
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
         await self._ensure_initialized()
 
-        logging.info(f"Watching for Sandbox {name} to become ready...")
+        logger.info(f"Watching for Sandbox {name} to become ready...")
         w = watch.Watch()
         try:
             async for event in w.stream(
@@ -155,10 +159,10 @@ class AsyncK8sHelper:
                     conditions = status.get("conditions", [])
                     for cond in conditions:
                         if cond.get("type") == "Ready" and cond.get("status") == "True":
-                            logging.info(f"Sandbox {name} is ready.")
+                            logger.info(f"Sandbox {name} is ready.")
                             return
                 elif event["type"] == "DELETED":
-                    logging.error(f"Sandbox {name} was deleted before becoming ready.")
+                    logger.error(f"Sandbox {name} was deleted before becoming ready.")
                     raise SandboxNotFoundError(
                         f"Sandbox {name} was deleted before becoming ready."
                     )
@@ -178,10 +182,10 @@ class AsyncK8sHelper:
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
             )
-            logging.info(f"Terminated SandboxClaim: {name}")
+            logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
-                logging.error(f"Error terminating sandbox {name}: {e}")
+                logger.error(f"Error terminating sandbox {name}: {e}")
                 raise
 
     async def get_sandbox(self, name: str, namespace: str):
@@ -218,14 +222,14 @@ class AsyncK8sHelper:
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:
-            logging.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
+            logger.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
     async def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         await self._ensure_initialized()
 
-        logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
+        logger.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
         w = watch.Watch()
         try:
             async for event in w.stream(
@@ -246,7 +250,7 @@ class AsyncK8sHelper:
                     if addresses:
                         ip_address = addresses[0].get("value")
                         if ip_address:
-                            logging.info(f"Gateway ready. IP: {ip_address}")
+                            logger.info(f"Gateway ready. IP: {ip_address}")
                             return ip_address
         finally:
             await w.close()

@@ -23,6 +23,7 @@ from k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support im
     SNAPSHOT_ERROR_CODE,
 )
 from k8s_agent_sandbox.constants import (
+    PODSNAPSHOT_POD_NAME_LABEL,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
@@ -477,7 +478,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-1",
                         "uid": "uid-1",
                         "creationTimestamp": "2023-01-02T00:00:00Z",
-                        "labels": {"podsnapshot.gke.io/pod-name": "test-pod"},
+                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -486,7 +487,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-2",
                         "uid": "uid-2",
                         "creationTimestamp": "2023-01-01T00:00:00Z",
-                        "labels": {"podsnapshot.gke.io/pod-name": "test-pod"},
+                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -518,7 +519,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector="podsnapshot.gke.io/pod-name=test-pod,test-label=test-value",
+            label_selector=f"{PODSNAPSHOT_POD_NAME_LABEL}=test-pod,test-label=test-value",
         )
 
     def test_snapshots_list_filter_empty(self):
@@ -595,7 +596,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-1",
                         "uid": "uid-1",
                         "creationTimestamp": None,  # Test Case: None
-                        "labels": {"podsnapshot.gke.io/pod-name": "test-pod"},
+                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -604,7 +605,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-2",
                         "uid": "uid-2",
                         "creationTimestamp": "2023-01-01T00:00:00Z",
-                        "labels": {"podsnapshot.gke.io/pod-name": "test-pod"},
+                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -635,7 +636,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector="podsnapshot.gke.io/pod-name=test-pod",
+            label_selector=f"{PODSNAPSHOT_POD_NAME_LABEL}=test-pod",
         )
 
     def test_snapshots_list_no_pod_name(self):
@@ -722,7 +723,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             )
 
             result = self.engine.delete_all(
-                delete_by="labels", filter_value={"foo": "bar"}
+                delete_by="labels", label_value={"foo": "bar"}
             )
 
             self.assertTrue(result.success)
@@ -896,7 +897,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_reason="",
                 error_code=0,
             )
-            self.engine.delete_all(delete_by="labels", filter_value={"foo": "bar"})
+            self.engine.delete_all(delete_by="labels", label_value={"foo": "bar"})
             mock_execute.assert_called_once_with(labels={"foo": "bar"})
 
     def test_snapshots_delete_empty_fails(self):

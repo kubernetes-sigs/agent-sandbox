@@ -21,6 +21,7 @@ from kubernetes.client import ApiException
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from k8s_agent_sandbox.constants import (
+    PODSNAPSHOT_POD_NAME_LABEL,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
@@ -284,15 +285,15 @@ class SnapshotEngine:
 
         selectors = []
         if not pod_name:
-            logger.warning("Pod name not found. Ensure sandbox is created.")
+            logger.warning("Pod name not found.")
             return ListSnapshotResult(
                 success=False,
                 snapshots=[],
-                error_reason="Pod name not found. Ensure sandbox is created.",
+                error_reason="Pod name not found.",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-        selectors.append(f"podsnapshot.gke.io/pod-name={pod_name}")
+        selectors.append(f"{PODSNAPSHOT_POD_NAME_LABEL}={pod_name}")
 
         if filter_by.grouping_labels:
             for k, v in filter_by.grouping_labels.items():
@@ -330,7 +331,7 @@ class SnapshotEngine:
                     SnapshotDetail(
                         snapshot_uid=metadata.get("name"),
                         source_pod=metadata.get("labels", {}).get(
-                            "podsnapshot.gke.io/pod-name", "Unknown"
+                            PODSNAPSHOT_POD_NAME_LABEL, "Unknown"
                         ),
                         creation_timestamp=metadata.get("creationTimestamp"),
                         status="Ready" if is_ready else "NotReady",
@@ -505,13 +506,13 @@ class SnapshotEngine:
     def delete_all(
         self,
         delete_by: Literal["all", "labels"] = "all",
-        filter_value: dict[str, str] | None = None,
+        label_value: dict[str, str] | None = None,
     ) -> DeleteSnapshotResult:
         """Deletes snapshots based on a specific strategy.
 
         Args:
             delete_by: The criteria to use ('all', 'labels').
-            filter_value: The value associated with the criteria (e.g., a dict
+            label_value: The value associated with the criteria (e.g., a dict
               for labels).
         """
         match delete_by:
@@ -520,12 +521,12 @@ class SnapshotEngine:
                 return self._execute_deletion(scope="global")
 
             case "labels":
-                if not isinstance(filter_value, dict):
+                if not isinstance(label_value, dict):
                     raise ValueError(
-                        "filter_value must be a dict when deleting by labels"
+                        "label_value must be a dict when deleting by labels"
                     )
-                logger.info(f"Deleting snapshots matching labels: {filter_value}")
-                return self._execute_deletion(labels=filter_value)
+                logger.info(f"Deleting snapshots matching labels: {label_value}")
+                return self._execute_deletion(labels=label_value)
 
             case _:
                 raise ValueError(f"Unsupported deletion strategy: {delete_by}")

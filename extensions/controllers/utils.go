@@ -15,11 +15,7 @@
 package controllers
 
 import (
-	"encoding/json"
-	"fmt"
-
 	corev1 "k8s.io/api/core/v1"
-	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
@@ -48,13 +44,4 @@ func ApplySandboxSecureDefaults(template *extensionsv1alpha1.SandboxTemplate, sp
 			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
 		}
 	}
-}
-
-// computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
-func computePodTemplateHash(template *extensionsv1alpha1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.PodTemplate)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
-	}
-	return sandboxcontrollers.NameHash(string(specJSON)), nil
 }

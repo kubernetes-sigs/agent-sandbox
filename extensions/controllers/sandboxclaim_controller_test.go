@@ -760,10 +760,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 
 	warmPoolUID := types.UID("warmpool-uid-123")
 	poolNameHash := sandboxcontrollers.NameHash("test-pool")
-	currentPodTemplateHash, err := computePodTemplateHash(template)
-	if err != nil {
-		t.Fatalf("failed to compute pod template hash: %v", err)
-	}
 
 	createWarmPoolSandbox := func(name string, creationTime metav1.Time, ready bool) *sandboxv1alpha1.Sandbox {
 		conditionStatus := metav1.ConditionFalse
@@ -777,9 +773,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				Namespace:         "default",
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
-					warmPoolSandboxLabel:                        poolNameHash,
-					sandboxTemplateRefHash:                      sandboxcontrollers.NameHash("test-template"),
-					sandboxv1alpha1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
+					warmPoolSandboxLabel:   poolNameHash,
+					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -1263,18 +1258,13 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 
 		// Create a warm pool sandbox
 		poolNameHash := sandboxcontrollers.NameHash("test-pool")
-		currentPodTemplateHash, err := computePodTemplateHash(template)
-		if err != nil {
-			t.Fatalf("failed to compute pod template hash: %v", err)
-		}
 		warmSandbox := &sandboxv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "warm-sb",
 				Namespace: "default",
 				Labels: map[string]string{
-					warmPoolSandboxLabel:                        poolNameHash,
-					sandboxTemplateRefHash:                      sandboxcontrollers.NameHash("test-template"),
-					sandboxv1alpha1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
+					warmPoolSandboxLabel:   poolNameHash,
+					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -1307,7 +1297,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
-		_, err = reconciler.Reconcile(context.Background(), req)
+		_, err := reconciler.Reconcile(context.Background(), req)
 		if err != nil {
 			t.Fatalf("reconcile failed: %v", err)
 		}

@@ -35,8 +35,8 @@ import (
 
 func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 	t.Helper()
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts := Options{
 		TemplateName:        "test-template",
 		Namespace:           "default",
@@ -208,8 +208,8 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 
 // TestResolveSandboxName_FromClaimStatus verifies the new resolution path.
 func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	k8s := &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1alpha1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
@@ -240,8 +240,8 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 // TestWaitForSandboxReady_UsesSandboxName verifies the ready check uses the
 // resolved sandbox name, not the claim name.
 func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	k8s := &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1alpha1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),

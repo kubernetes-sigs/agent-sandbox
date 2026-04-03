@@ -66,8 +66,8 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *
 	srv := httptest.NewServer(sandboxHTTPHandler())
 	t.Cleanup(srv.Close)
 
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 
 	// Simulate GenerateName: assign a name if only GenerateName is set.
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -305,8 +305,8 @@ func TestTracingNoopWithoutProvider(t *testing.T) {
 	srv := httptest.NewServer(sandboxHTTPHandler())
 	t.Cleanup(srv.Close)
 
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 
 	// Default: claim status returns claim name as sandbox name.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -363,8 +363,8 @@ func TestTracingErrorRecording(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 
 	// Default: claim status returns claim name as sandbox name.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {

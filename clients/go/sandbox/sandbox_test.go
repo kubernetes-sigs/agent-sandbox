@@ -63,8 +63,8 @@ func defaultTestOpts() Options {
 }
 
 func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1alpha1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
@@ -100,8 +100,8 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 }
 
 func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClient) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()
-	extensionsCS := fakeextensions.NewSimpleClientset()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1alpha1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
@@ -492,7 +492,7 @@ func TestResolveRouterPod_Success(t *testing.T) {
 		}},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice)
+	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",
@@ -516,7 +516,7 @@ func TestResolveRouterPod_NoEndpoints(t *testing.T) {
 		},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice)
+	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",

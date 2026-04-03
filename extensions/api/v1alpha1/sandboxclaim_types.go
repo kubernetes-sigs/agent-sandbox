@@ -96,6 +96,22 @@ type SandboxTemplateRef struct {
 	Name string `json:"name,omitempty" protobuf:"bytes,1,name=name"`
 }
 
+// EnvVar represents a custom environment variable key-value pair.
+type EnvVar struct {
+	// name of the environment variable.
+	// +required
+	Name string `json:"name"`
+
+	// value of the environment variable.
+	// +required
+	Value string `json:"value"`
+
+	// containerName specifies the target container for the environment variable.
+	// If not specified, it defaults to the first container defined in the template.
+	// +optional
+	ContainerName string `json:"containerName,omitempty"`
+}
+
 // SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
 	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
@@ -118,6 +134,11 @@ type SandboxClaimSpec struct {
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
 	// +optional
 	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
+
+	// env is a list of environment variables to inject into the sandbox
+	// +listType=atomic
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

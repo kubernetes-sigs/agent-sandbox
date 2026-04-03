@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -670,6 +671,33 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 	return nil
 }
 
+// injectEnvs is a helper to inject/override a set of environment variables in a container.
+func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1alpha1.EnvVar, policy extensionsv1alpha1.EnvVarsInjectionPolicy, claimName string) error {
+	for _, claimEnv := range envsToInject {
+		existingIdx := -1
+		for j, env := range container.Env {
+			if env.Name == claimEnv.Name {
+				existingIdx = j
+				break
+			}
+		}
+
+		if existingIdx >= 0 {
+			if policy != extensionsv1alpha1.EnvVarsInjectionPolicyOverrides {
+				err := fmt.Errorf("environment variable override is not allowed by the template policy for variable %q", claimEnv.Name)
+				logger.Error(err, "Environment variable override rejected", "claimName", claimName, "envName", claimEnv.Name)
+				return err
+			}
+			logger.Info("Overriding existing environment variable", "envName", claimEnv.Name, "container", container.Name)
+			container.Env[existingIdx] = corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value}
+		} else {
+			logger.Info("Appending new environment variable", "envName", claimEnv.Name, "container", container.Name)
+			container.Env = append(container.Env, corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value})
+		}
+	}
+	return nil
+}
+
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 
@@ -707,6 +735,74 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
+	}
+
+	// Inject environment variables from the SandboxClaim
+	if len(claim.Spec.Env) > 0 {
+		if template.Spec.EnvVarsInjectionPolicy != extensionsv1alpha1.EnvVarsInjectionPolicyAllowed && template.Spec.EnvVarsInjectionPolicy != extensionsv1alpha1.EnvVarsInjectionPolicyOverrides {
+			err := fmt.Errorf("environment variable injection is not allowed by the template policy")
+			logger.Error(err, "Environment variable injection rejected", "claimName", claim.Name)
+			return nil, err
+		}
+
+		// Group envs by container name for efficient lookup.
+		envsByContainer := make(map[string][]extensionsv1alpha1.EnvVar)
+		defaultEnvs := []extensionsv1alpha1.EnvVar{}
+		for _, env := range claim.Spec.Env {
+			if env.ContainerName == "" {
+				defaultEnvs = append(defaultEnvs, env)
+			} else {
+				envsByContainer[env.ContainerName] = append(envsByContainer[env.ContainerName], env)
+			}
+		}
+
+		// Validate that all targeted containers exist.
+		allContainerNames := make(map[string]struct{})
+		for _, c := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+			allContainerNames[c.Name] = struct{}{}
+		}
+		for _, c := range sandbox.Spec.PodTemplate.Spec.Containers {
+			allContainerNames[c.Name] = struct{}{}
+		}
+		for containerName := range envsByContainer {
+			if _, ok := allContainerNames[containerName]; !ok {
+				err := fmt.Errorf("target container %q not found in template", containerName)
+				// To provide a more helpful error, we find which env var caused it.
+				for _, e := range envsByContainer[containerName] {
+					err = fmt.Errorf("target container %q not found in template for environment variable %q", containerName, e.Name)
+					break
+				}
+				logger.Error(err, "Environment variable injection rejected: container not found", "claimName", claim.Name)
+				return nil, err
+			}
+		}
+
+		// Inject into init containers
+		for i := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+			container := &sandbox.Spec.PodTemplate.Spec.InitContainers[i]
+			if envs, ok := envsByContainer[container.Name]; ok {
+				if err := r.injectEnvs(logger, container, envs, template.Spec.EnvVarsInjectionPolicy, claim.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		// Inject into regular containers
+		for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+			container := &sandbox.Spec.PodTemplate.Spec.Containers[i]
+			var envsToInject []extensionsv1alpha1.EnvVar
+			if envs, ok := envsByContainer[container.Name]; ok {
+				envsToInject = append(envsToInject, envs...)
+			}
+			if i == 0 { // Default envs go to the first main container
+				envsToInject = append(envsToInject, defaultEnvs...)
+			}
+			if len(envsToInject) > 0 {
+				if err := r.injectEnvs(logger, container, envsToInject, template.Spec.EnvVarsInjectionPolicy, claim.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 
 	// TODO: this is a workaround, remove replica assignment related issue #202
@@ -832,6 +928,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		}
 
 		adoptionCandidates = append(adoptionCandidates, sb)
+	}
+
+	if policy != extensionsv1alpha1.WarmPoolPolicyNone && len(claim.Spec.Env) > 0 {
+		err := fmt.Errorf("custom environment variables are not supported when using a warm pool")
+		logger.Error(err, "Invalid configuration", "claim", claim.Name)
+		return nil, err
 	}
 
 	if policy == extensionsv1alpha1.WarmPoolPolicyNone {

@@ -221,7 +221,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 				if condition.Type == corev1.PodReady {
 					if condition.Status == corev1.ConditionTrue {
 						if len(pod.Status.PodIPs) == 0 {
-							message = "Pod is Ready but has no IP yet"
+							message = "Pod is Ready but has no podIPs yet"
 						} else {
 							message = "Pod is Ready"
 							podReady = true

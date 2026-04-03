@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"reflect"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -131,8 +133,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if sandbox.Spec.Replicas == nil {
-		replicas := int32(1)
-		sandbox.Spec.Replicas = &replicas
+		sandbox.Spec.Replicas = ptr.To[int32](1)
 	}
 
 	oldStatus := sandbox.Status.DeepCopy()
@@ -167,7 +168,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	var allErrors error
 
 	// Reconcile PVCs
-	err := r.reconcilePVCs(ctx, sandbox)
+	err := r.reconcilePVCs(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
 	// Reconcile Pod
@@ -509,7 +510,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	return pod, nil
 }
 
-func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) error {
 	log := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
@@ -529,11 +530,16 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			return fmt.Errorf("PVC Get Failed: %w", err)
 		}
 
+		pvcLabels := maps.Clone(pvcTemplate.Labels)
+		pvcLabels[sandboxLabel] = nameHash
+
 		log.Info("Creating a new PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
 		pvc = &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      pvcName,
-				Namespace: sandbox.Namespace,
+				Name:        pvcName,
+				Namespace:   sandbox.Namespace,
+				Annotations: maps.Clone(pvcTemplate.Annotations),
+				Labels:      pvcLabels,
 			},
 			Spec: pvcTemplate.Spec,
 		}

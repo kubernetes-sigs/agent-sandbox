@@ -87,12 +87,19 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	setupLog.Info("Concurrency settings",
+		"sandbox", sandboxConcurrentWorkers,
+		"sandboxClaim", sandboxClaimConcurrentWorkers,
+		"sandboxWarmPool", sandboxWarmPoolConcurrentWorkers,
+		"sandboxTemplate", sandboxTemplateConcurrentWorkers,
+	)
 
 	// Validation checks for concurrency flags
 	if sandboxConcurrentWorkers <= 0 || sandboxClaimConcurrentWorkers <= 0 || sandboxWarmPoolConcurrentWorkers <= 0 {

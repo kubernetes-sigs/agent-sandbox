@@ -1,0 +1,8 @@
+title: Label and Annotation Propagation to Sandbox Pods
+kep-number: 174
+authors:
+  - "@chenyiwang"
+status: provisional
+creation-date: "2026-03-18"
+last-updated: "2026-04-02"
+stage: alpha

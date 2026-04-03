@@ -1,0 +1,19 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: sandbox-example
+spec:
+  podTemplate:
+    spec:
+      # Set runtimeClassName to use kata mshv runtime class
+      runtimeClassName: kata-vm-isolation
+      containers:
+        - name: devcontainer-main
+          image: ghcr.io/coder/envbuilder
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "4Gi" # noticed some initial OOM Kills without increasing memory
+              ephemeral-storage: "4Gi"
+            limits:
+              ephemeral-storage: "4Gi"

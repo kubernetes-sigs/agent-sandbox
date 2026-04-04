@@ -25,14 +25,9 @@ export class ComputerUseSandbox extends SandboxClient {
     });
   }
 
-  async agent(
-    query: string,
-    timeout: number = 60,
-  ): Promise<ExecutionResult> {
+  async agent(query: string, timeout: number = 60): Promise<ExecutionResult> {
     if (!this.isReady()) {
-      throw new Error(
-        "Sandbox is not ready. Cannot execute agent queries.",
-      );
+      throw new Error("Sandbox is not ready. Cannot execute agent queries.");
     }
 
     const response = await this.request("POST", "agent", {

@@ -53,10 +53,7 @@ async function fetchWithRetry(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const response = await fetch(url, options);
-      if (
-        attempt < maxRetries &&
-        retryStatusCodes.includes(response.status)
-      ) {
+      if (attempt < maxRetries && retryStatusCodes.includes(response.status)) {
         const delay = backoffFactor * Math.pow(2, attempt) * 1000;
         console.debug(
           `Request to ${url} returned ${response.status}, retrying in ${delay}ms (attempt ${
@@ -139,9 +136,7 @@ export class SandboxClient {
 
     this.kubeConfig = new k8s.KubeConfig();
     this.kubeConfig.loadFromDefault();
-    this.customObjectsApi = this.kubeConfig.makeApiClient(
-      k8s.CustomObjectsApi,
-    );
+    this.customObjectsApi = this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
   }
 
   isReady(): boolean {
@@ -291,20 +286,21 @@ export class SandboxClient {
           );
         }, timeoutMs);
 
-        let abortController: AbortController | undefined;
+      let abortController: AbortController | undefined;
 
-        const cleanup = () => {
-          clearTimeout(timer);
-          if (abortController) {
-            try {
-              abortController.abort();
-            } catch {
-              // ignore
-            }
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (abortController) {
+          try {
+            abortController.abort();
+          } catch {
+            // ignore
           }
-        };
+        }
+      };
 
-        watcher.watch(
+      watcher
+        .watch(
           `/apis/${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}/namespaces/${this.namespace}/${SANDBOX_PLURAL_NAME}`,
           { fieldSelector: `metadata.name=${this.claimName}` },
           (type: string, obj: Record<string, unknown>) => {
@@ -317,8 +313,8 @@ export class SandboxClient {
               );
 
               if (isReady) {
-                const metadata = (obj.metadata as Record<string, unknown>) ??
-                  {};
+                const metadata =
+                  (obj.metadata as Record<string, unknown>) ?? {};
                 this.sandboxName = metadata.name as string | undefined;
                 if (!this.sandboxName) {
                   cleanup();
@@ -355,7 +351,8 @@ export class SandboxClient {
               reject(err);
             }
           },
-        ).then((ac) => {
+        )
+        .then((ac) => {
           abortController = ac;
         });
       });
@@ -374,10 +371,7 @@ export class SandboxClient {
       const span = getCurrentSpan();
       if (span.isRecording()) {
         span.setAttribute("sandbox.gateway.name", this.gatewayName!);
-        span.setAttribute(
-          "sandbox.gateway.namespace",
-          this.gatewayNamespace,
-        );
+        span.setAttribute("sandbox.gateway.namespace", this.gatewayNamespace);
       }
 
       if (this.baseUrl) {
@@ -434,27 +428,22 @@ export class SandboxClient {
                   resolve();
                 }
               }
-            }
-          },
-          (err) => {
-            cleanup();
-            // Ignore AbortError that occurs when we intentionally abort the watch
-            if (err && !(err instanceof Error && err.name === "AbortError")) {
-              reject(err);
-            }
-          },
-        ).then((ac) => {
-          abortController = ac;
-        });
+            },
+            (err) => {
+              cleanup();
+              // Ignore AbortError that occurs when we intentionally abort the watch
+              if (err && !(err instanceof Error && err.name === "AbortError")) {
+                reject(err);
+              }
+            },
+          )
+          .then((ac) => {
+            abortController = ac;
+          });
       });
     };
 
-    await withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "wait_for_gateway",
-      fn,
-    );
+    await withSpan(this.tracer, this.traceServiceName, "wait_for_gateway", fn);
   }
 
   private async startAndWaitForPortForward(): Promise<void> {
@@ -468,13 +457,7 @@ export class SandboxClient {
 
       this.portForwardProcess = spawn(
         "kubectl",
-        [
-          "port-forward",
-          routerSvc,
-          `${localPort}:8080`,
-          "-n",
-          this.namespace,
-        ],
+        ["port-forward", routerSvc, `${localPort}:8080`, "-n", this.namespace],
         { stdio: ["ignore", "pipe", "pipe"] },
       );
 
@@ -509,9 +492,7 @@ export class SandboxClient {
 
         if (connected) {
           this.baseUrl = `http://127.0.0.1:${localPort}`;
-          console.info(
-            `Dev Mode ready. Tunneled to Router at ${this.baseUrl}`,
-          );
+          console.info(`Dev Mode ready. Tunneled to Router at ${this.baseUrl}`);
           await new Promise((resolve) => setTimeout(resolve, 500));
           return;
         }
@@ -523,12 +504,7 @@ export class SandboxClient {
       throw new Error("Failed to establish tunnel to Router Service.");
     };
 
-    await withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "dev_mode_tunnel",
-      fn,
-    );
+    await withSpan(this.tracer, this.traceServiceName, "dev_mode_tunnel", fn);
   }
 
   protected async request(
@@ -544,19 +520,17 @@ export class SandboxClient {
       throw new Error("Sandbox is not ready for communication.");
     }
 
-    if (
-      this.portForwardProcess &&
-      this.portForwardProcess.exitCode !== null
-    ) {
+    if (this.portForwardProcess && this.portForwardProcess.exitCode !== null) {
       throw new Error(
         `Kubectl Port-Forward crashed BEFORE request! ` +
           `Exit code: ${this.portForwardProcess.exitCode}`,
       );
     }
 
-    const url = `${this.baseUrl!.replace(/\/+$/, "")}/${
-      endpoint.replace(/^\/+/, "")
-    }`;
+    const url = `${this.baseUrl!.replace(/\/+$/, "")}/${endpoint.replace(
+      /^\/+/,
+      "",
+    )}`;
 
     const headers: Record<string, string> = {
       ...options.headers,
@@ -601,39 +575,31 @@ export class SandboxClient {
     }
   }
 
-  async run(
-    command: string,
-    timeout: number = 60,
-  ): Promise<ExecutionResult> {
-    return withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "run",
-      async (span) => {
-        if (span.isRecording()) {
-          span.setAttribute("sandbox.command", command);
-        }
+  async run(command: string, timeout: number = 60): Promise<ExecutionResult> {
+    return withSpan(this.tracer, this.traceServiceName, "run", async (span) => {
+      if (span.isRecording()) {
+        span.setAttribute("sandbox.command", command);
+      }
 
-        const response = await this.request("POST", "execute", {
-          body: JSON.stringify({ command }),
-          headers: { "Content-Type": "application/json" },
-          timeout,
-        });
+      const response = await this.request("POST", "execute", {
+        body: JSON.stringify({ command }),
+        headers: { "Content-Type": "application/json" },
+        timeout,
+      });
 
-        const data = (await response.json()) as Record<string, unknown>;
-        const result: ExecutionResult = {
-          stdout: (data.stdout as string) ?? "",
-          stderr: (data.stderr as string) ?? "",
-          exitCode: (data.exit_code as number) ?? -1,
-        };
+      const data = (await response.json()) as Record<string, unknown>;
+      const result: ExecutionResult = {
+        stdout: (data.stdout as string) ?? "",
+        stderr: (data.stderr as string) ?? "",
+        exitCode: (data.exit_code as number) ?? -1,
+      };
 
-        if (span.isRecording()) {
-          span.setAttribute("sandbox.exit_code", result.exitCode);
-        }
+      if (span.isRecording()) {
+        span.setAttribute("sandbox.exit_code", result.exitCode);
+      }
 
-        return result;
-      },
-    );
+      return result;
+    });
   }
 
   async write(
@@ -655,10 +621,10 @@ export class SandboxClient {
           typeof content === "string"
             ? new TextEncoder().encode(content)
             : new Uint8Array(
-              content.buffer as ArrayBuffer,
-              content.byteOffset,
-              content.byteLength,
-            );
+                content.buffer as ArrayBuffer,
+                content.byteOffset,
+                content.byteLength,
+              );
 
         const filename = path.basename(filePath);
         const blob = new Blob([contentBytes]);

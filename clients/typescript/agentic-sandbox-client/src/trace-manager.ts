@@ -101,18 +101,13 @@ export async function initializeTracer(serviceName: string): Promise<void> {
   }
 
   try {
-    const dynamicImport = Function(
-      "specifier",
-      "return import(specifier)",
-    ) as (specifier: string) => Promise<Record<string, unknown>>;
+    const dynamicImport = Function("specifier", "return import(specifier)") as (
+      specifier: string,
+    ) => Promise<Record<string, unknown>>;
 
-    const sdkTraceNode = await dynamicImport(
-      "@opentelemetry/sdk-trace-node",
-    );
+    const sdkTraceNode = await dynamicImport("@opentelemetry/sdk-trace-node");
     const resources = await dynamicImport("@opentelemetry/resources");
-    const sdkTraceBase = await dynamicImport(
-      "@opentelemetry/sdk-trace-base",
-    );
+    const sdkTraceBase = await dynamicImport("@opentelemetry/sdk-trace-base");
     const exporterOtlpGrpc = await dynamicImport(
       "@opentelemetry/exporter-trace-otlp-grpc",
     );
@@ -120,23 +115,21 @@ export async function initializeTracer(serviceName: string): Promise<void> {
     const Resource = resources.Resource as new (
       attrs: Record<string, string>,
     ) => unknown;
-    const NodeTracerProvider = sdkTraceNode.NodeTracerProvider as new (
-      opts: { resource: unknown },
-    ) => {
+    const NodeTracerProvider = sdkTraceNode.NodeTracerProvider as new (opts: {
+      resource: unknown;
+    }) => {
       addSpanProcessor(processor: unknown): void;
       register(): void;
     };
     const BatchSpanProcessor = sdkTraceBase.BatchSpanProcessor as new (
       exporter: unknown,
     ) => unknown;
-    const OTLPTraceExporter = exporterOtlpGrpc.OTLPTraceExporter as new () =>
-    unknown;
+    const OTLPTraceExporter =
+      exporterOtlpGrpc.OTLPTraceExporter as new () => unknown;
 
     const resource = new Resource({ "service.name": serviceName });
     const provider = new NodeTracerProvider({ resource });
-    provider.addSpanProcessor(
-      new BatchSpanProcessor(new OTLPTraceExporter()),
-    );
+    provider.addSpanProcessor(new BatchSpanProcessor(new OTLPTraceExporter()));
     provider.register();
 
     tracerProviderInitialized = true;

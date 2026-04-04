@@ -17,13 +17,11 @@ import type { Mock } from "vitest";
 
 // ---------- hoisted mock fns ----------
 
-const {
-  mockCreateNamespacedCustomObject,
-  mockDeleteNamespacedCustomObject,
-} = vi.hoisted(() => ({
-  mockCreateNamespacedCustomObject: vi.fn(),
-  mockDeleteNamespacedCustomObject: vi.fn(),
-}));
+const { mockCreateNamespacedCustomObject, mockDeleteNamespacedCustomObject } =
+  vi.hoisted(() => ({
+    mockCreateNamespacedCustomObject: vi.fn(),
+    mockDeleteNamespacedCustomObject: vi.fn(),
+  }));
 
 // ---------- mock: @kubernetes/client-node ----------
 
@@ -154,9 +152,9 @@ describe("ComputerUseSandbox", () => {
         templateName: "computer-use-tpl",
       });
 
-      await expect(
-        client.agent("do something"),
-      ).rejects.toThrow("Sandbox is not ready");
+      await expect(client.agent("do something")).rejects.toThrow(
+        "Sandbox is not ready",
+      );
     });
   });
 });

@@ -15,10 +15,10 @@
 import { SandboxClient } from "../sandbox-client.js";
 import type { ExecutionResult, SandboxOptions } from "../types.js";
 
+import { withSpan } from "../trace-manager.js";
+
 export class ComputerUseSandbox extends SandboxClient {
-  constructor(
-    options: Pick<SandboxOptions, "templateName" | "namespace" | "serverPort">,
-  ) {
+  constructor(options: SandboxOptions) {
     super({
       ...options,
       serverPort: options.serverPort ?? 8080,
@@ -26,21 +26,40 @@ export class ComputerUseSandbox extends SandboxClient {
   }
 
   async agent(query: string, timeout: number = 60): Promise<ExecutionResult> {
-    if (!this.isReady()) {
-      throw new Error("Sandbox is not ready. Cannot execute agent queries.");
-    }
+    return withSpan(
+      this.tracer,
+      this.traceServiceName,
+      "agent",
+      async (span) => {
+        if (!this.isReady()) {
+          throw new Error(
+            "Sandbox is not ready. Cannot execute agent queries.",
+          );
+        }
 
-    const response = await this.request("POST", "agent", {
-      body: JSON.stringify({ query }),
-      headers: { "Content-Type": "application/json" },
-      timeout,
-    });
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.agent.query", query);
+        }
 
-    const data = (await response.json()) as Record<string, unknown>;
-    return {
-      stdout: (data.stdout as string) ?? "",
-      stderr: (data.stderr as string) ?? "",
-      exitCode: (data.exit_code as number) ?? -1,
-    };
+        const response = await this.request("POST", "agent", {
+          body: JSON.stringify({ query }),
+          headers: { "Content-Type": "application/json" },
+          timeout,
+        });
+
+        const data = (await response.json()) as Record<string, unknown>;
+        const result: ExecutionResult = {
+          stdout: (data.stdout as string) ?? "",
+          stderr: (data.stderr as string) ?? "",
+          exitCode: (data.exit_code as number) ?? -1,
+        };
+
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.exit_code", result.exitCode);
+        }
+
+        return result;
+      },
+    );
   }
 }

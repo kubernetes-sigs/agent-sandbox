@@ -73,8 +73,8 @@ function deploySandboxTemplate(tc: TestContext, namespace: string): void {
   const imagePrefix = getImagePrefix();
   const manifest = fs
     .readFileSync(TEMPLATE_YAML_PATH, "utf-8")
-    .replace("{image_prefix}", imagePrefix)
-    .replace("{image_tag}", imageTag);
+    .replaceAll("{image_prefix}", imagePrefix)
+    .replaceAll("{image_tag}", imageTag);
   tc.applyManifestText(manifest, namespace);
 }
 
@@ -89,7 +89,7 @@ async function deployRouter(tc: TestContext, namespace: string): Promise<void> {
 
   const manifest = fs
     .readFileSync(ROUTER_YAML_PATH, "utf-8")
-    .replace("IMAGE_PLACEHOLDER", routerImage);
+    .replaceAll("IMAGE_PLACEHOLDER", routerImage);
 
   console.log(`Applying router manifest to namespace: ${namespace}`);
   tc.applyManifestText(manifest, namespace);

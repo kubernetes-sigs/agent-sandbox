@@ -13,4 +13,5 @@
 // limitations under the License.
 
 export { SandboxClient } from "./sandbox-client.js";
+export * from "./extensions/index.js";
 export type { ExecutionResult, SandboxOptions } from "./types.js";

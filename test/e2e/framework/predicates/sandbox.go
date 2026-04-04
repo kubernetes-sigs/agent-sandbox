@@ -57,6 +57,7 @@ func (s *sandboxHasStatusPredicate) Matches(obj client.Object) (bool, error) {
 	}
 	opts := []cmp.Option{
 		cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
+		cmpopts.IgnoreFields(sandboxv1alpha1.SandboxStatus{}, "PodIPs"),
 	}
 	if diff := cmp.Diff(s.WantStatus, sandbox.Status, opts...); diff != "" {
 		return false, nil

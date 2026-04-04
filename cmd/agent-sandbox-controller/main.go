@@ -225,7 +225,7 @@ func main() {
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
+			Recorder: mgr.GetEventRecorder("sandboxclaim-controller"),
 			Tracer:   instrumenter,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
@@ -235,7 +235,7 @@ func main() {
 		if err = (&extensionscontrollers.SandboxTemplateReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("sandboxtemplate-controller"),
+			Recorder: mgr.GetEventRecorder("sandboxtemplate-controller"),
 			Tracer:   instrumenter,
 		}).SetupWithManager(mgr, sandboxTemplateConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxTemplate")

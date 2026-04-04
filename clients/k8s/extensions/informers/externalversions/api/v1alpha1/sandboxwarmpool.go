@@ -55,7 +55,7 @@ func NewSandboxWarmPoolInformer(client versioned.Interface, namespace string, re
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredSandboxWarmPoolInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -80,7 +80,7 @@ func NewFilteredSandboxWarmPoolInformer(client versioned.Interface, namespace st
 				}
 				return client.ExtensionsV1alpha1().SandboxWarmPools(namespace).Watch(ctx, options)
 			},
-		},
+		}, client),
 		&extensionsapiv1alpha1.SandboxWarmPool{},
 		resyncPeriod,
 		indexers,

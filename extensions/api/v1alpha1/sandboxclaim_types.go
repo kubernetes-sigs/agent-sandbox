@@ -129,6 +129,11 @@ type SandboxStatus struct {
 	// name is the name of the Sandbox created from this claim
 	// +optional
 	Name string `json:"name,omitempty"`
+
+	// podIPs are the IP addresses of the underlying pod.
+	// A pod may have multiple IPs in dual-stack clusters.
+	// +optional
+	PodIPs []string `json:"podIPs,omitempty"`
 }
 
 // +genclient

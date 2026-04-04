@@ -36,7 +36,21 @@ var (
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_startup_latency_ms",
-			Help: "End-to-end latency from SandboxClaim creation to Pod Ready state in milliseconds.",
+			Help: "End-to-end latency from SandboxClaim creation to Sandbox Ready state in milliseconds.",
+			// Buckets for latency from 50ms to 4 minutes
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+		},
+		[]string{"launch_type", "sandbox_template"},
+	)
+
+	// ClaimControllerStartupLatency measures the time from controller first observed timestamp to SandboxClaim Ready state.
+	// Labels:
+	// - launch_type: "warm", "cold", "unknown"
+	// - sandbox_template: the SandboxTemplateRef
+	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_claim_controller_startup_latency_ms",
+			Help: "Latency from controller first observed SandboxClaim to Sandbox Ready state in milliseconds.",
 			// Buckets for latency from 50ms to 4 minutes
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
@@ -91,6 +105,7 @@ var (
 // Init registers custom metrics with the global controller-runtime registry.
 func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
+	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 }
@@ -99,6 +114,12 @@ func init() {
 func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
 	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+}
+
+// RecordClaimControllerStartupLatency records the duration since the provided controller start time.
+func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templateName string) {
+	duration := float64(time.Since(startTime).Milliseconds())
+	ClaimControllerStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
 }
 
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.

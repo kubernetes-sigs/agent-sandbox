@@ -92,15 +92,24 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID. Inline patch,
-	// no early return, to avoid forcing a second reconcile cycle.
+	// Initialize trace ID and observation time for active resources missing them.
+	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
 	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	obsAnnotation := "agent-sandbox.kubernetes.io/controller-first-observed-at"
+	needObsPatch := claim.Annotations == nil || claim.Annotations[obsAnnotation] == ""
+	needTcPatch := tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "")
+
+	if needObsPatch || needTcPatch {
 		patch := client.MergeFrom(claim.DeepCopy())
 		if claim.Annotations == nil {
 			claim.Annotations = make(map[string]string)
 		}
-		claim.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if needObsPatch {
+			claim.Annotations[obsAnnotation] = time.Now().Format(time.RFC3339Nano)
+		}
+		if needTcPatch {
+			claim.Annotations[asmetrics.TraceContextAnnotation] = tc
+		}
 		if err := r.Patch(ctx, claim, patch); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -821,6 +830,20 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
 	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
+
+	// Record controller startup latency
+	obsAnnotation := "agent-sandbox.kubernetes.io/controller-first-observed-at"
+	if claim.Annotations != nil && claim.Annotations[obsAnnotation] != "" {
+		obsStr := claim.Annotations[obsAnnotation]
+		observedTime, err := time.Parse(time.RFC3339Nano, obsStr)
+		if err != nil {
+			logger.Error(err, "Failed to parse controller observation time", "value", obsStr)
+		} else {
+			latency := time.Since(observedTime).Milliseconds()
+			logger.V(1).Info("Recording controller startup latency", "claim", claim.Name, "latency_ms", latency)
+			asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
+		}
+	}
 
 	// For cold launches, also record the time from Sandbox creation to Ready state to capture controller overhead.
 	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {

@@ -327,30 +327,28 @@ class SnapshotEngine:
                 if filter_by.ready_only and not is_ready:
                     continue
 
-                valid_snapshots.append(
-                    SnapshotDetail(
-                        snapshot_uid=metadata.get("name"),
-                        source_pod=metadata.get("labels", {}).get(
-                            PODSNAPSHOT_POD_NAME_LABEL, "Unknown"
-                        ),
-                        creation_timestamp=metadata.get("creationTimestamp"),
-                        status="Ready" if is_ready else "NotReady",
+                try:
+                    valid_snapshots.append(
+                        SnapshotDetail(
+                            snapshot_uid=metadata.get("name"),
+                            source_pod=metadata.get("labels", {}).get(
+                                PODSNAPSHOT_POD_NAME_LABEL, "Unknown"
+                            ),
+                            creation_timestamp=metadata.get("creationTimestamp"),
+                            status="Ready" if is_ready else "NotReady",
+                        )
                     )
-                )
+                except ValidationError as e:
+                    logger.warning(
+                        f"Skipping malformed snapshot {metadata.get('name', 'Unknown')}: {e}"
+                    )
+                    continue
         except ApiException as e:
             logger.error(f"Failed to list PodSnapshots: {e}")
             return ListSnapshotResult(
                 success=False,
                 snapshots=[],
                 error_reason=f"Failed to list PodSnapshots: {e}",
-                error_code=SNAPSHOT_ERROR_CODE,
-            )
-        except ValidationError as e:
-            logger.error(f"Malformed snapshot data: {e}")
-            return ListSnapshotResult(
-                success=False,
-                snapshots=[],
-                error_reason=f"Malformed snapshot data: {e}",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
         except Exception as e:

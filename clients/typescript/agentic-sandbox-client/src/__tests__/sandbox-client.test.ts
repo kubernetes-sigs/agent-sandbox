@@ -20,12 +20,14 @@ import type { Mock } from "vitest";
 const {
   mockCreateNamespacedCustomObject,
   mockDeleteNamespacedCustomObject,
+  mockGetNamespacedCustomObject,
   mockWatchFn,
   mockSpawn,
   mockCreateServer,
 } = vi.hoisted(() => ({
   mockCreateNamespacedCustomObject: vi.fn(),
   mockDeleteNamespacedCustomObject: vi.fn(),
+  mockGetNamespacedCustomObject: vi.fn(),
   mockWatchFn: vi.fn(),
   mockSpawn: vi.fn(),
   mockCreateServer: vi.fn(),
@@ -39,6 +41,7 @@ vi.mock("@kubernetes/client-node", () => {
     makeApiClient: vi.fn().mockReturnValue({
       createNamespacedCustomObject: mockCreateNamespacedCustomObject,
       deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+      getNamespacedCustomObject: mockGetNamespacedCustomObject,
     }),
   }));
 
@@ -137,13 +140,15 @@ class TestableSandboxClient extends SandboxClient {
 
 // ---------- helpers ----------
 
-function createReadyClient(overrides: Partial<{
-  baseUrl: string;
-  claimName: string;
-  sandboxName: string;
-  namespace: string;
-  serverPort: number;
-}> = {}): TestableSandboxClient {
+function createReadyClient(
+  overrides: Partial<{
+    baseUrl: string;
+    claimName: string;
+    sandboxName: string;
+    namespace: string;
+    serverPort: number;
+  }> = {},
+): TestableSandboxClient {
   const client = new TestableSandboxClient({
     templateName: "test-template",
     namespace: overrides.namespace ?? "default",
@@ -247,7 +252,7 @@ describe("SandboxClient", () => {
       expect(JSON.parse(opts.body as string)).toEqual({
         command: "echo hello world",
       });
-      expect(opts.headers["X-Sandbox-ID"]).toBe("test-claim");
+      expect(opts.headers["X-Sandbox-ID"]).toBe("test-sandbox");
       expect(opts.headers["X-Sandbox-Namespace"]).toBe("default");
       expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
     });
@@ -338,8 +343,23 @@ describe("SandboxClient", () => {
     it("start(): executes flow createClaim -> waitForSandboxReady -> port-forward", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
 
-      // mockWatch: immediately fire a MODIFIED event with Ready condition
-      mockWatchFn.mockImplementation(
+      // First watch: SandboxClaim resolves the actual sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+          _done: (err: unknown) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: { sandbox: { name: "my-sandbox" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Second watch: Sandbox becomes ready
+      mockWatchFn.mockImplementationOnce(
         (
           _path: string,
           _query: unknown,
@@ -399,8 +419,8 @@ describe("SandboxClient", () => {
       expect(callArgs.plural).toBe(CLAIM_PLURAL_NAME);
       expect(callArgs.namespace).toBe("default");
 
-      // Verify Watch was used for sandbox readiness
-      expect(mockWatchFn).toHaveBeenCalledOnce();
+      // Verify Watch was used for sandbox readiness (twice: claim resolve + sandbox ready)
+      expect(mockWatchFn).toHaveBeenCalledTimes(2);
 
       // Verify pod name was extracted from annotation
       expect(client._podName).toBe("my-pod-0");
@@ -410,7 +430,23 @@ describe("SandboxClient", () => {
     it("start() with apiUrl: completes flow createClaim -> waitForSandboxReady", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
 
-      mockWatchFn.mockImplementation(
+      // First watch: SandboxClaim resolves the actual sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+          _done: (err: unknown) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: { sandbox: { name: "my-sandbox-2" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Second watch: Sandbox becomes ready
+      mockWatchFn.mockImplementationOnce(
         (
           _path: string,
           _query: unknown,
@@ -438,9 +474,68 @@ describe("SandboxClient", () => {
       await client.start();
 
       expect(mockCreateNamespacedCustomObject).toHaveBeenCalledOnce();
-      expect(mockWatchFn).toHaveBeenCalledOnce();
+      expect(mockWatchFn).toHaveBeenCalledTimes(2);
       expect(client.isReady()).toBe(true);
       expect(client._baseUrl).toBe("http://direct-api:8080");
+    });
+
+    it("start() with gatewayName: uses an already-ready Gateway without waiting for a watch event", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        body: {
+          status: {
+            addresses: [{ value: "10.0.0.42" }],
+          },
+        },
+      });
+
+      // First watch: SandboxClaim resolves the actual sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+          _done: (err: unknown) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: { sandbox: { name: "my-sandbox-gateway" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Second watch: Sandbox becomes ready
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+          _done: (err: unknown) => void,
+        ) => {
+          callback("MODIFIED", {
+            metadata: {
+              name: "my-sandbox-gateway",
+              annotations: {},
+            },
+            status: {
+              conditions: [{ type: "Ready", status: "True" }],
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new TestableSandboxClient({
+        templateName: "tpl",
+        gatewayName: "kind-gateway",
+        gatewayNamespace: "default",
+      });
+
+      await client.start();
+
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockWatchFn).toHaveBeenCalledTimes(2);
+      expect(client._baseUrl).toBe("http://10.0.0.42");
     });
 
     it("close(): executes port-forward kill -> delete claim", async () => {
@@ -489,7 +584,23 @@ describe("SandboxClient", () => {
     it("uses pod-name from annotation if present", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
 
-      mockWatchFn.mockImplementation(
+      // First watch: SandboxClaim resolves the actual sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+          _done: (err: unknown) => void,
+        ) => {
+          callback("ADDED", {
+            status: { sandbox: { name: "sandbox-abc" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Second watch: Sandbox becomes ready with pod-name annotation
+      mockWatchFn.mockImplementationOnce(
         (
           _path: string,
           _query: unknown,
@@ -523,7 +634,23 @@ describe("SandboxClient", () => {
     it("falls back to sandbox name if annotation is missing", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
 
-      mockWatchFn.mockImplementation(
+      // First watch: SandboxClaim resolves the actual sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+          _done: (err: unknown) => void,
+        ) => {
+          callback("ADDED", {
+            status: { sandbox: { name: "sandbox-xyz" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Second watch: Sandbox becomes ready without pod-name annotation
+      mockWatchFn.mockImplementationOnce(
         (
           _path: string,
           _query: unknown,

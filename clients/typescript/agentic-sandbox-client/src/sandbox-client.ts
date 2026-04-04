@@ -220,6 +220,14 @@ export class SandboxClient {
     await this.close();
   }
 
+  private extractGatewayAddress(
+    obj: Record<string, unknown> | undefined,
+  ): string | undefined {
+    const status = (obj?.status as Record<string, unknown>) ?? {};
+    const addresses = (status.addresses as Array<Record<string, string>>) ?? [];
+    return addresses[0]?.value;
+  }
+
   private async createClaim(traceContextStr: string = ""): Promise<void> {
     const fn = async () => {
       this.claimName = `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
@@ -264,27 +272,90 @@ export class SandboxClient {
     await withSpan(this.tracer, this.traceServiceName, "create_claim", fn);
   }
 
-  private async waitForSandboxReady(): Promise<void> {
-    const fn = async () => {
-      if (!this.claimName) {
-        throw new Error(
-          "Cannot wait for sandbox; a sandboxclaim has not been created.",
+  private resolveSandboxName(timeoutMs: number): Promise<string> {
+    if (!this.claimName) {
+      return Promise.reject(
+        new Error(
+          "Cannot resolve sandbox name; a sandboxclaim has not been created.",
+        ),
+      );
+    }
+
+    console.info(`Resolving sandbox name from claim '${this.claimName}'...`);
+
+    const watcher = new k8s.Watch(this.kubeConfig);
+
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error(
+            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
+          ),
         );
-      }
+      }, timeoutMs);
 
-      console.info("Watching for Sandbox to become ready...");
+      let abortController: AbortController | undefined;
 
-      const watcher = new k8s.Watch(this.kubeConfig);
-      const timeoutMs = this.sandboxReadyTimeout * 1000;
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (abortController) {
+          try {
+            abortController.abort();
+          } catch {
+            // ignore
+          }
+        }
+      };
 
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(
-            new Error(
-              `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
-            ),
-          );
-        }, timeoutMs);
+      watcher
+        .watch(
+          `/apis/${CLAIM_API_GROUP}/${CLAIM_API_VERSION}/namespaces/${this.namespace}/${CLAIM_PLURAL_NAME}`,
+          { fieldSelector: `metadata.name=${this.claimName}` },
+          (type: string, obj: Record<string, unknown>) => {
+            if (type === "ADDED" || type === "MODIFIED") {
+              const status = (obj.status as Record<string, unknown>) ?? {};
+              const sandboxStatus =
+                (status.sandbox as Record<string, unknown>) ?? {};
+              const name = sandboxStatus.name as string | undefined;
+              if (name) {
+                console.info(
+                  `Resolved sandbox name '${name}' from claim status.`,
+                );
+                cleanup();
+                resolve(name);
+              }
+            }
+          },
+          (err) => {
+            cleanup();
+            // Ignore AbortError that occurs when we intentionally abort the watch
+            if (err && !(err instanceof Error && err.name === "AbortError")) {
+              reject(err);
+            }
+          },
+        )
+        .then((ac) => {
+          abortController = ac;
+        });
+    });
+  }
+
+  private watchForSandboxReady(
+    sandboxName: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    console.info("Watching for Sandbox to become ready...");
+
+    const watcher = new k8s.Watch(this.kubeConfig);
+
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error(
+            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
+          ),
+        );
+      }, timeoutMs);
 
       let abortController: AbortController | undefined;
 
@@ -302,7 +373,7 @@ export class SandboxClient {
       watcher
         .watch(
           `/apis/${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}/namespaces/${this.namespace}/${SANDBOX_PLURAL_NAME}`,
-          { fieldSelector: `metadata.name=${this.claimName}` },
+          { fieldSelector: `metadata.name=${sandboxName}` },
           (type: string, obj: Record<string, unknown>) => {
             if (type === "ADDED" || type === "MODIFIED") {
               const status = (obj.status as Record<string, unknown>) ?? {};
@@ -355,7 +426,29 @@ export class SandboxClient {
         .then((ac) => {
           abortController = ac;
         });
-      });
+    });
+  }
+
+  private async waitForSandboxReady(): Promise<void> {
+    const fn = async () => {
+      if (!this.claimName) {
+        throw new Error(
+          "Cannot wait for sandbox; a sandboxclaim has not been created.",
+        );
+      }
+
+      const startTime = Date.now();
+      const totalTimeoutMs = this.sandboxReadyTimeout * 1000;
+
+      // Step 1: Watch SandboxClaim until status.sandbox.name is populated.
+      // This resolves the actual Sandbox name, which may differ from the claim
+      // name when a sandbox is adopted from a warm pool.
+      const sandboxName = await this.resolveSandboxName(totalTimeoutMs);
+
+      // Step 2: Watch the Sandbox by its resolved name with the remaining budget.
+      const elapsed = Date.now() - startTime;
+      const remainingMs = Math.max(0, totalTimeoutMs - elapsed);
+      await this.watchForSandboxReady(sandboxName, remainingMs);
     };
 
     await withSpan(
@@ -383,6 +476,32 @@ export class SandboxClient {
         `Waiting for Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}'...`,
       );
 
+      try {
+        const response = await this.customObjectsApi.getNamespacedCustomObject({
+          group: GATEWAY_API_GROUP,
+          version: GATEWAY_API_VERSION,
+          namespace: this.gatewayNamespace,
+          plural: GATEWAY_PLURAL,
+          name: this.gatewayName!,
+        });
+        const gatewayObj =
+          (response as { body?: Record<string, unknown> }).body ??
+          (response as Record<string, unknown>);
+        const existingAddress = this.extractGatewayAddress(gatewayObj);
+        if (existingAddress) {
+          this.baseUrl = `http://${existingAddress}`;
+          console.info(
+            `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
+          );
+          return;
+        }
+      } catch (err) {
+        const is404 = err instanceof Error && err.message.includes("404");
+        if (!is404) {
+          throw err;
+        }
+      }
+
       const watcher = new k8s.Watch(this.kubeConfig);
       const timeoutMs = this.gatewayReadyTimeout * 1000;
 
@@ -409,16 +528,13 @@ export class SandboxClient {
           }
         };
 
-        watcher.watch(
-          `/apis/${GATEWAY_API_GROUP}/${GATEWAY_API_VERSION}/namespaces/${this.gatewayNamespace}/${GATEWAY_PLURAL}`,
-          { fieldSelector: `metadata.name=${this.gatewayName}` },
-          (type: string, obj: Record<string, unknown>) => {
-            if (type === "ADDED" || type === "MODIFIED") {
-              const status = (obj.status as Record<string, unknown>) ?? {};
-              const addresses =
-                (status.addresses as Array<Record<string, string>>) ?? [];
-              if (addresses.length > 0) {
-                const ipAddress = addresses[0].value;
+        watcher
+          .watch(
+            `/apis/${GATEWAY_API_GROUP}/${GATEWAY_API_VERSION}/namespaces/${this.gatewayNamespace}/${GATEWAY_PLURAL}`,
+            { fieldSelector: `metadata.name=${this.gatewayName}` },
+            (type: string, obj: Record<string, unknown>) => {
+              if (type === "ADDED" || type === "MODIFIED") {
+                const ipAddress = this.extractGatewayAddress(obj);
                 if (ipAddress) {
                   this.baseUrl = `http://${ipAddress}`;
                   console.info(
@@ -534,7 +650,7 @@ export class SandboxClient {
 
     const headers: Record<string, string> = {
       ...options.headers,
-      "X-Sandbox-ID": this.claimName!,
+      "X-Sandbox-ID": this.sandboxName!,
       "X-Sandbox-Namespace": this.namespace,
       "X-Sandbox-Port": String(this.serverPort),
     };

@@ -18,6 +18,7 @@ import subprocess
 import sys
 
 from shared import utils
+from shared.node import ensure_node
 
 PYTHON_TEST_SUITES = [
     {
@@ -98,16 +99,46 @@ def run_python_tests(repo_root):
     return returncode
 
 
+def run_typescript_tests(repo_root):
+    """ runs TypeScript unit tests and returns the exit code """
+    ts_dir = os.path.join(repo_root, "clients", "typescript", "agentic-sandbox-client")
+    if not os.path.isdir(ts_dir):
+        print(f"WARNING: TypeScript client directory not found, skipping: {ts_dir}")
+        return 0
+
+    env = os.environ.copy()
+    npm_path, npx_path = ensure_node(repo_root, env)
+    if not npm_path or not npx_path:
+        print("Failed to ensure Node.js/npm is available.")
+        return 1
+
+    print("\n=== Installing TypeScript dependencies ===")
+    subprocess.check_call([npm_path, "install", "--prefer-offline"], cwd=ts_dir, env=env)
+
+    junit_file = os.path.join(repo_root, "bin", "ts-junit.xml")
+    print("\n=== Running TypeScript unit tests ===")
+    result = subprocess.run([
+        npx_path, "vitest", "run",
+        "--reporter=junit",
+        f"--outputFile={junit_file}",
+    ], cwd=ts_dir, env=env)
+
+    return result.returncode
+
+
 def main():
     """ invokes unit tests and outputs junit results files """
     repo_root = utils.get_repo_root()
 
     go_rc = run_go_tests(repo_root)
     python_rc = run_python_tests(repo_root)
+    ts_rc = run_typescript_tests(repo_root)
 
     if go_rc != 0:
         return go_rc
-    return python_rc
+    if python_rc != 0:
+        return python_rc
+    return ts_rc
 
 
 if __name__ == "__main__":

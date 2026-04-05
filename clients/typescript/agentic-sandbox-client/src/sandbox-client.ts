@@ -718,12 +718,14 @@ export class SandboxClient {
         throw new Error(
           `Kubectl Port-Forward crashed DURING request! ` +
             `Exit code: ${this.portForwardProcess.exitCode}`,
+          { cause: err },
         );
       }
 
       console.error(`Request to gateway router failed: ${err}`);
       throw new Error(
         `Failed to communicate with the sandbox via the gateway at ${url}.`,
+        { cause: err },
       );
     }
   }

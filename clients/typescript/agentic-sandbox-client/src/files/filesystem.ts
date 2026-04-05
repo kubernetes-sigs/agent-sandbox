@@ -48,6 +48,19 @@ export class Filesystem {
           span.setAttribute("sandbox.file.size", content.length);
         }
 
+        const base = path.basename(filePath);
+        if (
+          base === "." ||
+          base === ".." ||
+          base === "/" ||
+          base !== filePath
+        ) {
+          throw new Error(
+            `write: "${filePath}" is not a plain filename (resolved to "${base}"); ` +
+              `pass only the filename, not a path with directories`,
+          );
+        }
+
         const contentBytes: Uint8Array<ArrayBuffer> =
           typeof content === "string"
             ? new TextEncoder().encode(content)
@@ -57,17 +70,16 @@ export class Filesystem {
                 content.byteLength,
               );
 
-        const filename = path.basename(filePath);
         const blob = new Blob([contentBytes]);
         const formData = new FormData();
-        formData.append("file", blob, filename);
+        formData.append("file", blob, base);
 
         await this.requestFn("POST", "upload", {
           body: formData,
           timeout,
         });
 
-        console.info(`File '${filename}' uploaded successfully.`);
+        console.info(`File '${base}' uploaded successfully.`);
       },
     );
   }

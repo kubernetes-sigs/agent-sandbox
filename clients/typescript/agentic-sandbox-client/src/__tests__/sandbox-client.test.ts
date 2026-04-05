@@ -278,7 +278,7 @@ describe("SandboxClient", () => {
         new Response("ok", { status: 200 }),
       );
 
-      await client.files.write("/tmp/test.txt", "file content");
+      await client.files.write("test.txt", "file content");
 
       expect(fetch).toHaveBeenCalledOnce();
       const [url, opts] = (fetch as Mock).mock.calls[0];
@@ -303,7 +303,7 @@ describe("SandboxClient", () => {
       );
 
       const buf = Buffer.from("binary data");
-      await client.files.write("/data/output.bin", buf);
+      await client.files.write("output.bin", buf);
 
       expect(fetch).toHaveBeenCalledOnce();
       const [, opts] = (fetch as Mock).mock.calls[0];
@@ -313,6 +313,24 @@ describe("SandboxClient", () => {
 
       const arrayBuf = await file.arrayBuffer();
       expect(Buffer.from(arrayBuf).toString()).toBe("binary data");
+    });
+
+    it.each([
+      ["sub/foo.txt"],
+      ["./foo.txt"],
+      ["../foo.txt"],
+      ["/abs/foo.txt"],
+      ["/foo.txt"],
+      ["."],
+      [".."],
+      ["/"],
+    ])("rejects non-plain filename: %s", async (filePath) => {
+      const client = createReadyClient();
+
+      await expect(client.files.write(filePath, "data")).rejects.toThrow(
+        /is not a plain filename/,
+      );
+      expect(fetch).not.toHaveBeenCalled();
     });
   });
 

@@ -1,6 +1,7 @@
 version: "2"
 linters:
   enable:
+    - depguard
     - govet
     - revive
     - staticcheck
@@ -9,6 +10,13 @@ linters:
     - misspell
     - errcheck
     - ineffassign
+  settings:
+    depguard:
+      rules:
+        forbid-pkg-errors:
+          deny:
+            - pkg: sort
+              desc: Should be replaced with slices package
   exclusions:
     generated: lax
     presets:
@@ -20,6 +28,10 @@ linters:
       - third_party$
       - builtin$
       - examples$
+    rules:
+      - linters:
+          - staticcheck
+        text: "QF1008"
 formatters:
   enable:
     - gofmt

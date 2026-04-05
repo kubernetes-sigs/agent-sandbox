@@ -26,13 +26,43 @@ const (
 	ClaimExpiredReason = "ClaimExpired"
 )
 
+// WarmPoolPolicy describes the policy for using warm pools.
+// It can be one of the following:
+//   - "none": Do not use any warm pool, always create fresh sandboxes
+//   - "default": Select from all available warm pools that match the template (default)
+//   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+type WarmPoolPolicy string
+
+const (
+	// WarmPoolPolicyNone indicates that no warm pool should be used.
+	// A fresh sandbox will always be created.
+	WarmPoolPolicyNone WarmPoolPolicy = "none"
+
+	// WarmPoolPolicyDefault indicates the default behavior: select from all
+	// available warm pools that match the template. This is the default behavior
+	// if warmpool is not specified.
+	WarmPoolPolicyDefault WarmPoolPolicy = "default"
+)
+
+// IsSpecificPool returns true if the policy specifies a specific warm pool name
+// (not "none" or "default").
+func (p WarmPoolPolicy) IsSpecificPool() bool {
+	return p != WarmPoolPolicyNone && p != WarmPoolPolicyDefault && p != ""
+}
+
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
-// +kubebuilder:validation:Enum=Delete;Retain
+// +kubebuilder:validation:Enum=Delete;DeleteForeground;Retain
 type ShutdownPolicy string
 
 const (
 	// ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.
 	ShutdownPolicyDelete ShutdownPolicy = "Delete"
+
+	// ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground
+	// cascade deletion. The claim remains in the API (with a deletionTimestamp) until its
+	// underlying Sandbox and Pod are fully terminated. This allows external systems to observe
+	// shutdown progress by checking whether the claim still exists.
+	ShutdownPolicyDeleteForeground ShutdownPolicy = "DeleteForeground"
 
 	// ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).
 	// The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,
@@ -74,6 +104,14 @@ type SandboxClaimSpec struct {
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+
+	// warmpool specifies the warm pool policy for sandbox adoption.
+	// - "none": Do not use any warm pool, always create fresh sandboxes
+	// - "default": Use default behavior, select from all matching warm pools (default)
+	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+	// +optional
+	// +kubebuilder:default=default
+	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.
@@ -88,10 +126,14 @@ type SandboxClaimStatus struct {
 }
 
 type SandboxStatus struct {
-	// Name is the name of the Sandbox created from this claim
-	// TODO: change `Name` to `name`
+	// name is the name of the Sandbox created from this claim
 	// +optional
-	Name string `json:"Name,omitempty"` //nolint:kubeapilinter
+	Name string `json:"name,omitempty"`
+
+	// podIPs are the IP addresses of the underlying pod.
+	// A pod may have multiple IPs in dual-stack clusters.
+	// +optional
+	PodIPs []string `json:"podIPs,omitempty"`
 }
 
 // +genclient

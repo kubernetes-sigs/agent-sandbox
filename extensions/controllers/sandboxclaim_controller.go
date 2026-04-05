@@ -18,7 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -44,11 +44,19 @@ import (
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
+// getWarmPoolPolicy returns the effective warm pool policy for a claim.
+func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
+	if claim.Spec.WarmPool != nil {
+		return *claim.Spec.WarmPool
+	}
+	return extensionsv1alpha1.WarmPoolPolicyDefault
+}
+
 // SandboxClaimReconciler reconciles a SandboxClaim object
 type SandboxClaimReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
-	Recorder                record.EventRecorder
+	Recorder                events.EventRecorder
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
 }
@@ -59,16 +67,18 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
+	logger.V(1).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
+			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
@@ -101,16 +111,27 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Check Expiration
 	// We calculate this upfront to decide the flow.
 	claimExpired, timeLeft := r.checkExpiration(claim)
+	logger.V(1).Info("Expiration check", "isExpired", claimExpired, "timeLeft", timeLeft, "request", req.NamespacedName)
 
-	// Handle "Delete" Policy immediately
+	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
 	// Continuing would try to update the status of a deleted object, causing a crash/error.
-	if claimExpired && claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDelete {
-		log.Info("Deleting Claim because ShutdownPolicy=Delete and time has expired")
+	if claimExpired && claim.Spec.Lifecycle != nil &&
+		(claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDelete ||
+			claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1alpha1.ShutdownPolicyDeleteForeground) {
+
+		policy := claim.Spec.Lifecycle.ShutdownPolicy
+		logger.Info("Deleting Claim because time has expired", "shutdownPolicy", policy, "claim", claim.Name)
 		if r.Recorder != nil {
-			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Deleting Claim (ShutdownPolicy=Delete)")
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Deleting", fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
 		}
-		if err := r.Delete(ctx, claim); err != nil {
+
+		deleteOpts := []client.DeleteOption{}
+		if policy == extensionsv1alpha1.ShutdownPolicyDeleteForeground {
+			deleteOpts = append(deleteOpts, client.PropagationPolicy(metav1.DeletePropagationForeground))
+		}
+
+		if err := r.Delete(ctx, claim, deleteOpts...); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
@@ -134,15 +155,17 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if !hasExpiredCondition(originalClaimStatus.Conditions) && hasExpiredCondition(claim.Status.Conditions) {
 		if r.Recorder != nil {
-			r.Recorder.Event(claim, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Claim expired")
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Claim Expired", "Claim expired")
 		}
 	}
 
 	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
-		return ctrl.Result{}, errors.Join(reconcileErr, updateErr)
+		errs := errors.Join(reconcileErr, updateErr)
+		logger.V(1).Info("Sandboxclaim UpdateStatus error encountered", "errors", errs, "request", req.NamespacedName)
+		return ctrl.Result{}, errs
 	}
 
-	r.recordCreationLatencyMetric(claim, originalClaimStatus, sandbox)
+	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -152,9 +175,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Suppress expected user errors (like missing templates) to avoid crash loops
 	if errors.Is(reconcileErr, ErrTemplateNotFound) {
+		errs := errors.Join(reconcileErr, ErrTemplateNotFound)
+		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "errors", errs, "request", req.NamespacedName)
 		return result, nil
 	}
 
+	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", reconcileErr, "request", req.NamespacedName)
 	return result, reconcileErr
 }
 
@@ -177,21 +203,24 @@ func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1alpha1.Sandb
 // reconcileActive handles the creation and updates of running sandboxes.
 func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
+	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
 
 	// Fast path: try to find existing or adopt from warm pool before template lookup.
 	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
+	logger.V(1).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
 	if err != nil {
 		return nil, err
 	}
 	if sandbox != nil {
 		// Found or adopted. Reconcile network policy (best effort, non blocking).
+		logger.V(1).Info("Fast path: sandbox found or adopted, reconciling network policy", "claim", claim.Name)
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {
-			logger.Error(templateErr, "failed to get template for network policy reconciliation")
+			logger.Error(templateErr, "failed to get template for network policy reconciliation (non-fatal)", "claim", claim.Name)
 		}
 		if template != nil {
 			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-				logger.Error(npErr, "network policy reconcile failed after adoption (non-fatal)")
+				logger.Error(npErr, "network policy reconcile failed after adoption (non-fatal)", "claim", claim.Name)
 			}
 		}
 		return sandbox, nil
@@ -199,6 +228,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 	// Cold path: no existing sandbox or warm pool candidate.
 	// Need template to create from scratch.
+	logger.V(1).Info("Cold path: no sandbox found, creating from template", "claim", claim.Name)
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr != nil && !k8errors.IsNotFound(templateErr) {
 		return nil, templateErr
@@ -216,7 +246,8 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 // reconcileExpired ensures the Sandbox is deleted for Retained claims.
 func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
+	logger.V(1).Info("Reconciling Expired claim", "claim", claim.Name)
 	sandbox := &v1alpha1.Sandbox{}
 
 	// Check if Sandbox exists
@@ -229,7 +260,7 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 
 	// Sandbox exists, delete it.
 	if sandbox.DeletionTimestamp.IsZero() {
-		log.Info("Deleting Sandbox because Claim expired (Policy=Retain)", "Sandbox", sandbox.Name)
+		logger.Info("Deleting Sandbox because Claim expired (Policy=Retain)", "Sandbox", sandbox.Name, "claim", claim.Name)
 		if err := r.Delete(ctx, sandbox); err != nil {
 			return sandbox, fmt.Errorf("failed to delete expired sandbox: %w", err)
 		}
@@ -239,13 +270,19 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 }
 
 func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1alpha1.SandboxClaimStatus, claim *extensionsv1alpha1.SandboxClaim) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	sort.Slice(oldStatus.Conditions, func(i, j int) bool {
-		return oldStatus.Conditions[i].Type < oldStatus.Conditions[j].Type
+	slices.SortFunc(oldStatus.Conditions, func(a, b metav1.Condition) int {
+		if a.Type < b.Type {
+			return -1
+		}
+		return 1
 	})
-	sort.Slice(claim.Status.Conditions, func(i, j int) bool {
-		return claim.Status.Conditions[i].Type < claim.Status.Conditions[j].Type
+	slices.SortFunc(claim.Status.Conditions, func(a, b metav1.Condition) int {
+		if a.Type < b.Type {
+			return -1
+		}
+		return 1
 	})
 
 	if equality.Semantic.DeepEqual(oldStatus, &claim.Status) {
@@ -253,7 +290,7 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 	}
 
 	if err := r.Status().Update(ctx, claim); err != nil {
-		log.Error(err, "Failed to update sandboxclaim status")
+		logger.Error(err, "Failed to update sandboxclaim status")
 		return err
 	}
 
@@ -336,25 +373,32 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
+		claim.Status.SandboxStatus.PodIPs = sandbox.Status.PodIPs
+	} else {
+		claim.Status.SandboxStatus.Name = ""
+		claim.Status.SandboxStatus.PodIPs = nil
 	}
 }
 
 // adoptSandboxFromCandidates picks the best candidate and transfers ownership to the claim.
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Sort: ready sandboxes first, then by creation time (oldest first)
-	sort.Slice(candidates, func(i, j int) bool {
-		iReady := isSandboxReady(candidates[i])
-		jReady := isSandboxReady(candidates[j])
-		if iReady != jReady {
-			return iReady
+	slices.SortFunc(candidates, func(a, b *v1alpha1.Sandbox) int {
+		aReady := isSandboxReady(a)
+		bReady := isSandboxReady(b)
+		if aReady != bReady {
+			if aReady {
+				return -1 // a ready, b not ready -> a first
+			}
+			return 1 // b ready, a not ready -> b first
 		}
-		return candidates[i].CreationTimestamp.Before(&candidates[j].CreationTimestamp)
+		return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
 	})
 
 	if len(candidates) == 0 {
-		log.Info("No warm pool candidates available, falling through to cold start")
+		logger.Info("No warm pool candidates available, falling through to cold start", "claim", claim.Name)
 		return nil, nil
 	}
 
@@ -381,7 +425,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			poolName = controllerRef.Name
 		}
 
-		log.Info(fmt.Sprintf("Attempting sandbox adoption: sandbox=%s, pool=%s", adopted.Name, poolName))
+		logger.Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
 		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 		delete(adopted.Labels, warmPoolSandboxLabel)
@@ -414,14 +458,14 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				// Another worker adopted this sandbox while we were processing; try next candidate.
 				continue
 			}
-			log.Error(err, "Failed to update adopted sandbox")
+			logger.Error(err, "Failed to update adoption candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
 			return nil, err
 		}
 
-		log.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
+		logger.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
 
 		if r.Recorder != nil {
-			r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxAdopted", fmt.Sprintf("Adopted warm pool Sandbox %q", adopted.Name))
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxAdopted", "Adoption", "Adopted warm pool Sandbox %q", adopted.Name)
 		}
 
 		podCondition := "not_ready"
@@ -433,7 +477,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		return adopted, nil
 	}
 
-	log.Info("Failed to adopt any sandbox after checking all candidates")
+	logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
 	return nil, nil // Return nil, nil to fall completely to cold start
 }
 
@@ -476,6 +520,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 	}
 
+	// Track the sandbox template ref to be used by metrics collector
+	sandbox.Annotations[v1alpha1.SandboxTemplateRefAnnotation] = template.Name
+
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
@@ -516,10 +563,10 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		return nil, err
 	}
 
-	logger.Info("Created sandbox for claim", "claim", claim.Name)
+	logger.Info("Created sandbox for claim", "claim", claim.Name, "sandbox", sandbox.Name, "isReady", false, "duration", time.Since(claim.CreationTimestamp.Time))
 
 	if r.Recorder != nil {
-		r.Recorder.Event(claim, corev1.EventTypeNormal, "SandboxProvisioned", fmt.Sprintf("Created Sandbox %q", sandbox.Name))
+		r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxProvisioned", "Provisioning", "Created Sandbox %q", sandbox.Name)
 	}
 
 	asmetrics.RecordSandboxClaimCreation(claim.Namespace, claim.Spec.TemplateRef.Name, asmetrics.LaunchTypeCold, "none", "not_ready")
@@ -529,13 +576,15 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, _ *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
+	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
 
 	// Check if a previously adopted sandbox is recorded in claim status
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
+		logger.V(1).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 		sandbox := &v1alpha1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
-				logger.Info("found existing adopted sandbox from status", "name", statusName)
+				logger.Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 				return sandbox, nil
 			}
 		} else if !k8errors.IsNotFound(err) {
@@ -544,6 +593,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Try name-based lookup (sandbox created by createSandbox uses claim.Name)
+	logger.V(1).Info("Trying name-based lookup for sandbox", "claim", claim.Name)
 	sandbox := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: claim.Namespace,
@@ -569,11 +619,13 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	// Single List: ownership guard + adoption candidate scan.
 	// This queries the informer cache (not the API server), so it's fast.
+	logger.V(1).Info("Listing sandbox adoption candidates", "claim", claim.Name)
 	allSandboxes := &v1alpha1.SandboxList{}
 	if err := r.List(ctx, allSandboxes, client.InNamespace(claim.Namespace)); err != nil {
 		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
 	}
 
+	policy := getWarmPoolPolicy(claim)
 	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 	var adoptionCandidates []*v1alpha1.Sandbox
 
@@ -585,8 +637,13 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 		// Ownership guard: if this claim already owns a sandbox, return it
 		if metav1.IsControlledBy(sb, claim) {
-			logger.Info("found existing owned sandbox", "name", sb.Name)
+			logger.Info("Found existing owned sandbox", "sandbox", sb.Name, "claim", claim.Name)
 			return sb, nil
+		}
+
+		// Skip warm pool adoption entirely if policy is "none"
+		if policy == extensionsv1alpha1.WarmPoolPolicyNone {
+			continue
 		}
 
 		// Collect adoption candidates from warm pool
@@ -600,11 +657,26 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 			continue
 		}
+
+		// If a specific pool is requested, only consider sandboxes from that pool
+		if policy.IsSpecificPool() {
+			specificPoolHash := sandboxcontrollers.NameHash(string(policy))
+			if sb.Labels[warmPoolSandboxLabel] != specificPoolHash {
+				continue
+			}
+		}
+
 		adoptionCandidates = append(adoptionCandidates, sb)
+	}
+
+	if policy == extensionsv1alpha1.WarmPoolPolicyNone {
+		logger.Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
+		return nil, nil
 	}
 
 	// Try to adopt from warm pool
 	if len(adoptionCandidates) > 0 {
+		logger.V(1).Info("Found warm pool adoption candidates", "count", len(adoptionCandidates), "claim", claim.Name, "warmpool", policy)
 		adopted, err := r.adoptSandboxFromCandidates(ctx, claim, adoptionCandidates)
 		if err != nil {
 			return nil, err
@@ -612,6 +684,8 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if adopted != nil {
 			return adopted, nil
 		}
+	} else if policy.IsSpecificPool() {
+		logger.Info("No available sandboxes in specified warm pool", "warmPool", string(policy), "claim", claim.Name)
 	}
 
 	// No warm pool sandbox available; caller decides whether to create
@@ -710,10 +784,12 @@ func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, cla
 
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
+	ctx context.Context,
 	claim *extensionsv1alpha1.SandboxClaim,
 	oldStatus *extensionsv1alpha1.SandboxClaimStatus,
 	sandbox *v1alpha1.Sandbox,
 ) {
+	logger := log.FromContext(ctx)
 
 	newStatus := &claim.Status
 	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1alpha1.SandboxConditionReady))
@@ -731,10 +807,16 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// This is unlikely to happen; here for completeness only.
 	if sandbox == nil {
 		launchType = asmetrics.LaunchTypeUnknown
-	} else if sandbox.Annotations[sandboxcontrollers.SandboxPodNameAnnotation] != "" {
+	} else if sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] != "" {
 		// Existence of the SandboxPodNameAnnotation implies the pod was adopted from a warm pool.
 		launchType = asmetrics.LaunchTypeWarm
 	}
+
+	sandboxName := "none"
+	if sandbox != nil {
+		sandboxName = sandbox.Name
+	}
+	logger.V(1).Info("SandboxClaim is marked as Ready", "claim", claim.Name, "sandbox", sandboxName, "duration", time.Since(claim.CreationTimestamp.Time))
 
 	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
 	// startup latency when the TemplateRef is updated.

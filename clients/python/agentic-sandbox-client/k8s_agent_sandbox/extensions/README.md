@@ -2,16 +2,45 @@
 
 This directory contains the Python client extension for interacting with the Agentic Sandbox in a "computer use" scenario. This extension allows programmatic control of a sandbox environment that can execute actions within a virtual desktop, such as browsing the web or running shell commands.
 
-## `computer_use.py`
+## Components
 
-This file defines the `ComputerUseSandbox` class, which is a specialized client for the computer-use example. It extends the base `SandboxClient` to provide an `agent` method.
+The computer use functionality is driven by two main components defined in `computer_use.py`:
 
-### Key Features:
+### `ComputerUseSandboxClient`
+This class extends the base `SandboxClient` and acts as the main entry point for the computer-use extension. By setting `sandbox_class = SandboxWithComputerUseSupport`, it ensures that all sandbox handles created or retrieved via this client are automatically provisioned with the computer-use capabilities.
 
-*   **`ComputerUseSandbox(template_name: str, namespace: str = "default", server_port: int = 8080)`**: 
-    *   Initializes the client, specifying the Kubernetes SandboxTemplate to use, its namespace, and the port for the sandbox router service.
-*   **`agent(self, query: str, api_key: str | None = None, timeout: int = 60) -> ExecutionResult`**: 
-    *   Executes a natural language `query` using an agent within the sandbox. It requires an `api_key` for authentication. If no API key is provided, it returns an `ExecutionResult` with an error. The method sends the query to the sandbox router and returns the `stdout`, `stderr`, and `exit_code` from the executed agent task.
+### `SandboxWithComputerUseSupport`
+This class extends the base `Sandbox` handle. It manages the underlying sandbox connection while providing a specialized `.agent()` method to interact directly with the computer-use API runtime.
+
+*   **`agent(self, query: str, timeout: int = 60) -> ExecutionResult`**: 
+    *   Executes a natural language `query` using an agent within the sandbox. The method sends the query to the sandbox router via HTTP `POST` and returns an `ExecutionResult` containing the `stdout`, `stderr`, and `exit_code` from the executed task.
+
+## Usage Example
+
+Here is an example demonstrating how to initialize the client, create the sandbox, and execute an agent query:
+
+```python
+from k8s_agent_sandbox.extensions.computer_use import ComputerUseSandboxClient
+from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig
+
+# Initialize the client targeting the specific port the agent listens on (e.g., 8888)
+client = ComputerUseSandboxClient(
+    connection_config=SandboxLocalTunnelConnectionConfig(server_port=8888)
+)
+
+# Create the sandbox with computer use support enabled
+sandbox = client.create_sandbox(
+    template_name="sandbox-python-computeruse-template", 
+    namespace="default"
+)
+
+try:
+    # Send a natural language query to the virtual desktop agent
+    result = sandbox.agent("Navigate to https://www.example.com and tell me what the heading says.", timeout=180)
+    print(f"Agent Output: {result.stdout}")
+finally:
+    sandbox.terminate()
+```
 
 ## `test_computer_use_extension.py`
 

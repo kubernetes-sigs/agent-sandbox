@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -213,6 +213,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Reason:  "SandboxReady",
 		Message: "Sandbox is ready",
 	}}
+	readySandbox.Status.PodIPs = []string{"10.244.0.6"}
 
 	// Validation Functions
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
@@ -251,6 +252,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		expectSandbox     bool
 		expectError       bool
 		expectedCondition metav1.Condition
+		expectedPodIPs    []string
 		validateSandbox   func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
 	}{
 		{
@@ -311,6 +313,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
+			expectedPodIPs:  []string{"10.244.0.6"},
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
@@ -321,6 +324,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
+			expectedPodIPs:  []string{"10.244.0.6"},
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
@@ -441,7 +445,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
 				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
 			}
 
@@ -490,6 +494,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					t.Errorf("expected condition reason %q, got %q", "ReconcilerError", condition.Reason)
 				}
 			} else {
+				if len(tc.expectedPodIPs) > 0 {
+					if diff := cmp.Diff(tc.expectedPodIPs, updatedClaim.Status.SandboxStatus.PodIPs); diff != "" {
+						t.Errorf("unexpected PodIPs:\n%s", diff)
+					}
+				}
 				if diff := cmp.Diff(tc.expectedCondition, condition, cmp.Comparer(ignoreTimestamp)); diff != "" {
 					t.Errorf("unexpected condition:\n%s", diff)
 				}
@@ -585,6 +594,24 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			expectSandboxDeleted: false, // Same as above: FakeClient doesn't simulate GC.
 			expectStatus:         "",
 		},
+		{
+			name:               "Policy=DeleteForeground && Sandbox Running -> Should Delete Claim with foreground propagation",
+			claim:              createClaim("delete-fg-claim", extensionsv1alpha1.ShutdownPolicyDeleteForeground),
+			sandboxIsExpired:   false,
+			expectClaimDeleted: true,
+			// FakeClient doesn't simulate GC or foreground propagation,
+			// so the Sandbox will remain. The important thing is the Claim is deleted.
+			expectSandboxDeleted: false,
+			expectStatus:         "",
+		},
+		{
+			name:                 "Policy=DeleteForeground && Sandbox Expired -> Should Delete Claim with foreground propagation",
+			claim:                createClaim("delete-fg-claim-expired", extensionsv1alpha1.ShutdownPolicyDeleteForeground),
+			sandboxIsExpired:     true,
+			expectClaimDeleted:   true,
+			expectSandboxDeleted: false,
+			expectStatus:         "",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -598,7 +625,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			reconciler := &SandboxClaimReconciler{
 				Client:   client,
 				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
 			}
 
@@ -668,7 +695,7 @@ func TestSandboxProvisionEvent(t *testing.T) {
 		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
 	}
 
-	fakeRecorder := record.NewFakeRecorder(10)
+	fakeRecorder := events.NewFakeRecorder(10)
 	client := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(claim, template).
 		WithStatusSubresource(claim).Build()
@@ -961,7 +988,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			reconciler := &SandboxClaimReconciler{
 				Client:   fakeClient,
 				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 				Tracer:   asmetrics.NewNoOp(),
 			}
 
@@ -1092,7 +1119,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	reconciler := &SandboxClaimReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		Tracer:   asmetrics.NewNoOp(),
 	}
 
@@ -1115,6 +1142,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 }
 
 func TestRecordCreationLatencyMetric(t *testing.T) {
+	ctx := context.Background()
 	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
 
 	testCases := []struct {
@@ -1182,7 +1210,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			asmetrics.ClaimStartupLatency.Reset()
 			r := &SandboxClaimReconciler{}
 
-			r.recordCreationLatencyMetric(tc.claim, tc.oldStatus, tc.sandbox)
+			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
@@ -1217,7 +1245,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -1273,7 +1301,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		reconciler := &SandboxClaimReconciler{
 			Client:   client,
 			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(10),
+			Recorder: events.NewFakeRecorder(10),
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -1326,4 +1354,341 @@ func (c *conflictClient) Update(ctx context.Context, obj client.Object, opts ...
 		}
 	}
 	return c.Client.Update(ctx, obj, opts...)
+}
+
+func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template",
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	baseClaim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	warmPoolUID := types.UID("warmpool-uid-123")
+
+	createWarmPoolSandbox := func(name, poolName string, ready bool) *sandboxv1alpha1.Sandbox {
+		conditionStatus := metav1.ConditionFalse
+		if ready {
+			conditionStatus = metav1.ConditionTrue
+		}
+		replicas := int32(1)
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					warmPoolSandboxLabel:   sandboxcontrollers.NameHash(poolName),
+					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       poolName,
+						UID:        warmPoolUID,
+						Controller: ptr.To(true),
+					},
+				},
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{
+				Replicas: &replicas,
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+					},
+				},
+			},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(sandboxv1alpha1.SandboxConditionReady),
+						Status: conditionStatus,
+						Reason: "DependenciesReady",
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("skips warm pool when policy is none", func(t *testing.T) {
+		scheme := newScheme(t)
+		claimWithNone := baseClaim.DeepCopy()
+		warmPoolNone := extensionsv1alpha1.WarmPoolPolicyNone
+		claimWithNone.Spec.WarmPool = &warmPoolNone
+
+		existingObjects := []client.Object{
+			template,
+			claimWithNone,
+			createWarmPoolSandbox("pool-sb-1", "test-pool", true),
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingObjects...).
+			WithStatusSubresource(claimWithNone).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client:   fakeClient,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		}
+
+		ctx := context.Background()
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify a NEW sandbox was created (cold start, not adopted)
+		var sandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, req.NamespacedName, &sandbox); err != nil {
+			t.Fatalf("expected sandbox to be created but got error: %v", err)
+		}
+
+		// Verify the warm pool sandbox was NOT adopted (labels should still be present)
+		var poolSandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-sb-1", Namespace: "default"}, &poolSandbox); err != nil {
+			t.Fatalf("failed to get pool sandbox: %v", err)
+		}
+
+		if _, exists := poolSandbox.Labels[warmPoolSandboxLabel]; !exists {
+			t.Error("expected warm pool label to still be present on non-adopted sandbox")
+		}
+		if _, exists := poolSandbox.Labels[sandboxTemplateRefHash]; !exists {
+			t.Error("expected template ref label to still be present on non-adopted sandbox")
+		}
+	})
+
+	t.Run("adopts from specific warm pool only", func(t *testing.T) {
+		scheme := newScheme(t)
+		claimWithSpecificPool := baseClaim.DeepCopy()
+		specificPool := extensionsv1alpha1.WarmPoolPolicy("test-pool")
+		claimWithSpecificPool.Spec.WarmPool = &specificPool
+
+		existingObjects := []client.Object{
+			template,
+			claimWithSpecificPool,
+			createWarmPoolSandbox("pool1-sb", "test-pool", true),
+			createWarmPoolSandbox("pool2-sb", "other-pool", true),
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingObjects...).
+			WithStatusSubresource(claimWithSpecificPool).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client:   fakeClient,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		}
+
+		ctx := context.Background()
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify sandbox from "test-pool" was adopted (labels removed, owned by claim)
+		var adoptedSandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool1-sb", Namespace: "default"}, &adoptedSandbox); err != nil {
+			t.Fatalf("failed to get adopted sandbox: %v", err)
+		}
+
+		if _, exists := adoptedSandbox.Labels[warmPoolSandboxLabel]; exists {
+			t.Error("expected warm pool label to be removed from adopted sandbox")
+		}
+
+		controllerRef := metav1.GetControllerOf(&adoptedSandbox)
+		if controllerRef == nil || controllerRef.UID != claimWithSpecificPool.UID {
+			t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
+		}
+
+		// Verify sandbox from "other-pool" was NOT adopted (labels still present)
+		var otherPoolSandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool2-sb", Namespace: "default"}, &otherPoolSandbox); err != nil {
+			t.Fatalf("failed to get other pool sandbox: %v", err)
+		}
+
+		if _, exists := otherPoolSandbox.Labels[warmPoolSandboxLabel]; !exists {
+			t.Error("expected warm pool label to still be present on non-adopted sandbox from other pool")
+		}
+	})
+
+	t.Run("falls back to cold start when specific pool has no sandboxes", func(t *testing.T) {
+		scheme := newScheme(t)
+		claimWithSpecificPool := baseClaim.DeepCopy()
+		specificPool := extensionsv1alpha1.WarmPoolPolicy("nonexistent-pool")
+		claimWithSpecificPool.Spec.WarmPool = &specificPool
+
+		existingObjects := []client.Object{
+			template,
+			claimWithSpecificPool,
+			createWarmPoolSandbox("pool-sb-1", "test-pool", true),
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingObjects...).
+			WithStatusSubresource(claimWithSpecificPool).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client:   fakeClient,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		}
+
+		ctx := context.Background()
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify a new sandbox was created via cold start
+		var sandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, req.NamespacedName, &sandbox); err != nil {
+			t.Fatalf("expected sandbox to be created but got error: %v", err)
+		}
+
+		// Verify the existing pool sandbox was NOT adopted
+		var poolSandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-sb-1", Namespace: "default"}, &poolSandbox); err != nil {
+			t.Fatalf("failed to get pool sandbox: %v", err)
+		}
+		if _, exists := poolSandbox.Labels[warmPoolSandboxLabel]; !exists {
+			t.Error("expected warm pool label to still be present on non-adopted sandbox")
+		}
+	})
+
+	t.Run("default policy adopts from any matching warm pool", func(t *testing.T) {
+		scheme := newScheme(t)
+		claimWithDefault := baseClaim.DeepCopy()
+		defaultPolicy := extensionsv1alpha1.WarmPoolPolicyDefault
+		claimWithDefault.Spec.WarmPool = &defaultPolicy
+
+		existingObjects := []client.Object{
+			template,
+			claimWithDefault,
+			createWarmPoolSandbox("pool-sb-1", "test-pool", true),
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingObjects...).
+			WithStatusSubresource(claimWithDefault).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client:   fakeClient,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		}
+
+		ctx := context.Background()
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify the warm pool sandbox was adopted
+		var adoptedSandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-sb-1", Namespace: "default"}, &adoptedSandbox); err != nil {
+			t.Fatalf("failed to get adopted sandbox: %v", err)
+		}
+
+		if _, exists := adoptedSandbox.Labels[warmPoolSandboxLabel]; exists {
+			t.Error("expected warm pool label to be removed from adopted sandbox")
+		}
+
+		controllerRef := metav1.GetControllerOf(&adoptedSandbox)
+		if controllerRef == nil || controllerRef.UID != claimWithDefault.UID {
+			t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
+		}
+	})
+
+	t.Run("nil warmpool field uses default behavior", func(t *testing.T) {
+		scheme := newScheme(t)
+		claimWithNil := baseClaim.DeepCopy()
+		// WarmPool is nil by default
+
+		existingObjects := []client.Object{
+			template,
+			claimWithNil,
+			createWarmPoolSandbox("pool-sb-1", "test-pool", true),
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingObjects...).
+			WithStatusSubresource(claimWithNil).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client:   fakeClient,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		}
+
+		ctx := context.Background()
+		_, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		// Verify the warm pool sandbox was adopted (nil = default = adopt from any)
+		var adoptedSandbox sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-sb-1", Namespace: "default"}, &adoptedSandbox); err != nil {
+			t.Fatalf("failed to get adopted sandbox: %v", err)
+		}
+
+		if _, exists := adoptedSandbox.Labels[warmPoolSandboxLabel]; exists {
+			t.Error("expected warm pool label to be removed from adopted sandbox")
+		}
+	})
 }

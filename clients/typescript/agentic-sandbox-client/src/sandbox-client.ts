@@ -317,15 +317,8 @@ export class SandboxClient {
     const watcher = new k8s.Watch(this.kubeConfig);
 
     return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(
-          new Error(
-            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
-          ),
-        );
-      }, timeoutMs);
-
       let abortController: AbortController | undefined;
+      let timer: ReturnType<typeof setTimeout>;
 
       const cleanup = () => {
         clearTimeout(timer);
@@ -337,6 +330,15 @@ export class SandboxClient {
           }
         }
       };
+
+      timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
+          ),
+        );
+      }, timeoutMs);
 
       watcher
         .watch(
@@ -380,15 +382,8 @@ export class SandboxClient {
     const watcher = new k8s.Watch(this.kubeConfig);
 
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(
-          new Error(
-            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
-          ),
-        );
-      }, timeoutMs);
-
       let abortController: AbortController | undefined;
+      let timer: ReturnType<typeof setTimeout>;
 
       const cleanup = () => {
         clearTimeout(timer);
@@ -400,6 +395,15 @@ export class SandboxClient {
           }
         }
       };
+
+      timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
+          ),
+        );
+      }, timeoutMs);
 
       watcher
         .watch(
@@ -537,16 +541,8 @@ export class SandboxClient {
       const timeoutMs = this.gatewayReadyTimeout * 1000;
 
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(
-            new Error(
-              `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' did not get ` +
-                `an IP within ${this.gatewayReadyTimeout} seconds.`,
-            ),
-          );
-        }, timeoutMs);
-
         let abortController: AbortController | undefined;
+        let timer: ReturnType<typeof setTimeout>;
 
         const cleanup = () => {
           clearTimeout(timer);
@@ -558,6 +554,16 @@ export class SandboxClient {
             }
           }
         };
+
+        timer = setTimeout(() => {
+          cleanup();
+          reject(
+            new Error(
+              `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' did not get ` +
+                `an IP within ${this.gatewayReadyTimeout} seconds.`,
+            ),
+          );
+        }, timeoutMs);
 
         watcher
           .watch(

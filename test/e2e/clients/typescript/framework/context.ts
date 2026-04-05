@@ -157,15 +157,8 @@ export class TestContext {
     return new Promise<boolean>((resolve, reject) => {
       let resolved = false;
 
-      const timer = setTimeout(() => {
-        reject(
-          new Error(
-            `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
-          ),
-        );
-      }, timeoutMs);
-
       let abortController: AbortController | undefined;
+      let timer: ReturnType<typeof setTimeout>;
 
       const cleanup = () => {
         clearTimeout(timer);
@@ -177,6 +170,15 @@ export class TestContext {
           }
         }
       };
+
+      timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
+          ),
+        );
+      }, timeoutMs);
 
       watcher
         .watch(

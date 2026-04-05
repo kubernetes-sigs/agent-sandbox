@@ -27,6 +27,10 @@ from .models import (
     SandboxLocalTunnelConnectionConfig
 )
 from .k8s_helper import K8sHelper
+from .exceptions import (
+    SandboxPortForwardError,
+    SandboxRequestError,
+)
 
 ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
 
@@ -45,7 +49,7 @@ class ConnectionStrategy(ABC):
 
     @abstractmethod
     def verify_connection(self):
-        """Checks if the connection is healthy. Raises RuntimeError if not."""
+        """Checks if the connection is healthy. Raises SandboxPortForwardError if not."""
         pass
 
 class DirectConnectionStrategy(ConnectionStrategy):
@@ -109,7 +113,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         local_port = self._get_free_port()
 
         logging.info(
-            f"Starting tunnel for Sandbox {self.sandbox_id}: localhost:{local_port} -> {ROUTER_SERVICE_NAME}:8080...")
+            f"Starting tunnel for Sandbox {self.sandbox_id}")
         self.port_forward_process = subprocess.Popen(
             [
                 "kubectl", "port-forward",
@@ -126,8 +130,8 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
             if self.port_forward_process.poll() is not None:
                 _, stderr = self.port_forward_process.communicate()
-                raise RuntimeError(
-                    f"Tunnel crashed: {stderr.decode(errors='ignore')}")
+                raise SandboxPortForwardError(
+                    f"Tunnel crashed: {stderr.decode(errors='replace')}")
 
             try:
                 with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
@@ -159,9 +163,9 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
     def verify_connection(self):
         if self.port_forward_process and self.port_forward_process.poll() is not None:
             _, stderr = self.port_forward_process.communicate()
-            raise RuntimeError(
+            raise SandboxPortForwardError(
                 f"Kubectl Port-Forward crashed!\n"
-                f"Stderr: {stderr.decode(errors='ignore')}"
+                f"Stderr: {stderr.decode(errors='replace')}"
             )
 
 class SandboxConnector:
@@ -219,7 +223,7 @@ class SandboxConnector:
         try:
             # Establish connection (re-establishes if closed/dead)
             base_url = self.connect()
-            
+
             # Verify if the connection is active before sending the request
             self.strategy.verify_connection()
 
@@ -236,7 +240,17 @@ class SandboxConnector:
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             return response
-        except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, RuntimeError) as e:
-            logging.error(f"Connection failed: {e}")
+        except SandboxPortForwardError:
             self.close()
-            raise e
+            raise
+        except requests.exceptions.RequestException as e:
+            resp = getattr(e, "response", None)
+            status_code = resp.status_code if resp is not None else None
+
+            logging.error(f"Request to sandbox failed: {e}")
+            self.close()
+            raise SandboxRequestError(
+                f"Failed to communicate with the sandbox at {url}.",
+                status_code=status_code,
+                response=resp,
+            ) from e

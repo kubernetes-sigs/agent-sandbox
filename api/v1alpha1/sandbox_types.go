@@ -121,6 +121,7 @@ type SandboxSpec struct {
 	// Defaults to 1.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1
+	// +kubebuilder:default=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 }
@@ -175,6 +176,11 @@ type SandboxStatus struct {
 	// selector is the label selector for pods.
 	// +optional
 	LabelSelector string `json:"selector,omitempty"`
+
+	// podIPs are the IP addresses of the underlying pod.
+	// A pod may have multiple IPs in dual-stack clusters.
+	// +optional
+	PodIPs []string `json:"podIPs,omitempty"`
 }
 
 // +genclient

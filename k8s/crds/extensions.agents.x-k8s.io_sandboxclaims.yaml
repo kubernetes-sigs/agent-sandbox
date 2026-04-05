@@ -34,6 +34,7 @@ spec:
                     default: Retain
                     enum:
                     - Delete
+                    - DeleteForeground
                     - Retain
                     type: string
                   shutdownTime:
@@ -47,6 +48,9 @@ spec:
                 required:
                 - name
                 type: object
+              warmpool:
+                default: default
+                type: string
             required:
             - sandboxTemplateRef
             type: object
@@ -90,8 +94,12 @@ spec:
                 type: array
               sandbox:
                 properties:
-                  Name:
+                  name:
                     type: string
+                  podIPs:
+                    items:
+                      type: string
+                    type: array
                 type: object
             type: object
         required:

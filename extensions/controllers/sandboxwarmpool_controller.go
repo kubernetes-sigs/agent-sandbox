@@ -18,7 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -204,13 +204,16 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 		// Prioritize deleting unready sandboxes before ready ones,
 		// then newest first within each group.
-		sort.Slice(activeSandboxes, func(i, j int) bool {
-			iReady := isSandboxReady(&activeSandboxes[i])
-			jReady := isSandboxReady(&activeSandboxes[j])
-			if iReady != jReady {
-				return !iReady // unready first
+		slices.SortFunc(activeSandboxes, func(a, b sandboxv1alpha1.Sandbox) int {
+			aReady := isSandboxReady(&a)
+			bReady := isSandboxReady(&b)
+			if aReady != bReady {
+				if aReady {
+					return 1 // a ready, b not ready -> b first (delete unready first)
+				}
+				return -1 // b ready, a not ready -> a first
 			}
-			return activeSandboxes[i].CreationTimestamp.After(activeSandboxes[j].CreationTimestamp.Time)
+			return b.CreationTimestamp.Time.Compare(a.CreationTimestamp.Time) // newest first
 		})
 
 		for i := int32(0); i < sandboxesToDelete && i < int32(len(activeSandboxes)); i++ {
@@ -337,8 +340,7 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		Status: warmPool.Status,
 	}
 
-	// Send the Server-Side Apply request to update the status subresource
-	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil {
+	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil { //nolint:staticcheck // SA1019: client.Apply requires generated apply configurations
 		log.Error(err, "Failed to apply SandboxWarmPool status via SSA")
 		return err
 	}

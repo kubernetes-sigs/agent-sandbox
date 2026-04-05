@@ -88,12 +88,19 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	setupLog.Info("Concurrency settings",
+		"sandbox", sandboxConcurrentWorkers,
+		"sandboxClaim", sandboxClaimConcurrentWorkers,
+		"sandboxWarmPool", sandboxWarmPoolConcurrentWorkers,
+		"sandboxTemplate", sandboxTemplateConcurrentWorkers,
+	)
 
 	// Validation checks for concurrency flags
 	if sandboxConcurrentWorkers <= 0 || sandboxClaimConcurrentWorkers <= 0 || sandboxWarmPoolConcurrentWorkers <= 0 {
@@ -220,7 +227,7 @@ func main() {
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("sandboxclaim-controller"),
+			Recorder: mgr.GetEventRecorder("sandboxclaim-controller"),
 			Tracer:   instrumenter,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
@@ -230,7 +237,7 @@ func main() {
 		if err = (&extensionscontrollers.SandboxTemplateReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("sandboxtemplate-controller"),
+			Recorder: mgr.GetEventRecorder("sandboxtemplate-controller"),
 			Tracer:   instrumenter,
 		}).SetupWithManager(mgr, sandboxTemplateConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxTemplate")

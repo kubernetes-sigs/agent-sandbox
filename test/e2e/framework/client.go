@@ -40,6 +40,7 @@ import (
 	sandboxextensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -298,6 +299,7 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 	watchFilter := WatchFilter{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 
 	var lastNotMatching []predicates.ObjectPredicate
+	var lastObject *unstructured.Unstructured
 	done, err := Watch(ctx, cl, gvr, watchFilter, func(event watch.Event, obj *unstructured.Unstructured) (bool, error) {
 		if event.Type == watch.Deleted {
 			return false, fmt.Errorf("object was deleted while waiting for predicates to be satisfied")
@@ -314,8 +316,22 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 		}
 
 		lastNotMatching = notMatching
+		lastObject = obj.DeepCopy()
+
 		return len(notMatching) == 0, nil
 	})
+
+	if lastObject == nil {
+		cl.Logf("no matching object observed")
+	} else {
+		y, err := yaml.Marshal(lastObject)
+		if err != nil {
+			cl.Errorf("failed to marshal last object state: %v", err)
+		} else {
+			cl.Logf("last object state: %v", string(y))
+		}
+	}
+
 	if err != nil {
 		return err
 	}

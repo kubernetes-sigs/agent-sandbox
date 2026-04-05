@@ -57,7 +57,7 @@ func TestSandboxReplicas(t *testing.T) {
 			},
 		}),
 	}
-	require.NoError(t, tc.WaitForObject(t.Context(), sandboxObj, p...))
+	tc.MustWaitForObject(sandboxObj, p...)
 	// Assert Pod and Service objects exist
 	pod := &corev1.Pod{}
 	pod.Name = "my-sandbox"
@@ -92,7 +92,7 @@ func TestSandboxReplicas(t *testing.T) {
 			},
 		}),
 	}
-	require.NoError(t, tc.WaitForObject(t.Context(), sandboxObj, p...))
+	tc.MustWaitForObject(sandboxObj, p...)
 	// Verify Pod is deleted but Service still exists
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), pod))
 	tc.MustMatchPredicates(service, predicates.NotDeleted())

@@ -31,3 +31,20 @@ export interface ExecutionResult {
   stderr: string;
   exitCode: number;
 }
+
+export interface FileEntry {
+  name: string;
+  size: number;
+  type: "file" | "directory";
+  modTime: number;
+}
+
+export type RequestFn = (
+  method: string,
+  endpoint: string,
+  options?: {
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
+    timeout?: number;
+  },
+) => Promise<Response>;

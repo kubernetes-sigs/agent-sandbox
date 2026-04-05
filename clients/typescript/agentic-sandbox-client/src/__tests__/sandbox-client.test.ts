@@ -220,9 +220,9 @@ describe("SandboxClient", () => {
     });
   });
 
-  // ===== run =====
+  // ===== commands.run =====
 
-  describe("run", () => {
+  describe("commands.run", () => {
     it("correctly parses command execution results", async () => {
       const client = createReadyClient();
 
@@ -237,7 +237,7 @@ describe("SandboxClient", () => {
         ),
       );
 
-      const result = await client.run("echo hello world");
+      const result = await client.commands.run("echo hello world");
 
       expect(result).toEqual({
         stdout: "hello world\n",
@@ -262,15 +262,15 @@ describe("SandboxClient", () => {
         templateName: "tpl",
       });
 
-      await expect(client.run("ls")).rejects.toThrow(
+      await expect(client.commands.run("ls")).rejects.toThrow(
         "Sandbox is not ready for communication.",
       );
     });
   });
 
-  // ===== write =====
+  // ===== files.write =====
 
-  describe("write", () => {
+  describe("files.write", () => {
     it("successfully uploads string content", async () => {
       const client = createReadyClient();
 
@@ -278,7 +278,7 @@ describe("SandboxClient", () => {
         new Response("ok", { status: 200 }),
       );
 
-      await client.write("/tmp/test.txt", "file content");
+      await client.files.write("/tmp/test.txt", "file content");
 
       expect(fetch).toHaveBeenCalledOnce();
       const [url, opts] = (fetch as Mock).mock.calls[0];
@@ -303,7 +303,7 @@ describe("SandboxClient", () => {
       );
 
       const buf = Buffer.from("binary data");
-      await client.write("/data/output.bin", buf);
+      await client.files.write("/data/output.bin", buf);
 
       expect(fetch).toHaveBeenCalledOnce();
       const [, opts] = (fetch as Mock).mock.calls[0];
@@ -316,9 +316,9 @@ describe("SandboxClient", () => {
     });
   });
 
-  // ===== read =====
+  // ===== files.read =====
 
-  describe("read", () => {
+  describe("files.read", () => {
     it("returns file download result as a Buffer", async () => {
       const client = createReadyClient();
       const content = "downloaded content";
@@ -327,13 +327,98 @@ describe("SandboxClient", () => {
         new Response(content, { status: 200 }),
       );
 
-      const result = await client.read("tmp/hello.txt");
+      const result = await client.files.read("tmp/hello.txt");
 
       expect(Buffer.isBuffer(result)).toBe(true);
       expect(result.toString()).toBe("downloaded content");
 
       const [url] = (fetch as Mock).mock.calls[0];
-      expect(url).toBe("http://localhost:9999/download/tmp/hello.txt");
+      expect(url).toBe("http://localhost:9999/download/tmp%2Fhello.txt");
+    });
+  });
+
+  // ===== files.list =====
+
+  describe("files.list", () => {
+    it("returns parsed FileEntry array", async () => {
+      const client = createReadyClient();
+
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { name: "file.txt", size: 100, type: "file", mod_time: 1700000000 },
+            {
+              name: "subdir",
+              size: 4096,
+              type: "directory",
+              mod_time: 1700000001,
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+      const entries = await client.files.list("tmp");
+
+      expect(entries).toEqual([
+        { name: "file.txt", size: 100, type: "file", modTime: 1700000000 },
+        { name: "subdir", size: 4096, type: "directory", modTime: 1700000001 },
+      ]);
+
+      const [url, opts] = (fetch as Mock).mock.calls[0];
+      expect(url).toBe("http://localhost:9999/list/tmp");
+      expect(opts.method).toBe("GET");
+    });
+
+    it("returns empty array for empty response", async () => {
+      const client = createReadyClient();
+
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify(null), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      const entries = await client.files.list("empty-dir");
+      expect(entries).toEqual([]);
+    });
+  });
+
+  // ===== files.exists =====
+
+  describe("files.exists", () => {
+    it("returns true when file exists", async () => {
+      const client = createReadyClient();
+
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      const result = await client.files.exists("tmp/file.txt");
+
+      expect(result).toBe(true);
+
+      const [url, opts] = (fetch as Mock).mock.calls[0];
+      expect(url).toBe("http://localhost:9999/exists/tmp%2Ffile.txt");
+      expect(opts.method).toBe("GET");
+    });
+
+    it("returns false when file does not exist", async () => {
+      const client = createReadyClient();
+
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      const result = await client.files.exists("tmp/missing.txt");
+      expect(result).toBe(false);
     });
   });
 

@@ -12,8 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-export { SandboxClient } from "./sandbox-client.js";
-export { CommandExecutor } from "./commands/index.js";
-export { Filesystem } from "./files/index.js";
-export * from "./extensions/index.js";
-export type { ExecutionResult, FileEntry, SandboxOptions } from "./types.js";
+export { CommandExecutor } from "./command-executor.js";

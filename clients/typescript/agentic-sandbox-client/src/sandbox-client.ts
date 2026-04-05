@@ -14,11 +14,12 @@
 
 import * as crypto from "node:crypto";
 import * as net from "node:net";
-import * as path from "node:path";
 import { ChildProcess, spawn } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
 
-import type { ExecutionResult, SandboxOptions } from "./types.js";
+import type { RequestFn, SandboxOptions } from "./types.js";
+import { CommandExecutor } from "./commands/index.js";
+import { Filesystem } from "./files/index.js";
 import {
   BACKOFF_FACTOR,
   CLAIM_API_GROUP,
@@ -118,6 +119,9 @@ export class SandboxClient {
   protected podName: string | undefined;
   protected annotations: Record<string, string> | undefined;
 
+  private _commands: CommandExecutor | null = null;
+  private _files: Filesystem | null = null;
+
   protected kubeConfig: k8s.KubeConfig;
   protected customObjectsApi: k8s.CustomObjectsApi;
 
@@ -137,10 +141,34 @@ export class SandboxClient {
     this.kubeConfig = new k8s.KubeConfig();
     this.kubeConfig.loadFromDefault();
     this.customObjectsApi = this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
+
+    const requestFn: RequestFn = (method, endpoint, options) =>
+      this.request(method, endpoint, options);
+    const getTracer = () => this.tracer;
+    this._commands = new CommandExecutor(
+      requestFn,
+      getTracer,
+      this.traceServiceName,
+    );
+    this._files = new Filesystem(requestFn, getTracer, this.traceServiceName);
   }
 
   isReady(): boolean {
     return this.baseUrl !== undefined;
+  }
+
+  get commands(): CommandExecutor {
+    if (!this._commands) {
+      throw new Error("Sandbox connection has been closed.");
+    }
+    return this._commands;
+  }
+
+  get files(): Filesystem {
+    if (!this._files) {
+      throw new Error("Sandbox connection has been closed.");
+    }
+    return this._files;
   }
 
   async start(): Promise<this> {
@@ -206,6 +234,9 @@ export class SandboxClient {
         }
       }
     }
+
+    this._commands = null;
+    this._files = null;
 
     if (this.tracingManager) {
       try {
@@ -689,97 +720,5 @@ export class SandboxClient {
         `Failed to communicate with the sandbox via the gateway at ${url}.`,
       );
     }
-  }
-
-  async run(command: string, timeout: number = 60): Promise<ExecutionResult> {
-    return withSpan(this.tracer, this.traceServiceName, "run", async (span) => {
-      if (span.isRecording()) {
-        span.setAttribute("sandbox.command", command);
-      }
-
-      const response = await this.request("POST", "execute", {
-        body: JSON.stringify({ command }),
-        headers: { "Content-Type": "application/json" },
-        timeout,
-      });
-
-      const data = (await response.json()) as Record<string, unknown>;
-      const result: ExecutionResult = {
-        stdout: (data.stdout as string) ?? "",
-        stderr: (data.stderr as string) ?? "",
-        exitCode: (data.exit_code as number) ?? -1,
-      };
-
-      if (span.isRecording()) {
-        span.setAttribute("sandbox.exit_code", result.exitCode);
-      }
-
-      return result;
-    });
-  }
-
-  async write(
-    filePath: string,
-    content: Buffer | string,
-    timeout: number = 60,
-  ): Promise<void> {
-    await withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "write",
-      async (span) => {
-        if (span.isRecording()) {
-          span.setAttribute("sandbox.file.path", filePath);
-          span.setAttribute("sandbox.file.size", content.length);
-        }
-
-        const contentBytes: Uint8Array<ArrayBuffer> =
-          typeof content === "string"
-            ? new TextEncoder().encode(content)
-            : new Uint8Array(
-                content.buffer as ArrayBuffer,
-                content.byteOffset,
-                content.byteLength,
-              );
-
-        const filename = path.basename(filePath);
-        const blob = new Blob([contentBytes]);
-        const formData = new FormData();
-        formData.append("file", blob, filename);
-
-        await this.request("POST", "upload", {
-          body: formData,
-          timeout,
-        });
-
-        console.info(`File '${filename}' uploaded successfully.`);
-      },
-    );
-  }
-
-  async read(filePath: string, timeout: number = 60): Promise<Buffer> {
-    return withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "read",
-      async (span) => {
-        if (span.isRecording()) {
-          span.setAttribute("sandbox.file.path", filePath);
-        }
-
-        const response = await this.request("GET", `download/${filePath}`, {
-          timeout,
-        });
-
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-
-        if (span.isRecording()) {
-          span.setAttribute("sandbox.file.size", buffer.length);
-        }
-
-        return buffer;
-      },
-    );
   }
 }

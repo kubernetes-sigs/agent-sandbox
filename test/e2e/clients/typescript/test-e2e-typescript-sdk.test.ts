@@ -134,7 +134,7 @@ async function deployWarmPool(
  */
 async function runSdkTests(sandbox: SandboxClient): Promise<void> {
   // Test execution
-  const result = await sandbox.run("echo 'Hello from SDK'");
+  const result = await sandbox.commands.run("echo 'Hello from SDK'");
   console.log(`Run result: ${JSON.stringify(result)}`);
   expect(result.stdout).toBe("Hello from SDK\n");
   expect(result.stderr).toBe("");
@@ -145,10 +145,10 @@ async function runSdkTests(sandbox: SandboxClient): Promise<void> {
   const filePath = "test.txt";
 
   console.log(`Writing content to '${filePath}'...`);
-  await sandbox.write(filePath, fileContent);
+  await sandbox.files.write(filePath, fileContent);
 
   console.log(`Reading content from '${filePath}'...`);
-  const readContent = await sandbox.read(filePath);
+  const readContent = await sandbox.files.read(filePath);
   expect(readContent.toString("utf-8")).toBe(fileContent);
 }
 

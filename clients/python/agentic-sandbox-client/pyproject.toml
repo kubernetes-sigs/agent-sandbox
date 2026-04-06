@@ -45,9 +45,16 @@ exclude = [
 root = "../../.."
 
 [project.optional-dependencies]
+async = [
+    "httpx",
+    "kubernetes_asyncio",
+]
 test = [
     "pytest",
     "pytest-xdist",
+    "pytest-asyncio",
+    "httpx",
+    "kubernetes_asyncio",
 ]
 tracing = [
     "opentelemetry-api~=1.39.0",

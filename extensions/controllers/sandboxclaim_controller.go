@@ -41,6 +41,8 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
+const observabilityAnnotation = "agent-sandbox.kubernetes.io/controller-first-observed-at"
+
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
@@ -94,21 +96,20 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Initialize trace ID and observation time for active resources missing them.
 	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
-	tc := r.Tracer.GetTraceContext(ctx)
-	obsAnnotation := "agent-sandbox.kubernetes.io/controller-first-observed-at"
-	needObsPatch := claim.Annotations == nil || claim.Annotations[obsAnnotation] == ""
-	needTcPatch := tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "")
+	traceContext := r.Tracer.GetTraceContext(ctx)
+	needObservabilityPatch := claim.Annotations[observabilityAnnotation] == ""
+	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
 
-	if needObsPatch || needTcPatch {
+	if needObservabilityPatch || needTraceContextPatch {
 		patch := client.MergeFrom(claim.DeepCopy())
 		if claim.Annotations == nil {
 			claim.Annotations = make(map[string]string)
 		}
-		if needObsPatch {
-			claim.Annotations[obsAnnotation] = time.Now().Format(time.RFC3339Nano)
+		if needObservabilityPatch {
+			claim.Annotations[observabilityAnnotation] = time.Now().Format(time.RFC3339Nano)
 		}
-		if needTcPatch {
-			claim.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if needTraceContextPatch {
+			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 		}
 		if err := r.Patch(ctx, claim, patch); err != nil {
 			return ctrl.Result{}, err
@@ -450,8 +451,8 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		if adopted.Annotations == nil {
 			adopted.Annotations = make(map[string]string)
 		}
-		if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
-			adopted.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+			adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 		}
 
 		// Add sandbox ID label to pod template for NetworkPolicy targeting
@@ -525,8 +526,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	if sandbox.Annotations == nil {
 		sandbox.Annotations = make(map[string]string)
 	}
-	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+	if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 	}
 
 	// Track the sandbox template ref to be used by metrics collector
@@ -832,15 +833,14 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 
 	// Record controller startup latency
-	obsAnnotation := "agent-sandbox.kubernetes.io/controller-first-observed-at"
-	if claim.Annotations != nil && claim.Annotations[obsAnnotation] != "" {
-		obsStr := claim.Annotations[obsAnnotation]
-		observedTime, err := time.Parse(time.RFC3339Nano, obsStr)
+	if claim.Annotations != nil && claim.Annotations[observabilityAnnotation] != "" {
+		observedTimeString := claim.Annotations[observabilityAnnotation]
+		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
 		if err != nil {
-			logger.Error(err, "Failed to parse controller observation time", "value", obsStr)
+			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
 		} else {
-			latency := time.Since(observedTime).Milliseconds()
-			logger.V(1).Info("Recording controller startup latency", "claim", claim.Name, "latency_ms", latency)
+			controllerLatency := time.Since(observedTime).Milliseconds()
+			logger.V(1).Info("Recording controller startup latency", "claim", claim.Name, "latency_ms", controllerLatency)
 			asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
 		}
 	}

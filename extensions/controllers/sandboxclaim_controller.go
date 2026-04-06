@@ -833,7 +833,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 
 	// Record controller startup latency
-	if claim.Annotations != nil && claim.Annotations[observabilityAnnotation] != "" {
+	if claim.Annotations[observabilityAnnotation] != "" {
 		observedTimeString := claim.Annotations[observabilityAnnotation]
 		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
 		if err != nil {

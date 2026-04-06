@@ -101,15 +101,15 @@ export async function initializeTracer(serviceName: string): Promise<void> {
   }
 
   try {
-    const dynamicImport = Function("specifier", "return import(specifier)") as (
-      specifier: string,
-    ) => Promise<Record<string, unknown>>;
-
-    const sdkTraceNode = await dynamicImport("@opentelemetry/sdk-trace-node");
-    const resources = await dynamicImport("@opentelemetry/resources");
-    const sdkTraceBase = await dynamicImport("@opentelemetry/sdk-trace-base");
-    const exporterOtlpGrpc = await dynamicImport(
-      "@opentelemetry/exporter-trace-otlp-grpc",
+    // @ts-ignore -- optional peer dependency resolved at runtime
+    const sdkTraceNode = await import("@opentelemetry/sdk-trace-node");
+    // @ts-ignore -- optional peer dependency resolved at runtime
+    const resources = await import("@opentelemetry/resources");
+    // @ts-ignore -- optional peer dependency resolved at runtime
+    const sdkTraceBase = await import("@opentelemetry/sdk-trace-base");
+    const exporterOtlpGrpc = await import(
+      // @ts-ignore -- optional peer dependency resolved at runtime
+      "@opentelemetry/exporter-trace-otlp-grpc"
     );
 
     const Resource = resources.Resource as new (

@@ -29,6 +29,7 @@ from typing import Generic, TypeVar
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
+from .lifecycle import build_lifecycle
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
@@ -108,6 +109,8 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str = "default",
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
+        *,
+        shutdown_after_seconds: int | None = None,
     ) -> T:
         """Provisions a new Sandbox claim and returns an async Sandbox handle.
 
@@ -123,10 +126,12 @@ class AsyncSandboxClient(Generic[T]):
         if labels:
             self._validate_labels(labels)
 
+        lifecycle = build_lifecycle(shutdown_after_seconds) if shutdown_after_seconds is not None else None
+
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
         try:
-            await self._create_claim(claim_name, template, namespace, labels=labels)
+            await self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle)
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, sandbox_ready_timeout
@@ -300,6 +305,7 @@ class AsyncSandboxClient(Generic[T]):
         template_name: str,
         namespace: str,
         labels: dict[str, str] | None = None,
+        lifecycle: dict | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():
@@ -312,7 +318,7 @@ class AsyncSandboxClient(Generic[T]):
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
         await self.k8s_helper.create_sandbox_claim(
-            claim_name, template_name, namespace, annotations=annotations, labels=labels
+            claim_name, template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle
         )
 
     @async_trace_span("wait_for_sandbox_ready")

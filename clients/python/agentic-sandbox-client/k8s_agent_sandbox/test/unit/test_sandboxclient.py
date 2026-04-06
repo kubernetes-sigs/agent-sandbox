@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import json
-import os
 import threading
 import unittest
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from unittest.mock import MagicMock, patch, ANY
@@ -25,7 +25,6 @@ from urllib3.util.retry import Retry
 
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
-from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 from k8s_agent_sandbox.constants import POD_NAME_ANNOTATION
@@ -61,7 +60,7 @@ class TestSandboxClient(unittest.TestCase):
             
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
             
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None)
+            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None)
             self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
@@ -202,6 +201,7 @@ class TestSandboxClient(unittest.TestCase):
             mock_create_claim.assert_called_once_with(
                 "sandbox-claim-1234abcd", "test-template", "test-namespace",
                 labels={"agent": "code-agent", "team": "platform"},
+                lifecycle=None,
             )
 
     def test_create_claim_with_labels(self):
@@ -215,6 +215,7 @@ class TestSandboxClient(unittest.TestCase):
             "test-claim", "test-template", "test-namespace",
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels={"agent": "code-agent"},
+            lifecycle=None,
         )
 
     def test_create_claim(self):
@@ -226,7 +227,8 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
             "test-claim", "test-template", "test-namespace",
             annotations={"opentelemetry.io/trace-context": "trace-data"},
-            labels=None
+            labels=None,
+            lifecycle=None,
         )
 
     def test_validate_labels_rejects_invalid_value(self):
@@ -277,6 +279,107 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper.wait_for_sandbox_ready.assert_called_once_with(
             "sandbox-id", "test-namespace", 45
         )
+
+    @patch('uuid.uuid4')
+    def test_create_sandbox_with_shutdown_after_seconds(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+
+            self.client.create_sandbox(
+                "test-template", "test-namespace", shutdown_after_seconds=300
+            )
+
+            mock_create_claim.assert_called_once()
+            call_kwargs = mock_create_claim.call_args
+            lifecycle = call_kwargs[1].get("lifecycle") or call_kwargs[0][3] if len(call_kwargs[0]) > 3 else call_kwargs[1].get("lifecycle")
+            self.assertIsNotNone(lifecycle)
+            self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
+            self.assertIn("shutdownTime", lifecycle)
+
+    @patch('uuid.uuid4')
+    def test_create_sandbox_without_shutdown_after_seconds(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+
+            self.client.create_sandbox("test-template", "test-namespace")
+
+            call_kwargs = mock_create_claim.call_args
+            lifecycle = call_kwargs[1].get("lifecycle")
+            self.assertIsNone(lifecycle)
+
+    @patch("k8s_agent_sandbox.lifecycle.datetime")
+    def test_create_claim_with_lifecycle(self, mock_datetime):
+        frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        mock_datetime.now.return_value = frozen_now
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = None
+
+        lifecycle = {
+            "shutdownTime": "2026-06-15T12:05:00Z",
+            "shutdownPolicy": "Delete",
+        }
+        self.client._create_claim(
+            "test-claim", "test-template", "test-namespace", lifecycle=lifecycle
+        )
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-template", "test-namespace",
+            annotations={},
+            labels=None,
+            lifecycle=lifecycle,
+        )
+
+    def test_create_claim_without_lifecycle(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = None
+
+        self.client._create_claim("test-claim", "test-template", "test-namespace")
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-template", "test-namespace",
+            annotations={},
+            labels=None,
+            lifecycle=None,
+        )
+
+    def test_shutdown_after_seconds_validation_zero(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", shutdown_after_seconds=0)
+        self.assertIn("positive", str(ctx.exception))
+
+    def test_shutdown_after_seconds_validation_negative(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", shutdown_after_seconds=-1)
+        self.assertIn("positive", str(ctx.exception))
+
+    def test_shutdown_after_seconds_validation_bool(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", shutdown_after_seconds=True)
+        self.assertIn("integer", str(ctx.exception))
+
+    def test_shutdown_after_seconds_validation_float(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", shutdown_after_seconds=1.5)
+        self.assertIn("integer", str(ctx.exception))
+
+    def test_shutdown_after_seconds_validation_string(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-template", shutdown_after_seconds="10")
+        self.assertIn("integer", str(ctx.exception))
 
 
 class SandboxHandler(BaseHTTPRequestHandler):

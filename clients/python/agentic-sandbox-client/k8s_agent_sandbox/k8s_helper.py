@@ -96,7 +96,8 @@ class K8sHelper:
                 claim_object = event['object']
                 sandbox_status = claim_object.get(
                     'status', {}).get('sandbox', {})
-                name = sandbox_status.get('name', '')
+                # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
+                name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
                 if name:
                     logging.info(
                         f"Resolved sandbox name '{name}' from claim status")

@@ -12,6 +12,8 @@ spec:
     metadata:
       labels:
         app: agent-sandbox-workload
+        tenant-id: "test-tenant"
+        user-id: "test-user"
     spec:
       serviceAccountName: sandbox-test
       runtimeClassName: gvisor

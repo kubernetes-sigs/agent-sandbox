@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import time
 from typing import Any
 from kubernetes.client import ApiException
 from kubernetes import watch
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
+    PODSNAPSHOT_PLURAL,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
 )
 
@@ -28,14 +30,18 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_SUCCESS_CODE = 0
 SNAPSHOT_ERROR_CODE = 1
 
+
 class RestoreCheckResult(BaseModel):
     """Result of a restore check operation."""
+
     success: bool
     error_reason: str
     error_code: int
 
+
 class SnapshotResult(BaseModel):
     """Result of a snapshot processing operation."""
+
     snapshot_uid: str
     snapshot_timestamp: str
 
@@ -57,10 +63,15 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
                 snapshot_uid=snapshot_uid,
                 snapshot_timestamp=snapshot_timestamp,
             )
-        elif condition.get("status") == "False" and condition.get("reason") in [
-            "Failed",
-            "Error",
-        ]:
+        elif (
+            condition.get("type") == "Triggered"
+            and condition.get("status") == "False"
+            and condition.get("reason")
+            in [
+                "Failed",
+                "Error",
+            ]
+        ):
             raise RuntimeError(
                 f"Snapshot failed. Condition: {condition.get('message', 'Unknown error')}"
             )
@@ -111,9 +122,7 @@ def wait_for_snapshot_to_be_completed(
                     # Continue watching if snapshot is not yet complete
                     continue
             elif event["type"] == "ERROR":
-                logger.error(
-                    f"Snapshot watch received error event: {event['object']}"
-                )
+                logger.error(f"Snapshot watch received error event: {event['object']}")
                 raise RuntimeError(f"Snapshot watch error: {event['object']}")
             elif event["type"] == "DELETED":
                 logger.error(
@@ -131,6 +140,7 @@ def wait_for_snapshot_to_be_completed(
     raise TimeoutError(
         f"Snapshot manual trigger '{trigger_name}' was not processed within {podsnapshot_timeout} seconds."
     )
+
 
 def check_pod_restored_from_snapshot(
     k8s_helper,
@@ -198,3 +208,62 @@ def check_pod_restored_from_snapshot(
             error_reason=f"Unexpected error: {e}",
             error_code=SNAPSHOT_ERROR_CODE,
         )
+
+
+def wait_for_snapshot_deletion(
+    k8s_helper,
+    namespace: str,
+    snapshot_uid: str,
+    timeout: int = 60,
+    resource_version: str | None = None,
+) -> bool:
+    """Waits for the PodSnapshot to be deleted from the cluster."""
+    # Check if already deleted
+    try:
+        k8s_helper.custom_objects_api.get_namespaced_custom_object(
+            group=PODSNAPSHOT_API_GROUP,
+            version=PODSNAPSHOT_API_VERSION,
+            namespace=namespace,
+            plural=PODSNAPSHOT_PLURAL,
+            name=snapshot_uid,
+        )
+    except ApiException as e:
+        if e.status == 404:
+            logger.info(f"PodSnapshot '{snapshot_uid}' already deleted.")
+            return True
+        raise
+
+    w = watch.Watch()
+    logger.info(f"Waiting for PodSnapshot '{snapshot_uid}' to be deleted...")
+
+    kwargs = {}
+    if resource_version:
+        kwargs["resource_version"] = resource_version
+
+    try:
+        for event in w.stream(
+            func=k8s_helper.custom_objects_api.list_namespaced_custom_object,
+            namespace=namespace,
+            group=PODSNAPSHOT_API_GROUP,
+            version=PODSNAPSHOT_API_VERSION,
+            plural=PODSNAPSHOT_PLURAL,
+            field_selector=f"metadata.name={snapshot_uid}",
+            timeout_seconds=timeout,
+            **kwargs,
+        ):
+            if event["type"] == "DELETED":
+                logger.info(f"PodSnapshot '{snapshot_uid}' confirmed deleted.")
+                return True
+            elif event["type"] == "ERROR":
+                logger.error(
+                    f"Snapshot deletion watch received error event: {event['object']}"
+                )
+                raise RuntimeError(f"Snapshot watch error: {event['object']}")
+    except Exception as e:
+        logger.error(f"Error watching snapshot deletion: {e}")
+        raise
+    finally:
+        w.stop()
+
+    logger.warning(f"Timed out waiting for PodSnapshot '{snapshot_uid}' to be deleted.")
+    return False

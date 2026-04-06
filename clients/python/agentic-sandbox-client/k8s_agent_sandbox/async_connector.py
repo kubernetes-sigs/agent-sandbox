@@ -62,7 +62,10 @@ class AsyncSandboxConnector:
         self.k8s_helper = k8s_helper
 
         self._base_url: str | None = None
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
+        transport = httpx.AsyncHTTPTransport(retries=3)
+        self.client = httpx.AsyncClient(
+            transport=transport, timeout=httpx.Timeout(60.0)
+        )
 
     async def _resolve_base_url(self) -> str:
         if self._base_url:

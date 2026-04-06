@@ -51,6 +51,26 @@ steps:
           query: histogram_quantile(0.99, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))
           threshold: 5000  # Equivalent to 5s
           requireSamples: true
+  - Identifier: SandboxClaimControllerStartupLatency
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      metricName: Agent Sandbox Claim Controller Startup Latency (ms)
+      metricVersion: v1
+      unit: ms
+      queries:
+        - name: ControllerStartupLatency50
+          query: histogram_quantile(0.50, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))
+          threshold: 1000
+          requireSamples: true
+        - name: ControllerStartupLatency90
+          query: histogram_quantile(0.90, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))
+          threshold: 1000
+          requireSamples: true
+        - name: ControllerStartupLatency99
+          query: histogram_quantile(0.99, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))
+          threshold: 5000
+          requireSamples: true
 
 - name: Setup Sandbox Template
   phases:
@@ -150,6 +170,11 @@ steps:
       action: gather
       labelSelector: "app=agent-sandbox-load-test"
   - Identifier: SandboxClaimStartupLatency
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+      enableViolations: true
+  - Identifier: SandboxClaimControllerStartupLatency
     Method: GenericPrometheusQuery
     Params:
       action: gather

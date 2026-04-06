@@ -20,10 +20,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -308,24 +308,18 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 }
 
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) error {
-	logger := log.FromContext(ctx)
+	log := log.FromContext(ctx)
 
-	if equality.Semantic.DeepEqual(oldStatus, &sandbox.Status) {
+	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
 		return nil
 	}
 
-	oldSandbox := sandbox.DeepCopy()
-	oldSandbox.Status = *oldStatus
-
-	sandbox.SetGroupVersionKind(sandboxv1alpha1.GroupVersion.WithKind("Sandbox"))
-
-	patch := client.MergeFrom(oldSandbox)
-
-	if err := r.Status().Patch(ctx, sandbox, patch); err != nil {
-		logger.Error(err, "Failed to patch sandbox status")
+	if err := r.Status().Update(ctx, sandbox); err != nil {
+		log.Error(err, "Failed to update sandbox status")
 		return err
 	}
 
+	// Surface error
 	return nil
 }
 

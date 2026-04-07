@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,12 +29,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
@@ -41,7 +46,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-const observabilityAnnotation = "agent-sandbox.kubernetes.io/controller-first-observed-at"
+const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -61,6 +66,7 @@ type SandboxClaimReconciler struct {
 	Recorder                events.EventRecorder
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
+	observedTimes           sync.Map
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -97,7 +103,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Initialize trace ID and observation time for active resources missing them.
 	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
 	traceContext := r.Tracer.GetTraceContext(ctx)
-	needObservabilityPatch := claim.Annotations[observabilityAnnotation] == ""
+	needObservabilityPatch := claim.Annotations[ObservabilityAnnotation] == ""
 	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
 
 	if needObservabilityPatch || needTraceContextPatch {
@@ -106,7 +112,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			claim.Annotations = make(map[string]string)
 		}
 		if needObservabilityPatch {
-			claim.Annotations[observabilityAnnotation] = time.Now().Format(time.RFC3339Nano)
+			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+			if val, ok := r.observedTimes.Load(key); ok {
+				claim.Annotations[ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
+			} else {
+				now := time.Now()
+				claim.Annotations[ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+				r.observedTimes.Store(key, now)
+			}
 		}
 		if needTraceContextPatch {
 			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
@@ -719,11 +732,27 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 	return template, nil
 }
 
+func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
+			r.observedTimes.LoadOrStore(key, time.Now())
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			key := types.NamespacedName{Name: e.ObjectNew.GetName(), Namespace: e.ObjectNew.GetNamespace()}
+			r.observedTimes.LoadOrStore(key, time.Now())
+			return true
+		},
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extensionsv1alpha1.SandboxClaim{}).
+		For(&extensionsv1alpha1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
 		Owns(&v1alpha1.Sandbox{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
@@ -833,15 +862,14 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 
 	// Record controller startup latency
-	if claim.Annotations[observabilityAnnotation] != "" {
-		observedTimeString := claim.Annotations[observabilityAnnotation]
+	if observedTimeString := claim.Annotations[ObservabilityAnnotation]; observedTimeString != "" {
 		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
 		if err != nil {
 			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
 		} else {
-			controllerLatency := time.Since(observedTime).Milliseconds()
-			logger.V(1).Info("Recording controller startup latency", "claim", claim.Name, "latency_ms", controllerLatency)
 			asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
+			// Clean up map entry after success
+			r.observedTimes.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
 		}
 	}
 

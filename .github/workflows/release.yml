@@ -1,0 +1,135 @@
+name: Release Automation
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write # Required for Google Auth
+
+jobs:
+  promote-and-wait:
+    name: Promote Images and Wait for PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 6-hour limit for long k8s.io merge cycles
+    outputs:
+      pr_url: ${{ steps.extract-pr.outputs.pr_url }}
+
+    steps:
+      - name: Checkout agent-sandbox
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Clone k8s.io
+        env:
+          GH_TOKEN: ${{ secrets.K8S_IO_PAT }}
+        run: |
+          cd ..
+          git clone https://github.com/kubernetes/k8s.io.git
+          cd k8s.io
+          git remote rename origin upstream
+          gh repo fork --clone=false || true # Ignore if already exists or fails to add remote if already there
+          # Ensure origin remote points to the fork
+          GH_USER=$(gh api user --jq .login)
+          git remote add origin https://x-access-token:${{ secrets.K8S_IO_PAT }}@github.com/$GH_USER/k8s.io.git || git remote set-url origin https://x-access-token:${{ secrets.K8S_IO_PAT }}@github.com/$GH_USER/k8s.io.git
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
+          service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Setup Git Identity
+        run: |
+          # Use the standard GitHub Actions Bot identity
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run Promotion Script
+        id: extract-pr
+        env:
+          # Use a PAT with permissions to fork/PR kubernetes/k8s.io
+          GH_TOKEN: ${{ secrets.K8S_IO_PAT }}
+        run: |
+          # Capture output to find the PR URL directly
+          make release-promote TAG="${GITHUB_REF_NAME}" K8S_IO_DIR=../k8s.io | tee promote_output.log
+          
+          # Extract the URL from the log
+          PR_URL=$(grep -o 'https://github.com/kubernetes/k8s.io/pull/[0-9]*' promote_output.log | head -n 1)
+          
+          if [ -z "$PR_URL" ]; then
+            echo "❌ No PR URL found in logs. Check make release-promote output."
+            exit 1
+          fi
+          
+          echo "Found PR: $PR_URL"
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+
+      - name: Poll PR Status
+        env:
+          GH_TOKEN: ${{ secrets.K8S_IO_PAT }}
+        run: |
+          PR_URL="${{ steps.extract-pr.outputs.pr_url }}"
+          echo "Waiting for $PR_URL to be merged..."
+          
+          # 60 attempts, every 5 minutes = 5 hours total
+          for i in {1..60}; do
+            # Explicitly check the kubernetes/k8s.io repo context
+            STATE=$(gh pr view "$PR_URL" --repo kubernetes/k8s.io --json state --jq '.state')
+            
+            echo "Attempt $i: PR is currently $STATE"
+            
+            if [ "$STATE" == "MERGED" ]; then
+              echo "✅ PR merged. Proceeding."
+              exit 0
+            elif [ "$STATE" == "CLOSED" ]; then
+              echo "❌ PR was closed without merging."
+              exit 1
+            fi
+            
+            sleep 300
+          done
+          
+          echo "❌ Timed out waiting for merge."
+          exit 1
+
+  publish-draft:
+    name: Publish Draft Release
+    needs: promote-and-wait
+    runs-on: ubuntu-latest
+    environment: 
+      name: agent-sandbox-release
+      
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Generate Draft Release and Manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # This finally publishes the draft for your review
+          make release-publish TAG="${GITHUB_REF_NAME}"

@@ -16,61 +16,59 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from k8s_agent_sandbox.lifecycle import build_lifecycle
+from k8s_agent_sandbox.utils import construct_sandbox_claim_lifecycle_spec
 
 
-class TestBuildLifecycle(unittest.TestCase):
+class TestConstructSandboxClaimLifecycleSpec(unittest.TestCase):
 
-    @patch("k8s_agent_sandbox.lifecycle.datetime")
+    @patch("k8s_agent_sandbox.utils.datetime")
     def test_builds_correct_lifecycle_dict(self, mock_datetime):
         frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
         mock_datetime.now.return_value = frozen_now
-        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
-        result = build_lifecycle(300)
+        result = construct_sandbox_claim_lifecycle_spec(300)
 
         self.assertEqual(result["shutdownTime"], "2026-06-15T12:05:00Z")
         self.assertEqual(result["shutdownPolicy"], "Delete")
 
-    @patch("k8s_agent_sandbox.lifecycle.datetime")
+    @patch("k8s_agent_sandbox.utils.datetime")
     def test_large_ttl(self, mock_datetime):
         frozen_now = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
         mock_datetime.now.return_value = frozen_now
-        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
-        result = build_lifecycle(86400)
+        result = construct_sandbox_claim_lifecycle_spec(86400)
 
         self.assertEqual(result["shutdownTime"], "2026-01-02T00:00:00Z")
         self.assertEqual(result["shutdownPolicy"], "Delete")
 
     def test_rejects_zero(self):
         with self.assertRaises(ValueError) as ctx:
-            build_lifecycle(0)
+            construct_sandbox_claim_lifecycle_spec(0)
         self.assertIn("positive", str(ctx.exception))
 
     def test_rejects_negative(self):
         with self.assertRaises(ValueError) as ctx:
-            build_lifecycle(-10)
+            construct_sandbox_claim_lifecycle_spec(-10)
         self.assertIn("positive", str(ctx.exception))
 
     def test_rejects_bool(self):
         with self.assertRaises(ValueError) as ctx:
-            build_lifecycle(True)
+            construct_sandbox_claim_lifecycle_spec(True)
         self.assertIn("integer", str(ctx.exception))
 
     def test_rejects_float(self):
         with self.assertRaises(ValueError) as ctx:
-            build_lifecycle(1.5)
+            construct_sandbox_claim_lifecycle_spec(1.5)
         self.assertIn("integer", str(ctx.exception))
 
     def test_rejects_string(self):
         with self.assertRaises(ValueError) as ctx:
-            build_lifecycle("10")
+            construct_sandbox_claim_lifecycle_spec("10")
         self.assertIn("integer", str(ctx.exception))
 
     def test_rejects_overflow(self):
         with self.assertRaises(ValueError) as ctx:
-            build_lifecycle(10**18)
+            construct_sandbox_claim_lifecycle_spec(10**18)
         self.assertIn("too large", str(ctx.exception))
 
 

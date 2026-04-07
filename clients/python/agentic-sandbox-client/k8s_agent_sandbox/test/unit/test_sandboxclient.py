@@ -296,8 +296,7 @@ class TestSandboxClient(unittest.TestCase):
             )
 
             mock_create_claim.assert_called_once()
-            call_kwargs = mock_create_claim.call_args
-            lifecycle = call_kwargs[1].get("lifecycle") or call_kwargs[0][3] if len(call_kwargs[0]) > 3 else call_kwargs[1].get("lifecycle")
+            lifecycle = mock_create_claim.call_args[1].get("lifecycle")
             self.assertIsNotNone(lifecycle)
             self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
             self.assertIn("shutdownTime", lifecycle)
@@ -319,7 +318,7 @@ class TestSandboxClient(unittest.TestCase):
             lifecycle = call_kwargs[1].get("lifecycle")
             self.assertIsNone(lifecycle)
 
-    @patch("k8s_agent_sandbox.lifecycle.datetime")
+    @patch("k8s_agent_sandbox.utils.datetime")
     def test_create_claim_with_lifecycle(self, mock_datetime):
         frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
         mock_datetime.now.return_value = frozen_now

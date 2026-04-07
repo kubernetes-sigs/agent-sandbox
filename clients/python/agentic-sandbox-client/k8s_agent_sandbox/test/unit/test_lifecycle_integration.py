@@ -16,13 +16,13 @@
 Integration tests for the shutdown_after_seconds lifecycle feature.
 
 These tests exercise the full code path from create_sandbox() through
-to the K8s API call with real objects — only the K8s API transport is
-mocked. This validates that build_lifecycle(), SandboxClient, and
-K8sHelper are wired correctly end-to-end.
+to the K8s API call with real objects. Only the K8s API transport is
+mocked. This validates that construct_sandbox_claim_lifecycle_spec(),
+SandboxClient, and K8sHelper are wired correctly end-to-end.
 """
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.k8s_helper import K8sHelper
@@ -34,11 +34,11 @@ from k8s_agent_sandbox.sandbox_client import SandboxClient
 @patch("k8s_agent_sandbox.k8s_helper.config")
 @patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
 class TestLifecycleIntegration(unittest.TestCase):
-    """End-to-end integration: SandboxClient → K8sHelper → manifest body.
+    """End-to-end integration: SandboxClient -> K8sHelper -> manifest body.
 
     Only the K8s API transport (CustomObjectsApi) is mocked.
-    Everything else — build_lifecycle(), _create_claim(), manifest
-    construction — runs the real code.
+    Everything else (construct_sandbox_claim_lifecycle_spec, _create_claim,
+    manifest construction) runs the real code.
     """
 
     def test_create_sandbox_with_shutdown_produces_lifecycle_in_manifest(
@@ -49,12 +49,10 @@ class TestLifecycleIntegration(unittest.TestCase):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
-        # Build a real K8sHelper with only the API transport mocked
         real_helper = K8sHelper.__new__(K8sHelper)
         real_helper.custom_objects_api = mock_api
         real_helper.core_v1_api = MagicMock()
 
-        # Wire the real helper into SandboxClient
         sandbox_client = SandboxClient.__new__(SandboxClient)
         sandbox_client.k8s_helper = real_helper
         sandbox_client.tracing_manager = None
@@ -65,7 +63,6 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client._active_connection_sandboxes = {}
         sandbox_client.sandbox_class = MagicMock()
 
-        # Mock resolve + wait so create_sandbox doesn't block
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
         real_helper.wait_for_sandbox_ready = MagicMock()
 
@@ -73,7 +70,6 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.create_sandbox("my-template", "default", shutdown_after_seconds=300)
         after = datetime.now(timezone.utc)
 
-        # Verify create_namespaced_custom_object was called with lifecycle
         mock_api.create_namespaced_custom_object.assert_called_once()
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
 
@@ -85,11 +81,9 @@ class TestLifecycleIntegration(unittest.TestCase):
         shutdown_time = shutdown_time.replace(tzinfo=timezone.utc)
         expected_earliest = before.replace(microsecond=0)
         expected_latest = after.replace(microsecond=0)
-        from datetime import timedelta
         self.assertGreaterEqual(shutdown_time, expected_earliest + timedelta(seconds=300))
         self.assertLessEqual(shutdown_time, expected_latest + timedelta(seconds=301))
 
-        # Also verify the rest of the manifest is well-formed
         self.assertEqual(body["kind"], "SandboxClaim")
         self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "my-template")
 

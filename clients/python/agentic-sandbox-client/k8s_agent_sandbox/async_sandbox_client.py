@@ -29,7 +29,7 @@ from typing import Generic, TypeVar
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
-from .lifecycle import build_lifecycle
+from .utils import construct_sandbox_claim_lifecycle_spec
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
@@ -114,6 +114,17 @@ class AsyncSandboxClient(Generic[T]):
     ) -> T:
         """Provisions a new Sandbox claim and returns an async Sandbox handle.
 
+        Args:
+            template: Name of the SandboxTemplate to use.
+            namespace: Kubernetes namespace for the claim.
+            sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
+            labels: Optional Kubernetes labels to attach to the claim.
+            shutdown_after_seconds: Optional TTL in seconds. When set, the
+                claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
+                of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
+                of ``"Delete"``, so the controller auto-deletes the claim on
+                expiry. Must be a positive integer.
+
         Example::
 
             async with AsyncSandboxClient(connection_config=config) as client:
@@ -126,7 +137,7 @@ class AsyncSandboxClient(Generic[T]):
         if labels:
             self._validate_labels(labels)
 
-        lifecycle = build_lifecycle(shutdown_after_seconds) if shutdown_after_seconds is not None else None
+        lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
@@ -310,6 +321,9 @@ class AsyncSandboxClient(Generic[T]):
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", claim_name)
+            if lifecycle:
+                span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
+                span.set_attribute("sandbox.lifecycle.shutdown_policy", lifecycle["shutdownPolicy"])
 
         annotations = {}
         if self.tracing_manager:

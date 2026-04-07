@@ -15,8 +15,8 @@
 from datetime import datetime, timedelta, timezone
 
 
-def build_lifecycle(shutdown_after_seconds: int) -> dict:
-    """Build a SandboxClaim lifecycle dict from a TTL in seconds.
+def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
+    """Construct a SandboxClaim lifecycle spec dict from a TTL in seconds.
 
     Returns a dict suitable for inclusion as ``spec.lifecycle`` in a
     SandboxClaim manifest, with ``shutdownTime`` set to *now + TTL* (UTC)
@@ -25,7 +25,7 @@ def build_lifecycle(shutdown_after_seconds: int) -> dict:
     Raises ``ValueError`` if the input is not a positive integer or is
     too large for datetime arithmetic.
     """
-    if not isinstance(shutdown_after_seconds, int) or isinstance(shutdown_after_seconds, bool):
+    if type(shutdown_after_seconds) is not int:
         raise ValueError(
             f"shutdown_after_seconds must be an integer, got {type(shutdown_after_seconds).__name__}"
         )

@@ -99,6 +99,17 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```
 
+### Go SDK
+
+To interact with the agent-sandbox programmatically from Go, use the Go SDK:
+
+```sh
+go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
+```
+
+The Go SDK currently ships from the repository's root Go module, so repository release tags such as `v0.1.0` are also the Go SDK versions.
+For detailed installation and usage instructions, please refer to the [Go SDK README](clients/go/README.md).
+
 ### Python SDK
 
 To interact with the agent-sandbox programmatically, you can use the Python SDK. This client library provides a high-level interface for creating and managing sandboxes.

@@ -28,6 +28,16 @@ def run_command(cmd):
         print(f"Error running command: {' '.join(cmd)}")
         sys.exit(1)
 
+def release_exists(tag):
+    """Returns true when the GitHub release already exists."""
+    result = subprocess.run(
+        ["gh", "release", "view", tag, "--repo", "kubernetes-sigs/agent-sandbox"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
 def main():
     parser = argparse.ArgumentParser(description='Generate release manifests.')
     parser.add_argument('--tag', required=True, help='The git tag for the release.')
@@ -88,24 +98,32 @@ def main():
         print(f"INFO: Publishing draft release {tag} to GitHub...")
         manifest_path = "release_assets/manifest.yaml"
         extensions_path = "release_assets/extensions.yaml"
-        
+
         if not os.path.exists(manifest_path) or not os.path.exists(extensions_path):
              print("❌ Release assets missing. Cannot publish.")
              sys.exit(1)
-             
-        # Check if release exists, if so, we might want to fail or edit. 
-        # Here we assume creating a new one.
-        cmd = [
-            "gh", "release", "create", tag,
-            manifest_path,
-            extensions_path,
-            "--generate-notes",
-            "--title", tag,
-            "--verify-tag",
-            "--draft",
-            "--repo", "kubernetes-sigs/agent-sandbox"
-        ]
-        run_command(cmd)
+
+        if release_exists(tag):
+            print(f"INFO: Release {tag} already exists; updating assets...")
+            run_command([
+                "gh", "release", "upload", tag,
+                manifest_path,
+                extensions_path,
+                "--clobber",
+                "--repo", "kubernetes-sigs/agent-sandbox",
+            ])
+        else:
+
+            run_command([
+                "gh", "release", "create", tag,
+                manifest_path,
+                extensions_path,
+                "--generate-notes",
+                "--title", tag,
+                "--verify-tag",
+                "--draft",
+                "--repo", "kubernetes-sigs/agent-sandbox",
+            ])
         print(f"🎉 Draft release {tag} published successfully!")
         print(f"👉 Go to https://github.com/kubernetes-sigs/agent-sandbox/releases to review and publish.")
 

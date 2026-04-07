@@ -123,6 +123,34 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	adoptedPod := &corev1.Pod{}
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: ns.Name}, adoptedPod))
 
+	// Wait for the sandbox controller to finish adopting the warm pool pod.
+	require.Eventually(t, func() bool {
+		if err := tc.Get(t.Context(), types.NamespacedName{
+			Name:      adoptedSandbox.Name,
+			Namespace: ns.Name,
+		}, adoptedSandbox); err != nil {
+			return false
+		}
+
+		var podName string
+		if ann, ok := adoptedSandbox.Annotations["agents.x-k8s.io/pod-name"]; ok && ann != "" {
+			podName = ann
+		} else {
+			return false
+		}
+
+		if err := tc.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: ns.Name}, adoptedPod); err != nil {
+			return false
+		}
+
+		if !metav1.IsControlledBy(adoptedPod, adoptedSandbox) {
+			return false
+		}
+
+		_, hasSandboxLabel := adoptedPod.Labels["agents.x-k8s.io/sandbox-name-hash"]
+		return hasSandboxLabel
+	}, 30*time.Second, 500*time.Millisecond, "sandbox controller should adopt the pod before deletion")
+
 	// Delete the pod and verify sandbox status updates
 	require.NoError(t, tc.Delete(t.Context(), adoptedPod))
 
@@ -136,5 +164,5 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 			}
 		}
 		return false
-	}, 15*time.Second, 500*time.Millisecond, "sandbox should become not-ready after pod deletion")
+	}, 30*time.Second, 100*time.Millisecond, "sandbox should become not-ready after pod deletion")
 }

@@ -53,7 +53,7 @@ class TestRunner:
         if result.returncode != 0:
             return result
 
-        result = subprocess.run([f"{self.repo_root}/dev/tools/deploy-to-kube", "--image-prefix", args.image_prefix, "--image-tag", image_tag])
+        result = subprocess.run([f"{self.repo_root}/dev/tools/deploy-to-kube", "--image-prefix", args.image_prefix, "--image-tag", image_tag, "--extensions"])
         if result.returncode != 0:
             return result
 

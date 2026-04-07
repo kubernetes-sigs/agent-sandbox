@@ -14,9 +14,10 @@ KIND_CLUSTER=agent-sandbox
 .PHONY: deploy-kind
 # `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
 # `CONTROLLER_ARGS="--enable-pprof-debug --zap-log-level=debug" make deploy-kind` to deploy with custom controller flags.
+# `CONTROLLER_ONLY=true make deploy-kind` to build and push only the controller image.
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} --controller-only
+	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
 	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
 
 .PHONY: deploy-cloud-provider-kind

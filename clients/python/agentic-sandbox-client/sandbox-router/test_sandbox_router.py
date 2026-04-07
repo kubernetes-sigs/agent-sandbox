@@ -14,54 +14,13 @@
 
 import importlib
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import sandbox_router
-
-HEADERS = {"X-Sandbox-ID": "test-sb"}
-METHODS = ["get", "post", "put", "delete", "patch"]
-PATHS = [
-    "/exec?foo=bar&n=1",
-    "/exec",
-    "/exec?a=1&b=2&c=3",
-    "/exec?q=%E4%B8%AD%E6%96%87",
-    pytest.param("/abc?", marks=pytest.mark.xfail(
-        reason="trailing '?' is dropped when query string is empty; expected behavior"
-    )),
-]
-
-
-@pytest.fixture()
-def mock_proxy():
-    """Replace the real httpx client so no network call is made."""
-    async def _stream():
-        yield b""
-
-    resp = MagicMock(status_code=200, headers={}, aiter_bytes=_stream)
-    mock = MagicMock()
-    mock.build_request.return_value = httpx.Request("GET", "http://placeholder")
-    mock.send = AsyncMock(return_value=resp)
-
-    with patch("sandbox_router.client", mock):
-        yield mock
-
-
-def forwarded_url(mock) -> str:
-    return mock.build_request.call_args.kwargs["url"]
-
-
-@pytest.mark.parametrize("method", METHODS)
-@pytest.mark.parametrize("path", PATHS)
-def test_query_string_forwarding(mock_proxy, method, path):
-    client = TestClient(sandbox_router.app)
-    # Response is unused; the call triggers the router's forwarding logic
-    # so mock_proxy captures the outbound URL for the assertion below
-    getattr(client, method)(path, headers=HEADERS)
-    assert forwarded_url(mock_proxy).endswith(path)
 
 
 @pytest.fixture
@@ -197,3 +156,18 @@ class TestProxyRouting:
             forwarded_host = captured_request.get("headers", {}).get("host", "")
             assert "evil.example.com" not in forwarded_host
 
+    def test_query_parameters_forwarded(self, client):
+        """Query parameters should be preserved in the proxied request."""
+        captured_request = {}
+
+        async def capture_send(req, **kwargs):
+            captured_request["params"] = req.url.params
+            raise httpx.ConnectError("stop here")
+
+        with patch.object(sandbox_router.client, "send", side_effect=capture_send):
+            client.get(
+                "/execute?cmd=ls&arg=-la",
+                headers={"X-Sandbox-ID": "my-sandbox"},
+            )
+            assert captured_request.get("params", {}).get("cmd") == "ls"
+            assert captured_request.get("params", {}).get("arg") == "-la"

@@ -50,8 +50,6 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
@@ -121,7 +119,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Initialize trace ID and observation time for active resources missing them.
 	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
 	traceContext := r.Tracer.GetTraceContext(ctx)
-	needObservabilityPatch := claim.Annotations[ObservabilityAnnotation] == ""
+	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
 	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
 
 	if needObservabilityPatch || needTraceContextPatch {
@@ -132,10 +130,10 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if needObservabilityPatch {
 			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
 			if val, ok := r.observedTimes.Load(key); ok {
-				claim.Annotations[ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
+				claim.Annotations[asmetrics.ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
 			} else {
 				now := time.Now()
-				claim.Annotations[ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+				claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
 				r.observedTimes.Store(key, now)
 			}
 		}
@@ -1071,12 +1069,20 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	}
 	logger.V(1).Info("SandboxClaim is marked as Ready", "claim", claim.Name, "sandbox", sandboxName, "duration", time.Since(claim.CreationTimestamp.Time))
 
-	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
-	// startup latency when the TemplateRef is updated.
-	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
+	webhookSeenTimeStr := claim.Annotations[asmetrics.WebhookAnnotation]
+	if webhookSeenTimeStr == "" {
+		logger.V(1).Info("Webhook first seen annotation missing, skipping ClaimStartupLatency metric", "claim", claim.Name)
+	} else {
+		webhookSeenTime, err := time.Parse(time.RFC3339Nano, webhookSeenTimeStr)
+		if err != nil {
+			logger.Error(err, "Failed to parse webhook first seen time", "value", webhookSeenTimeStr)
+		} else {
+			asmetrics.RecordClaimStartupLatency(webhookSeenTime, launchType, claim.Spec.TemplateRef.Name)
+		}
+	}
 
 	// Record controller startup latency
-	if observedTimeString := claim.Annotations[ObservabilityAnnotation]; observedTimeString != "" {
+	if observedTimeString := claim.Annotations[asmetrics.ObservabilityAnnotation]; observedTimeString != "" {
 		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
 		if err != nil {
 			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)

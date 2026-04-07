@@ -156,3 +156,18 @@ class TestProxyRouting:
             forwarded_host = captured_request.get("headers", {}).get("host", "")
             assert "evil.example.com" not in forwarded_host
 
+    def test_query_parameters_forwarded(self, client):
+        """Query parameters should be preserved in the proxied request."""
+        captured_request = {}
+
+        async def capture_send(req, **kwargs):
+            captured_request["params"] = req.url.params
+            raise httpx.ConnectError("stop here")
+
+        with patch.object(sandbox_router.client, "send", side_effect=capture_send):
+            client.get(
+                "/execute?cmd=ls&arg=-la",
+                headers={"X-Sandbox-ID": "my-sandbox"},
+            )
+            assert captured_request.get("params", {}).get("cmd") == "ls"
+            assert captured_request.get("params", {}).get("arg") == "-la"

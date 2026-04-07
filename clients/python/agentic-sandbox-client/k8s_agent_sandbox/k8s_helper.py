@@ -42,7 +42,7 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 
-    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None):
+    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None):
         """Creates a SandboxClaim custom resource."""
         metadata = {
             "name": name,
@@ -51,15 +51,19 @@ class K8sHelper:
         if labels:
             metadata["labels"] = labels
 
+        spec = {
+            "sandboxTemplateRef": {
+                "name": template
+            }
+        }
+        if lifecycle:
+            spec["lifecycle"] = lifecycle
+
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
             "kind": "SandboxClaim",
             "metadata": metadata,
-            "spec": {
-                "sandboxTemplateRef": {
-                    "name": template
-                }
-            }
+            "spec": spec,
         }
         logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'...")
         self.custom_objects_api.create_namespaced_custom_object(

@@ -64,6 +64,33 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         self.assertEqual(body["metadata"]["annotations"], {})
         self.assertNotIn("labels", body["metadata"])
 
+    def test_lifecycle_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        lifecycle = {
+            "shutdownTime": "2026-12-31T23:59:59Z",
+            "shutdownPolicy": "Delete",
+        }
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim", "test-template", "test-namespace", lifecycle=lifecycle
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body["spec"]["lifecycle"], lifecycle)
+        self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "test-template")
+
+    def test_no_lifecycle_omits_key(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertNotIn("lifecycle", body["spec"])
+
 
 if __name__ == '__main__':
     unittest.main()

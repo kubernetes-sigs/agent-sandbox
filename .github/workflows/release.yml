@@ -40,7 +40,7 @@ jobs:
           gh repo fork --clone=false || true # Ignore if already exists or fails to add remote if already there
           # Ensure origin remote points to the fork
           GH_USER=$(gh api user --jq .login)
-          git remote add origin https://x-access-token:${{ secrets.K8S_IO_PAT }}@github.com/$GH_USER/k8s.io.git || git remote set-url origin https://x-access-token:${{ secrets.K8S_IO_PAT }}@github.com/$GH_USER/k8s.io.git
+          git remote add origin "https://x-access-token:${{ secrets.K8S_IO_PAT }}@github.com/$GH_USER/k8s.io.git" || git remote set-url origin "https://x-access-token:${{ secrets.K8S_IO_PAT }}@github.com/$GH_USER/k8s.io.git"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -75,7 +75,7 @@ jobs:
           fi
           
           echo "Found PR: $PR_URL"
-          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       - name: Poll PR Status
         env:

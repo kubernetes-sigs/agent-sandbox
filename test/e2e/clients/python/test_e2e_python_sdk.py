@@ -67,7 +67,7 @@ def deploy_router(tc, temp_namespace):
     print(f"Using router image: {router_image}")
 
     with open(ROUTER_YAML_PATH, "r") as f:
-        manifest = f.read().replace("IMAGE_PLACEHOLDER", router_image)
+        manifest = f.read().replace("${ROUTER_IMAGE}", router_image)
 
     print(f"Applying router manifest to namespace: {temp_namespace}")
     tc.apply_manifest_text(manifest, namespace=temp_namespace)

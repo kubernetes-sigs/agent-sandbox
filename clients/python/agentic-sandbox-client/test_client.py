@@ -32,6 +32,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
  
 def run_sandbox_tests(sandbox: Sandbox):
     """Tests methods on the Sandbox object (execution, files, etc)."""
+    
+    print("\n--- Testing Sandbox Status ---")
+    status, message = sandbox.status()
+    print(f"Status: {status}, Message: '{message}'")
+    assert status == "SandboxReady", f"Expected 'SandboxReady', got '{status}'"
+    print("--- Sandbox Status Test Passed! ---")
+    
     print("\n--- Testing Command Execution ---")
     command_to_run = "echo 'Hello from the sandbox shruti!'"
     print(f"Executing command: '{command_to_run}'")
@@ -188,6 +195,11 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
             print(f"Caught expected RuntimeError: {e}")
             assert "not found" in str(e)
             break
+            
+    print("\n--- Verifying Sandbox Status after termination ---")
+    status, message = sandbox.status()
+    print(f"Status: {status}, Message: '{message}'")
+    assert status == "SandboxNotFound", f"Expected 'SandboxNotFound', got '{status}'"
     print("--- Termination and Get Test Passed ---")
 
     print("\n--- Testing delete_all ---")

@@ -214,7 +214,7 @@ def wait_for_snapshot_deletion(
     k8s_helper,
     namespace: str,
     snapshot_uid: str,
-    timeout: int = 60,
+    timeout: int = 180,
     resource_version: str | None = None,
 ) -> bool:
     """Waits for the PodSnapshot to be deleted from the cluster."""
@@ -266,4 +266,55 @@ def wait_for_snapshot_deletion(
         w.stop()
 
     logger.warning(f"Timed out waiting for PodSnapshot '{snapshot_uid}' to be deleted.")
+    return False
+
+
+def wait_for_pod_termination(
+    k8s_helper,
+    namespace: str,
+    pod_name: str,
+    pod_uid: str,
+    timeout: int = 180,
+) -> bool:
+    """Waits until the specified pod is terminated."""
+    logger.info(f"Waiting up to {timeout}s for pod '{pod_name}' (UID: {pod_uid}) to terminate...")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            pod = k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
+            if pod.metadata.uid != pod_uid:
+                # A new pod has taken this name; the old one has terminated.
+                return True
+        except ApiException as e:
+            if e.status == 404:
+                return True
+            else:
+                logger.error(f"Error checking pod status: {e}")
+        time.sleep(2)
+    return False
+
+
+def wait_for_pod_ready(
+    k8s_helper,
+    namespace: str,
+    get_pod_name_func,
+    timeout: int = 180,
+) -> bool:
+    """Waits until a newly created pod is ready."""
+    logger.info(f"Waiting up to {timeout}s for pod to become ready...")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        pod_name = get_pod_name_func()
+        if pod_name:
+            try:
+                pod = k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
+                if pod.metadata and not pod.metadata.deletion_timestamp:
+                    if pod.status and pod.status.conditions:
+                        for condition in pod.status.conditions:
+                            if condition.type == "Ready" and condition.status == "True":
+                                return True
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error(f"Error checking pod status: {e}")
+        time.sleep(2)
     return False

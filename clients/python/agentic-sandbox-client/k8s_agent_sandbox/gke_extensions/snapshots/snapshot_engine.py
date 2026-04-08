@@ -386,6 +386,7 @@ class SnapshotEngine:
         snapshot_uid: str | None = None,
         scope: str | None = None,
         labels: dict | None = None,
+        timeout: int = 180,
     ) -> DeleteSnapshotResult:
         """Helper method to execute deletion of snapshots."""
         snapshots_to_delete = []
@@ -455,6 +456,7 @@ class SnapshotEngine:
                     namespace=self.namespace,
                     snapshot_uid=uid,
                     resource_version=resource_version,
+                    timeout=timeout,
                 ):
                     deleted_snapshots.append(uid)
                 else:
@@ -497,14 +499,15 @@ class SnapshotEngine:
             error_code=SNAPSHOT_SUCCESS_CODE,
         )
 
-    def delete(self, snapshot_uid: str) -> DeleteSnapshotResult:
+    def delete(self, snapshot_uid: str, timeout: int = 180) -> DeleteSnapshotResult:
         """Delete a single snapshot by UID."""
-        return self._execute_deletion(snapshot_uid=snapshot_uid)
+        return self._execute_deletion(snapshot_uid=snapshot_uid, timeout=timeout)
 
     def delete_all(
         self,
         delete_by: Literal["all", "labels"] = "all",
         label_value: dict[str, str] | None = None,
+        timeout: int = 180,
     ) -> DeleteSnapshotResult:
         """Deletes snapshots based on a specific strategy.
 
@@ -516,7 +519,7 @@ class SnapshotEngine:
         match delete_by:
             case "all":
                 logger.info("Deleting every snapshot for this pod...")
-                return self._execute_deletion(scope="global")
+                return self._execute_deletion(scope="global", timeout=timeout)
 
             case "labels":
                 if not isinstance(label_value, dict):
@@ -524,7 +527,7 @@ class SnapshotEngine:
                         "label_value must be a dict when deleting by labels"
                     )
                 logger.info(f"Deleting snapshots matching labels: {label_value}")
-                return self._execute_deletion(labels=label_value)
+                return self._execute_deletion(labels=label_value, timeout=timeout)
 
             case _:
                 raise ValueError(f"Unsupported deletion strategy: {delete_by}")

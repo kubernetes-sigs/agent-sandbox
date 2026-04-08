@@ -215,9 +215,9 @@ func main() {
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
 	if err = (&controllers.SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Tracer: instrumenter,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Tracer:        instrumenter,
 		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")

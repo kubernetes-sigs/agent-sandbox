@@ -99,8 +99,8 @@ func init() {
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Tracer asmetrics.Instrumenter
+	Scheme        *runtime.Scheme
+	Tracer        asmetrics.Instrumenter
 	ClusterDomain string
 }
 

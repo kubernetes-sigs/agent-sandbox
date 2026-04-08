@@ -840,9 +840,9 @@ func TestReconcile(t *testing.T) {
 				sb.Annotations = tc.sandboxAnnotations
 			}
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sb)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, sb)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
 				ClusterDomain: "cluster.local",
 			}
 
@@ -1345,9 +1345,9 @@ func TestReconcilePod(t *testing.T) {
 			sandbox := tc.sandbox.DeepCopy()
 
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sandbox)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, sandbox)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
 				ClusterDomain: "cluster.local",
 			}
 

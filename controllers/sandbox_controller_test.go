@@ -1547,8 +1547,10 @@ func TestReconcileService(t *testing.T) {
 			wantStatusService:     sandboxName,
 			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
 		},
+
 		{
 			name: "refuses to use service owned by a different controller",
+
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1946,38 +1948,52 @@ func TestReconcilePVCs(t *testing.T) {
 }
 
 func TestSandboxExpiry(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+
 	testCases := []struct {
 		name           string
 		shutdownTime   *metav1.Time
 		deletionPolicy sandboxv1alpha1.ShutdownPolicy
 		wantExpired    bool
-		wantRequeue    bool
+		wantRequeue    time.Duration
 	}{
 		{
 			name:         "nil shutdown time",
 			shutdownTime: nil,
 			wantExpired:  false,
-			wantRequeue:  false,
+			wantRequeue:  0,
 		},
 		{
 			name:         "shutdown time in future",
-			shutdownTime: new(metav1.NewTime(time.Now().Add(2 * time.Hour))),
+			shutdownTime: ptr.To(metav1.NewTime(now.Add(2 * time.Hour))),
 			wantExpired:  false,
-			wantRequeue:  true,
+			wantRequeue:  2 * time.Hour,
+		},
+		{
+			name:         "shutdown time at current time expires immediately",
+			shutdownTime: ptr.To(metav1.NewTime(now)),
+			wantExpired:  true,
+			wantRequeue:  0,
+		},
+		{
+			name:         "shutdown time shortly in future uses minimum requeue",
+			shutdownTime: ptr.To(metav1.NewTime(now.Add(500 * time.Millisecond))),
+			wantExpired:  false,
+			wantRequeue:  2 * time.Second,
 		},
 		{
 			name:           "shutdown time in past - retain",
-			shutdownTime:   new(metav1.NewTime(time.Now().Add(-10 * time.Second))),
+			shutdownTime:   ptr.To(metav1.NewTime(now.Add(-10 * time.Second))),
 			deletionPolicy: sandboxv1alpha1.ShutdownPolicyRetain,
 			wantExpired:    true,
-			wantRequeue:    false,
+			wantRequeue:    0,
 		},
 		{
 			name:           "shutdown time in past - delete",
-			shutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Minute))),
+			shutdownTime:   ptr.To(metav1.NewTime(now.Add(-1 * time.Minute))),
 			deletionPolicy: sandboxv1alpha1.ShutdownPolicyDelete,
 			wantExpired:    true,
-			wantRequeue:    false,
+			wantRequeue:    0,
 		},
 	}
 	for _, tc := range testCases {
@@ -1987,13 +2003,9 @@ func TestSandboxExpiry(t *testing.T) {
 			if tc.deletionPolicy != "" {
 				sandbox.Spec.ShutdownPolicy = new(tc.deletionPolicy)
 			}
-			expired, requeueAfter := checkSandboxExpiry(sandbox)
+			expired, requeueAfter := checkSandboxExpiryAt(sandbox, now)
 			require.Equal(t, tc.wantExpired, expired)
-			if tc.wantRequeue {
-				require.Greater(t, requeueAfter, time.Duration(0))
-			} else {
-				require.Equal(t, time.Duration(0), requeueAfter)
-			}
+			require.Equal(t, tc.wantRequeue, requeueAfter)
 		})
 	}
 }

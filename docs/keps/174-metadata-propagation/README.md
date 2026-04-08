@@ -2,6 +2,23 @@
 
 ---
 
+<!-- toc -->
+- [Summary](#summary)
+- [Motivation](#motivation)
+- [Proposal](#proposal)
+  - [User Stories (Optional)](#user-stories-optional)
+    - [Use Case 1: Custom Metadata Propagation (Identification)](#use-case-1-custom-metadata-propagation-identification)
+    - [Use Case 2: Stateful Session Management (Pod Snapshots)](#use-case-2-stateful-session-management-pod-snapshots)
+  - [High-Level Design](#high-level-design)
+    - [Safety Principle: No Overrides](#safety-principle-no-overrides)
+    - [API Changes](#api-changes)
+    - [Implementation Guidance](#implementation-guidance)
+      - [Scenario A: Cold Start (No Warmpool)](#scenario-a-cold-start-no-warmpool)
+      - [Scenario B: Warmpool](#scenario-b-warmpool)
+- [Scalability](#scalability)
+- [Alternatives (Optional)](#alternatives-optional)
+<!-- /toc -->
+
 ## Summary
 
 This KEP proposes a standardized mechanism to clarify how labels and annotations propagate from top-level user requests (`SandboxClaim`) down to the final compute resources (`Pod`). This ensures consistency for observability, billing, and workload management while maintaining the homogeneity and performance of `SandboxWarmPools`.

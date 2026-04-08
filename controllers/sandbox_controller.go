@@ -582,17 +582,39 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 
 		// Apply label for both podUnowned and podOwnedBySandbox cases.
+		updated := false
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
-		pod.Labels[sandboxLabel] = nameHash
+		if pod.Labels[sandboxLabel] != nameHash {
+			pod.Labels[sandboxLabel] = nameHash
+			updated = true
+		}
 		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-			pod.Labels[k] = v
+			if pod.Labels[k] != v {
+				pod.Labels[k] = v
+				updated = true
+			}
 		}
 
-		if err := r.Update(ctx, pod); err != nil {
-			return nil, fmt.Errorf("failed to update pod: %w", err)
+		// Propagate pod template annotations to the existing pod
+		if sandbox.Spec.PodTemplate.ObjectMeta.Annotations != nil {
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+				if pod.Annotations[k] != v {
+					pod.Annotations[k] = v
+					updated = true
+				}
+			}
+		}
+
+		if updated {
+			if err := r.Update(ctx, pod); err != nil {
+				return nil, fmt.Errorf("failed to update pod: %w", err)
+			}
 		}
 
 		if err := ensurePodNameAnnotation(pod.Name); err != nil {

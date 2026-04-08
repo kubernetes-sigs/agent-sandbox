@@ -956,6 +956,9 @@ func TestReconcilePod(t *testing.T) {
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"custom-label":                      "label-val",
 					},
+					Annotations: map[string]string{
+						"custom-annotation": "anno-val",
+					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.PodSpec{

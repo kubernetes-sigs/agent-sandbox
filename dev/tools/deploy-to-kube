@@ -16,10 +16,25 @@
 import argparse
 import io
 import os
+import shutil
 import subprocess
 import yaml
 
 from shared import utils
+
+
+def resolve_kustomize_binary(repo_root):
+    """Returns path to a kustomize executable, or None if not found."""
+    override = os.environ.get("KUSTOMIZE")
+    if override and os.path.isfile(override) and os.access(override, os.X_OK):
+        return override
+    which = shutil.which("kustomize")
+    if which:
+        return which
+    local = os.path.join(repo_root, "bin", "kustomize")
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    return None
 
 
 def find_and_replace_images(doc, image_prefix, image_tag):
@@ -112,7 +127,7 @@ def kubectl_apply_objects(docs, repo_root):
     subprocess.run(["kubectl", "apply", "-f", "-"], cwd=repo_root, check=True, input=string_stream.getvalue(), text=True)
 
 
-def gather_manifests(manifests_path):
+def gather_manifests(manifests_path, kustomize_bin, repo_root):
     """Scans a directory for YAML files and parses them into a structured list.
 
     This function walks through the given directory, reads all '.yaml' or '.yml'
@@ -120,7 +135,9 @@ def gather_manifests(manifests_path):
     objects.
 
     Args:
-        manifests_path (str): The path to the directory containing manifests.
+        manifests_path (str): Path to the kustomize overlay (directory).
+        kustomize_bin (str): Path to the kustomize executable.
+        repo_root (str): Repository root (working directory for kustomize build).
 
     Returns:
         list: A flat list of dictionaries. Each dictionary represents a single
@@ -132,21 +149,29 @@ def gather_manifests(manifests_path):
         print("k8s directory not found")
         return all_docs
 
+    # Build manifests from the chosen kustomize overlay (run `make manifests` first if CRDs/RBAC are stale).
+    try:
+        result = subprocess.run(
+            [kustomize_bin, "build", manifests_path],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as e:
+        print(f"kustomize executable not found: {e}")
+        return all_docs
+    if result.returncode != 0:
+        print(f"kustomize build failed ({manifests_path}):", result.stderr)
+        return all_docs
 
-    for root, dirs, files in os.walk(manifests_path):
-        for filename in files:
-            if not (filename.endswith(".yaml") or filename.endswith(".yml")):
-                continue
-            path = os.path.join(root, filename)
-            with open(path, "r") as f:
-                docs = list(yaml.safe_load_all(f))
-                for doc in docs:
-                    if doc:
-                        all_docs.append({
-                            "doc": doc,
-                            "filename": filename,
-                            "kind": doc.get("kind"),
-                        })
+    docs = list(yaml.safe_load_all(result.stdout))
+    for doc in docs:
+        if doc:
+            all_docs.append({
+                "doc": doc,
+                "filename": "",
+                "kind": doc.get("kind"),
+            })
     return all_docs
 
 
@@ -243,15 +268,29 @@ def main(args):
         args (argparse.Namespace): The parsed command-line arguments.
     """
     repo_root = utils.get_repo_root()
-    manifests_path = os.path.join(repo_root, "k8s")
+    manifests_path = os.path.join(repo_root, args.kustomize_dir)
+    kustomize_bin = resolve_kustomize_binary(repo_root)
+    if not kustomize_bin:
+        print(
+            "kustomize not found: install it, add it to PATH, run `make kustomize`, "
+            "or set KUSTOMIZE to the executable path."
+        )
+        return 1
 
-    all_docs = gather_manifests(manifests_path)
+    all_docs = gather_manifests(manifests_path, kustomize_bin, repo_root)
     prereq_docs, other_docs, extension_docs = process_manifests(all_docs, args)
     apply_manifests(prereq_docs, other_docs, extension_docs, repo_root, args.extensions)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Deploy manifests under k8s/ to Kubernetes cluster")
+    default_kustomize = "config/default"
+    parser = argparse.ArgumentParser(description="Deploy manifests to Kubernetes cluster")
+    parser.add_argument("--kustomize-dir",
+                        dest="kustomize_dir",
+                        help="Kustomize overlay directory relative to the repo root, or an absolute path. "
+                        "Default: config/default.",
+                        type=str,
+                        default=default_kustomize)
     parser.add_argument("--image-prefix",
                         dest="image_prefix",
                         help="prefix for the image name. requires slash at the end if a path",

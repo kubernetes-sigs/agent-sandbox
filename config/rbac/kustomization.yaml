@@ -1,0 +1,4 @@
+# rbac.generated.yaml and extensions-rbac.generated.yaml are produced by go generate.
+resources:
+- rbac.generated.yaml
+- extensions-rbac.generated.yaml

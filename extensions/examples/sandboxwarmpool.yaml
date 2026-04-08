@@ -3,6 +3,8 @@ kind: SandboxWarmPool
 metadata:
   name: sandboxwarmpool-example
 spec:
+  updateStrategy:
+    type: Recreate
   replicas: 1
   sandboxTemplateRef:
     # This name must exactly match the 'metadata.name' of your SandboxTemplate.

@@ -21,6 +21,13 @@ import (
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
 // Important: Run "make" to regenerate code after modifying this file
 
+const (
+	// TemplateRefField is the field used for indexing SandboxWarmPools by their template reference name.
+	// Warning: This path must exactly match the JSON tag path of SandboxWarmPoolSpec.TemplateRef.Name.
+	// If the JSON tags are changed, this constant must be updated to avoid indexer failures.
+	TemplateRefField = ".spec.sandboxTemplateRef.name"
+)
+
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool
 type SandboxWarmPoolSpec struct {
 	// replicas is the desired number of sandboxes in the pool.
@@ -30,8 +37,35 @@ type SandboxWarmPoolSpec struct {
 	Replicas int32 `json:"replicas"`
 
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
+	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
 	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+
+	// updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes
+	// +optional
+	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
+}
+
+// SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates
+// all possible update strategies for the SandboxWarmPool controller.
+// +kubebuilder:validation:Enum=Recreate;OnReplenish
+type SandboxWarmPoolUpdateStrategyType string
+
+const (
+	// RecreateSandboxWarmPoolUpdateStrategyType indicates that stale pods are deleted immediately to ensure the pool only contains fresh pods.
+	// Note: This applies to PodTemplate spec changes only. Changes to annotations or labels in the template do not trigger recreate.
+	RecreateSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "Recreate"
+	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale pods are only replaced when they are manually deleted or when these stale pods are adopted by sandboxclaims and hence replaced by fresh pods.
+	OnReplenishSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "OnReplenish"
+)
+
+// SandboxWarmPoolUpdateStrategy defines the update strategy for the SandboxWarmPool.
+type SandboxWarmPoolUpdateStrategy struct {
+	// type indicates the type of the SandboxWarmPoolUpdateStrategy.
+	// Default is OnReplenish.
+	// +kubebuilder:default=OnReplenish
+	// +optional
+	Type SandboxWarmPoolUpdateStrategyType `json:"type,omitempty"`
 }
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool

@@ -453,6 +453,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 		delete(adopted.Labels, warmPoolSandboxLabel)
 		delete(adopted.Labels, sandboxTemplateRefHash)
+		delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
 
 		// Transfer ownership from SandboxWarmPool to SandboxClaim
 		adopted.OwnerReferences = nil
@@ -530,11 +531,6 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 
-	// Determine if we are in "Secure By Default" mode
-	management := template.Spec.NetworkPolicyManagement
-	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
-	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
-
 	// Propagate the trace context annotation to the Sandbox resource
 	if sandbox.Annotations == nil {
 		sandbox.Annotations = make(map[string]string)
@@ -550,23 +546,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas
-	// Enforce a secure-by-default policy by disabling the automatic mounting
-	// of the service account token, adhering to security best practices for
-	// sandboxed environments.
-	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
-		automount := false
-		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
-	}
-	// To prevent internal DNS enumeration while still allowing public domain resolution,
-	// we explicitly override the Pod's DNS config to use external public resolvers.
-	// We only inject this if using the strict "Secure by Default" policy. If the user
-	// provides custom rules or is Unmanaged, we leave DNS alone for air-gapped/proxy compatibility.
-	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
-		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
-		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
-			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
-		}
-	}
+
+	// Apply secure defaults to the sandbox pod spec
+	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)

@@ -123,6 +123,53 @@ class TestSandbox(unittest.TestCase):
         self.mock_k8s_helper.get_sandbox.return_value = None
         self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
 
+    def test_status_not_found(self):
+        self.mock_k8s_helper.get_sandbox.return_value = None
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxNotFound")
+        self.assertEqual(message, "Sandbox object not found in Kubernetes.")
+        self.mock_k8s_helper.get_sandbox.assert_called_once_with(self.sandbox_id, self.namespace)
+
+    def test_status_ready(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "True", "message": ""}
+                ]
+            }
+        }
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxReady")
+        self.assertEqual(message, "")
+
+    def test_status_not_ready_with_message(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "False", "message": "Pod is initializing"}
+                ]
+            }
+        }
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxNotReady")
+        self.assertEqual(message, "Pod is initializing")
+
+    def test_status_no_ready_condition(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "conditions": [
+                    {"type": "PodScheduled", "status": "True"}
+                ]
+            }
+        }
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxNotReady")
+        self.assertEqual(message, "Unknown message")
+
     def test_properties(self):
         """Tests the commands and files properties."""
         self.assertEqual(self.sandbox.commands, self.mock_command_executor)

@@ -1579,9 +1579,10 @@ func TestReconcileService(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, tc.sandbox)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			svc, err := r.reconcileService(t.Context(), tc.sandbox, nameHash)

@@ -110,6 +110,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
+			// Fallback cleanup to prevent memory leaks if the delete predicate was missed or a stale request is processed.
 			r.observedTimes.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
@@ -133,39 +134,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Initialize trace ID and observation time for active resources missing them.
-	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
-	traceContext := r.Tracer.GetTraceContext(ctx)
-	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
-	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
-
-	if needObservabilityPatch || needTraceContextPatch {
-		patch := client.MergeFrom(claim.DeepCopy())
-		if claim.Annotations == nil {
-			claim.Annotations = make(map[string]string)
-		}
-		if needObservabilityPatch {
-			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-			if actualObservedTimeEntry, ok := r.observedTimes.Load(key); ok {
-				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
-				if observedEntry.uid == claim.UID {
-					claim.Annotations[asmetrics.ObservabilityAnnotation] = observedEntry.timestamp.Format(time.RFC3339Nano)
-				} else {
-					now := time.Now()
-					claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
-					r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
-				}
-			} else {
-				now := time.Now()
-				claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
-				r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
-			}
-		}
-		if needTraceContextPatch {
-			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
-		}
-		if err := r.Patch(ctx, claim, patch); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.initializeAnnotations(ctx, claim); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	originalClaimStatus := claim.Status.DeepCopy()
@@ -243,6 +213,44 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", reconcileErr, "request", req.NamespacedName)
 	return result, reconcileErr
+}
+
+// initializeAnnotations initializes trace ID and observation time for active resources missing them.
+func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
+	traceContext := r.Tracer.GetTraceContext(ctx)
+	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
+	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
+
+	if needObservabilityPatch || needTraceContextPatch {
+		patch := client.MergeFrom(claim.DeepCopy())
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		if needObservabilityPatch {
+			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+			if actualObservedTimeEntry, ok := r.observedTimes.Load(key); ok {
+				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
+				if observedEntry.uid == claim.UID {
+					claim.Annotations[asmetrics.ObservabilityAnnotation] = observedEntry.timestamp.Format(time.RFC3339Nano)
+				} else {
+					now := time.Now()
+					claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+					r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
+				}
+			} else {
+				now := time.Now()
+				claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
+			}
+		}
+		if needTraceContextPatch {
+			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
+		}
+		if err := r.Patch(ctx, claim, patch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.

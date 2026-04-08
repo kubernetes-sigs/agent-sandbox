@@ -72,6 +72,14 @@ func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha
 	return extensionsv1alpha1.WarmPoolPolicyDefault
 }
 
+// observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
+// We store the UID to protect against stale data when a claim is deleted and a new one
+// is created with the same name.
+type observedTimeEntry struct {
+	timestamp time.Time
+	uid       types.UID
+}
+
 // SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
@@ -102,6 +110,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
+			r.observedTimes.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
@@ -136,12 +145,19 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		if needObservabilityPatch {
 			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-			if val, ok := r.observedTimes.Load(key); ok {
-				claim.Annotations[asmetrics.ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
+			if actualObservedTimeEntry, ok := r.observedTimes.Load(key); ok {
+				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
+				if observedEntry.uid == claim.UID {
+					claim.Annotations[asmetrics.ObservabilityAnnotation] = observedEntry.timestamp.Format(time.RFC3339Nano)
+				} else {
+					now := time.Now()
+					claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+					r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
+				}
 			} else {
 				now := time.Now()
 				claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
-				r.observedTimes.Store(key, now)
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
 			}
 		}
 		if needTraceContextPatch {
@@ -1023,16 +1039,30 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
 			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
-			r.observedTimes.LoadOrStore(key, time.Now())
+			actualObservedTimeEntry, loaded := r.observedTimes.LoadOrStore(key, observedTimeEntry{timestamp: time.Now(), uid: e.Object.GetUID()})
+			if loaded {
+				// sync.Map returns any, so we need to type assert to observedTimeEntry
+				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
+				if observedEntry.uid != e.Object.GetUID() {
+					r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: e.Object.GetUID()})
+				}
+			}
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			key := types.NamespacedName{Name: e.ObjectNew.GetName(), Namespace: e.ObjectNew.GetNamespace()}
-			r.observedTimes.LoadOrStore(key, time.Now())
+			actualObservedTimeEntry, loaded := r.observedTimes.LoadOrStore(key, observedTimeEntry{timestamp: time.Now(), uid: e.ObjectNew.GetUID()})
+			if loaded {
+				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
+				if observedEntry.uid != e.ObjectNew.GetUID() {
+					r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: e.ObjectNew.GetUID()})
+				}
+			}
 			return true
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
+			// Remove SandboxClaims from in memory map when SandboxClaims are deleted. No-op if key is not in map.
 			r.observedTimes.Delete(key)
 			return true
 		},

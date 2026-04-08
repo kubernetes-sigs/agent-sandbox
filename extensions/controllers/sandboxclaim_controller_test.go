@@ -1786,6 +1786,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "stored-time",
 					Namespace:         "default",
+					UID:               "uid-stored-time",
 					CreationTimestamp: pastTime,
 					Annotations: map[string]string{
 						asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
@@ -1802,7 +1803,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			expectedControllerObservations: 1,
 			setupReconciler: func(r *SandboxClaimReconciler) {
 				key := types.NamespacedName{Name: "stored-time", Namespace: "default"}
-				r.observedTimes.Store(key, time.Now().Add(-5*time.Second))
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-stored-time"})
 			},
 		},
 		{
@@ -2411,47 +2412,151 @@ func TestSandboxClaimPredicates(t *testing.T) {
 	r := &SandboxClaimReconciler{}
 	pred := r.getTimingPredicate()
 
+	claim1 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	}
+	claim2 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-2"},
+	}
+	key := types.NamespacedName{Name: "test-claim", Namespace: "default"}
+
 	testCases := []struct {
-		name        string
-		trigger     func(p predicate.Predicate) bool
-		expectedKey types.NamespacedName
+		name    string
+		setup   func(r *SandboxClaimReconciler)
+		trigger func(p predicate.Predicate) bool
+		verify  func(t *testing.T, r *SandboxClaimReconciler)
 	}{
 		{
-			name: "CreateFunc stores time",
+			name: "Create stores time and UID",
 			trigger: func(p predicate.Predicate) bool {
-				return p.Create(event.CreateEvent{
-					Object: &extensionsv1alpha1.SandboxClaim{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default"},
-					},
-				})
+				return p.Create(event.CreateEvent{Object: claim1})
 			},
-			expectedKey: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				val, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Fatal("Expected entry in map after Create")
+				}
+				entry := val.(observedTimeEntry)
+				if entry.uid != "uid-1" {
+					t.Errorf("Expected UID uid-1, got %s", entry.uid)
+				}
+			},
 		},
 		{
-			name: "UpdateFunc stores time",
-			trigger: func(p predicate.Predicate) bool {
-				return p.Update(event.UpdateEvent{
-					ObjectNew: &extensionsv1alpha1.SandboxClaim{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-claim-update", Namespace: "default"},
-					},
-				})
+			name: "Update with same UID preserves",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-1"})
 			},
-			expectedKey: types.NamespacedName{Name: "test-claim-update", Namespace: "default"},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Update(event.UpdateEvent{ObjectNew: claim1, ObjectOld: claim1})
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				val, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Fatal("Expected entry in map after Update")
+				}
+				entry := val.(observedTimeEntry)
+				if entry.uid != "uid-1" {
+					t.Errorf("Expected UID uid-1, got %s", entry.uid)
+				}
+			},
+		},
+		{
+			name: "Update with different UID overwrites",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-1"})
+			},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Update(event.UpdateEvent{ObjectNew: claim2, ObjectOld: claim1})
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				val, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Fatal("Expected entry in map after Update with new UID")
+				}
+				entry := val.(observedTimeEntry)
+				if entry.uid != "uid-2" {
+					t.Errorf("Expected UID uid-2 after update, got %s", entry.uid)
+				}
+			},
+		},
+		{
+			name: "Delete with mismatch UID does not delete",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-2"})
+			},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Delete(event.DeleteEvent{Object: claim1}) // claim1 has uid-1
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				_, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Error("Entry should NOT be deleted when UID mismatches")
+				}
+			},
+		},
+		{
+			name: "Delete with matching UID deletes",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-2"})
+			},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Delete(event.DeleteEvent{Object: claim2}) // claim2 has uid-2
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				_, ok := r.observedTimes.Load(key)
+				if ok {
+					t.Error("Entry should be deleted when UID matches")
+				}
+			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r.observedTimes = sync.Map{} // Reset map for each test case
+			if tc.setup != nil {
+				tc.setup(r)
+			}
 			res := tc.trigger(pred)
 			if !res {
 				t.Error("expected predicate to return true")
 			}
-
-			if _, ok := r.observedTimes.Load(tc.expectedKey); !ok {
-				t.Errorf("expected time to be stored in observedTimes map for key %v", tc.expectedKey)
-			}
+			tc.verify(t, r)
 		})
+	}
+}
+
+func TestSandboxClaimReconcileCleanup(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	}
+
+	// Create a fake client without the claim, so it returns NotFound
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	// Pre-populate map
+	reconciler.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: claim.UID})
+
+	req := reconcile.Request{
+		NamespacedName: key,
+	}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	_, ok := reconciler.observedTimes.Load(key)
+	if ok {
+		t.Error("Entry should be deleted by Reconcile when object is not found")
 	}
 }
 

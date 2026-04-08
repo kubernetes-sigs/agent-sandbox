@@ -67,6 +67,20 @@ def find_and_replace_images(doc, image_prefix, image_tag):
     walk_object(doc, fn)
 
 
+def append_extensions_controller_arg(doc):
+    """Adds --extensions to the agent-sandbox-controller container args.
+
+    Uses the same walk_object + field_path pattern as find_and_replace_images, but
+    scopes the walk to the named controller container so only its args list is
+    updated (not sidecar containers).
+    """
+    def fn(field_path, v):
+        if field_path == ".spec.template.spec.containers[].args":
+            if "--extensions" not in v:
+                v.append("--extensions")
+                print("Appended controller flag: --extensions")
+        return v
+    walk_object(doc, fn)
 
 def append_controller_flags(doc, flags_str):
     """Appends arbitrary flags to the controller container arguments."""
@@ -218,6 +232,8 @@ def process_manifests(all_docs, args):
             continue
 
         find_and_replace_images(doc, image_prefix, image_tag)
+        if args.extensions:
+            append_extensions_controller_arg(doc)
         append_controller_flags(doc, getattr(args, "controller_args", ""))
 
         if kind in ["CustomResourceDefinition", "Namespace"]:

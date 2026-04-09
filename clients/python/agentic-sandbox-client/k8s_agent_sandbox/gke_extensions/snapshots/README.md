@@ -32,7 +32,7 @@ client = PodSnapshotSandboxClient()
 
 # Create a sandbox with snapshot capabilities enabled
 sandbox = client.create_sandbox(
-    template_name="python-counter-template", 
+    template="python-counter-template", 
     namespace="default"
 )
 

@@ -91,11 +91,13 @@ class SnapshotEngine:
         namespace: str,
         k8s_helper,
         get_pod_name_func: Callable[[], str],
+        api_version: str | None = None,
     ):
         self.namespace = namespace
         self.k8s_helper = k8s_helper
         self.get_pod_name_func = get_pod_name_func
         self.created_manual_triggers = []
+        self.api_version = api_version or PODSNAPSHOT_API_VERSION
 
     def create(
         self, trigger_name: str, podsnapshot_timeout: int = 180
@@ -117,7 +119,7 @@ class SnapshotEngine:
         trigger_name = f"{safe_trigger_name}-{timestamp}-{suffix}"
 
         manifest = {
-            "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{PODSNAPSHOT_API_VERSION}",
+            "apiVersion": f"{PODSNAPSHOT_API_GROUP}/{self.api_version}",
             "kind": f"{PODSNAPSHOTMANUALTRIGGER_API_KIND}",
             "metadata": {"name": trigger_name, "namespace": self.namespace},
             "spec": {"targetPod": self.get_pod_name_func()},
@@ -127,7 +129,7 @@ class SnapshotEngine:
             pod_snapshot_manual_trigger_cr = (
                 self.k8s_helper.custom_objects_api.create_namespaced_custom_object(
                     group=PODSNAPSHOT_API_GROUP,
-                    version=PODSNAPSHOT_API_VERSION,
+                    version=self.api_version,
                     namespace=self.namespace,
                     plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
                     body=manifest,
@@ -163,6 +165,7 @@ class SnapshotEngine:
                 trigger_name=trigger_name,
                 podsnapshot_timeout=podsnapshot_timeout,
                 resource_version=resource_version,
+                api_version=self.api_version,
             )
 
             return SnapshotResponse(
@@ -225,7 +228,7 @@ class SnapshotEngine:
                 try:
                     self.k8s_helper.custom_objects_api.delete_namespaced_custom_object(
                         group=PODSNAPSHOT_API_GROUP,
-                        version=PODSNAPSHOT_API_VERSION,
+                        version=self.api_version,
                         namespace=self.namespace,
                         plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
                         name=trigger_name,
@@ -306,7 +309,7 @@ class SnapshotEngine:
             # Fetch the PodSnapshots using label selector directly
             response = self.k8s_helper.custom_objects_api.list_namespaced_custom_object(
                 group=PODSNAPSHOT_API_GROUP,
-                version=PODSNAPSHOT_API_VERSION,
+                version=self.api_version,
                 namespace=self.namespace,
                 plural=PODSNAPSHOT_PLURAL,
                 label_selector=label_selector,
@@ -435,7 +438,7 @@ class SnapshotEngine:
                 delete_resp = (
                     self.k8s_helper.custom_objects_api.delete_namespaced_custom_object(
                         group=PODSNAPSHOT_API_GROUP,
-                        version=PODSNAPSHOT_API_VERSION,
+                        version=self.api_version,
                         namespace=self.namespace,
                         plural=PODSNAPSHOT_PLURAL,
                         name=uid,
@@ -457,6 +460,7 @@ class SnapshotEngine:
                     snapshot_uid=uid,
                     resource_version=resource_version,
                     timeout=timeout,
+                    api_version=self.api_version,
                 ):
                     deleted_snapshots.append(uid)
                 else:

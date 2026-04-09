@@ -84,6 +84,7 @@ def wait_for_snapshot_to_be_completed(
     trigger_name: str,
     podsnapshot_timeout: int,
     resource_version: str | None = None,
+    api_version: str | None = None,
 ) -> SnapshotResult:
     """
     Waits for the PodSnapshotManualTrigger to be processed and returns SnapshotResult.
@@ -102,7 +103,7 @@ def wait_for_snapshot_to_be_completed(
             func=k8s_helper.custom_objects_api.list_namespaced_custom_object,
             namespace=namespace,
             group=PODSNAPSHOT_API_GROUP,
-            version=PODSNAPSHOT_API_VERSION,
+            version=api_version or PODSNAPSHOT_API_VERSION,
             plural=PODSNAPSHOTMANUALTRIGGER_PLURAL,
             field_selector=f"metadata.name={trigger_name}",
             timeout_seconds=podsnapshot_timeout,
@@ -216,13 +217,14 @@ def wait_for_snapshot_deletion(
     snapshot_uid: str,
     timeout: int = 180,
     resource_version: str | None = None,
+    api_version: str | None = None,
 ) -> bool:
     """Waits for the PodSnapshot to be deleted from the cluster."""
     # Check if already deleted
     try:
         k8s_helper.custom_objects_api.get_namespaced_custom_object(
             group=PODSNAPSHOT_API_GROUP,
-            version=PODSNAPSHOT_API_VERSION,
+            version=api_version or PODSNAPSHOT_API_VERSION,
             namespace=namespace,
             plural=PODSNAPSHOT_PLURAL,
             name=snapshot_uid,
@@ -245,7 +247,7 @@ def wait_for_snapshot_deletion(
             func=k8s_helper.custom_objects_api.list_namespaced_custom_object,
             namespace=namespace,
             group=PODSNAPSHOT_API_GROUP,
-            version=PODSNAPSHOT_API_VERSION,
+            version=api_version or PODSNAPSHOT_API_VERSION,
             plural=PODSNAPSHOT_PLURAL,
             field_selector=f"metadata.name={snapshot_uid}",
             timeout_seconds=timeout,

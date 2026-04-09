@@ -47,11 +47,13 @@ class ResumeResponse(BaseModel):
 
 class SandboxWithSnapshotSupport(Sandbox):
     def __init__(self, *args, **kwargs):
+        podsnapshot_api_version = kwargs.pop("podsnapshot_api_version", None)
         super().__init__(*args, **kwargs)
         self._snapshots = SnapshotEngine(
             namespace=self.namespace,
             k8s_helper=self.k8s_helper,
             get_pod_name_func=self.get_pod_name,
+            api_version=podsnapshot_api_version,
         )
 
     @property

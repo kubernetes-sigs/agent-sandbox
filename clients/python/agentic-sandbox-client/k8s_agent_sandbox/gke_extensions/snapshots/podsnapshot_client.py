@@ -32,8 +32,11 @@ class PodSnapshotSandboxClient(SandboxClient[SandboxWithSnapshotSupport]):
 
     def __init__(
         self,
-        *args, **kwargs,
+        *args,
+        podsnapshot_api_version: str | None = None,
+        **kwargs,
     ):
+        self.podsnapshot_api_version = podsnapshot_api_version or PODSNAPSHOT_API_VERSION
         super().__init__(*args, **kwargs)
 
         self.snapshot_crd_installed = self._check_snapshot_crd_installed()
@@ -49,7 +52,7 @@ class PodSnapshotSandboxClient(SandboxClient[SandboxWithSnapshotSupport]):
         try:
             resource_list = self.k8s_helper.custom_objects_api.get_api_resources(
                 group=PODSNAPSHOT_API_GROUP,
-                version=PODSNAPSHOT_API_VERSION,
+                version=self.podsnapshot_api_version,
             )
             if not resource_list or not resource_list.resources:
                 return False

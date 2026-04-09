@@ -30,7 +30,7 @@ client = ComputerUseSandboxClient(
 
 # Create the sandbox with computer use support enabled
 sandbox = client.create_sandbox(
-    template_name="sandbox-python-computeruse-template", 
+    template="sandbox-python-computeruse-template", 
     namespace="default"
 )
 

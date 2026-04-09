@@ -115,6 +115,7 @@ type SandboxClaimSpec struct {
 	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
+	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
 	// +optional
 	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 }

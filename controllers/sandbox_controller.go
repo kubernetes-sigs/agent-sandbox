@@ -21,6 +21,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"reflect"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -592,8 +593,22 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+			if isSystemMetadata(k) {
+				continue
+			}
 			if pod.Labels[k] != v {
 				pod.Labels[k] = v
+				updated = true
+			}
+		}
+
+		// Handle deletion of labels
+		for k := range pod.Labels {
+			if isSystemMetadata(k) {
+				continue
+			}
+			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
+				delete(pod.Labels, k)
 				updated = true
 			}
 		}
@@ -604,10 +619,24 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				pod.Annotations = make(map[string]string)
 			}
 			for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+				if isSystemMetadata(k) {
+					continue
+				}
 				if pod.Annotations[k] != v {
 					pod.Annotations[k] = v
 					updated = true
 				}
+			}
+		}
+
+		// Handle deletion of annotations
+		for k := range pod.Annotations {
+			if isSystemMetadata(k) {
+				continue
+			}
+			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {
+				delete(pod.Annotations, k)
+				updated = true
 			}
 		}
 
@@ -632,10 +661,16 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		sandboxLabel: nameHash,
 	}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if isSystemMetadata(k) {
+			continue
+		}
 		labels[k] = v
 	}
 	annotations := map[string]string{}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+		if isSystemMetadata(k) {
+			continue
+		}
 		annotations[k] = v
 	}
 
@@ -881,4 +916,17 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
+}
+
+// isSystemMetadata returns true if the key belongs to a restricted system domain.
+func isSystemMetadata(key string) bool {
+	parts := strings.SplitN(key, "/", 2)
+	if len(parts) == 0 {
+		return false
+	}
+	domain := parts[0]
+	return domain == "kubernetes.io" ||
+		domain == "k8s.io" ||
+		strings.HasSuffix(domain, ".agents.x-k8s.io") ||
+		domain == "agents.x-k8s.io"
 }

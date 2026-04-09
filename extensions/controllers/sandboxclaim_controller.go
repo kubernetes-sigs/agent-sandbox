@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -256,9 +258,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			// Check if metadata needs update
 			var mergedMeta v1alpha1.PodMetadata
 			template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
-			if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
-				return nil, err
-			}
 
 			// Preserve system-injected labels
 			if mergedMeta.Labels == nil {
@@ -266,6 +265,10 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			}
 			mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 			mergedMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
+
+			if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+				return nil, err
+			}
 
 			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
@@ -503,6 +506,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 		}
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 
 		// Merge metadata from claim
 		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
@@ -556,8 +560,37 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		return nil
 	}
 
+	// Helper to validate label/annotation keys and values
+	validateMetadata := func(key, value string, isLabel bool) error {
+		// Check restricted domains
+		parts := strings.SplitN(key, "/", 2)
+		domain := ""
+		if len(parts) > 1 {
+			domain = parts[0]
+		}
+		if domain == "kubernetes.io" || domain == "k8s.io" || strings.HasSuffix(domain, ".agents.x-k8s.io") || domain == "agents.x-k8s.io" {
+			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+		}
+
+		// Validate label values (annotations have less restrictions)
+		if isLabel {
+			if len(value) > 63 {
+				return fmt.Errorf("label value too long: %q exceeds 63 characters", value)
+			}
+			// K8s label value regex
+			labelValueRegex := regexp.MustCompile(`^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$`)
+			if !labelValueRegex.MatchString(value) {
+				return fmt.Errorf("invalid label value: %q does not match allowed pattern", value)
+			}
+		}
+		return nil
+	}
+
 	// Check for overrides in labels
 	for k, v := range claimMeta.Labels {
+		if err := validateMetadata(k, v, true); err != nil {
+			return fmt.Errorf("failed to validate label %q: %w", k, err)
+		}
 		if tv, ok := templateMeta.Labels[k]; ok && tv != v {
 			return fmt.Errorf("metadata override conflict: label %q is defined in template with value %q, but claim requests %q", k, tv, v)
 		}
@@ -565,6 +598,9 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 
 	// Check for overrides in annotations
 	for k, v := range claimMeta.Annotations {
+		if err := validateMetadata(k, v, false); err != nil {
+			return fmt.Errorf("failed to validate annotation %q: %w", k, err)
+		}
 		if tv, ok := templateMeta.Annotations[k]; ok && tv != v {
 			return fmt.Errorf("metadata override conflict: annotation %q is defined in template with value %q, but claim requests %q", k, tv, v)
 		}
@@ -622,6 +658,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 
+	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
+		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+	}
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
+
 	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
 	}
@@ -632,12 +674,6 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
-
-	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
-		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
-	}
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)

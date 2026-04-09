@@ -456,6 +456,60 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "claim with too long label value is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-long-label", Namespace: "default", UID: "uid-long-label"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"user-label": "a-very-long-value-that-exceeds-sixty-three-characters-limit-which-is-sixty-four"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError",
+			},
+		},
+		{
+			name: "claim with invalid label pattern is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-invalid-label", Namespace: "default", UID: "uid-invalid-label"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"user-label": "invalid@value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError",
+			},
+		},
+		{
+			name: "claim with restricted domain label is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-restricted-label", Namespace: "default", UID: "uid-restricted-label"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"kubernetes.io/restricted": "value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError",
+			},
+		},
 	}
 
 	for _, tc := range testCases {

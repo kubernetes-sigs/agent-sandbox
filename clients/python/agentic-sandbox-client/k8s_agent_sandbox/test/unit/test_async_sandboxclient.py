@@ -358,7 +358,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
             connection_config=config,
             k8s_helper=MagicMock(),
         )
-        self.assertFalse(connector._should_inject_router_headers())
+        self.assertFalse(connector._inject_router_headers)
 
     async def test_direct_injects_router_headers(self):
         config = SandboxDirectConnectionConfig(api_url="http://router")
@@ -368,7 +368,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
             connection_config=config,
             k8s_helper=MagicMock(),
         )
-        self.assertTrue(connector._should_inject_router_headers())
+        self.assertTrue(connector._inject_router_headers)
 
 
 class AsyncSandboxHandler(BaseHTTPRequestHandler):

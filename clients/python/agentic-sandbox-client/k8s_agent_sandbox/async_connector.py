@@ -73,6 +73,10 @@ class AsyncSandboxConnector:
                     f".svc.cluster.local:{connection_config.server_port}"
                 )
 
+        self._inject_router_headers = not isinstance(
+            connection_config, SandboxInClusterConnectionConfig
+        )
+
         transport = httpx.AsyncHTTPTransport(retries=3)
         self.client = httpx.AsyncClient(
             transport=transport, timeout=httpx.Timeout(60.0)
@@ -98,15 +102,12 @@ class AsyncSandboxConnector:
 
         return self._base_url
 
-    def _should_inject_router_headers(self) -> bool:
-        return not isinstance(self.connection_config, SandboxInClusterConnectionConfig)
-
     async def send_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         base_url = await self._resolve_base_url()
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.pop("headers", {}).copy()
-        if self._should_inject_router_headers():
+        if self._inject_router_headers:
             headers["X-Sandbox-ID"] = self.id
             headers["X-Sandbox-Namespace"] = self.namespace
             headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
@@ -156,4 +157,6 @@ class AsyncSandboxConnector:
 
     async def close(self):
         await self.client.aclose()
-        self._base_url = None
+        # Only clear volatile URLs (Gateway). Direct and InCluster URLs are stable.
+        if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
+            self._base_url = None

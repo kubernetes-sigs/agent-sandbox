@@ -224,7 +224,7 @@ class SandboxConnector:
         self.namespace = namespace
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
-        self.pod_ip = pod_ip
+        self._pod_ip = pod_ip
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
@@ -249,7 +249,7 @@ class SandboxConnector:
         elif isinstance(self.connection_config, SandboxLocalTunnelConnectionConfig):
             return LocalTunnelConnectionStrategy(self.id, self.namespace, self.connection_config)
         elif isinstance(self.connection_config, SandboxInClusterConnectionConfig):
-            return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self.pod_ip)
+            return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self._pod_ip)
         else:
             raise ValueError("Unknown connection configuration type")
 

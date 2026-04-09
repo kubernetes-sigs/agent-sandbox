@@ -31,6 +31,7 @@ from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
+    SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
 )
 
@@ -269,6 +270,53 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         self.assertIn("connection_config is required", str(ctx.exception))
 
 
+class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        patcher = patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
+        self.MockAsyncK8sHelper = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_in_cluster_config_accepted(self):
+        config = SandboxInClusterConnectionConfig()
+        client = AsyncSandboxClient(connection_config=config)
+        self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
+
+    async def test_pod_ip_passed_to_sandbox_when_use_pod_ip_true(self):
+        config = SandboxInClusterConnectionConfig(use_pod_ip=True)
+        client = AsyncSandboxClient(connection_config=config)
+        mock_k8s_helper = client.k8s_helper
+        mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
+
+        mock_sandbox_class = MagicMock()
+        mock_sandbox_class.return_value = MagicMock()
+        client.sandbox_class = mock_sandbox_class
+
+        with patch.object(client, "_create_claim", new_callable=AsyncMock), \
+             patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock, return_value="10.244.0.5"):
+            await client.create_sandbox("my-template")
+
+        call_kwargs = mock_sandbox_class.call_args.kwargs
+        self.assertEqual(call_kwargs["pod_ip"], "10.244.0.5")
+
+    async def test_pod_ip_not_passed_when_use_pod_ip_false(self):
+        config = SandboxInClusterConnectionConfig(use_pod_ip=False)
+        client = AsyncSandboxClient(connection_config=config)
+        mock_k8s_helper = client.k8s_helper
+        mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
+
+        mock_sandbox_class = MagicMock()
+        mock_sandbox_class.return_value = MagicMock()
+        client.sandbox_class = mock_sandbox_class
+
+        with patch.object(client, "_create_claim", new_callable=AsyncMock), \
+             patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock, return_value="10.244.0.5"):
+            await client.create_sandbox("my-template")
+
+        call_kwargs = mock_sandbox_class.call_args.kwargs
+        self.assertIsNone(call_kwargs["pod_ip"])
+
+
 class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_local_tunnel_config(self):
@@ -280,6 +328,47 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
                 k8s_helper=MagicMock(),
             )
         self.assertIn("does not support SandboxLocalTunnelConnectionConfig", str(ctx.exception))
+
+    async def test_in_cluster_uses_dns_by_default(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        self.assertEqual(connector._base_url, "http://my-sandbox.dev.svc.cluster.local:8888")
+
+    async def test_in_cluster_uses_pod_ip_when_provided(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+            pod_ip="10.244.0.5",
+        )
+        self.assertEqual(connector._base_url, "http://10.244.0.5:8888")
+
+    async def test_in_cluster_does_not_inject_router_headers(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        self.assertFalse(connector._should_inject_router_headers())
+
+    async def test_direct_injects_router_headers(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        self.assertTrue(connector._should_inject_router_headers())
 
 
 class AsyncSandboxHandler(BaseHTTPRequestHandler):

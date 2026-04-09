@@ -45,6 +45,7 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
+        pod_ip: str | None = None,
     ):
         if connection_config is None:
             raise ValueError(
@@ -64,6 +65,7 @@ class AsyncSandbox:
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
+            pod_ip=pod_ip,
         )
 
         self.tracer_config = tracer_config or SandboxTracerConfig()

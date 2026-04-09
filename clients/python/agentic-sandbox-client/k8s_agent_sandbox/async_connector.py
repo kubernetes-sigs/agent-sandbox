@@ -25,6 +25,7 @@ from .models import (
     SandboxConnectionConfig,
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
+    SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
 )
 
@@ -37,8 +38,8 @@ class AsyncSandboxConnector:
     """
     Async connector for communicating with a Sandbox over HTTP using httpx.
 
-    Supports DirectConnection and GatewayConnection modes. LocalTunnel mode
-    is not supported because it relies on a long-running subprocess; use the
+    Supports DirectConnection, GatewayConnection, and InCluster modes. LocalTunnel
+    mode is not supported because it relies on a long-running subprocess; use the
     sync SandboxConnector for local development.
     """
 
@@ -48,6 +49,7 @@ class AsyncSandboxConnector:
         namespace: str,
         connection_config: SandboxConnectionConfig,
         k8s_helper: AsyncK8sHelper,
+        pod_ip: str | None = None,
     ):
         if isinstance(connection_config, SandboxLocalTunnelConnectionConfig):
             raise ValueError(
@@ -62,6 +64,15 @@ class AsyncSandboxConnector:
         self.k8s_helper = k8s_helper
 
         self._base_url: str | None = None
+        if isinstance(connection_config, SandboxInClusterConnectionConfig):
+            if pod_ip:
+                self._base_url = f"http://{pod_ip}:{connection_config.server_port}"
+            else:
+                self._base_url = (
+                    f"http://{sandbox_id}.{namespace}"
+                    f".svc.cluster.local:{connection_config.server_port}"
+                )
+
         transport = httpx.AsyncHTTPTransport(retries=3)
         self.client = httpx.AsyncClient(
             transport=transport, timeout=httpx.Timeout(60.0)
@@ -87,14 +98,18 @@ class AsyncSandboxConnector:
 
         return self._base_url
 
+    def _should_inject_router_headers(self) -> bool:
+        return not isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+
     async def send_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         base_url = await self._resolve_base_url()
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.pop("headers", {}).copy()
-        headers["X-Sandbox-ID"] = self.id
-        headers["X-Sandbox-Namespace"] = self.namespace
-        headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+        if self._should_inject_router_headers():
+            headers["X-Sandbox-ID"] = self.id
+            headers["X-Sandbox-Namespace"] = self.namespace
+            headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
 
         last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):
@@ -122,7 +137,10 @@ class AsyncSandboxConnector:
                 ) from e
             except httpx.HTTPError as e:
                 logger.error(f"Request to sandbox failed: {e}")
-                self._base_url = None
+                # Only clear the cached URL for Gateway config — the IP may have changed.
+                # Direct and InCluster URLs are stable and must not be cleared.
+                if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
+                    self._base_url = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=None,

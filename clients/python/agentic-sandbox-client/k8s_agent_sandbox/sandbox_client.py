@@ -178,7 +178,9 @@ class SandboxClient(Generic[T]):
         if existing:
             self._active_connection_sandboxes.pop(key, None)
 
-        # Re-attach: Create a fresh handle for the existing ID
+        # Re-attach: Create a fresh handle for the existing ID.
+        # pod_ip is intentionally omitted — we don't have it here without an extra
+        # K8s API call, and the stable cluster DNS is always available in-cluster.
         new_handle = self.sandbox_class(
             claim_name=claim_name,
             sandbox_id=sandbox_id,

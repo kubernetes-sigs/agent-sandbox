@@ -19,7 +19,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 
 
@@ -81,6 +81,7 @@ class AsyncSandbox:
 
         self._is_closed = False
         self._pod_name = None
+        self._pod_ip = pod_ip
 
     async def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
@@ -93,6 +94,19 @@ class AsyncSandbox:
         pod_name = annotations.get(POD_NAME_ANNOTATION)
         self._pod_name = pod_name if pod_name is not None else self.sandbox_id
         return self._pod_name
+
+    async def get_pod_ip(self) -> str | None:
+        """Fetches the first pod IP from the Sandbox status.
+
+        Returns None if the controller does not populate podIPs.
+        """
+        if self._pod_ip is not None:
+            return self._pod_ip
+
+        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        pod_ips = sandbox_object.get("status", {}).get("podIPs", [])
+        self._pod_ip = pod_ips[0] if pod_ips else None
+        return self._pod_ip
 
     @property
     def commands(self) -> AsyncCommandExecutor | None:

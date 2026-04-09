@@ -673,44 +673,10 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
         call_kwargs = self._create_sandbox_with_in_cluster_config(namespace='prod')
         self.assertEqual(call_kwargs['namespace'], 'prod')
 
-    def _create_sandbox_with_pod_ip_config(self, pod_ip_from_ready):
-        with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'), \
-             patch('uuid.uuid4') as mock_uuid:
-            mock_uuid.return_value.hex = 'aabbccdd'
-            config = SandboxInClusterConnectionConfig(use_pod_ip=True)
-            client = SandboxClient(connection_config=config)
-            client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
-            mock_sandbox_class = MagicMock()
-            mock_sandbox_class.return_value = MagicMock()
-            client.sandbox_class = mock_sandbox_class
-            with patch.object(client, '_create_claim'), \
-                 patch.object(client, '_wait_for_sandbox_ready', return_value=pod_ip_from_ready):
-                client.create_sandbox('my-template')
-            return mock_sandbox_class.call_args.kwargs
-
-    def test_pod_ip_passed_to_sandbox_when_use_pod_ip_true(self):
-        call_kwargs = self._create_sandbox_with_pod_ip_config(pod_ip_from_ready='10.244.0.5')
-        self.assertEqual(call_kwargs['pod_ip'], '10.244.0.5')
-
-    def test_pod_ip_is_none_when_not_returned(self):
-        call_kwargs = self._create_sandbox_with_pod_ip_config(pod_ip_from_ready=None)
-        self.assertIsNone(call_kwargs['pod_ip'])
-
-    def test_pod_ip_not_passed_when_use_pod_ip_false(self):
-        with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'), \
-             patch('uuid.uuid4') as mock_uuid:
-            mock_uuid.return_value.hex = 'aabbccdd'
-            config = SandboxInClusterConnectionConfig(use_pod_ip=False)
-            client = SandboxClient(connection_config=config)
-            client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
-            mock_sandbox_class = MagicMock()
-            mock_sandbox_class.return_value = MagicMock()
-            client.sandbox_class = mock_sandbox_class
-            with patch.object(client, '_create_claim'), \
-                 patch.object(client, '_wait_for_sandbox_ready', return_value='10.244.0.5'):
-                client.create_sandbox('my-template')
-            call_kwargs = mock_sandbox_class.call_args.kwargs
-        self.assertIsNone(call_kwargs['pod_ip'])
+    def test_client_does_not_pass_pod_ip(self):
+        """SandboxClient no longer threads pod_ip — Sandbox resolves it internally."""
+        call_kwargs = self._create_sandbox_with_in_cluster_config()
+        self.assertNotIn('pod_ip', call_kwargs)
 
 
 if __name__ == '__main__':

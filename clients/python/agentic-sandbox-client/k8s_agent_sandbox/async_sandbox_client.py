@@ -152,12 +152,16 @@ class AsyncSandboxClient(Generic[T]):
             remaining_timeout = max(0, int(sandbox_ready_timeout - elapsed_time))
             if remaining_timeout <= 0:
                 raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
-            pod_ip = await self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
+            await self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
 
-            use_pod_ip = (
-                isinstance(self.connection_config, SandboxInClusterConnectionConfig)
-                and self.connection_config.use_pod_ip
-            )
+            # Resolve pod IP if requested — must happen after sandbox is Ready
+            pod_ip = None
+            if (isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+                    and self.connection_config.use_pod_ip):
+                sandbox_obj = await self.k8s_helper.get_sandbox(sandbox_id, namespace) or {}
+                pod_ips = sandbox_obj.get("status", {}).get("podIPs", [])
+                pod_ip = pod_ips[0] if pod_ips else None
+
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
                 sandbox_id=sandbox_id,
@@ -165,7 +169,7 @@ class AsyncSandboxClient(Generic[T]):
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
                 k8s_helper=self.k8s_helper,
-                pod_ip=pod_ip if use_pod_ip else None,
+                pod_ip=pod_ip,
             )
         except (Exception, asyncio.CancelledError):
             await asyncio.shield(self._delete_claim(claim_name, namespace))
@@ -214,8 +218,6 @@ class AsyncSandboxClient(Generic[T]):
             async with self._lock:
                 self._active_connection_sandboxes.pop(key, None)
 
-        # pod_ip is intentionally omitted — we don't have it here without an extra
-        # K8s API call, and the stable cluster DNS is always available in-cluster.
         new_handle = self.sandbox_class(
             claim_name=claim_name,
             sandbox_id=sandbox_id,
@@ -344,8 +346,8 @@ class AsyncSandboxClient(Generic[T]):
         )
 
     @async_trace_span("wait_for_sandbox_ready")
-    async def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int) -> str | None:
-        return await self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
+    async def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
+        await self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @async_trace_span("delete_claim")
     async def _delete_claim(self, claim_name: str, namespace: str):

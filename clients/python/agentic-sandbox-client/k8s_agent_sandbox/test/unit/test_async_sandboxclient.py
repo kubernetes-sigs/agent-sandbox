@@ -282,24 +282,27 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         client = AsyncSandboxClient(connection_config=config)
         self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
 
-    async def test_pod_ip_passed_to_sandbox_when_use_pod_ip_true(self):
+    async def test_pod_ip_resolved_when_use_pod_ip_true(self):
         config = SandboxInClusterConnectionConfig(use_pod_ip=True)
         client = AsyncSandboxClient(connection_config=config)
         mock_k8s_helper = client.k8s_helper
         mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
+        mock_k8s_helper.get_sandbox = AsyncMock(return_value={
+            "status": {"podIPs": ["10.244.0.5"]}
+        })
 
         mock_sandbox_class = MagicMock()
         mock_sandbox_class.return_value = MagicMock()
         client.sandbox_class = mock_sandbox_class
 
         with patch.object(client, "_create_claim", new_callable=AsyncMock), \
-             patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock, return_value="10.244.0.5"):
+             patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
             await client.create_sandbox("my-template")
 
         call_kwargs = mock_sandbox_class.call_args.kwargs
         self.assertEqual(call_kwargs["pod_ip"], "10.244.0.5")
 
-    async def test_pod_ip_not_passed_when_use_pod_ip_false(self):
+    async def test_pod_ip_none_when_use_pod_ip_false(self):
         config = SandboxInClusterConnectionConfig(use_pod_ip=False)
         client = AsyncSandboxClient(connection_config=config)
         mock_k8s_helper = client.k8s_helper
@@ -310,11 +313,11 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         client.sandbox_class = mock_sandbox_class
 
         with patch.object(client, "_create_claim", new_callable=AsyncMock), \
-             patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock, return_value="10.244.0.5"):
+             patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
             await client.create_sandbox("my-template")
 
         call_kwargs = mock_sandbox_class.call_args.kwargs
-        self.assertIsNone(call_kwargs["pod_ip"])
+        self.assertIsNone(call_kwargs.get("pod_ip"))
 
 
 class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):

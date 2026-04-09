@@ -19,9 +19,10 @@ from .trace_manager import create_tracer_manager, trace_span, trace
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
-    SandboxConnectionConfig, 
-    SandboxLocalTunnelConnectionConfig, 
-    SandboxTracerConfig
+    SandboxConnectionConfig,
+    SandboxInClusterConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+    SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
@@ -45,7 +46,6 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
-        pod_ip: str | None = None,
     ):
         # Sandbox Related Configuration
         self.claim_name = claim_name
@@ -56,13 +56,19 @@ class Sandbox:
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
 
+        # Resolve pod IP if requested before establishing connection
+        self._pod_ip = None
+        if (isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+                and self.connection_config.use_pod_ip):
+            self.get_pod_ip()
+
         # Establish Sandbox Connection
         self.connector = SandboxConnector(
-            sandbox_id=self.sandbox_id, # Pass the base sandbox id to connect to.
+            sandbox_id=self.sandbox_id,
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
-            pod_ip=pod_ip,
+            pod_ip=self._pod_ip,
         )
 
         # Tracer initialization
@@ -82,13 +88,26 @@ class Sandbox:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
         if self._pod_name is not None:
             return self._pod_name
-            
+
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         metadata = sandbox_object.get('metadata') or {}
         annotations = metadata.get('annotations') or {}
         pod_name = annotations.get(POD_NAME_ANNOTATION)
         self._pod_name = pod_name if pod_name is not None else self.sandbox_id
         return self._pod_name
+
+    def get_pod_ip(self) -> str | None:
+        """Fetches the first pod IP from the Sandbox status.
+
+        Returns None if the controller does not populate podIPs.
+        """
+        if self._pod_ip is not None:
+            return self._pod_ip
+
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        pod_ips = sandbox_object.get('status', {}).get('podIPs', [])
+        self._pod_ip = pod_ips[0] if pod_ips else None
+        return self._pod_ip
 
     def status(self) -> tuple[str, str]:
         """

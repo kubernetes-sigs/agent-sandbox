@@ -53,9 +53,10 @@ class ConnectionStrategy(ABC):
         """Checks if the connection is healthy. Raises SandboxPortForwardError if not."""
         pass
 
+    @abstractmethod
     def should_inject_router_headers(self) -> bool:
         """Returns True if X-Sandbox-* router headers should be injected into requests."""
-        return True
+        pass
 
 class DirectConnectionStrategy(ConnectionStrategy):
     def __init__(self, config: SandboxDirectConnectionConfig):
@@ -69,6 +70,9 @@ class DirectConnectionStrategy(ConnectionStrategy):
 
     def verify_connection(self):
         pass
+
+    def should_inject_router_headers(self) -> bool:
+        return True
 
 class GatewayConnectionStrategy(ConnectionStrategy):
     def __init__(self, config: SandboxGatewayConnectionConfig, k8s_helper: K8sHelper):
@@ -93,6 +97,9 @@ class GatewayConnectionStrategy(ConnectionStrategy):
 
     def verify_connection(self):
         pass
+
+    def should_inject_router_headers(self) -> bool:
+        return True
 
 class LocalTunnelConnectionStrategy(ConnectionStrategy):
     def __init__(self, sandbox_id: str, namespace: str, config: SandboxLocalTunnelConnectionConfig):
@@ -172,6 +179,9 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                 f"Kubectl Port-Forward crashed!\n"
                 f"Stderr: {stderr.decode(errors='replace')}"
             )
+
+    def should_inject_router_headers(self) -> bool:
+        return True
 
 class InClusterConnectionStrategy(ConnectionStrategy):
     """Provides direct in-cluster connectivity to a sandbox pod, bypassing the router.

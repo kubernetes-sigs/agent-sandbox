@@ -103,7 +103,7 @@ class TestSandbox(unittest.TestCase):
             namespace="custom-ns",
             connection_config=mock_connection_config,
             k8s_helper=mock_k8s_helper_instance,
-            pod_ip=None,
+            pod_ip=None,  # no use_pod_ip on this config
         )
 
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)

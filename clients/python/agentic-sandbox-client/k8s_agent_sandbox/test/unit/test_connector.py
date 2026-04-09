@@ -64,6 +64,21 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
     def test_close_does_not_raise(self):
         self.strategy.close()
 
+    def test_connect_uses_pod_ip_when_provided(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, pod_ip="10.244.0.5")
+        self.assertEqual(strategy.connect(), "http://10.244.0.5:8888")
+
+    def test_connect_uses_dns_when_pod_ip_not_provided(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, pod_ip=None)
+        self.assertEqual(strategy.connect(), "http://my-sandbox.dev.svc.cluster.local:8888")
+
+    def test_connect_pod_ip_uses_custom_port(self):
+        config = SandboxInClusterConnectionConfig(server_port=9000)
+        strategy = InClusterConnectionStrategy("sb", "ns", config, pod_ip="192.168.1.1")
+        self.assertEqual(strategy.connect(), "http://192.168.1.1:9000")
+
 
 class TestExistingStrategiesDefaultHeaderInjection(unittest.TestCase):
     """Regression: existing strategies must still inject router headers by default."""

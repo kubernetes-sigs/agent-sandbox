@@ -185,11 +185,15 @@ class InClusterConnectionStrategy(ConnectionStrategy):
         sandbox_id: str,
         namespace: str,
         config: SandboxInClusterConnectionConfig,
+        pod_ip: str | None = None,
     ):
-        self._base_url = (
-            f"http://{sandbox_id}.{namespace}"
-            f".svc.cluster.local:{config.server_port}"
-        )
+        if pod_ip:
+            self._base_url = f"http://{pod_ip}:{config.server_port}"
+        else:
+            self._base_url = (
+                f"http://{sandbox_id}.{namespace}"
+                f".svc.cluster.local:{config.server_port}"
+            )
 
     def connect(self) -> str:
         return self._base_url
@@ -213,13 +217,15 @@ class SandboxConnector:
         namespace: str,
         connection_config: SandboxConnectionConfig,
         k8s_helper: K8sHelper,
+        pod_ip: str | None = None,
     ):
         # Parameter initialization
         self.id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
-        
+        self.pod_ip = pod_ip
+
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
         
@@ -243,7 +249,7 @@ class SandboxConnector:
         elif isinstance(self.connection_config, SandboxLocalTunnelConnectionConfig):
             return LocalTunnelConnectionStrategy(self.id, self.namespace, self.connection_config)
         elif isinstance(self.connection_config, SandboxInClusterConnectionConfig):
-            return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config)
+            return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self.pod_ip)
         else:
             raise ValueError("Unknown connection configuration type")
 

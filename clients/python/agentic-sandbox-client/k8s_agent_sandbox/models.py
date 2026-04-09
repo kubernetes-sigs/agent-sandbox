@@ -46,13 +46,16 @@ class SandboxLocalTunnelConnectionConfig(BaseModel):
     server_port: int = 8888  # Port the sandbox container listens on.
 
 class SandboxInClusterConnectionConfig(BaseModel):
-    """Configuration for direct in-cluster connection to the sandbox pod via K8s DNS.
+    """Configuration for direct in-cluster connection to the sandbox pod, bypassing the router.
 
-    Constructs the URL as http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}
-    and bypasses the router entirely. No external config is required beyond what
-    the Sandbox already knows (id, namespace, port).
+    By default, connects via stable K8s DNS:
+        http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}
+
+    When use_pod_ip=True, connects directly to the pod IP from the Sandbox status,
+    avoiding DNS resolution at the cost of needing a K8s API call to retrieve the IP.
     """
     server_port: int = 8888  # Port the sandbox container listens on.
+    use_pod_ip: bool = False  # If True, connect via pod IP instead of cluster DNS.
 
 SandboxConnectionConfig = Union[
     SandboxDirectConnectionConfig,

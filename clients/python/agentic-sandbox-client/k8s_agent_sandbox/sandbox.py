@@ -45,13 +45,14 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
+        pod_ip: str | None = None,
     ):
         # Sandbox Related Configuration
         self.claim_name = claim_name
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
-        
+
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
 
@@ -60,7 +61,8 @@ class Sandbox:
             sandbox_id=self.sandbox_id, # Pass the base sandbox id to connect to.
             namespace=self.namespace,
             connection_config=self.connection_config,
-            k8s_helper=self.k8s_helper
+            k8s_helper=self.k8s_helper,
+            pod_ip=pod_ip,
         )
 
         # Tracer initialization

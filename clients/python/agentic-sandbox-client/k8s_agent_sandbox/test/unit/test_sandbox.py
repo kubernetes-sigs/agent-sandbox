@@ -102,7 +102,8 @@ class TestSandbox(unittest.TestCase):
             sandbox_id="custom-id",
             namespace="custom-ns",
             connection_config=mock_connection_config,
-            k8s_helper=mock_k8s_helper_instance
+            k8s_helper=mock_k8s_helper_instance,
+            pod_ip=None,
         )
 
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)

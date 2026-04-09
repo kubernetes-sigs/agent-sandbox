@@ -31,8 +31,9 @@ from .trace_manager import (
 )
 from .sandbox import Sandbox
 from .models import (
-    SandboxConnectionConfig, 
-    SandboxLocalTunnelConnectionConfig, 
+    SandboxConnectionConfig,
+    SandboxInClusterConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig
 )
 from .k8s_helper import K8sHelper
@@ -120,15 +121,20 @@ class SandboxClient(Generic[T]):
             remaining_timeout = max(0, int(sandbox_ready_timeout - elapsed_time))
             if remaining_timeout <= 0:
                 raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
-            self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
-            
+            pod_ip = self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
+
+            use_pod_ip = (
+                isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+                and self.connection_config.use_pod_ip
+            )
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
                 sandbox_id=sandbox_id,
                 namespace=namespace,
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
-                k8s_helper=self.k8s_helper
+                k8s_helper=self.k8s_helper,
+                pod_ip=pod_ip if use_pod_ip else None,
             )
         except Exception:
             # If creation or waiting fails, ensure we don't leave an orphaned claim
@@ -320,9 +326,12 @@ class SandboxClient(Generic[T]):
         self.k8s_helper.create_sandbox_claim(claim_name, template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle)
 
     @trace_span("wait_for_sandbox_ready")
-    def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
-        """Waits for the Sandbox custom resource to have a 'Ready' status."""
-        self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
+    def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int) -> str | None:
+        """Waits for the Sandbox custom resource to have a 'Ready' status.
+
+        Returns the first pod IP if available, or None.
+        """
+        return self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @trace_span("delete_claim")
     def _delete_claim(self, claim_name: str, namespace: str):

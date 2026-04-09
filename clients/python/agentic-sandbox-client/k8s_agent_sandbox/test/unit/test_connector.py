@@ -64,20 +64,35 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
     def test_close_does_not_raise(self):
         self.strategy.close()
 
-    def test_connect_uses_pod_ip_when_provided(self):
+    def test_connect_uses_pod_ip_when_callable_provided(self):
         config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
-        strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, pod_ip="10.244.0.5")
+        strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, get_pod_ip=lambda: "10.244.0.5")
         self.assertEqual(strategy.connect(), "http://10.244.0.5:8888")
 
-    def test_connect_uses_dns_when_pod_ip_not_provided(self):
+    def test_connect_falls_back_to_dns_when_callable_returns_none(self):
         config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
-        strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, pod_ip=None)
+        strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, get_pod_ip=lambda: None)
+        self.assertEqual(strategy.connect(), "http://my-sandbox.dev.svc.cluster.local:8888")
+
+    def test_connect_uses_dns_when_no_callable(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, get_pod_ip=None)
         self.assertEqual(strategy.connect(), "http://my-sandbox.dev.svc.cluster.local:8888")
 
     def test_connect_pod_ip_uses_custom_port(self):
         config = SandboxInClusterConnectionConfig(server_port=9000)
-        strategy = InClusterConnectionStrategy("sb", "ns", config, pod_ip="192.168.1.1")
+        strategy = InClusterConnectionStrategy("sb", "ns", config, get_pod_ip=lambda: "192.168.1.1")
         self.assertEqual(strategy.connect(), "http://192.168.1.1:9000")
+
+    def test_connect_caches_pod_ip_until_close(self):
+        """Pod IP is cached across connect() calls; close() invalidates the cache."""
+        ips = iter(["10.0.0.1", "10.0.0.2"])
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        strategy = InClusterConnectionStrategy("sb", "ns", config, get_pod_ip=lambda: next(ips))
+        self.assertEqual(strategy.connect(), "http://10.0.0.1:8888")
+        self.assertEqual(strategy.connect(), "http://10.0.0.1:8888")  # cached
+        strategy.close()  # invalidates cache
+        self.assertEqual(strategy.connect(), "http://10.0.0.2:8888")  # fresh resolve
 
 
 class TestExistingStrategiesDefaultHeaderInjection(unittest.TestCase):

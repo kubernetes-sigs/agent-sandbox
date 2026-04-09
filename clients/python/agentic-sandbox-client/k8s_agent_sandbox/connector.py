@@ -16,6 +16,7 @@ import logging
 import socket
 import subprocess
 import time
+from typing import Callable
 import requests
 from abc import ABC, abstractmethod
 from requests.adapters import HTTPAdapter
@@ -195,24 +196,34 @@ class InClusterConnectionStrategy(ConnectionStrategy):
         sandbox_id: str,
         namespace: str,
         config: SandboxInClusterConnectionConfig,
-        pod_ip: str | None = None,
+        get_pod_ip: Callable[[], str | None] | None = None,
     ):
-        if pod_ip:
-            self._base_url = f"http://{pod_ip}:{config.server_port}"
-        else:
-            self._base_url = (
-                f"http://{sandbox_id}.{namespace}"
-                f".svc.cluster.local:{config.server_port}"
-            )
+        self._dns_url = (
+            f"http://{sandbox_id}.{namespace}"
+            f".svc.cluster.local:{config.server_port}"
+        )
+        self._get_pod_ip = get_pod_ip
+        self._server_port = config.server_port
+        self._resolved = False
+        self._cached_pod_ip_url: str | None = None
 
     def connect(self) -> str:
-        return self._base_url
+        if self._get_pod_ip:
+            if self._resolved:
+                return self._cached_pod_ip_url or self._dns_url
+            pod_ip = self._get_pod_ip()
+            self._resolved = True
+            if pod_ip:
+                self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                return self._cached_pod_ip_url
+        return self._dns_url
 
     def verify_connection(self):
         pass
 
     def close(self):
-        pass
+        self._resolved = False
+        self._cached_pod_ip_url = None
 
     def should_inject_router_headers(self) -> bool:
         return False
@@ -227,14 +238,14 @@ class SandboxConnector:
         namespace: str,
         connection_config: SandboxConnectionConfig,
         k8s_helper: K8sHelper,
-        pod_ip: str | None = None,
+        get_pod_ip: Callable[[], str | None] | None = None,
     ):
         # Parameter initialization
         self.id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
-        self._pod_ip = pod_ip
+        self._get_pod_ip = get_pod_ip
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
@@ -259,7 +270,7 @@ class SandboxConnector:
         elif isinstance(self.connection_config, SandboxLocalTunnelConnectionConfig):
             return LocalTunnelConnectionStrategy(self.id, self.namespace, self.connection_config)
         elif isinstance(self.connection_config, SandboxInClusterConnectionConfig):
-            return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self._pod_ip)
+            return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self._get_pod_ip)
         else:
             raise ValueError("Unknown connection configuration type")
 

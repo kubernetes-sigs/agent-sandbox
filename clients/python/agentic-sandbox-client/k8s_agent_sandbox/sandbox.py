@@ -56,19 +56,17 @@ class Sandbox:
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
 
-        # Resolve pod IP if requested before establishing connection
-        self._pod_ip = None
-        if (isinstance(self.connection_config, SandboxInClusterConnectionConfig)
-                and self.connection_config.use_pod_ip):
-            self.get_pod_ip()
-
         # Establish Sandbox Connection
+        use_pod_ip = (
+            isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+            and self.connection_config.use_pod_ip
+        )
         self.connector = SandboxConnector(
             sandbox_id=self.sandbox_id,
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
-            pod_ip=self._pod_ip,
+            get_pod_ip=self.get_pod_ip if use_pod_ip else None,
         )
 
         # Tracer initialization
@@ -99,15 +97,13 @@ class Sandbox:
     def get_pod_ip(self) -> str | None:
         """Fetches the first pod IP from the Sandbox status.
 
+        Always queries the K8s API for the latest IP — the pod IP can change
+        after a pod restart (e.g. when spec.replicas is scaled to 0 and back).
         Returns None if the controller does not populate podIPs.
         """
-        if self._pod_ip is not None:
-            return self._pod_ip
-
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         pod_ips = sandbox_object.get('status', {}).get('podIPs', [])
-        self._pod_ip = pod_ips[0] if pod_ips else None
-        return self._pod_ip
+        return pod_ips[0] if pod_ips else None
 
     def status(self) -> tuple[str, str]:
         """

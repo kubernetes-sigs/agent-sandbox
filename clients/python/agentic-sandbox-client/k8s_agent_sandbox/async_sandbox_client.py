@@ -154,14 +154,10 @@ class AsyncSandboxClient(Generic[T]):
                 raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
             await self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
 
-            # Resolve pod IP if requested — must happen after sandbox is Ready
-            pod_ip = None
-            if (isinstance(self.connection_config, SandboxInClusterConnectionConfig)
-                    and self.connection_config.use_pod_ip):
-                sandbox_obj = await self.k8s_helper.get_sandbox(sandbox_id, namespace) or {}
-                pod_ips = sandbox_obj.get("status", {}).get("podIPs", [])
-                pod_ip = pod_ips[0] if pod_ips else None
-
+            use_pod_ip = (
+                isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+                and self.connection_config.use_pod_ip
+            )
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
                 sandbox_id=sandbox_id,
@@ -169,7 +165,7 @@ class AsyncSandboxClient(Generic[T]):
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
                 k8s_helper=self.k8s_helper,
-                pod_ip=pod_ip,
+                use_pod_ip=use_pod_ip,
             )
         except (Exception, asyncio.CancelledError):
             await asyncio.shield(self._delete_claim(claim_name, namespace))

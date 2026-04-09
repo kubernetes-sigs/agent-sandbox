@@ -282,14 +282,11 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         client = AsyncSandboxClient(connection_config=config)
         self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
 
-    async def test_pod_ip_resolved_when_use_pod_ip_true(self):
+    async def test_use_pod_ip_passed_when_true(self):
         config = SandboxInClusterConnectionConfig(use_pod_ip=True)
         client = AsyncSandboxClient(connection_config=config)
         mock_k8s_helper = client.k8s_helper
         mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
-        mock_k8s_helper.get_sandbox = AsyncMock(return_value={
-            "status": {"podIPs": ["10.244.0.5"]}
-        })
 
         mock_sandbox_class = MagicMock()
         mock_sandbox_class.return_value = MagicMock()
@@ -300,9 +297,9 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
             await client.create_sandbox("my-template")
 
         call_kwargs = mock_sandbox_class.call_args.kwargs
-        self.assertEqual(call_kwargs["pod_ip"], "10.244.0.5")
+        self.assertTrue(call_kwargs["use_pod_ip"])
 
-    async def test_pod_ip_none_when_use_pod_ip_false(self):
+    async def test_use_pod_ip_false_when_not_set(self):
         config = SandboxInClusterConnectionConfig(use_pod_ip=False)
         client = AsyncSandboxClient(connection_config=config)
         mock_k8s_helper = client.k8s_helper
@@ -317,7 +314,7 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
             await client.create_sandbox("my-template")
 
         call_kwargs = mock_sandbox_class.call_args.kwargs
-        self.assertIsNone(call_kwargs.get("pod_ip"))
+        self.assertFalse(call_kwargs.get("use_pod_ip", False))
 
 
 class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
@@ -332,7 +329,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("does not support SandboxLocalTunnelConnectionConfig", str(ctx.exception))
 
-    async def test_in_cluster_uses_dns_by_default(self):
+    async def test_in_cluster_resolves_dns_by_default(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(
             sandbox_id="my-sandbox",
@@ -340,18 +337,20 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
             connection_config=config,
             k8s_helper=MagicMock(),
         )
-        self.assertEqual(connector._base_url, "http://my-sandbox.dev.svc.cluster.local:8888")
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://my-sandbox.dev.svc.cluster.local:8888")
 
-    async def test_in_cluster_uses_pod_ip_when_provided(self):
+    async def test_in_cluster_resolves_pod_ip_via_callable(self):
         config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
         connector = AsyncSandboxConnector(
             sandbox_id="my-sandbox",
             namespace="dev",
             connection_config=config,
             k8s_helper=MagicMock(),
-            pod_ip="10.244.0.5",
+            get_pod_ip=AsyncMock(return_value="10.244.0.5"),
         )
-        self.assertEqual(connector._base_url, "http://10.244.0.5:8888")
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://10.244.0.5:8888")
 
     async def test_in_cluster_does_not_inject_router_headers(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)

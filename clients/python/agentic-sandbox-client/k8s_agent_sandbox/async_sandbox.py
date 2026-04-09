@@ -19,7 +19,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 
 
@@ -45,7 +45,7 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
-        pod_ip: str | None = None,
+        use_pod_ip: bool = False,
     ):
         if connection_config is None:
             raise ValueError(
@@ -65,7 +65,7 @@ class AsyncSandbox:
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
-            pod_ip=pod_ip,
+            get_pod_ip=self.get_pod_ip if use_pod_ip else None,
         )
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
@@ -81,7 +81,6 @@ class AsyncSandbox:
 
         self._is_closed = False
         self._pod_name = None
-        self._pod_ip = pod_ip
 
     async def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
@@ -98,15 +97,13 @@ class AsyncSandbox:
     async def get_pod_ip(self) -> str | None:
         """Fetches the first pod IP from the Sandbox status.
 
+        Always queries the K8s API for the latest IP — the pod IP can change
+        after a pod restart (e.g. when spec.replicas is scaled to 0 and back).
         Returns None if the controller does not populate podIPs.
         """
-        if self._pod_ip is not None:
-            return self._pod_ip
-
         sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         pod_ips = sandbox_object.get("status", {}).get("podIPs", [])
-        self._pod_ip = pod_ips[0] if pod_ips else None
-        return self._pod_ip
+        return pod_ips[0] if pod_ips else None
 
     @property
     def commands(self) -> AsyncCommandExecutor | None:

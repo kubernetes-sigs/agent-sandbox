@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+from typing import Callable, Awaitable
 
 import httpx
 
@@ -49,7 +50,7 @@ class AsyncSandboxConnector:
         namespace: str,
         connection_config: SandboxConnectionConfig,
         k8s_helper: AsyncK8sHelper,
-        pod_ip: str | None = None,
+        get_pod_ip: Callable[[], Awaitable[str | None]] | None = None,
     ):
         if isinstance(connection_config, SandboxLocalTunnelConnectionConfig):
             raise ValueError(
@@ -62,16 +63,20 @@ class AsyncSandboxConnector:
         self.namespace = namespace
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
+        self._get_pod_ip = get_pod_ip
 
         self._base_url: str | None = None
+        self._pod_ip_resolved = False
+        self._cached_pod_ip_url: str | None = None
         if isinstance(connection_config, SandboxInClusterConnectionConfig):
-            if pod_ip:
-                self._base_url = f"http://{pod_ip}:{connection_config.server_port}"
-            else:
-                self._base_url = (
-                    f"http://{sandbox_id}.{namespace}"
-                    f".svc.cluster.local:{connection_config.server_port}"
-                )
+            self._dns_url = (
+                f"http://{sandbox_id}.{namespace}"
+                f".svc.cluster.local:{connection_config.server_port}"
+            )
+            self._server_port = connection_config.server_port
+        else:
+            self._dns_url = None
+            self._server_port = None
 
         self._inject_router_headers = not isinstance(
             connection_config, SandboxInClusterConnectionConfig
@@ -83,6 +88,17 @@ class AsyncSandboxConnector:
         )
 
     async def _resolve_base_url(self) -> str:
+        if isinstance(self.connection_config, SandboxInClusterConnectionConfig):
+            if self._get_pod_ip:
+                if self._pod_ip_resolved:
+                    return self._cached_pod_ip_url or self._dns_url
+                pod_ip = await self._get_pod_ip()
+                self._pod_ip_resolved = True
+                if pod_ip:
+                    self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                    return self._cached_pod_ip_url
+            return self._dns_url
+
         if self._base_url:
             return self._base_url
 
@@ -138,10 +154,11 @@ class AsyncSandboxConnector:
                 ) from e
             except httpx.HTTPError as e:
                 logger.error(f"Request to sandbox failed: {e}")
-                # Only clear the cached URL for Gateway config — the IP may have changed.
-                # Direct and InCluster URLs are stable and must not be cleared.
+                # Clear cached URLs that may have gone stale.
                 if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
                     self._base_url = None
+                self._pod_ip_resolved = False
+                self._cached_pod_ip_url = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=None,
@@ -157,6 +174,7 @@ class AsyncSandboxConnector:
 
     async def close(self):
         await self.client.aclose()
-        # Only clear volatile URLs (Gateway). Direct and InCluster URLs are stable.
         if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
             self._base_url = None
+        self._pod_ip_resolved = False
+        self._cached_pod_ip_url = None

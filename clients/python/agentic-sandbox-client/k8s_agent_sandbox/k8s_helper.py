@@ -22,6 +22,7 @@ from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
     GATEWAY_PLURAL,
@@ -62,9 +63,15 @@ class K8sHelper:
                 annotations propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
         """
+        from datetime import datetime
+
+        updated_annotations = annotations or {}
+        if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
+            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.utcnow().isoformat() + "Z"
+
         metadata = {
             "name": name,
-            "annotations": annotations or {},
+            "annotations": updated_annotations,
         }
         if labels:
             metadata["labels"] = labels
@@ -95,7 +102,7 @@ class K8sHelper:
             plural=CLAIM_PLURAL_NAME,
             body=manifest
         )
-    
+
     def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
@@ -129,7 +136,7 @@ class K8sHelper:
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     claim_object = event['object']
                     status = claim_object.get('status') or {}
-                    
+
                     for cond in status.get('conditions', []):
                         if (
                             cond.get('type') == 'Ready'
@@ -271,8 +278,8 @@ class K8sHelper:
                 kwargs["label_selector"] = label_selector
             response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
             return [
-                item.get("metadata", {}).get("name") 
-                for item in response.get("items", []) 
+                item.get("metadata", {}).get("name")
+                for item in response.get("items", [])
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:

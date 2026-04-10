@@ -137,6 +137,12 @@ func verifyOnReplenishLifecycle(t *testing.T, tc *framework.TestContext, ns *cor
 	require.NoError(t, err, "Sandbox should still exist")
 	require.NoError(t, tc.Delete(t.Context(), sb), "Failed to delete sandbox for replenishment")
 
+	// Wait for the old sandbox to be gone
+	require.Eventually(t, func() bool {
+		err := tc.Get(t.Context(), types.NamespacedName{Name: poolSandboxName, Namespace: ns.Name}, &sandboxv1alpha1.Sandbox{})
+		return k8serrors.IsNotFound(err)
+	}, 30*time.Second, 1*time.Second, "old sandbox should be deleted")
+
 	// Wait for the warm pool to be ready again
 	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
 

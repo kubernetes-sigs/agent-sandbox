@@ -25,6 +25,7 @@ SANDBOX_API_GROUP = "agents.x-k8s.io"
 SANDBOX_API_VERSION = "v1beta1"
 SANDBOX_PLURAL_NAME = "sandboxes"
 
+CLIENT_REQUEST_TIME_ANNOTATION = "agents.x-k8s.io/client-first-requested-at"
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 PODSNAPSHOT_POD_NAME_ANNOTATION = "podsnapshot.gke.io/origin-pod"
 SANDBOX_NAME_HASH_LABEL = "agents.x-k8s.io/sandbox-name-hash"

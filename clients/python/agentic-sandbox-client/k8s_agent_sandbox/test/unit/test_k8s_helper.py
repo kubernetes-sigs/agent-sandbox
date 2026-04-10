@@ -29,7 +29,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
         helper = K8sHelper()
         helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace",
+            "test-template", "test-namespace",
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels={"agent": "code-agent", "team": "platform"},
         )
@@ -45,7 +45,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
         helper = K8sHelper()
         helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace",
+            "test-template", "test-namespace",
             labels={"agent": "code-agent"},
         )
 
@@ -58,7 +58,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         mock_api_cls.return_value = mock_api
 
         helper = K8sHelper()
-        helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
+        helper.create_sandbox_claim("test-template", "test-namespace")
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertEqual(body["metadata"]["annotations"], {})
@@ -74,7 +74,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         }
         helper = K8sHelper()
         helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", lifecycle=lifecycle
+            "test-template", "test-namespace", lifecycle=lifecycle
         )
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
@@ -86,7 +86,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         mock_api_cls.return_value = mock_api
 
         helper = K8sHelper()
-        helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
+        helper.create_sandbox_claim("test-template", "test-namespace")
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertNotIn("lifecycle", body["spec"])

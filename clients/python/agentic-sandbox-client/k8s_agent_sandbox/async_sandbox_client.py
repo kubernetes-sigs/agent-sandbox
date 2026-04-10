@@ -23,7 +23,6 @@ import asyncio
 import logging
 import re
 import time
-import uuid
 from typing import Generic, TypeVar
 
 from .async_k8s_helper import AsyncK8sHelper
@@ -31,7 +30,7 @@ from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .models import SandboxConnectionConfig, SandboxTracerConfig
-from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
+from .trace_manager import async_trace_span, create_tracer_manager, create_tracer_provider, trace
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +73,10 @@ class AsyncSandboxClient(Generic[T]):
         self.connection_config = connection_config
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
-        if self.tracer_config.enable_tracing:
-            initialize_tracer(self.tracer_config.trace_service_name)
-        self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
+        if self.tracer_config.enable_tracing and self.tracer_config.tracer_provider is None:
+            self.tracer_config.tracer_provider = create_tracer_provider(self.tracer_config.trace_service_name)
+        self.tracing_manager, self.tracer = create_tracer_manager(
+            self.tracer_config, self.tracer_config.tracer_provider)
 
         self.k8s_helper = AsyncK8sHelper()
 
@@ -139,10 +139,8 @@ class AsyncSandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
-
         try:
-            await self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle)
+            claim_name = await self._create_claim(template, namespace, labels=labels, lifecycle=lifecycle)
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, sandbox_ready_timeout
@@ -312,12 +310,22 @@ class AsyncSandboxClient(Generic[T]):
     @async_trace_span("create_claim")
     async def _create_claim(
         self,
-        claim_name: str,
         template_name: str,
         namespace: str,
         labels: dict[str, str] | None = None,
         lifecycle: dict | None = None,
-    ):
+    ) -> str:
+        """Creates the SandboxClaim and returns its generated name."""
+        annotations = {}
+        if self.tracing_manager:
+            trace_context_str = self.tracing_manager.get_trace_context_json()
+            if trace_context_str:
+                annotations["opentelemetry.io/trace-context"] = trace_context_str
+
+        claim_name = await self.k8s_helper.create_sandbox_claim(
+            template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle
+        )
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", claim_name)
@@ -325,15 +333,7 @@ class AsyncSandboxClient(Generic[T]):
                 span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
                 span.set_attribute("sandbox.lifecycle.shutdown_policy", lifecycle["shutdownPolicy"])
 
-        annotations = {}
-        if self.tracing_manager:
-            trace_context_str = self.tracing_manager.get_trace_context_json()
-            if trace_context_str:
-                annotations["opentelemetry.io/trace-context"] = trace_context_str
-
-        await self.k8s_helper.create_sandbox_claim(
-            claim_name, template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle
-        )
+        return claim_name
 
     @async_trace_span("wait_for_sandbox_ready")
     async def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):

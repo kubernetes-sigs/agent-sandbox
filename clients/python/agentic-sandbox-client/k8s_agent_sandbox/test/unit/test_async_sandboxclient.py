@@ -58,13 +58,13 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock, return_value="sandbox-claim-gen12") as mock_create, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
             sandbox = await self.client.create_sandbox("test-template", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-template", "test-namespace", labels=None, lifecycle=None
+                "test-template", "test-namespace", labels=None, lifecycle=None
             )
             self.assertEqual(sandbox, mock_sandbox_instance)
 
@@ -76,7 +76,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             side_effect=Exception("Timeout")
         )
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock), \
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock, return_value="sandbox-claim-gen12"), \
              patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
 
             with self.assertRaises(Exception) as ctx:
@@ -91,7 +91,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             side_effect=asyncio.CancelledError()
         )
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock), \
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock, return_value="sandbox-claim-gen12"), \
              patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
 
             with self.assertRaises(asyncio.CancelledError):
@@ -215,7 +215,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock, return_value="sandbox-claim-gen12") as mock_create, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
             await self.client.create_sandbox(
@@ -235,7 +235,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock, return_value="sandbox-claim-gen12") as mock_create, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
             await self.client.create_sandbox("test-template", "test-namespace")

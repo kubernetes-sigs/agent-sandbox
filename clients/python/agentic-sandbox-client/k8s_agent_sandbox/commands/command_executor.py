@@ -31,7 +31,7 @@ class CommandExecutor:
 
     @trace_span("run")
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
-        """Executes a command. Rejects responses larger than 16 MB."""
+        """Executes a command. Rejects responses exceeding ``MAX_EXECUTION_RESPONSE_SIZE``."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.command", command)

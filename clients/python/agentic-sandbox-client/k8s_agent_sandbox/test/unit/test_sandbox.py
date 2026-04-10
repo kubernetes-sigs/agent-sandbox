@@ -105,7 +105,7 @@ class TestSandbox(unittest.TestCase):
             k8s_helper=mock_k8s_helper_instance
         )
 
-        mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
+        mock_create_tracer_manager.assert_called_once_with(mock_tracer_config, None)
         mock_command_executor.assert_called_once_with(mock_connector.return_value, mock_tracer, "custom-tracer")
         mock_filesystem.assert_called_once_with(mock_connector.return_value, mock_tracer, "custom-tracer")
 

@@ -166,24 +166,24 @@ def test_explicit_disconnect_and_persistence(client: SandboxClient, template_nam
     persist_sandbox = client.create_sandbox(template_name, namespace=namespace)
     persist_claim = persist_sandbox.claim_name
     
-    print(f"Explicitly disconnecting sandbox '{persist_claim}'...")
-    persist_sandbox.disconnect()
-    assert not persist_sandbox.is_active, "Sandbox should be inactive after disconnect()"
+    print(f"Explicitly closing connection for sandbox '{persist_claim}'...")
+    persist_sandbox.close_connection()
+    assert not persist_sandbox.is_active, "Sandbox should be inactive after close_connection()"
     
     print("Checking active sandboxes list...")
     active_list = client.list_active_sandboxes()
-    assert (namespace, persist_claim) not in active_list, "Disconnected sandbox should be removed from active list"
+    assert (namespace, persist_claim) not in active_list, "Sandbox with closed connection should be removed from active list"
     
-    print(f"Re-attaching to disconnected sandbox '{persist_claim}'...")
+    print(f"Re-attaching to sandbox '{persist_claim}' with closed connection...")
     reattached_sandbox = client.get_sandbox(persist_claim, namespace=namespace)
     assert reattached_sandbox.is_active, "Reattached sandbox should be active"
     assert (namespace, persist_claim) in client.list_active_sandboxes(), "Restored sandbox should be back in active list"
-    assert persist_sandbox is not reattached_sandbox, "Expected different sandbox objects after disconnect and re-attach"
-    assert persist_sandbox.connector.session is not reattached_sandbox.connector.session, "Expected different requests.Session objects after disconnect and re-attach"
+    assert persist_sandbox is not reattached_sandbox, "Expected different sandbox objects after close_connection and re-attach"
+    assert persist_sandbox.connector.session is not reattached_sandbox.connector.session, "Expected different requests.Session objects after close_connection and re-attach"
     
     print("Cleaning up persisted sandbox...")
     reattached_sandbox.terminate()
-    print("--- Explicit Disconnect Test Passed ---")
+    print("--- Explicit Close Connection Test Passed ---")
 
 def test_creation_get_and_list_sandboxes(client: SandboxClient, template_name: str, namespace: str) -> tuple[Sandbox, Sandbox]:
     print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
@@ -294,7 +294,7 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     run_sandbox_tests(sandbox)
 
     # Test persistence of Sandbox in Kubernetes cluster after client side disconnection
-    test_explicit_disconnect_and_persistence(client, template_name, namespace)
+    test_explicit_close_connection_and_persistence(client, template_name, namespace)
 
     # Test Sandbox deletion at Kubernetes cluster
     test_termination_and_deletion(client, sandbox, sandbox2, namespace)
@@ -411,7 +411,8 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
 
     client = SandboxClient(
         connection_config=connection_config,
-        tracer_config=tracer_config
+        tracer_config=tracer_config,
+        cleanup=True
     )
     
     test_client_cleanup_flag(client, template_name, namespace, connection_config)

@@ -17,7 +17,7 @@ import time
 import logging
 from unittest.mock import MagicMock
 from pydantic import ValidationError
-from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -142,7 +142,21 @@ def run_sandbox_tests(sandbox: Sandbox):
     print("--- Pydantic Validation Tests Passed ---")
 
 
+def test_wrong_template_name(client: SandboxClient, namespace: str):
+    print("\n--- Testing Wrong Template Name ---")
+    wrong_template = "this-template-does-not-exist-123"
+    print(f"Attempting to create sandbox with non-existent template '{wrong_template}'...")
+    try:
+        client.create_sandbox(wrong_template, namespace=namespace)
+        raise AssertionError("Expected SandboxTemplateNotFoundError was not raised")
+    except SandboxTemplateNotFoundError as e:
+        print(f"Caught expected SandboxTemplateNotFoundError: {e}")
+    print("--- Wrong Template Name Test Passed! ---")
+
+
 def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
+    test_wrong_template_name(client, namespace)
+
     print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
     sandbox = client.create_sandbox(template_name, namespace=namespace)
     print(f"Sandbox created with claim name: {sandbox.claim_name}")

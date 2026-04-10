@@ -90,6 +90,27 @@ After running your client script, traces will be sent to Google Cloud.
 - You will see your traces appear in the list. You can click on a trace to see the full waterfall
   diagram, including the sandbox-client.lifecycle parent span and all its children.
 
+### GKE Deployment
+
+For production or testing in a real GKE cluster, you should deploy the OpenTelemetry Collector
+inside the cluster. This allows both the client (if running in the cluster) and the controllers
+to send traces to the same collector.
+
+Please refer to the official Google Cloud documentation for instructions on how to deploy the
+Google-Built OpenTelemetry Collector on GKE:
+[Deploy Google-Built OpenTelemetry Collector on GKE](https://docs.cloud.google.com/stackdriver/docs/instrumentation/opentelemetry-collector-gke).
+
+When running in GKE, you will need to configure your client to send traces to the cluster-internal
+address of the collector service. You can do this by setting the `OTEL_EXPORTER_OTLP_ENDPOINT`
+environment variable:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector.default.svc.cluster.local:4317"
+```
+
+Replace `otel-collector.default.svc.cluster.local` with the actual service name and namespace
+of your deployed collector.
+
 ## Tracing Behavior with Multiple Clients
 
 It is generally expected that most clients within the same application process will share the same

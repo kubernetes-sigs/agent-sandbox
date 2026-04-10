@@ -21,6 +21,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -592,52 +593,75 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			updated = true
 		}
 		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
+		var managedLabelKeys []string
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-			if isSystemMetadata(k) {
-				continue
-			}
 			if pod.Labels[k] != v {
 				pod.Labels[k] = v
 				updated = true
 			}
+			managedLabelKeys = append(managedLabelKeys, k)
 		}
 
 		// Handle deletion of labels
-		for k := range pod.Labels {
-			if isSystemMetadata(k) {
-				continue
-			}
-			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
-				delete(pod.Labels, k)
-				updated = true
-			}
-		}
-
-		// Propagate pod template annotations to the existing pod
-		if sandbox.Spec.PodTemplate.ObjectMeta.Annotations != nil {
-			if pod.Annotations == nil {
-				pod.Annotations = make(map[string]string)
-			}
-			for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
-				if isSystemMetadata(k) {
+		propagatedLabelsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation]
+		if propagatedLabelsStr != "" {
+			propagatedLabels := strings.Split(propagatedLabelsStr, ",")
+			for _, k := range propagatedLabels {
+				if k == "" {
 					continue
 				}
-				if pod.Annotations[k] != v {
-					pod.Annotations[k] = v
+				if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
+					delete(pod.Labels, k)
 					updated = true
 				}
 			}
 		}
 
+		// Propagate pod template annotations to the existing pod
+		var managedAnnotationKeys []string
+		if sandbox.Spec.PodTemplate.ObjectMeta.Annotations != nil {
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+				if pod.Annotations[k] != v {
+					pod.Annotations[k] = v
+					updated = true
+				}
+				managedAnnotationKeys = append(managedAnnotationKeys, k)
+			}
+		}
+
 		// Handle deletion of annotations
-		for k := range pod.Annotations {
-			if isSystemMetadata(k) {
-				continue
+		propagatedAnnotationsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation]
+		if propagatedAnnotationsStr != "" {
+			propagatedAnnotations := strings.Split(propagatedAnnotationsStr, ",")
+			for _, k := range propagatedAnnotations {
+				if k == "" {
+					continue
+				}
+				if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {
+					delete(pod.Annotations, k)
+					updated = true
+				}
 			}
-			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {
-				delete(pod.Annotations, k)
-				updated = true
-			}
+		}
+
+		// Update tracked annotations on the pod
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		slices.Sort(managedLabelKeys)
+		newLabelsStr := strings.Join(managedLabelKeys, ",")
+		if pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation] != newLabelsStr {
+			pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation] = newLabelsStr
+			updated = true
+		}
+		slices.Sort(managedAnnotationKeys)
+		newAnnotationsStr := strings.Join(managedAnnotationKeys, ",")
+		if pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation] != newAnnotationsStr {
+			pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation] = newAnnotationsStr
+			updated = true
 		}
 
 		if updated {
@@ -660,18 +684,22 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	labels := map[string]string{
 		sandboxLabel: nameHash,
 	}
+	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-		if isSystemMetadata(k) {
-			continue
-		}
 		labels[k] = v
+		managedLabelKeys = append(managedLabelKeys, k)
 	}
 	annotations := map[string]string{}
+	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
-		if isSystemMetadata(k) {
-			continue
-		}
 		annotations[k] = v
+		managedAnnotationKeys = append(managedAnnotationKeys, k)
+	}
+	if len(managedLabelKeys) > 0 {
+		annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation] = strings.Join(managedLabelKeys, ",")
+	}
+	if len(managedAnnotationKeys) > 0 {
+		annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation] = strings.Join(managedAnnotationKeys, ",")
 	}
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
@@ -916,17 +944,4 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
-}
-
-// isSystemMetadata returns true if the key belongs to a restricted system domain.
-func isSystemMetadata(key string) bool {
-	parts := strings.SplitN(key, "/", 2)
-	if len(parts) == 0 {
-		return false
-	}
-	domain := parts[0]
-	return domain == "kubernetes.io" ||
-		domain == "k8s.io" ||
-		strings.HasSuffix(domain, ".agents.x-k8s.io") ||
-		domain == "agents.x-k8s.io"
 }

@@ -23,6 +23,7 @@ from .constants import (
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
     TERMINAL_CLAIM_READY_REASONS,
+    CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
     GATEWAY_PLURAL,
@@ -64,9 +65,15 @@ class K8sHelper:
                 annotations propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
         """
+        from datetime import datetime
+
+        updated_annotations = annotations or {}
+        if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
+            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.utcnow().isoformat() + "Z"
+
         metadata = {
             "name": name,
-            "annotations": annotations or {},
+            "annotations": updated_annotations,
             "labels": {
                 **(labels or {}),
                 CREATED_BY_LABEL: "python-client",
@@ -358,8 +365,8 @@ class K8sHelper:
                 kwargs["label_selector"] = label_selector
             response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
             return [
-                item.get("metadata", {}).get("name") 
-                for item in response.get("items", []) 
+                item.get("metadata", {}).get("name")
+                for item in response.get("items", [])
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:

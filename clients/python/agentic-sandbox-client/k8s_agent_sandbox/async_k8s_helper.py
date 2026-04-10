@@ -24,6 +24,7 @@ from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
     GATEWAY_PLURAL,
@@ -81,9 +82,15 @@ class AsyncK8sHelper:
         """
         await self._ensure_initialized()
 
+        from datetime import datetime
+
+        updated_annotations = annotations or {}
+        if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
+            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.utcnow().isoformat() + "Z"
+
         metadata = {
             "name": name,
-            "annotations": annotations or {},
+            "annotations": updated_annotations,
             "labels": {
                 **(labels or {}),
                 CREATED_BY_LABEL: "python-client",

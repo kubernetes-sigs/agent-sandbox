@@ -228,20 +228,24 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 		}
 		if needObservabilityPatch {
 			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-			if actualObservedTimeEntry, ok := r.observedTimes.Load(key); ok {
-				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
-				if observedEntry.uid == claim.UID {
-					claim.Annotations[asmetrics.ObservabilityAnnotation] = observedEntry.timestamp.Format(time.RFC3339Nano)
-				} else {
-					now := time.Now()
-					claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
-					r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
+			actualObservedTimeEntry, ok := r.observedTimes.Load(key)
+
+			var timestamp time.Time
+
+			// Use the cached timestamp if the claim UID matches.
+			if ok {
+				entry := actualObservedTimeEntry.(observedTimeEntry)
+				if entry.uid == claim.UID {
+					timestamp = entry.timestamp
 				}
-			} else {
-				now := time.Now()
-				claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
-				r.observedTimes.Store(key, observedTimeEntry{timestamp: now, uid: claim.UID})
 			}
+
+			// If entry not found or UID mismatch, create a new timestamp and cache it
+			if timestamp.IsZero() {
+				timestamp = time.Now()
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: timestamp, uid: claim.UID})
+			}
+			claim.Annotations[asmetrics.ObservabilityAnnotation] = timestamp.Format(time.RFC3339Nano)
 		}
 		if needTraceContextPatch {
 			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext

@@ -16,10 +16,13 @@
 package metrics
 
 import (
+	"context"
+	"errors"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/agent-sandbox/internal/version"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -27,6 +30,9 @@ const (
 	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+
+	// ClientAnnotation is the annotation key for the client request time.
+	ClientAnnotation = "agents.x-k8s.io/client-first-requested-at"
 
 	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
 	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
@@ -58,6 +64,20 @@ var (
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_controller_startup_latency_ms",
 			Help: "Latency from controller first observed SandboxClaim to Sandbox Ready state in milliseconds.",
+			// Buckets for latency from 100ms to 4 minutes
+			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+		},
+		[]string{"launch_type", "sandbox_template"},
+	)
+
+	// ClientClaimStartupLatency measures the time from client request to SandboxClaim Ready state.
+	// Labels:
+	// - launch_type: "warm", "cold", "unknown"
+	// - sandbox_template: the SandboxTemplateRef.
+	ClientClaimStartupLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_client_claim_startup_latency_ms",
+			Help: "End-to-end latency from client request to Sandbox Ready state in milliseconds.",
 			// Buckets for latency from 100ms to 4 minutes
 			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
@@ -132,6 +152,7 @@ var (
 func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
+	metrics.Registry.MustRegister(ClientClaimStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 	metrics.Registry.MustRegister(BuildInfo)
@@ -147,6 +168,17 @@ func RecordClaimStartupLatency(startTime time.Time, launchType, templateName str
 func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templateName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
 	ClaimControllerStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+}
+
+// RecordClientClaimStartupLatency records the duration since the client request time.
+func RecordClientClaimStartupLatency(ctx context.Context, startTime time.Time, launchType, templateName string) {
+	duration := float64(time.Since(startTime).Milliseconds())
+	if duration < 0 {
+		logger := log.FromContext(ctx)
+		logger.Error(errors.New("client claim startup latency is negative"), "negative latency", "duration", duration)
+		return
+	}
+	ClientClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
 }
 
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.

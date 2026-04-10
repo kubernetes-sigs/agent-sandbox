@@ -16,7 +16,7 @@ import logging
 import time
 from typing import List
 from kubernetes import client, config, watch
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .exceptions import SandboxMetadataError, SandboxNotFoundError
 
 # Constants for API Groups and Resources
 CLAIM_API_GROUP = "extensions.agents.x-k8s.io"

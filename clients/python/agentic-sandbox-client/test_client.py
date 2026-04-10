@@ -31,9 +31,16 @@ from k8s_agent_sandbox.models import (
 from k8s_agent_sandbox.sandbox import Sandbox
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
- 
-def test_command_execution(sandbox: Sandbox):
-    """Tests command execution and pod introspection."""
+
+def run_sandbox_tests(sandbox: Sandbox):
+    """Tests methods on the Sandbox object (execution, files, etc)."""
+
+    print("\n--- Testing Sandbox Status ---")
+    status, message = sandbox.status()
+    print(f"Status: {status}, Message: '{message}'")
+    assert status == "SandboxReady", f"Expected 'SandboxReady', got '{status}'"
+    print("--- Sandbox Status Test Passed! ---")
+
     print("\n--- Testing Command Execution ---")
     command_to_run = "echo 'Hello from the sandbox shruti!'"
     print(f"Executing command: '{command_to_run}'")
@@ -76,7 +83,7 @@ def test_file_operations(sandbox: Sandbox):
 
     print(f"Read content: '{read_content}'")
     assert read_content == file_content
-    
+
     print("--- File Operations Test Passed! ---")
 
     # Test list and exists
@@ -99,19 +106,32 @@ def test_file_operations(sandbox: Sandbox):
     file_entry = next(f for f in files if f.name == file_path)
     assert file_entry.size == len(file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
     print("--- List and Exists Test Passed! ---")
-    
+
+    # Test introspection commands
+    print("\n--- Testing Pod Introspection ---")
+
+    print("\n--- Listing files in /app ---")
+    list_files_result = sandbox.commands.run("ls -la /app")
+    print(list_files_result.stdout)
+
+    print("\n--- Printing environment variables ---")
+    env_result = sandbox.commands.run("env")
+    print(env_result.stdout)
+
+    print("--- Introspection Tests Finished ---")
+
     print("\n--- Testing Pydantic Validation ---")
-    
+
     # Test: ExecutionResult defaults (partial response)
     original_send_request = sandbox.connector.send_request
-    
+
     mock_response = MagicMock()
     mock_response.json.return_value = {} # Empty response
     sandbox.connector.send_request = MagicMock(return_value=mock_response)
-    
+
     print("Testing ExecutionResult defaults with empty response...")
     # This should not raise error because of defaults
-    res = sandbox.commands.run("echo test") 
+    res = sandbox.commands.run("echo test")
     assert res.exit_code == -1
     assert res.stdout == ""
     assert isinstance(res, ExecutionResult)
@@ -124,7 +144,7 @@ def test_file_operations(sandbox: Sandbox):
         "type": "invalid_type", # Invalid literal
         "mod_time": 12345.6
     }]
-    
+
     print("Testing FileEntry validation with invalid type...")
     try:
         sandbox.files.list(".")
@@ -132,20 +152,64 @@ def test_file_operations(sandbox: Sandbox):
     except RuntimeError as e:
         print(f"Caught expected RuntimeError: {e}")
         assert "Server returned invalid file entry format" in str(e)
-    
+
     # Restore original method
     sandbox.connector.send_request = original_send_request
     print("--- Pydantic Validation Tests Passed ---")
 
+
+def test_claim_annotation(client: SandboxClient, template_name: str, namespace: str):
+    print("\n--- Testing SandboxClaim Annotation ---")
+    import uuid
+    from datetime import datetime
+    from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
+
+    claim_name = f"test-annotation-{uuid.uuid4().hex[:8]}"
+
+    # Create claim using client
+    client._create_claim(claim_name, template_name, namespace)
+
+    try:
+        # Get claim using k8s_helper
+        claim = client.k8s_helper.custom_objects_api.get_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="sandboxclaims",
+            name=claim_name
+        )
+
+        annotations = claim.get("metadata", {}).get("annotations", {})
+        print(f"Annotations: {annotations}")
+
+        assert CLIENT_REQUEST_TIME_ANNOTATION in annotations, f"Expected annotation '{CLIENT_REQUEST_TIME_ANNOTATION}' missing"
+
+        timestamp_str = annotations[CLIENT_REQUEST_TIME_ANNOTATION]
+        print(f"Timestamp: {timestamp_str}")
+
+        # Verify it can be parsed
+        assert timestamp_str.endswith('Z'), "Timestamp should end with Z"
+        try:
+            dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            print(f"Parsed datetime: {dt}")
+        except ValueError as e:
+            raise AssertionError(f"Failed to parse timestamp '{timestamp_str}': {e}")
+
+        print("--- SandboxClaim Annotation Test Passed! ---")
+
+    finally:
+        print(f"Cleaning up claim {claim_name}...")
+        client._delete_claim(claim_name, namespace)
+
 def run_sandbox_tests(sandbox: Sandbox):
     """Tests methods on the Sandbox object (execution, files, etc)."""
-    
+
     print("\n--- Testing Sandbox Status ---")
     status, message = sandbox.status()
     print(f"Status: {status}, Message: '{message}'")
     assert status == "SandboxReady", f"Expected 'SandboxReady', got '{status}'"
     print("--- Sandbox Status Test Passed! ---")
-    
+
     test_command_execution(sandbox)
     test_file_operations(sandbox)
 
@@ -165,22 +229,22 @@ def test_explicit_close_connection_and_persistence(client: SandboxClient, templa
     print("\n--- Testing Explicit Disconnect and Persistence ---")
     persist_sandbox = client.create_sandbox(template_name, namespace=namespace)
     persist_claim = persist_sandbox.claim_name
-    
+
     print(f"Explicitly closing connection for sandbox '{persist_claim}'...")
     persist_sandbox.close_connection()
     assert not persist_sandbox.is_active, "Sandbox should be inactive after close_connection()"
-    
+
     print("Checking active sandboxes list...")
     active_list = client.list_active_sandboxes()
     assert (namespace, persist_claim) not in active_list, "Sandbox with closed connection should be removed from active list"
-    
+
     print(f"Re-attaching to sandbox '{persist_claim}' with closed connection...")
     reattached_sandbox = client.get_sandbox(persist_claim, namespace=namespace)
     assert reattached_sandbox.is_active, "Reattached sandbox should be active"
     assert (namespace, persist_claim) in client.list_active_sandboxes(), "Restored sandbox should be back in active list"
     assert persist_sandbox is not reattached_sandbox, "Expected different sandbox objects after close_connection and re-attach"
     assert persist_sandbox.connector.session is not reattached_sandbox.connector.session, "Expected different requests.Session objects after close_connection and re-attach"
-    
+
     print("Cleaning up persisted sandbox...")
     reattached_sandbox.terminate()
     print("--- Explicit Close Connection Test Passed ---")
@@ -214,13 +278,15 @@ def test_creation_get_and_list_sandboxes(client: SandboxClient, template_name: s
     assert reattached_result.exit_code == 0
     assert reattached_result.stdout.strip() == "Re-attached"
     print("\n--- get_sandbox Test Passed ---")
-    
+
     return sandbox, sandbox2
 
 def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandbox2: Sandbox, namespace: str):
     print("\n--- Testing Termination and Get ---")
     print(f"Terminating sandbox {sandbox.claim_name}...")
     sandbox.terminate()
+
+    client.delete_sandbox(sandbox.claim_name, namespace=namespace)
 
     print(f"Attempting to get terminated sandbox {sandbox.claim_name}...")
     # Wait for K8s to fully delete the resource
@@ -236,7 +302,7 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
             print(f"Caught expected RuntimeError: {e}")
             assert "not found" in str(e)
             break
-            
+
     print("\n--- Verifying Sandbox Status after termination ---")
     status, message = sandbox.status()
     print(f"Status: {status}, Message: '{message}'")
@@ -246,14 +312,14 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
     print("\n--- Testing delete_all ---")
     # Ensure sandbox2 is still active
     assert (sandbox2.namespace, sandbox2.claim_name) in client.list_active_sandboxes()
-    
+
     print("Calling client.delete_all()...")
     client.delete_all()
-    
+
     # Verify client registry is empty
     active_sandboxes_after = client.list_active_sandboxes()
     assert len(active_sandboxes_after) == 0, f"Expected 0 active sandboxes, got {active_sandboxes_after}"
-    
+
     # Verify sandbox2 state
     assert not sandbox2.is_active, "Sandbox 2 should be marked inactive"
     assert sandbox2.commands is None, "Sandbox 2 commands engine should be None"
@@ -298,11 +364,11 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
 
     # Test Sandbox deletion at Kubernetes cluster
     test_termination_and_deletion(client, sandbox, sandbox2, namespace)
-    
+
 
 def test_client_cleanup_flag(client: SandboxClient, template_name: str, namespace: str, connection_config):
     print("\n--- Testing SandboxClient cleanup flag (Subprocess Simulation) ---")
-    
+
     # Reconstruct the connection config dynamically for the subprocess
     if isinstance(connection_config, SandboxGatewayConnectionConfig):
         conn_code = f"SandboxGatewayConnectionConfig(gateway_name='{connection_config.gateway_name}', gateway_namespace='{connection_config.gateway_namespace}', server_port={connection_config.server_port})"
@@ -323,18 +389,18 @@ client = SandboxClient(connection_config=conn_config, cleanup=cleanup_flag)
 sb = client.create_sandbox('{template_name}', namespace='{namespace}')
 print(f"CLAIM_NAME:{{sb.claim_name}}")
 """
-    
+
     print("Simulating script exit with cleanup=True...")
     res_true = subprocess.run([sys.executable, "-c", script, "True"], capture_output=True, text=True)
     if res_true.returncode != 0:
         raise RuntimeError(f"Subprocess failed:\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
-        
+
     claim_true = next((line.split("CLAIM_NAME:")[1].strip() for line in res_true.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
     if not claim_true:
         raise RuntimeError(f"Could not parse claim name.\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
-        
+
     print(f"Created sandbox '{claim_true}' in subprocess. Verifying deletion...")
-    
+
     # Verify the claim was successfully deleted by the OS closing the subprocess
     start_time = time.monotonic()
     deleted = False
@@ -347,7 +413,7 @@ print(f"CLAIM_NAME:{{sb.claim_name}}")
                 deleted = True
                 break
             time.sleep(2)
-            
+
     if not deleted:
         raise AssertionError(f"Sandbox {claim_true} should have been deleted by atexit!")
     print("Verified: Sandbox was successfully deleted on script exit.")
@@ -356,18 +422,18 @@ print(f"CLAIM_NAME:{{sb.claim_name}}")
     res_false = subprocess.run([sys.executable, "-c", script, "False"], capture_output=True, text=True)
     if res_false.returncode != 0:
         raise RuntimeError(f"Subprocess failed:\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
-        
+
     claim_false = next((line.split("CLAIM_NAME:")[1].strip() for line in res_false.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
     if not claim_false:
         raise RuntimeError(f"Could not parse claim name.\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
-        
+
     print(f"Created sandbox '{claim_false}' in subprocess. Verifying persistence...")
-    
+
     # Verify the claim was NOT deleted by verifying we can cleanly reconnect to it
     sb_false = client.get_sandbox(claim_false, namespace=namespace)
     assert sb_false.is_active, f"Sandbox {claim_false} should still be active!"
     print("Verified: Sandbox persisted after script exit.")
-    
+
     # Clean up the persisted sandbox explicitly
     sb_false.terminate()
     print("--- SandboxClient cleanup flag Test Passed ---")
@@ -414,7 +480,7 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
         tracer_config=tracer_config,
         cleanup=True
     )
-    
+
     test_client_cleanup_flag(client, template_name, namespace, connection_config)
 
     try:

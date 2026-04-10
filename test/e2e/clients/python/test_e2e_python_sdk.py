@@ -150,6 +150,49 @@ def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_rou
         client.delete_all()
 
 
+def test_python_sdk_annotation(tc, temp_namespace, sandbox_template):
+    """Tests that the Python SDK creates SandboxClaim with correct annotation."""
+    from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
+    from datetime import datetime
+    
+    client = SandboxClient()
+    try:
+        sandbox = client.create_sandbox(
+            template=sandbox_template,
+            namespace=temp_namespace,
+        )
+        
+        custom_objects_api = tc.get_custom_objects_api()
+        claim = custom_objects_api.get_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=temp_namespace,
+            plural="sandboxclaims",
+            name=sandbox.claim_name
+        )
+        
+        annotations = claim.get("metadata", {}).get("annotations", {})
+        print(f"Annotations: {annotations}")
+        
+        assert CLIENT_REQUEST_TIME_ANNOTATION in annotations, f"Expected annotation '{CLIENT_REQUEST_TIME_ANNOTATION}' missing"
+        
+        timestamp_str = annotations[CLIENT_REQUEST_TIME_ANNOTATION]
+        print(f"Timestamp: {timestamp_str}")
+        
+        assert timestamp_str.endswith('Z'), "Timestamp should end with Z"
+        try:
+            datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        except ValueError as e:
+            pytest.fail(f"Failed to parse timestamp '{timestamp_str}': {e}")
+            
+        print("--- SandboxClaim Annotation Test Passed! ---")
+        
+    except Exception as e:
+        pytest.fail(f"SDK test failed: {e}")
+    finally:
+        client.delete_all()
+
+
 def test_python_sdk_router_mode_warmpool(
     tc, temp_namespace, sandbox_template, deploy_router, sandbox_warmpool
 ):

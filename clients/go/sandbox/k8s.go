@@ -38,6 +38,7 @@ import (
 	extensionsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1alpha1"
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
@@ -131,6 +132,10 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 			"opentelemetry.io/trace-context": traceCtx,
 		}
 	}
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[asmetrics.ClientAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 
 	claim := &extv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{

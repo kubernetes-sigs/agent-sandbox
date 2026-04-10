@@ -323,7 +323,7 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	sandboxAnnotations := map[string]string{
 		sandboxv1alpha1.SandboxTemplateRefAnnotation: warmPool.Spec.TemplateRef.Name,
 	}
-	
+
 	// Copy template pod labels into sandbox pod template
 	podLabels := make(map[string]string)
 	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {

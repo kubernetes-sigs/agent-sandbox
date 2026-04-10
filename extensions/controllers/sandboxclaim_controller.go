@@ -2311,6 +2311,21 @@ func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Contex
 	return nil
 }
 
+// recordClientClaimStartupLatency records the client claim startup latency based on annotation.
+func (r *SandboxClaimReconciler) recordClientClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string) {
+	logger := log.FromContext(ctx)
+	clientRequestTime := claim.Annotations[asmetrics.ClientAnnotation]
+	if clientRequestTime == "" {
+		return
+	}
+	requestTime, err := time.Parse(time.RFC3339Nano, clientRequestTime)
+	if err != nil {
+		logger.Error(err, "Failed to parse client request time", "value", clientRequestTime)
+		return
+	}
+	asmetrics.RecordClientClaimStartupLatency(ctx, requestTime, launchType, templateName)
+}
+
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 // It returns an error when the first-ready annotation fails to persist so that
 // the reconciler retries. The retry is safe because the status already has
@@ -2368,6 +2383,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
+	r.recordClientClaimStartupLatency(ctx, claim, launchType, templateName)
 
 	// Stamp the first-ready annotation to prevent duplicate metric recording on
 	// re-Ready events (e.g. readiness probe flaps).

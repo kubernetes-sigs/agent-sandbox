@@ -1149,6 +1149,21 @@ func (r *SandboxClaimReconciler) recordSandboxCreationLatency(claim *extensionsv
 	}
 }
 
+// recordClientClaimStartupLatency records the client claim startup latency based on annotation.
+func (r *SandboxClaimReconciler) recordClientClaimStartupLatency(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, launchType string) {
+	logger := log.FromContext(ctx)
+	clientRequestTime := claim.Annotations[asmetrics.ClientAnnotation]
+	if clientRequestTime == "" {
+		return
+	}
+	requestTime, err := time.Parse(time.RFC3339Nano, clientRequestTime)
+	if err != nil {
+		logger.Error(err, "Failed to parse client request time", "value", clientRequestTime)
+		return
+	}
+	asmetrics.RecordClientClaimStartupLatency(ctx, requestTime, launchType, claim.Spec.TemplateRef.Name)
+}
+
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	ctx context.Context,
@@ -1181,6 +1196,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordClaimStartupLatency(ctx, claim, launchType)
 	r.recordControllerStartupLatency(ctx, claim, launchType)
 	r.recordSandboxCreationLatency(claim, sandbox, launchType)
+	r.recordClientClaimStartupLatency(ctx, claim, launchType)
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller.

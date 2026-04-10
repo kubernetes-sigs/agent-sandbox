@@ -1855,6 +1855,69 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 	}
 }
 
+func TestClientClaimLatencyMetric(t *testing.T) {
+	ctx := context.Background()
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	testCases := []struct {
+		name                 string
+		claim                *extensionsv1alpha1.SandboxClaim
+		oldStatus            *extensionsv1alpha1.SandboxClaimStatus
+		expectedObservations int
+	}{
+		{
+			name: "records client latency using annotation",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "client-time",
+					Namespace:         "default",
+					CreationTimestamp: pastTime,
+					Annotations: map[string]string{
+						asmetrics.ClientAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations: 1,
+		},
+		{
+			name: "ignores client latency if annotation is missing",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "no-client-time",
+					Namespace:         "default",
+					CreationTimestamp: pastTime,
+				},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.ClientClaimStartupLatency.Reset()
+
+			r := &SandboxClaimReconciler{}
+
+			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, nil)
+
+			count := testutil.CollectAndCount(asmetrics.ClientClaimStartupLatency)
+			if count != tc.expectedObservations {
+				t.Errorf("expected %d observations for ClientClaimStartupLatency, got %d", tc.expectedObservations, count)
+			}
+		})
+	}
+}
+
 func TestSandboxClaimCreationMetric(t *testing.T) {
 	template := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},

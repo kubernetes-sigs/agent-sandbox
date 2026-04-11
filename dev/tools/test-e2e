@@ -24,15 +24,25 @@ from shared import utils
 def run_go_e2e_tests(repo_root, artifact_dir, env):
     """Runs the Go e2e tests"""
     print("========= Running Go E2E tests... =========")
+    print(f"Race detector enabled: {race_enabled}")
+    race_enabled = os.getenv("RACE", "false").lower() == "true"
+
+    go_test_args = [
+       "./test/e2e/...",
+       "--parallel=1",
+       "-v",
+    ]
+
+    if race_enabled:
+        go_test_args.append("-race")
+
     go_test_cmd = utils.go_tool_args(
         "gotestsum",
-        f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
-        f"--jsonfile={artifact_dir}/test-e2e.json",
-        "--",
-        "./test/e2e/...",
-        "--parallel=1",
-        "-v",
-    )
+         f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
+         f"--jsonfile={artifact_dir}/test-e2e.json",
+         "--",
+         *go_test_args,
+)
     print(f"Running command: {' '.join(go_test_cmd)}")
     return subprocess.run(go_test_cmd, env=env, cwd=repo_root).returncode
 

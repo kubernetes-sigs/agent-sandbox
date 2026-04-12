@@ -38,11 +38,11 @@ test-unit:
 
 .PHONY: test-e2e
 test-e2e:
-	./dev/tools/test-e2e
+	RACE=$(RACE) ./dev/tools/test-e2e
 
 .PHONY: test-e2e-race
 test-e2e-race:
-	RACE=true ./dev/tools/test-e2e
+	RACE=1 ./dev/tools/test-e2e
 
 .PHONY: test-e2e-benchmarks
 test-e2e-benchmarks:

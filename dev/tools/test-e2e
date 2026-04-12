@@ -24,8 +24,8 @@ from shared import utils
 def run_go_e2e_tests(repo_root, artifact_dir, env):
     """Runs the Go e2e tests"""
     print("========= Running Go E2E tests... =========")
+    race_enabled = os.getenv("RACE", "false").lower() in ("true", "1", "yes")
     print(f"Race detector enabled: {race_enabled}")
-    race_enabled = os.getenv("RACE", "false").lower() == "true"
 
     go_test_args = [
        "./test/e2e/...",

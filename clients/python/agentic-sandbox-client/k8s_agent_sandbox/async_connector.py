@@ -147,6 +147,11 @@ class AsyncSandboxConnector:
                 return response
             except httpx.HTTPStatusError as e:
                 logger.error(f"Request to sandbox failed: {e}")
+                # Clear cached URLs that may have gone stale.
+                if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
+                    self._base_url = None
+                self._pod_ip_resolved = False
+                self._cached_pod_ip_url = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=e.response.status_code,

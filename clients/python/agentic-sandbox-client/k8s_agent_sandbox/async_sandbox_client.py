@@ -214,6 +214,10 @@ class AsyncSandboxClient(Generic[T]):
             async with self._lock:
                 self._active_connection_sandboxes.pop(key, None)
 
+        use_pod_ip = (
+            isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+            and self.connection_config.use_pod_ip
+        )
         new_handle = self.sandbox_class(
             claim_name=claim_name,
             sandbox_id=sandbox_id,
@@ -221,6 +225,7 @@ class AsyncSandboxClient(Generic[T]):
             connection_config=self.connection_config,
             tracer_config=self.tracer_config,
             k8s_helper=self.k8s_helper,
+            use_pod_ip=use_pod_ip,
         )
 
         async with self._lock:

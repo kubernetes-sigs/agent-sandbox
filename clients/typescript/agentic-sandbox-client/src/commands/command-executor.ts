@@ -19,15 +19,18 @@ import { withSpan } from "../trace-manager.js";
 export class CommandExecutor {
   private requestFn: RequestFn;
   private getTracer: () => Tracer | null;
+  private getParentContext: () => unknown;
   private traceServiceName: string;
 
   constructor(
     requestFn: RequestFn,
     getTracer: () => Tracer | null,
     traceServiceName: string,
+    getParentContext: () => unknown = () => null,
   ) {
     this.requestFn = requestFn;
     this.getTracer = getTracer;
+    this.getParentContext = getParentContext;
     this.traceServiceName = traceServiceName;
   }
 
@@ -60,6 +63,7 @@ export class CommandExecutor {
 
         return result;
       },
+      this.getParentContext(),
     );
   }
 }

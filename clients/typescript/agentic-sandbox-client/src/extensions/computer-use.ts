@@ -60,6 +60,7 @@ export class ComputerUseSandbox extends SandboxClient {
 
         return result;
       },
+      this.tracingManager?.parentContext,
     );
   }
 }

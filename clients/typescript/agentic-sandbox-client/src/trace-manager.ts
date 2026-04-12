@@ -150,18 +150,25 @@ export async function withSpan<T>(
   serviceName: string,
   spanSuffix: string,
   fn: (span: Span) => T | Promise<T>,
+  parentContext?: unknown,
 ): Promise<T> {
   if (!tracer) {
     return fn(new NoOpSpan());
   }
   const spanName = `${serviceName}.${spanSuffix}`;
-  return tracer.startActiveSpan(spanName, async (span) => {
-    try {
-      return await fn(span);
-    } finally {
-      span.end();
-    }
-  });
+  const startSpan = () =>
+    tracer.startActiveSpan(spanName, async (span) => {
+      try {
+        return await fn(span);
+      } finally {
+        span.end();
+      }
+    });
+
+  if (otelApi && parentContext != null) {
+    return await otelApi.context.with(parentContext, startSpan);
+  }
+  return startSpan();
 }
 
 export function getCurrentSpan(): Span {
@@ -172,9 +179,9 @@ export function getCurrentSpan(): Span {
 
 export class TracerManager {
   public tracer: Tracer;
+  public parentContext: unknown = null;
   private lifecycleSpanName: string;
   private parentSpan: Span | null = null;
-  private parentContext: unknown = null;
 
   constructor(serviceName: string) {
     const scopeName = serviceName.replace(/-/g, "_");

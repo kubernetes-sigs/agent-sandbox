@@ -21,15 +21,18 @@ import { withSpan } from "../trace-manager.js";
 export class Filesystem {
   private requestFn: RequestFn;
   private getTracer: () => Tracer | null;
+  private getParentContext: () => unknown;
   private traceServiceName: string;
 
   constructor(
     requestFn: RequestFn,
     getTracer: () => Tracer | null,
     traceServiceName: string,
+    getParentContext: () => unknown = () => null,
   ) {
     this.requestFn = requestFn;
     this.getTracer = getTracer;
+    this.getParentContext = getParentContext;
     this.traceServiceName = traceServiceName;
   }
 
@@ -81,6 +84,7 @@ export class Filesystem {
 
         console.info(`File '${base}' uploaded successfully.`);
       },
+      this.getParentContext(),
     );
   }
 
@@ -112,6 +116,7 @@ export class Filesystem {
 
         return buffer;
       },
+      this.getParentContext(),
     );
   }
 
@@ -151,6 +156,7 @@ export class Filesystem {
 
         return fileEntries;
       },
+      this.getParentContext(),
     );
   }
 
@@ -178,6 +184,7 @@ export class Filesystem {
 
         return exists;
       },
+      this.getParentContext(),
     );
   }
 }

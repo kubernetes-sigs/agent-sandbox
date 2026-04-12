@@ -145,12 +145,19 @@ export class SandboxClient {
     const requestFn: RequestFn = (method, endpoint, options) =>
       this.request(method, endpoint, options);
     const getTracer = () => this.tracer;
+    const getParentContext = () => this.tracingManager?.parentContext ?? null;
     this._commands = new CommandExecutor(
       requestFn,
       getTracer,
       this.traceServiceName,
+      getParentContext,
     );
-    this._files = new Filesystem(requestFn, getTracer, this.traceServiceName);
+    this._files = new Filesystem(
+      requestFn,
+      getTracer,
+      this.traceServiceName,
+      getParentContext,
+    );
   }
 
   isReady(): boolean {
@@ -300,7 +307,13 @@ export class SandboxClient {
       });
     };
 
-    await withSpan(this.tracer, this.traceServiceName, "create_claim", fn);
+    await withSpan(
+      this.tracer,
+      this.traceServiceName,
+      "create_claim",
+      fn,
+      this.tracingManager?.parentContext,
+    );
   }
 
   private resolveSandboxName(timeoutMs: number): Promise<string> {
@@ -491,6 +504,7 @@ export class SandboxClient {
       this.traceServiceName,
       "wait_for_sandbox_ready",
       fn,
+      this.tracingManager?.parentContext,
     );
   }
 
@@ -596,7 +610,13 @@ export class SandboxClient {
       });
     };
 
-    await withSpan(this.tracer, this.traceServiceName, "wait_for_gateway", fn);
+    await withSpan(
+      this.tracer,
+      this.traceServiceName,
+      "wait_for_gateway",
+      fn,
+      this.tracingManager?.parentContext,
+    );
   }
 
   private async startAndWaitForPortForward(): Promise<void> {
@@ -657,7 +677,13 @@ export class SandboxClient {
       throw new Error("Failed to establish tunnel to Router Service.");
     };
 
-    await withSpan(this.tracer, this.traceServiceName, "dev_mode_tunnel", fn);
+    await withSpan(
+      this.tracer,
+      this.traceServiceName,
+      "dev_mode_tunnel",
+      fn,
+      this.tracingManager?.parentContext,
+    );
   }
 
   protected async request(

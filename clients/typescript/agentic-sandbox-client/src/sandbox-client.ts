@@ -577,7 +577,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
             } else if (type === "DELETED") {
               cleanup();
               reject(
-                new SandboxNotFoundError(
+                new SandboxMetadataError(
                   `SandboxClaim '${claimName}' was deleted while waiting for it to be resolved.`,
                 ),
               );

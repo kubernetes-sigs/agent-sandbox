@@ -120,6 +120,7 @@ export async function initializeTracer(serviceName: string): Promise<void> {
     }) => {
       addSpanProcessor(processor: unknown): void;
       register(): void;
+      shutdown(): Promise<void>;
     };
     const BatchSpanProcessor = sdkTraceBase.BatchSpanProcessor as new (
       exporter: unknown,
@@ -131,6 +132,12 @@ export async function initializeTracer(serviceName: string): Promise<void> {
     const provider = new NodeTracerProvider({ resource });
     provider.addSpanProcessor(new BatchSpanProcessor(new OTLPTraceExporter()));
     provider.register();
+
+    // Register shutdown hook to flush BatchSpanProcessor on process exit.
+    // Analogous to Python's atexit.register(_TRACER_PROVIDER.shutdown).
+    process.once("beforeExit", async () => {
+      await provider.shutdown();
+    });
 
     tracerProviderInitialized = true;
     tracerProviderServiceName = serviceName;

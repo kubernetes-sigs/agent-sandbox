@@ -17,11 +17,15 @@ import type { Mock } from "vitest";
 
 // ---------- hoisted mock fns ----------
 
-const { mockCreateNamespacedCustomObject, mockDeleteNamespacedCustomObject } =
-  vi.hoisted(() => ({
-    mockCreateNamespacedCustomObject: vi.fn(),
-    mockDeleteNamespacedCustomObject: vi.fn(),
-  }));
+const {
+  mockCreateNamespacedCustomObject,
+  mockDeleteNamespacedCustomObject,
+  mockWatchFn,
+} = vi.hoisted(() => ({
+  mockCreateNamespacedCustomObject: vi.fn(),
+  mockDeleteNamespacedCustomObject: vi.fn(),
+  mockWatchFn: vi.fn(),
+}));
 
 // ---------- mock: @kubernetes/client-node ----------
 
@@ -31,13 +35,14 @@ vi.mock("@kubernetes/client-node", () => {
     makeApiClient: vi.fn().mockReturnValue({
       createNamespacedCustomObject: mockCreateNamespacedCustomObject,
       deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+      listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
     }),
   }));
 
   const CustomObjectsApi = vi.fn();
 
   const Watch = vi.fn().mockImplementation(() => ({
-    watch: vi.fn(),
+    watch: mockWatchFn,
   }));
 
   return { KubeConfig, CustomObjectsApi, Watch };
@@ -52,10 +57,16 @@ vi.mock("node:child_process", () => ({
 
 // ---------- import SUT ----------
 
-import { ComputerUseSandbox } from "../extensions/computer-use.js";
+import {
+  ComputerUseSandbox,
+  ComputerUseSandboxClient,
+} from "../extensions/computer-use.js";
+import { Sandbox } from "../sandbox.js";
+import type { SandboxInit } from "../sandbox.js";
+import { POD_NAME_ANNOTATION } from "../constants.js";
 
 /**
- * Test helper: subclass that exposes protected members.
+ * Test helper: exposes protected members for test assertions.
  */
 class TestableComputerUseSandbox extends ComputerUseSandbox {
   get _baseUrl(): string | undefined {
@@ -65,21 +76,33 @@ class TestableComputerUseSandbox extends ComputerUseSandbox {
     this.baseUrl = value;
   }
 
-  get _claimName(): string | undefined {
-    return this.claimName;
-  }
-  set _claimName(value: string | undefined) {
-    this.claimName = value;
-  }
-
   get _serverPort(): number {
     return this.serverPort;
   }
 }
 
+function makeBaseInit(): SandboxInit {
+  return {
+    claimName: "cu-claim",
+    sandboxName: "cu-sandbox",
+    podName: "cu-pod",
+    namespace: "default",
+    annotations: {},
+    serverPort: 8888,
+    apiUrl: "http://localhost:7777",
+    kubeConfig: {} as never,
+    customObjectsApi: {
+      deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+    } as never,
+    traceServiceName: "sandbox-client",
+    tracer: null,
+    tracingManager: null,
+  };
+}
+
 // ---------- tests ----------
 
-describe("ComputerUseSandbox", () => {
+describe("ComputerUseSandbox (handle)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("fetch", vi.fn());
@@ -92,31 +115,31 @@ describe("ComputerUseSandbox", () => {
   // ===== constructor =====
 
   describe("constructor", () => {
-    it("defaults serverPort to 8080", () => {
-      const client = new TestableComputerUseSandbox({
-        templateName: "computer-use-tpl",
-      });
-      expect(client._serverPort).toBe(8080);
+    it("defaults serverPort to 8080 when init.serverPort is 8888", () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      expect(sandbox._serverPort).toBe(8080);
     });
 
-    it("uses the explicitly provided value", () => {
-      const client = new TestableComputerUseSandbox({
-        templateName: "computer-use-tpl",
+    it("preserves explicitly set serverPort", () => {
+      const sandbox = new TestableComputerUseSandbox({
+        ...makeBaseInit(),
         serverPort: 9090,
       });
-      expect(client._serverPort).toBe(9090);
+      expect(sandbox._serverPort).toBe(9090);
+    });
+
+    it("is an instance of Sandbox", () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      expect(sandbox).toBeInstanceOf(Sandbox);
     });
   });
 
-  // ===== agent =====
+  // ===== agent() =====
 
-  describe("agent", () => {
-    it("correctly sends queries and parses results", async () => {
-      const client = new TestableComputerUseSandbox({
-        templateName: "computer-use-tpl",
-      });
-      client._baseUrl = "http://localhost:7777";
-      client._claimName = "cu-claim";
+  describe("agent()", () => {
+    it("sends query and parses result", async () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
 
       (fetch as Mock).mockResolvedValueOnce(
         new Response(
@@ -129,7 +152,9 @@ describe("ComputerUseSandbox", () => {
         ),
       );
 
-      const result = await client.agent("open the browser and search for cats");
+      const result = await sandbox.agent(
+        "open the browser and search for cats",
+      );
 
       expect(result).toEqual({
         stdout: "task completed",
@@ -147,14 +172,95 @@ describe("ComputerUseSandbox", () => {
       expect(opts.headers["X-Sandbox-Port"]).toBe("8080");
     });
 
-    it("throws an error when sandbox is not connected", async () => {
-      const client = new TestableComputerUseSandbox({
-        templateName: "computer-use-tpl",
+    it("throws when sandbox is not connected (no baseUrl)", async () => {
+      const sandbox = new TestableComputerUseSandbox({
+        ...makeBaseInit(),
+        apiUrl: undefined,
       });
+      // Do not call connect(), so baseUrl is undefined
 
-      await expect(client.agent("do something")).rejects.toThrow(
+      await expect(sandbox.agent("do something")).rejects.toThrow(
         "Sandbox is not ready",
       );
     });
+  });
+});
+
+// ---------- ComputerUseSandboxClient (registry) ----------
+
+describe("ComputerUseSandboxClient (registry)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function mockSandboxReadyFlow(sandboxName: string): void {
+    mockWatchFn.mockImplementationOnce(
+      (
+        _path: string,
+        _query: unknown,
+        callback: (type: string, obj: Record<string, unknown>) => void,
+      ) => {
+        callback("MODIFIED", { status: { sandbox: { name: sandboxName } } });
+        return Promise.resolve(new AbortController());
+      },
+    );
+
+    mockWatchFn.mockImplementationOnce(
+      (
+        _path: string,
+        _query: unknown,
+        callback: (type: string, obj: Record<string, unknown>) => void,
+      ) => {
+        callback("MODIFIED", {
+          metadata: {
+            name: sandboxName,
+            annotations: { [POD_NAME_ANNOTATION]: `${sandboxName}-pod` },
+          },
+          status: { conditions: [{ type: "Ready", status: "True" }] },
+        });
+        return Promise.resolve(new AbortController());
+      },
+    );
+  }
+
+  it("createSandbox() returns a ComputerUseSandbox handle", async () => {
+    mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+    mockSandboxReadyFlow("cu-sandbox-1");
+
+    const client = new ComputerUseSandboxClient({ apiUrl: "http://api:8080" });
+    const sandbox = await client.createSandbox("cu-template");
+
+    expect(sandbox).toBeInstanceOf(ComputerUseSandbox);
+    expect(sandbox).toBeInstanceOf(Sandbox);
+    expect(sandbox.isActive).toBe(true);
+  });
+
+  it("created sandbox has serverPort 8080 by default", async () => {
+    mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+    mockSandboxReadyFlow("cu-sandbox-2");
+
+    const client = new ComputerUseSandboxClient({ apiUrl: "http://api:8080" });
+    const sandbox = (await client.createSandbox(
+      "cu-template",
+    )) as TestableComputerUseSandbox;
+
+    // ComputerUseSandbox overrides 8888 → 8080
+    // Since TestableComputerUseSandbox is not used here, verify via agent() header
+    (fetch as Mock).mockResolvedValueOnce(
+      new Response(JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await sandbox.agent("test query");
+    expect((fetch as Mock).mock.calls[0][1].headers["X-Sandbox-Port"]).toBe(
+      "8080",
+    );
   });
 });

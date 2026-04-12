@@ -13,7 +13,6 @@
 // limitations under the License.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Mock } from "vitest";
 
 // ---------- hoisted mock fns (accessible inside vi.mock factories) ----------
 
@@ -21,16 +20,14 @@ const {
   mockCreateNamespacedCustomObject,
   mockDeleteNamespacedCustomObject,
   mockGetNamespacedCustomObject,
+  mockListNamespacedCustomObject,
   mockWatchFn,
-  mockSpawn,
-  mockCreateServer,
 } = vi.hoisted(() => ({
   mockCreateNamespacedCustomObject: vi.fn(),
   mockDeleteNamespacedCustomObject: vi.fn(),
   mockGetNamespacedCustomObject: vi.fn(),
+  mockListNamespacedCustomObject: vi.fn(),
   mockWatchFn: vi.fn(),
-  mockSpawn: vi.fn(),
-  mockCreateServer: vi.fn(),
 }));
 
 // ---------- mock: @kubernetes/client-node ----------
@@ -42,6 +39,7 @@ vi.mock("@kubernetes/client-node", () => {
       createNamespacedCustomObject: mockCreateNamespacedCustomObject,
       deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
       getNamespacedCustomObject: mockGetNamespacedCustomObject,
+      listNamespacedCustomObject: mockListNamespacedCustomObject,
     }),
   }));
 
@@ -57,7 +55,7 @@ vi.mock("@kubernetes/client-node", () => {
 // ---------- mock: node:child_process ----------
 
 vi.mock("node:child_process", () => ({
-  spawn: mockSpawn,
+  spawn: vi.fn(),
   ChildProcess: vi.fn(),
 }));
 
@@ -67,14 +65,15 @@ vi.mock("node:net", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
     ...actual,
-    default: { ...actual, createServer: mockCreateServer },
-    createServer: mockCreateServer,
+    default: { ...actual },
+    createServer: actual.createServer,
   };
 });
 
 // ---------- import SUT after mocks ----------
 
 import { SandboxClient } from "../sandbox-client.js";
+import { Sandbox } from "../sandbox.js";
 import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
@@ -82,87 +81,55 @@ import {
   POD_NAME_ANNOTATION,
 } from "../constants.js";
 
-/**
- * Test helper: subclass that exposes protected members.
- */
-class TestableSandboxClient extends SandboxClient {
-  get _baseUrl(): string | undefined {
-    return this.baseUrl;
-  }
-  set _baseUrl(value: string | undefined) {
-    this.baseUrl = value;
-  }
-
-  get _claimName(): string | undefined {
-    return this.claimName;
-  }
-  set _claimName(value: string | undefined) {
-    this.claimName = value;
-  }
-
-  get _sandboxName(): string | undefined {
-    return this.sandboxName;
-  }
-  set _sandboxName(value: string | undefined) {
-    this.sandboxName = value;
-  }
-
-  get _podName(): string | undefined {
-    return this.podName;
-  }
-  set _podName(value: string | undefined) {
-    this.podName = value;
-  }
-
-  get _namespace(): string {
-    return this.namespace;
-  }
-
-  get _serverPort(): number {
-    return this.serverPort;
-  }
-
-  get _templateName(): string {
-    return this.templateName;
-  }
-
-  get _portForwardProcess() {
-    return this.portForwardProcess;
-  }
-  set _portForwardProcess(value) {
-    this.portForwardProcess = value;
-  }
-
-  get _customObjectsApi() {
-    return this.customObjectsApi;
-  }
-}
-
 // ---------- helpers ----------
 
-function createReadyClient(
-  overrides: Partial<{
-    baseUrl: string;
-    claimName: string;
-    sandboxName: string;
-    namespace: string;
-    serverPort: number;
-  }> = {},
-): TestableSandboxClient {
-  const client = new TestableSandboxClient({
-    templateName: "test-template",
-    namespace: overrides.namespace ?? "default",
-    serverPort: overrides.serverPort,
-  });
-  client._baseUrl = overrides.baseUrl ?? "http://localhost:9999";
-  client._claimName = overrides.claimName ?? "test-claim";
-  client._sandboxName = overrides.sandboxName ?? "test-sandbox";
-  return client;
+/**
+ * Sets up two sequential Watch calls:
+ *   1. SandboxClaim watch → resolves sandbox name
+ *   2. Sandbox watch → becomes ready with optional pod annotation
+ */
+function mockSandboxReadyFlow(
+  sandboxName: string,
+  podAnnotation?: string,
+): void {
+  // First watch: SandboxClaim resolves actual sandbox name
+  mockWatchFn.mockImplementationOnce(
+    (
+      _path: string,
+      _query: unknown,
+      callback: (type: string, obj: Record<string, unknown>) => void,
+      _done: (err: unknown) => void,
+    ) => {
+      callback("MODIFIED", { status: { sandbox: { name: sandboxName } } });
+      return Promise.resolve(new AbortController());
+    },
+  );
+
+  // Second watch: Sandbox becomes Ready
+  mockWatchFn.mockImplementationOnce(
+    (
+      _path: string,
+      _query: unknown,
+      callback: (type: string, obj: Record<string, unknown>) => void,
+      _done: (err: unknown) => void,
+    ) => {
+      callback("MODIFIED", {
+        metadata: {
+          name: sandboxName,
+          annotations: podAnnotation
+            ? { [POD_NAME_ANNOTATION]: podAnnotation }
+            : {},
+        },
+        status: { conditions: [{ type: "Ready", status: "True" }] },
+      });
+      return Promise.resolve(new AbortController());
+    },
+  );
 }
 
 // ---------- tests ----------
 
-describe("SandboxClient", () => {
+describe("SandboxClient (registry)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("fetch", vi.fn());
@@ -175,612 +142,360 @@ describe("SandboxClient", () => {
   // ===== constructor =====
 
   describe("constructor", () => {
-    it("correctly sets default options", () => {
-      const client = new TestableSandboxClient({
-        templateName: "my-template",
-      });
-
-      expect(client._templateName).toBe("my-template");
-      expect(client._namespace).toBe("default");
-      expect(client._serverPort).toBe(8888);
-      expect(client.isReady()).toBe(false);
+    it("accepts empty options with sane defaults", () => {
+      const client = new SandboxClient();
+      expect(client).toBeInstanceOf(SandboxClient);
     });
 
-    it("reflects custom options", () => {
-      const client = new TestableSandboxClient({
-        templateName: "custom-tpl",
+    it("accepts all options without throwing", () => {
+      const client = new SandboxClient({
         namespace: "prod",
+        apiUrl: "http://api:8080",
         serverPort: 3000,
-        apiUrl: "http://my-api:8080",
+        sandboxReadyTimeout: 60,
+        enableTracing: false,
+        traceServiceName: "my-service",
       });
-
-      expect(client._templateName).toBe("custom-tpl");
-      expect(client._namespace).toBe("prod");
-      expect(client._serverPort).toBe(3000);
-      expect(client._baseUrl).toBe("http://my-api:8080");
+      expect(client).toBeInstanceOf(SandboxClient);
     });
   });
 
-  // ===== isReady =====
+  // ===== createSandbox =====
 
-  describe("isReady", () => {
-    it("returns false when baseUrl is not set", () => {
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-      });
-      expect(client.isReady()).toBe(false);
-    });
-
-    it("returns true when apiUrl is set", () => {
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-        apiUrl: "http://localhost:8080",
-      });
-      expect(client.isReady()).toBe(true);
-    });
-  });
-
-  // ===== commands.run =====
-
-  describe("commands.run", () => {
-    it("correctly parses command execution results", async () => {
-      const client = createReadyClient();
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            stdout: "hello world\n",
-            stderr: "",
-            exit_code: 0,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      );
-
-      const result = await client.commands.run("echo hello world");
-
-      expect(result).toEqual({
-        stdout: "hello world\n",
-        stderr: "",
-        exitCode: 0,
-      });
-
-      expect(fetch).toHaveBeenCalledOnce();
-      const [url, opts] = (fetch as Mock).mock.calls[0];
-      expect(url).toBe("http://localhost:9999/execute");
-      expect(opts.method).toBe("POST");
-      expect(JSON.parse(opts.body as string)).toEqual({
-        command: "echo hello world",
-      });
-      expect(opts.headers["X-Sandbox-ID"]).toBe("test-sandbox");
-      expect(opts.headers["X-Sandbox-Namespace"]).toBe("default");
-      expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
-    });
-
-    it("throws an error when sandbox is not connected", async () => {
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-      });
-
-      await expect(client.commands.run("ls")).rejects.toThrow(
-        "Sandbox is not ready for communication.",
-      );
-    });
-  });
-
-  // ===== files.write =====
-
-  describe("files.write", () => {
-    it("successfully uploads string content", async () => {
-      const client = createReadyClient();
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response("ok", { status: 200 }),
-      );
-
-      await client.files.write("test.txt", "file content");
-
-      expect(fetch).toHaveBeenCalledOnce();
-      const [url, opts] = (fetch as Mock).mock.calls[0];
-      expect(url).toBe("http://localhost:9999/upload");
-      expect(opts.method).toBe("POST");
-      expect(opts.body).toBeInstanceOf(FormData);
-
-      const formData = opts.body as FormData;
-      const file = formData.get("file") as File;
-      expect(file).toBeTruthy();
-      expect(file.name).toBe("test.txt");
-
-      const text = await file.text();
-      expect(text).toBe("file content");
-    });
-
-    it("successfully uploads Buffer content", async () => {
-      const client = createReadyClient();
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response("ok", { status: 200 }),
-      );
-
-      const buf = Buffer.from("binary data");
-      await client.files.write("output.bin", buf);
-
-      expect(fetch).toHaveBeenCalledOnce();
-      const [, opts] = (fetch as Mock).mock.calls[0];
-      const formData = opts.body as FormData;
-      const file = formData.get("file") as File;
-      expect(file.name).toBe("output.bin");
-
-      const arrayBuf = await file.arrayBuffer();
-      expect(Buffer.from(arrayBuf).toString()).toBe("binary data");
-    });
-
-    it.each([
-      ["sub/foo.txt"],
-      ["./foo.txt"],
-      ["../foo.txt"],
-      ["/abs/foo.txt"],
-      ["/foo.txt"],
-      ["."],
-      [".."],
-      ["/"],
-    ])("rejects non-plain filename: %s", async (filePath) => {
-      const client = createReadyClient();
-
-      await expect(client.files.write(filePath, "data")).rejects.toThrow(
-        /is not a plain filename/,
-      );
-      expect(fetch).not.toHaveBeenCalled();
-    });
-  });
-
-  // ===== files.read =====
-
-  describe("files.read", () => {
-    it("returns file download result as a Buffer", async () => {
-      const client = createReadyClient();
-      const content = "downloaded content";
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response(content, { status: 200 }),
-      );
-
-      const result = await client.files.read("tmp/hello.txt");
-
-      expect(Buffer.isBuffer(result)).toBe(true);
-      expect(result.toString()).toBe("downloaded content");
-
-      const [url] = (fetch as Mock).mock.calls[0];
-      expect(url).toBe("http://localhost:9999/download/tmp%2Fhello.txt");
-    });
-  });
-
-  // ===== files.list =====
-
-  describe("files.list", () => {
-    it("returns parsed FileEntry array", async () => {
-      const client = createReadyClient();
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response(
-          JSON.stringify([
-            { name: "file.txt", size: 100, type: "file", mod_time: 1700000000 },
-            {
-              name: "subdir",
-              size: 4096,
-              type: "directory",
-              mod_time: 1700000001,
-            },
-          ]),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      );
-
-      const entries = await client.files.list("tmp");
-
-      expect(entries).toEqual([
-        { name: "file.txt", size: 100, type: "file", modTime: 1700000000 },
-        { name: "subdir", size: 4096, type: "directory", modTime: 1700000001 },
-      ]);
-
-      const [url, opts] = (fetch as Mock).mock.calls[0];
-      expect(url).toBe("http://localhost:9999/list/tmp");
-      expect(opts.method).toBe("GET");
-    });
-
-    it("returns empty array for empty response", async () => {
-      const client = createReadyClient();
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response(JSON.stringify(null), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-
-      const entries = await client.files.list("empty-dir");
-      expect(entries).toEqual([]);
-    });
-  });
-
-  // ===== files.exists =====
-
-  describe("files.exists", () => {
-    it("returns true when file exists", async () => {
-      const client = createReadyClient();
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response(JSON.stringify({ exists: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-
-      const result = await client.files.exists("tmp/file.txt");
-
-      expect(result).toBe(true);
-
-      const [url, opts] = (fetch as Mock).mock.calls[0];
-      expect(url).toBe("http://localhost:9999/exists/tmp%2Ffile.txt");
-      expect(opts.method).toBe("GET");
-    });
-
-    it("returns false when file does not exist", async () => {
-      const client = createReadyClient();
-
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response(JSON.stringify({ exists: false }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-
-      const result = await client.files.exists("tmp/missing.txt");
-      expect(result).toBe(false);
-    });
-  });
-
-  // ===== start / close lifecycle =====
-
-  describe("start / close lifecycle", () => {
-    it("start(): executes flow createClaim -> waitForSandboxReady -> port-forward", async () => {
+  describe("createSandbox()", () => {
+    it("full flow: creates claim, watches, constructs Sandbox, registers", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("my-sandbox", "my-pod-0");
 
-      // First watch: SandboxClaim resolves the actual sandbox name
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("MODIFIED", {
-            status: { sandbox: { name: "my-sandbox" } },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("test-template", "default");
 
-      // Second watch: Sandbox becomes ready
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("MODIFIED", {
-            metadata: {
-              name: "my-sandbox",
-              annotations: { [POD_NAME_ANNOTATION]: "my-pod-0" },
-            },
-            status: {
-              conditions: [{ type: "Ready", status: "True" }],
-            },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
+      expect(sandbox).toBeInstanceOf(Sandbox);
+      expect(sandbox.isActive).toBe(true);
+      expect(sandbox.claimName).toMatch(/^sandbox-claim-/);
+      expect(sandbox.sandboxName).toBe("my-sandbox");
+      expect(sandbox.podName).toBe("my-pod-0");
+      expect(sandbox.namespace).toBe("default");
 
-      // mock getFreePort: override net.createServer
-      const fakeServer = {
-        listen: vi.fn((_port: number, _host: string, cb: () => void) => cb()),
-        address: vi.fn(() => ({ port: 12345 })),
-        close: vi.fn((cb: () => void) => cb()),
-        on: vi.fn(),
-      };
-      mockCreateServer.mockReturnValue(fakeServer);
-
-      // mock spawn for port-forward
-      const fakeProcess = {
-        exitCode: null as number | null,
-        kill: vi.fn(),
-        on: vi.fn(),
-        stdout: { on: vi.fn() },
-        stderr: { on: vi.fn() },
-      };
-      mockSpawn.mockReturnValue(fakeProcess);
-
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-        portForwardReadyTimeout: 1,
-      });
-
-      // Since port-forward requires actual socket connectivity, force exit
-      // to make the loop fail fast after verifying createClaim + watch
-      fakeProcess.exitCode = 1;
-
-      await client.start().catch(() => {
-        // expected: tunnel crash because we faked exitCode
-      });
-
-      // Verify createClaim was called
+      // Verify claim was created
       expect(mockCreateNamespacedCustomObject).toHaveBeenCalledOnce();
-      const callArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
-      expect(callArgs.group).toBe(CLAIM_API_GROUP);
-      expect(callArgs.version).toBe(CLAIM_API_VERSION);
-      expect(callArgs.plural).toBe(CLAIM_PLURAL_NAME);
-      expect(callArgs.namespace).toBe("default");
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.group).toBe(CLAIM_API_GROUP);
+      expect(createArgs.version).toBe(CLAIM_API_VERSION);
+      expect(createArgs.plural).toBe(CLAIM_PLURAL_NAME);
+      expect(createArgs.namespace).toBe("default");
+      expect(createArgs.body.spec.sandboxTemplateRef.name).toBe(
+        "test-template",
+      );
 
-      // Verify Watch was used for sandbox readiness (twice: claim resolve + sandbox ready)
+      // Verify two watches were used
       expect(mockWatchFn).toHaveBeenCalledTimes(2);
-
-      // Verify pod name was extracted from annotation
-      expect(client._podName).toBe("my-pod-0");
-      expect(client._sandboxName).toBe("my-sandbox");
     });
 
-    it("start() with apiUrl: completes flow createClaim -> waitForSandboxReady", async () => {
+    it("uses default namespace from client options", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-ns");
 
-      // First watch: SandboxClaim resolves the actual sandbox name
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("MODIFIED", {
-            status: { sandbox: { name: "my-sandbox-2" } },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
-
-      // Second watch: Sandbox becomes ready
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("MODIFIED", {
-            metadata: {
-              name: "my-sandbox-2",
-              annotations: {},
-            },
-            status: {
-              conditions: [{ type: "Ready", status: "True" }],
-            },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
-
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-        apiUrl: "http://direct-api:8080",
+      const client = new SandboxClient({
+        namespace: "prod",
+        apiUrl: "http://api:8080",
       });
+      const sandbox = await client.createSandbox("tpl");
 
-      await client.start();
-
-      expect(mockCreateNamespacedCustomObject).toHaveBeenCalledOnce();
-      expect(mockWatchFn).toHaveBeenCalledTimes(2);
-      expect(client.isReady()).toBe(true);
-      expect(client._baseUrl).toBe("http://direct-api:8080");
+      expect(sandbox.namespace).toBe("prod");
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.namespace).toBe("prod");
     });
 
-    it("start() with gatewayName: uses an already-ready Gateway without waiting for a watch event", async () => {
+    it("overrides namespace per-call", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockGetNamespacedCustomObject.mockResolvedValueOnce({
-        body: {
-          status: {
-            addresses: [{ value: "10.0.0.42" }],
-          },
-        },
+      mockSandboxReadyFlow("sandbox-staging");
+
+      const client = new SandboxClient({
+        namespace: "prod",
+        apiUrl: "http://api:8080",
       });
+      const sandbox = await client.createSandbox("tpl", "staging");
 
-      // First watch: SandboxClaim resolves the actual sandbox name
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("MODIFIED", {
-            status: { sandbox: { name: "my-sandbox-gateway" } },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
-
-      // Second watch: Sandbox becomes ready
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("MODIFIED", {
-            metadata: {
-              name: "my-sandbox-gateway",
-              annotations: {},
-            },
-            status: {
-              conditions: [{ type: "Ready", status: "True" }],
-            },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
-
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-        gatewayName: "kind-gateway",
-        gatewayNamespace: "default",
-      });
-
-      await client.start();
-
-      expect(mockGetNamespacedCustomObject).toHaveBeenCalledOnce();
-      expect(mockWatchFn).toHaveBeenCalledTimes(2);
-      expect(client._baseUrl).toBe("http://10.0.0.42");
+      expect(sandbox.namespace).toBe("staging");
     });
 
-    it("close(): executes port-forward kill -> delete claim", async () => {
+    it("passes labels to the claim manifest", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-labeled");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await client.createSandbox("tpl", "default", {
+        labels: { env: "test", team: "infra" },
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.metadata.labels).toEqual({
+        env: "test",
+        team: "infra",
+      });
+    });
+
+    it("throws when template is empty", async () => {
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("")).rejects.toThrow(
+        "Template name cannot be empty.",
+      );
+    });
+
+    it("cleans up orphaned claim when sandbox watch fails", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
 
-      const fakeProcess = {
-        kill: vi.fn(),
-        on: vi.fn((_event: string, cb: () => void) => {
-          if (_event === "exit") {
-            setTimeout(cb, 0);
-          }
-        }),
-        exitCode: null,
-      };
-
-      const client = createReadyClient();
-      client._portForwardProcess = fakeProcess as never;
-
-      await client.close();
-
-      expect(fakeProcess.kill).toHaveBeenCalledWith("SIGTERM");
-      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
-      const callArgs = mockDeleteNamespacedCustomObject.mock.calls[0][0];
-      expect(callArgs.group).toBe(CLAIM_API_GROUP);
-      expect(callArgs.version).toBe(CLAIM_API_VERSION);
-      expect(callArgs.plural).toBe(CLAIM_PLURAL_NAME);
-      expect(callArgs.name).toBe("test-claim");
-    });
-
-    it("close(): does not error if claim is 404", async () => {
-      mockDeleteNamespacedCustomObject.mockRejectedValueOnce(
-        new Error("HTTP response code was 404"),
+      // First watch: claim resolves
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", { status: { sandbox: { name: "s1" } } });
+          return Promise.resolve(new AbortController());
+        },
       );
 
-      const client = createReadyClient();
-      // Should not throw
-      await client.close();
+      // Second watch: error
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _callback: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          done(new Error("watch failed"));
+          return Promise.resolve(new AbortController());
+        },
+      );
 
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("tpl")).rejects.toThrow("watch failed");
+
+      // Orphaned claim should be deleted
       expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+    });
+
+    it("falls back to sandboxName when pod annotation is absent", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-xyz"); // no podAnnotation
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("tpl");
+
+      expect(sandbox.podName).toBe("sandbox-xyz");
+      expect(sandbox.sandboxName).toBe("sandbox-xyz");
+    });
+
+    it("registers sandbox in the registry", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-reg");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("tpl");
+
+      const active = client.listActiveSandboxes();
+      expect(active).toHaveLength(1);
+      expect(active[0].claimName).toBe(sandbox.claimName);
     });
   });
 
-  // ===== Pod name discovery =====
+  // ===== getSandbox =====
 
-  describe("Pod name discovery", () => {
-    it("uses pod-name from annotation if present", async () => {
+  describe("getSandbox()", () => {
+    it("returns cached handle when still active", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-cache");
 
-      // First watch: SandboxClaim resolves the actual sandbox name
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("ADDED", {
-            status: { sandbox: { name: "sandbox-abc" } },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+      const sandbox2 = await client.getSandbox(sandbox1.claimName);
 
-      // Second watch: Sandbox becomes ready with pod-name annotation
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("ADDED", {
-            metadata: {
-              name: "sandbox-abc",
-              annotations: {
-                [POD_NAME_ANNOTATION]: "custom-pod-name",
-              },
-            },
-            status: {
-              conditions: [{ type: "Ready", status: "True" }],
-            },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
-
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-        apiUrl: "http://api:8080",
-      });
-
-      await client.start();
-      expect(client._podName).toBe("custom-pod-name");
+      expect(sandbox2).toBe(sandbox1);
+      // No additional K8s calls
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
     });
 
-    it("falls back to sandbox name if annotation is missing", async () => {
+    it("re-attaches when cached handle is inactive (closed)", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+      mockSandboxReadyFlow("sandbox-reattach");
 
-      // First watch: SandboxClaim resolves the actual sandbox name
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("ADDED", {
-            status: { sandbox: { name: "sandbox-xyz" } },
-          });
-          return Promise.resolve(new AbortController());
-        },
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+      const claimName = sandbox1.claimName;
+
+      await sandbox1.close(); // marks as inactive
+
+      // Mock claim verification and watch for re-attach
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-reattach");
+
+      const sandbox2 = await client.getSandbox(claimName);
+      expect(sandbox2).not.toBe(sandbox1);
+      expect(sandbox2.isActive).toBe(true);
+      expect(sandbox2.claimName).toBe(claimName);
+    });
+
+    it("throws when claim not found in Kubernetes", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        new Error("HTTP 404"),
       );
 
-      // Second watch: Sandbox becomes ready without pod-name annotation
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-          _done: (err: unknown) => void,
-        ) => {
-          callback("ADDED", {
-            metadata: {
-              name: "sandbox-xyz",
-              annotations: {},
-            },
-            status: {
-              conditions: [{ type: "Ready", status: "True" }],
-            },
-          });
-          return Promise.resolve(new AbortController());
-        },
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.getSandbox("nonexistent-claim")).rejects.toThrow(
+        "SandboxClaim 'nonexistent-claim' not found",
       );
+    });
+  });
 
-      const client = new TestableSandboxClient({
-        templateName: "tpl",
-        apiUrl: "http://api:8080",
+  // ===== listActiveSandboxes =====
+
+  describe("listActiveSandboxes()", () => {
+    it("returns active sandboxes and prunes closed ones", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValue({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      mockSandboxReadyFlow("sandbox-a");
+      mockSandboxReadyFlow("sandbox-b");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sb1 = await client.createSandbox("tpl");
+      const sb2 = await client.createSandbox("tpl");
+
+      expect(client.listActiveSandboxes()).toHaveLength(2);
+
+      await sb1.close();
+      const active = client.listActiveSandboxes();
+      expect(active).toHaveLength(1);
+      expect(active[0].claimName).toBe(sb2.claimName);
+    });
+
+    it("returns empty list when no sandboxes", () => {
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      expect(client.listActiveSandboxes()).toEqual([]);
+    });
+  });
+
+  // ===== listAllSandboxes =====
+
+  describe("listAllSandboxes()", () => {
+    it("returns claim names from Kubernetes", async () => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({
+        items: [
+          { metadata: { name: "sandbox-claim-aaa" } },
+          { metadata: { name: "sandbox-claim-bbb" } },
+        ],
       });
 
-      await client.start();
-      expect(client._podName).toBe("sandbox-xyz");
-      expect(client._sandboxName).toBe("sandbox-xyz");
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const names = await client.listAllSandboxes("default");
+
+      expect(names).toEqual(["sandbox-claim-aaa", "sandbox-claim-bbb"]);
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledWith({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "default",
+        plural: CLAIM_PLURAL_NAME,
+      });
+    });
+
+    it("returns empty array when no claims exist", async () => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      expect(await client.listAllSandboxes()).toEqual([]);
+    });
+  });
+
+  // ===== deleteSandbox =====
+
+  describe("deleteSandbox()", () => {
+    it("closes tracked sandbox and removes from registry", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+      mockSandboxReadyFlow("sandbox-del");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("tpl");
+      const claimName = sandbox.claimName;
+
+      expect(client.listActiveSandboxes()).toHaveLength(1);
+
+      await client.deleteSandbox(claimName);
+
+      expect(sandbox.isActive).toBe(false);
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
+
+    it("deletes claim directly when sandbox is not tracked", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await client.deleteSandbox("untracked-claim", "default");
+
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      const args = mockDeleteNamespacedCustomObject.mock.calls[0][0];
+      expect(args.name).toBe("untracked-claim");
+    });
+
+    it("does not throw when claim is already 404", async () => {
+      mockDeleteNamespacedCustomObject.mockRejectedValueOnce(
+        new Error("HTTP 404"),
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(
+        client.deleteSandbox("missing-claim"),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  // ===== deleteAll =====
+
+  describe("deleteAll()", () => {
+    it("closes all tracked sandboxes", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValue({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      mockSandboxReadyFlow("sandbox-all-a");
+      mockSandboxReadyFlow("sandbox-all-b");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sb1 = await client.createSandbox("tpl");
+      const sb2 = await client.createSandbox("tpl");
+
+      expect(client.listActiveSandboxes()).toHaveLength(2);
+
+      await client.deleteAll();
+
+      expect(sb1.isActive).toBe(false);
+      expect(sb2.isActive).toBe(false);
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
+
+    it("is idempotent when no sandboxes exist", async () => {
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.deleteAll()).resolves.toBeUndefined();
+    });
+  });
+
+  // ===== [Symbol.asyncDispose] =====
+
+  describe("[Symbol.asyncDispose]()", () => {
+    it("calls deleteAll()", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+      mockSandboxReadyFlow("sandbox-dispose");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("tpl");
+
+      await client[Symbol.asyncDispose]();
+
+      expect(sandbox.isActive).toBe(false);
     });
   });
 });

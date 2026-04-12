@@ -639,9 +639,12 @@ export class SandboxClient {
       const timeoutMs = this.portForwardReadyTimeout * 1000;
 
       while (Date.now() - startTime < timeoutMs) {
-        if (this.portForwardProcess.exitCode !== null) {
+        if (
+          this.portForwardProcess.exitCode !== null ||
+          this.portForwardProcess.signalCode !== null
+        ) {
           throw new Error(
-            `Tunnel crashed: port-forward process exited with code ${this.portForwardProcess.exitCode}`,
+            `Tunnel crashed: port-forward process exited with code ${this.portForwardProcess.exitCode}, signal ${this.portForwardProcess.signalCode}`,
           );
         }
 
@@ -699,10 +702,14 @@ export class SandboxClient {
       throw new Error("Sandbox is not ready for communication.");
     }
 
-    if (this.portForwardProcess && this.portForwardProcess.exitCode !== null) {
+    if (
+      this.portForwardProcess &&
+      (this.portForwardProcess.exitCode !== null ||
+        this.portForwardProcess.signalCode !== null)
+    ) {
       throw new Error(
         `Kubectl Port-Forward crashed BEFORE request! ` +
-          `Exit code: ${this.portForwardProcess.exitCode}`,
+          `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
       );
     }
 
@@ -739,11 +746,12 @@ export class SandboxClient {
     } catch (err) {
       if (
         this.portForwardProcess &&
-        this.portForwardProcess.exitCode !== null
+        (this.portForwardProcess.exitCode !== null ||
+          this.portForwardProcess.signalCode !== null)
       ) {
         throw new Error(
           `Kubectl Port-Forward crashed DURING request! ` +
-            `Exit code: ${this.portForwardProcess.exitCode}`,
+            `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
           { cause: err },
         );
       }

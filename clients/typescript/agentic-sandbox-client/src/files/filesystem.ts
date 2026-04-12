@@ -17,6 +17,7 @@ import * as path from "node:path";
 import type { FileEntry, RequestFn } from "../types.js";
 import type { Tracer } from "../trace-manager.js";
 import { withSpan } from "../trace-manager.js";
+import { SandboxRequestError } from "../exceptions.js";
 
 export class Filesystem {
   private requestFn: RequestFn;
@@ -49,6 +50,10 @@ export class Filesystem {
         if (span.isRecording()) {
           span.setAttribute("sandbox.file.path", filePath);
           span.setAttribute("sandbox.file.size", content.length);
+        }
+
+        if (!filePath) {
+          throw new Error("write: file path cannot be empty");
         }
 
         const base = path.basename(filePath);
@@ -140,7 +145,7 @@ export class Filesystem {
         try {
           entries = JSON.parse(rawText);
         } catch (err) {
-          throw new Error(
+          throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );
@@ -189,7 +194,7 @@ export class Filesystem {
         try {
           data = JSON.parse(rawText) as Record<string, unknown>;
         } catch (err) {
-          throw new Error(
+          throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );

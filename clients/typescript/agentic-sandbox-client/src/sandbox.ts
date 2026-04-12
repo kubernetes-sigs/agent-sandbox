@@ -32,6 +32,13 @@ import {
 } from "./constants.js";
 import { TracerManager, withSpan } from "./trace-manager.js";
 import type { Tracer } from "./trace-manager.js";
+import {
+  isK8s404,
+  SandboxNotFoundError,
+  SandboxNotReadyError,
+  SandboxPortForwardError,
+  SandboxRequestError,
+} from "./exceptions.js";
 
 async function fetchWithRetry(
   url: string,
@@ -185,14 +192,14 @@ export class Sandbox {
 
   get commands(): CommandExecutor {
     if (!this._commands) {
-      throw new Error("Sandbox connection has been closed.");
+      throw new SandboxNotReadyError("Sandbox connection has been closed.");
     }
     return this._commands;
   }
 
   get files(): Filesystem {
     if (!this._files) {
-      throw new Error("Sandbox connection has been closed.");
+      throw new SandboxNotReadyError("Sandbox connection has been closed.");
     }
     return this._files;
   }
@@ -247,8 +254,7 @@ export class Sandbox {
           name: this.claimName,
         });
       } catch (err: unknown) {
-        const is404 = err instanceof Error && err.message.includes("404");
-        if (!is404) {
+        if (!isK8s404(err)) {
           console.error(`Error deleting sandbox claim: ${err}`);
         }
       }
@@ -310,8 +316,7 @@ export class Sandbox {
           return;
         }
       } catch (err) {
-        const is404 = err instanceof Error && err.message.includes("404");
-        if (!is404) {
+        if (!isK8s404(err)) {
           throw err;
         }
       }
@@ -325,6 +330,7 @@ export class Sandbox {
         let timer: ReturnType<typeof setTimeout>;
 
         const cleanup = () => {
+          aborted = true;
           clearTimeout(timer);
           if (abortController) {
             try {
@@ -338,7 +344,7 @@ export class Sandbox {
         timer = setTimeout(() => {
           cleanup();
           reject(
-            new Error(
+            new SandboxNotReadyError(
               `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' did not get ` +
                 `an IP within ${this.gatewayReadyTimeout} seconds.`,
             ),
@@ -360,6 +366,13 @@ export class Sandbox {
                   cleanup();
                   resolve();
                 }
+              } else if (type === "DELETED") {
+                cleanup();
+                reject(
+                  new SandboxNotFoundError(
+                    `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' was deleted while waiting for it to become ready.`,
+                  ),
+                );
               }
             },
             (err) => {
@@ -412,7 +425,7 @@ export class Sandbox {
           this.portForwardProcess.exitCode !== null ||
           this.portForwardProcess.signalCode !== null
         ) {
-          throw new Error(
+          throw new SandboxPortForwardError(
             `Tunnel crashed: port-forward process exited with code ${this.portForwardProcess.exitCode}, signal ${this.portForwardProcess.signalCode}`,
           );
         }
@@ -446,7 +459,9 @@ export class Sandbox {
       }
 
       await this.close();
-      throw new Error("Failed to establish tunnel to Router Service.");
+      throw new SandboxPortForwardError(
+        "Failed to establish tunnel to Router Service.",
+      );
     };
 
     await withSpan(
@@ -468,7 +483,7 @@ export class Sandbox {
     } = {},
   ): Promise<Response> {
     if (!this.baseUrl) {
-      throw new Error("Sandbox is not ready for communication.");
+      throw new SandboxNotReadyError("Sandbox is not ready for communication.");
     }
 
     if (
@@ -476,7 +491,7 @@ export class Sandbox {
       (this.portForwardProcess.exitCode !== null ||
         this.portForwardProcess.signalCode !== null)
     ) {
-      throw new Error(
+      throw new SandboxPortForwardError(
         `Kubectl Port-Forward crashed BEFORE request! ` +
           `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
       );
@@ -507,8 +522,9 @@ export class Sandbox {
     try {
       const response = await fetchWithRetry(url, fetchOptions);
       if (!response.ok) {
-        throw new Error(
+        throw new SandboxRequestError(
           `Request failed with status ${response.status}: ${response.statusText}`,
+          { statusCode: response.status, response },
         );
       }
       return response;
@@ -518,7 +534,7 @@ export class Sandbox {
         (this.portForwardProcess.exitCode !== null ||
           this.portForwardProcess.signalCode !== null)
       ) {
-        throw new Error(
+        throw new SandboxPortForwardError(
           `Kubectl Port-Forward crashed DURING request! ` +
             `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
           { cause: err },
@@ -526,7 +542,7 @@ export class Sandbox {
       }
 
       console.error(`Request to gateway router failed: ${err}`);
-      throw new Error(
+      throw new SandboxRequestError(
         `Failed to communicate with the sandbox via the gateway at ${url}.`,
         { cause: err },
       );

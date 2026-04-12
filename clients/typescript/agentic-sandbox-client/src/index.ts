@@ -14,6 +14,14 @@
 
 export { SandboxClient } from "./sandbox-client.js";
 export { Sandbox } from "./sandbox.js";
+export {
+  SandboxError,
+  SandboxNotReadyError,
+  SandboxNotFoundError,
+  SandboxPortForwardError,
+  SandboxMetadataError,
+  SandboxRequestError,
+} from "./exceptions.js";
 export { CommandExecutor } from "./commands/index.js";
 export { Filesystem } from "./files/index.js";
 export * from "./extensions/index.js";

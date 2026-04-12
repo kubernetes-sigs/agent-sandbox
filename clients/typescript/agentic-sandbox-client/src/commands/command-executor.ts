@@ -15,6 +15,7 @@
 import type { ExecutionResult, RequestFn } from "../types.js";
 import type { Tracer } from "../trace-manager.js";
 import { withSpan } from "../trace-manager.js";
+import { SandboxRequestError } from "../exceptions.js";
 
 export class CommandExecutor {
   private requestFn: RequestFn;
@@ -55,7 +56,7 @@ export class CommandExecutor {
         try {
           data = JSON.parse(rawText) as Record<string, unknown>;
         } catch (err) {
-          throw new Error(
+          throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );

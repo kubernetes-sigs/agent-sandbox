@@ -34,6 +34,69 @@ import {
   withSpan,
 } from "./trace-manager.js";
 import type { Tracer } from "./trace-manager.js";
+import {
+  isK8s404,
+  SandboxMetadataError,
+  SandboxNotFoundError,
+  SandboxNotReadyError,
+} from "./exceptions.js";
+
+// Kubernetes label validation constraints
+// https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+const LABEL_NAME_RE = /^[A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9]$|^[A-Za-z0-9]$/;
+const LABEL_PREFIX_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+const LABEL_NAME_MAX_LENGTH = 63;
+const LABEL_PREFIX_MAX_LENGTH = 253;
+
+function validateLabelName(name: string, context: string): void {
+  if (name.length > LABEL_NAME_MAX_LENGTH) {
+    throw new Error(
+      `Label ${context} '${name}' exceeds max length of ${LABEL_NAME_MAX_LENGTH} characters.`,
+    );
+  }
+  if (!LABEL_NAME_RE.test(name)) {
+    throw new Error(
+      `Label ${context} '${name}' contains invalid characters. ` +
+        `Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.].`,
+    );
+  }
+}
+
+function validateLabels(labels: Record<string, string>): void {
+  for (const [key, value] of Object.entries(labels)) {
+    if (!key) {
+      throw new Error("Label key cannot be empty.");
+    }
+
+    if (key.includes("/")) {
+      const slashIdx = key.indexOf("/");
+      const prefix = key.slice(0, slashIdx);
+      const name = key.slice(slashIdx + 1);
+
+      if (!prefix || prefix.length > LABEL_PREFIX_MAX_LENGTH) {
+        throw new Error(
+          `Label key prefix '${prefix}' is invalid or exceeds ${LABEL_PREFIX_MAX_LENGTH} characters.`,
+        );
+      }
+      if (!LABEL_PREFIX_RE.test(prefix)) {
+        throw new Error(
+          `Label key prefix '${prefix}' must be a valid DNS subdomain.`,
+        );
+      }
+      if (!name) {
+        throw new Error(`Label key '${key}' has an empty name after prefix.`);
+      }
+      validateLabelName(name, `key name in '${key}'`);
+    } else {
+      validateLabelName(key, `key '${key}'`);
+    }
+
+    // Values can be empty; non-empty values must follow the same name constraints
+    if (value) {
+      validateLabelName(value, `value '${value}' for key '${key}'`);
+    }
+  }
+}
 
 /**
  * Registry-based client for managing multiple Sandbox handles.
@@ -56,8 +119,6 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   private readonly enableTracing: boolean;
   private readonly traceServiceName: string;
 
-  private tracingManager: TracerManager | null = null;
-  private tracer: Tracer | null = null;
   private tracerInitialized = false;
 
   protected readonly kubeConfig: k8s.KubeConfig;
@@ -103,6 +164,16 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
     await this.ensureTracer();
 
+    // Create the per-sandbox tracer manager BEFORE createClaim so that
+    // createClaim and waitForSandboxReady run as children of the lifecycle span.
+    let sandboxTracingManager: TracerManager | null = null;
+    let sandboxTracer: Tracer | null = null;
+    if (this.enableTracing) {
+      sandboxTracingManager = new TracerManager(this.traceServiceName);
+      sandboxTracer = sandboxTracingManager.tracer;
+      sandboxTracingManager.startLifecycleSpan();
+    }
+
     const claimName = `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
 
     let sandboxName: string;
@@ -110,20 +181,26 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     let annotations: Record<string, string>;
 
     try {
-      const traceContextStr = this.tracingManager?.getTraceContextJson() ?? "";
+      const traceContextStr =
+        sandboxTracingManager?.getTraceContextJson() ?? "";
       await this.createClaim(
         claimName,
         template,
         ns,
         opts?.labels,
         traceContextStr,
+        sandboxTracer,
+        sandboxTracingManager?.parentContext,
       );
       ({ sandboxName, podName, annotations } = await this.waitForSandboxReady(
         claimName,
         ns,
         sandboxReadyTimeout * 1000,
+        sandboxTracer,
+        sandboxTracingManager?.parentContext,
       ));
     } catch (err) {
+      sandboxTracingManager?.endLifecycleSpan();
       // Clean up orphaned claim before re-throwing
       try {
         await this.customObjectsApi.deleteNamespacedCustomObject({
@@ -137,15 +214,6 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
         // ignore cleanup errors
       }
       throw err;
-    }
-
-    // Create a per-sandbox tracer manager (each sandbox has its own lifecycle span)
-    let sandboxTracingManager: TracerManager | null = null;
-    let sandboxTracer: Tracer | null = null;
-    if (this.enableTracing) {
-      sandboxTracingManager = new TracerManager(this.traceServiceName);
-      sandboxTracer = sandboxTracingManager.tracer;
-      sandboxTracingManager.startLifecycleSpan();
     }
 
     const init: SandboxInit = {
@@ -209,19 +277,11 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
         name: claimName,
       });
     } catch (err) {
-      throw new Error(
+      throw new SandboxNotFoundError(
         `SandboxClaim '${claimName}' not found in namespace '${ns}'.`,
         { cause: err },
       );
     }
-
-    // Resolve the sandbox identity and wait for readiness
-    const { sandboxName, podName, annotations } =
-      await this.waitForSandboxReady(
-        claimName,
-        ns,
-        this.defaultSandboxReadyTimeout * 1000,
-      );
 
     await this.ensureTracer();
 
@@ -231,6 +291,23 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       sandboxTracingManager = new TracerManager(this.traceServiceName);
       sandboxTracer = sandboxTracingManager.tracer;
       sandboxTracingManager.startLifecycleSpan();
+    }
+
+    // Resolve the sandbox identity and wait for readiness
+    let sandboxName: string;
+    let podName: string;
+    let annotations: Record<string, string>;
+    try {
+      ({ sandboxName, podName, annotations } = await this.waitForSandboxReady(
+        claimName,
+        ns,
+        this.defaultSandboxReadyTimeout * 1000,
+        sandboxTracer,
+        sandboxTracingManager?.parentContext,
+      ));
+    } catch (err) {
+      sandboxTracingManager?.endLifecycleSpan();
+      throw err;
     }
 
     const init: SandboxInit = {
@@ -321,8 +398,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           name: claimName,
         });
       } catch (err: unknown) {
-        const is404 = err instanceof Error && err.message.includes("404");
-        if (!is404) {
+        if (!isK8s404(err)) {
           throw err;
         }
       }
@@ -390,7 +466,13 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     namespace: string,
     labels?: Record<string, string>,
     traceContextStr: string = "",
+    tracer: Tracer | null = null,
+    parentContext?: unknown,
   ): Promise<void> {
+    if (labels) {
+      validateLabels(labels);
+    }
+
     const fn = async () => {
       const span = getCurrentSpan();
       if (span.isRecording()) {
@@ -431,7 +513,13 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       });
     };
 
-    await withSpan(this.tracer, this.traceServiceName, "create_claim", fn);
+    await withSpan(
+      tracer,
+      this.traceServiceName,
+      "create_claim",
+      fn,
+      parentContext,
+    );
   }
 
   private resolveSandboxName(
@@ -463,7 +551,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       timer = setTimeout(() => {
         cleanup();
         reject(
-          new Error(
+          new SandboxNotFoundError(
             `Sandbox claim '${claimName}' did not resolve within ${Math.floor(timeoutMs / 1000)} seconds.`,
           ),
         );
@@ -486,6 +574,13 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
                 cleanup();
                 resolve(name);
               }
+            } else if (type === "DELETED") {
+              cleanup();
+              reject(
+                new SandboxNotFoundError(
+                  `SandboxClaim '${claimName}' was deleted while waiting for it to be resolved.`,
+                ),
+              );
             }
           },
           (err) => {
@@ -534,7 +629,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       timer = setTimeout(() => {
         cleanup();
         reject(
-          new Error(
+          new SandboxNotReadyError(
             `Sandbox '${sandboxName}' did not become ready within ${Math.floor(timeoutMs / 1000)} seconds.`,
           ),
         );
@@ -560,7 +655,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
                 if (!resolvedName) {
                   cleanup();
                   reject(
-                    new Error(
+                    new SandboxMetadataError(
                       "Could not determine sandbox name from sandbox object.",
                     ),
                   );
@@ -579,6 +674,13 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
                 cleanup();
                 resolve({ podName, annotations });
               }
+            } else if (type === "DELETED") {
+              cleanup();
+              reject(
+                new SandboxNotFoundError(
+                  `Sandbox '${sandboxName}' was deleted while waiting for it to become ready.`,
+                ),
+              );
             }
           },
           (err) => {
@@ -602,6 +704,8 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     claimName: string,
     namespace: string,
     totalTimeoutMs: number,
+    tracer: Tracer | null = null,
+    parentContext?: unknown,
   ): Promise<{
     sandboxName: string;
     podName: string;
@@ -630,10 +734,11 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     };
 
     return withSpan(
-      this.tracer,
+      tracer,
       this.traceServiceName,
       "wait_for_sandbox_ready",
       fn,
+      parentContext,
     );
   }
 }

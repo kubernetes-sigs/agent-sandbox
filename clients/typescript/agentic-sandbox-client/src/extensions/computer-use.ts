@@ -17,6 +17,7 @@ import type { SandboxInit } from "../sandbox.js";
 import { SandboxClient } from "../sandbox-client.js";
 import type { ExecutionResult } from "../types.js";
 import { withSpan } from "../trace-manager.js";
+import { SandboxNotReadyError, SandboxRequestError } from "../exceptions.js";
 
 /**
  * Sandbox handle with computer-use agent support.
@@ -37,7 +38,7 @@ export class ComputerUseSandbox extends Sandbox {
       "agent",
       async (span) => {
         if (!this.isActive) {
-          throw new Error(
+          throw new SandboxNotReadyError(
             "Sandbox is not ready. Cannot execute agent queries.",
           );
         }
@@ -57,7 +58,7 @@ export class ComputerUseSandbox extends Sandbox {
         try {
           data = JSON.parse(rawText) as Record<string, unknown>;
         } catch (err) {
-          throw new Error(
+          throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );

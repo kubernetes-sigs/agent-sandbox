@@ -13,24 +13,16 @@
 // limitations under the License.
 
 import * as crypto from "node:crypto";
-import * as net from "node:net";
-import { ChildProcess, spawn } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
 
-import type { RequestFn, SandboxOptions } from "./types.js";
-import { CommandExecutor } from "./commands/index.js";
-import { Filesystem } from "./files/index.js";
+import type { CreateSandboxOptions, SandboxClientOptions } from "./types.js";
+import { Sandbox } from "./sandbox.js";
+import type { SandboxInit } from "./sandbox.js";
 import {
-  BACKOFF_FACTOR,
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
-  GATEWAY_API_GROUP,
-  GATEWAY_API_VERSION,
-  GATEWAY_PLURAL,
-  MAX_RETRIES,
   POD_NAME_ANNOTATION,
-  RETRY_STATUS_CODES,
   SANDBOX_API_GROUP,
   SANDBOX_API_VERSION,
   SANDBOX_PLURAL_NAME,
@@ -43,96 +35,43 @@ import {
 } from "./trace-manager.js";
 import type { Tracer } from "./trace-manager.js";
 
-async function fetchWithRetry(
-  url: string,
-  options: RequestInit,
-  maxRetries: number = MAX_RETRIES,
-  backoffFactor: number = BACKOFF_FACTOR,
-  retryStatusCodes: number[] = RETRY_STATUS_CODES,
-): Promise<Response> {
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetch(url, options);
-      if (attempt < maxRetries && retryStatusCodes.includes(response.status)) {
-        const delay = backoffFactor * Math.pow(2, attempt) * 1000;
-        console.debug(
-          `Request to ${url} returned ${response.status}, retrying in ${delay}ms (attempt ${
-            attempt + 1
-          }/${maxRetries})...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        continue;
-      }
-      return response;
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < maxRetries) {
-        const delay = backoffFactor * Math.pow(2, attempt) * 1000;
-        console.debug(
-          `Request to ${url} failed: ${lastError.message}, retrying in ${delay}ms (attempt ${
-            attempt + 1
-          }/${maxRetries})...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-    }
-  }
-  throw lastError ?? new Error("Request failed after retries");
-}
+/**
+ * Registry-based client for managing multiple Sandbox handles.
+ * Tracks all created sandboxes and supports creating, retrieving,
+ * listing, and deleting them.
+ */
+export class SandboxClient<T extends Sandbox = Sandbox> {
+  protected readonly sandboxClass: new (
+    init: SandboxInit,
+  ) => T;
 
-function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (addr && typeof addr !== "string") {
-        const port = addr.port;
-        server.close(() => resolve(port));
-      } else {
-        server.close(() => reject(new Error("Failed to get free port")));
-      }
-    });
-    server.on("error", reject);
-  });
-}
+  private readonly defaultNamespace: string;
+  private readonly apiUrl: string | undefined;
+  private readonly gatewayName: string | undefined;
+  private readonly gatewayNamespace: string;
+  private readonly serverPort: number;
+  private readonly defaultSandboxReadyTimeout: number;
+  private readonly gatewayReadyTimeout: number;
+  private readonly portForwardReadyTimeout: number;
+  private readonly enableTracing: boolean;
+  private readonly traceServiceName: string;
 
-export class SandboxClient {
-  protected traceServiceName: string;
-  protected tracingManager: TracerManager | null = null;
-  protected tracer: Tracer | null = null;
+  private tracingManager: TracerManager | null = null;
+  private tracer: Tracer | null = null;
+  private tracerInitialized = false;
 
-  protected templateName: string;
-  protected namespace: string;
-  protected gatewayName: string | undefined;
-  protected gatewayNamespace: string;
-  protected baseUrl: string | undefined;
-  protected serverPort: number;
-  protected sandboxReadyTimeout: number;
-  protected gatewayReadyTimeout: number;
-  protected portForwardReadyTimeout: number;
-  protected enableTracing: boolean;
+  protected readonly kubeConfig: k8s.KubeConfig;
+  protected readonly customObjectsApi: k8s.CustomObjectsApi;
 
-  protected portForwardProcess: ChildProcess | null = null;
-  protected claimName: string | undefined;
-  protected sandboxName: string | undefined;
-  protected podName: string | undefined;
-  protected annotations: Record<string, string> | undefined;
+  private readonly registry: Map<string, T> = new Map();
 
-  private _commands: CommandExecutor | null = null;
-  private _files: Filesystem | null = null;
-
-  protected kubeConfig: k8s.KubeConfig;
-  protected customObjectsApi: k8s.CustomObjectsApi;
-
-  constructor(options: SandboxOptions) {
-    this.templateName = options.templateName;
-    this.namespace = options.namespace ?? "default";
+  constructor(options: SandboxClientOptions = {}) {
+    this.defaultNamespace = options.namespace ?? "default";
+    this.apiUrl = options.apiUrl;
     this.gatewayName = options.gatewayName;
     this.gatewayNamespace = options.gatewayNamespace ?? "default";
-    this.baseUrl = options.apiUrl;
     this.serverPort = options.serverPort ?? 8888;
-    this.sandboxReadyTimeout = options.sandboxReadyTimeout ?? 180;
+    this.defaultSandboxReadyTimeout = options.sandboxReadyTimeout ?? 180;
     this.gatewayReadyTimeout = options.gatewayReadyTimeout ?? 180;
     this.portForwardReadyTimeout = options.portForwardReadyTimeout ?? 30;
     this.enableTracing = options.enableTracing ?? false;
@@ -142,137 +81,320 @@ export class SandboxClient {
     this.kubeConfig.loadFromDefault();
     this.customObjectsApi = this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
 
-    const requestFn: RequestFn = (method, endpoint, options) =>
-      this.request(method, endpoint, options);
-    const getTracer = () => this.tracer;
-    const getParentContext = () => this.tracingManager?.parentContext ?? null;
-    this._commands = new CommandExecutor(
-      requestFn,
-      getTracer,
-      this.traceServiceName,
-      getParentContext,
-    );
-    this._files = new Filesystem(
-      requestFn,
-      getTracer,
-      this.traceServiceName,
-      getParentContext,
-    );
+    this.sandboxClass = Sandbox as unknown as new (init: SandboxInit) => T;
   }
 
-  isReady(): boolean {
-    return this.baseUrl !== undefined;
-  }
-
-  get commands(): CommandExecutor {
-    if (!this._commands) {
-      throw new Error("Sandbox connection has been closed.");
-    }
-    return this._commands;
-  }
-
-  get files(): Filesystem {
-    if (!this._files) {
-      throw new Error("Sandbox connection has been closed.");
-    }
-    return this._files;
-  }
-
-  async start(): Promise<this> {
-    let traceContextStr = "";
-
-    if (this.enableTracing) {
-      await initializeTracer(this.traceServiceName);
-      this.tracingManager = new TracerManager(this.traceServiceName);
-      this.tracer = this.tracingManager.tracer;
-      this.tracingManager.startLifecycleSpan();
-      traceContextStr = this.tracingManager.getTraceContextJson();
+  /**
+   * Provisions a new Sandbox and returns a managed handle.
+   * On failure, any orphaned SandboxClaim is cleaned up automatically.
+   */
+  async createSandbox(
+    template: string,
+    namespace?: string,
+    opts?: CreateSandboxOptions,
+  ): Promise<T> {
+    if (!template) {
+      throw new Error("Template name cannot be empty.");
     }
 
-    await this.createClaim(traceContextStr);
-    await this.waitForSandboxReady();
+    const ns = namespace ?? this.defaultNamespace;
+    const sandboxReadyTimeout =
+      opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;
 
-    if (this.baseUrl) {
-      console.info(`Using configured API URL: ${this.baseUrl}`);
-    } else if (this.gatewayName) {
-      await this.waitForGatewayIp();
-    } else {
-      await this.startAndWaitForPortForward();
-    }
+    await this.ensureTracer();
 
-    return this;
-  }
+    const claimName = `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
 
-  async close(): Promise<void> {
-    if (this.portForwardProcess) {
-      try {
-        console.info("Stopping port-forwarding...");
-        this.portForwardProcess.kill("SIGTERM");
-        await new Promise<void>((resolve) => {
-          const timeout = setTimeout(() => {
-            this.portForwardProcess?.kill("SIGKILL");
-            resolve();
-          }, 2000);
-          this.portForwardProcess?.on("exit", () => {
-            clearTimeout(timeout);
-            resolve();
-          });
-        });
-      } catch (err) {
-        console.error(`Failed to stop port-forwarding: ${err}`);
-      }
-      this.portForwardProcess = null;
-    }
+    let sandboxName: string;
+    let podName: string;
+    let annotations: Record<string, string>;
 
-    if (this.claimName) {
-      console.info(`Deleting SandboxClaim: ${this.claimName}`);
+    try {
+      const traceContextStr = this.tracingManager?.getTraceContextJson() ?? "";
+      await this.createClaim(
+        claimName,
+        template,
+        ns,
+        opts?.labels,
+        traceContextStr,
+      );
+      ({ sandboxName, podName, annotations } = await this.waitForSandboxReady(
+        claimName,
+        ns,
+        sandboxReadyTimeout * 1000,
+      ));
+    } catch (err) {
+      // Clean up orphaned claim before re-throwing
       try {
         await this.customObjectsApi.deleteNamespacedCustomObject({
           group: CLAIM_API_GROUP,
           version: CLAIM_API_VERSION,
-          namespace: this.namespace,
+          namespace: ns,
           plural: CLAIM_PLURAL_NAME,
-          name: this.claimName,
+          name: claimName,
+        });
+      } catch {
+        // ignore cleanup errors
+      }
+      throw err;
+    }
+
+    // Create a per-sandbox tracer manager (each sandbox has its own lifecycle span)
+    let sandboxTracingManager: TracerManager | null = null;
+    let sandboxTracer: Tracer | null = null;
+    if (this.enableTracing) {
+      sandboxTracingManager = new TracerManager(this.traceServiceName);
+      sandboxTracer = sandboxTracingManager.tracer;
+      sandboxTracingManager.startLifecycleSpan();
+    }
+
+    const init: SandboxInit = {
+      claimName,
+      sandboxName,
+      podName,
+      namespace: ns,
+      annotations,
+      serverPort: this.serverPort,
+      apiUrl: this.apiUrl,
+      gatewayName: this.gatewayName,
+      gatewayNamespace: this.gatewayNamespace,
+      gatewayReadyTimeout: this.gatewayReadyTimeout,
+      portForwardReadyTimeout: this.portForwardReadyTimeout,
+      kubeConfig: this.kubeConfig,
+      customObjectsApi: this.customObjectsApi,
+      traceServiceName: this.traceServiceName,
+      tracer: sandboxTracer,
+      tracingManager: sandboxTracingManager,
+    };
+
+    const sandbox = new this.sandboxClass(init);
+
+    try {
+      await sandbox.connect();
+    } catch (err) {
+      // connect() failed — close sandbox (which also deletes claim)
+      await sandbox.close().catch(() => {});
+      throw err;
+    }
+
+    this.registry.set(`${ns}/${claimName}`, sandbox);
+    return sandbox;
+  }
+
+  /**
+   * Retrieves an existing sandbox handle by claim name.
+   * Returns the cached handle if still active, otherwise re-attaches.
+   */
+  async getSandbox(claimName: string, namespace?: string): Promise<T> {
+    const ns = namespace ?? this.defaultNamespace;
+    const key = `${ns}/${claimName}`;
+
+    const existing = this.registry.get(key);
+    if (existing?.isActive) {
+      return existing;
+    }
+
+    // Evict stale handle
+    if (existing) {
+      this.registry.delete(key);
+    }
+
+    // Verify the claim exists in Kubernetes
+    try {
+      await this.customObjectsApi.getNamespacedCustomObject({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: ns,
+        plural: CLAIM_PLURAL_NAME,
+        name: claimName,
+      });
+    } catch (err) {
+      throw new Error(
+        `SandboxClaim '${claimName}' not found in namespace '${ns}'.`,
+        { cause: err },
+      );
+    }
+
+    // Resolve the sandbox identity and wait for readiness
+    const { sandboxName, podName, annotations } =
+      await this.waitForSandboxReady(
+        claimName,
+        ns,
+        this.defaultSandboxReadyTimeout * 1000,
+      );
+
+    await this.ensureTracer();
+
+    let sandboxTracingManager: TracerManager | null = null;
+    let sandboxTracer: Tracer | null = null;
+    if (this.enableTracing) {
+      sandboxTracingManager = new TracerManager(this.traceServiceName);
+      sandboxTracer = sandboxTracingManager.tracer;
+      sandboxTracingManager.startLifecycleSpan();
+    }
+
+    const init: SandboxInit = {
+      claimName,
+      sandboxName,
+      podName,
+      namespace: ns,
+      annotations,
+      serverPort: this.serverPort,
+      apiUrl: this.apiUrl,
+      gatewayName: this.gatewayName,
+      gatewayNamespace: this.gatewayNamespace,
+      gatewayReadyTimeout: this.gatewayReadyTimeout,
+      portForwardReadyTimeout: this.portForwardReadyTimeout,
+      kubeConfig: this.kubeConfig,
+      customObjectsApi: this.customObjectsApi,
+      traceServiceName: this.traceServiceName,
+      tracer: sandboxTracer,
+      tracingManager: sandboxTracingManager,
+    };
+
+    const sandbox = new this.sandboxClass(init);
+    await sandbox.connect();
+
+    this.registry.set(key, sandbox);
+    return sandbox;
+  }
+
+  /**
+   * Returns keys of sandboxes currently tracked and still active.
+   * Prunes inactive handles from the registry.
+   */
+  listActiveSandboxes(): Array<{ namespace: string; claimName: string }> {
+    const active: Array<{ namespace: string; claimName: string }> = [];
+    for (const [key, sandbox] of this.registry) {
+      if (!sandbox.isActive) {
+        this.registry.delete(key);
+        continue;
+      }
+      const slashIdx = key.indexOf("/");
+      active.push({
+        namespace: key.slice(0, slashIdx),
+        claimName: key.slice(slashIdx + 1),
+      });
+    }
+    return active;
+  }
+
+  /**
+   * Lists all SandboxClaim names in the cluster for the given namespace.
+   */
+  async listAllSandboxes(namespace?: string): Promise<string[]> {
+    const ns = namespace ?? this.defaultNamespace;
+    const response = await this.customObjectsApi.listNamespacedCustomObject({
+      group: CLAIM_API_GROUP,
+      version: CLAIM_API_VERSION,
+      namespace: ns,
+      plural: CLAIM_PLURAL_NAME,
+    });
+    const list = response as {
+      items?: Array<{ metadata?: { name?: string } }>;
+    };
+    return (list.items ?? [])
+      .map((item) => item.metadata?.name ?? "")
+      .filter(Boolean);
+  }
+
+  /**
+   * Closes the sandbox handle (if tracked) and deletes the Kubernetes resources.
+   */
+  async deleteSandbox(claimName: string, namespace?: string): Promise<void> {
+    const ns = namespace ?? this.defaultNamespace;
+    const key = `${ns}/${claimName}`;
+
+    const sandbox = this.registry.get(key);
+    this.registry.delete(key);
+
+    if (sandbox) {
+      await sandbox.close();
+    } else {
+      // Not tracked locally; delete the claim directly
+      try {
+        await this.customObjectsApi.deleteNamespacedCustomObject({
+          group: CLAIM_API_GROUP,
+          version: CLAIM_API_VERSION,
+          namespace: ns,
+          plural: CLAIM_PLURAL_NAME,
+          name: claimName,
         });
       } catch (err: unknown) {
         const is404 = err instanceof Error && err.message.includes("404");
         if (!is404) {
-          console.error(`Error deleting sandbox claim: ${err}`);
+          throw err;
         }
       }
     }
+  }
 
-    this._commands = null;
-    this._files = null;
+  /**
+   * Closes and deletes all tracked sandboxes. Best-effort.
+   */
+  async deleteAll(): Promise<void> {
+    const snapshot = new Map(this.registry);
+    this.registry.clear();
 
-    if (this.tracingManager) {
-      try {
-        this.tracingManager.endLifecycleSpan();
-      } catch (err) {
-        console.error(`Failed to end tracing span: ${err}`);
+    const results = await Promise.allSettled(
+      [...snapshot.values()].map((sandbox) => sandbox.close()),
+    );
+
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.error(`Cleanup failed: ${result.reason}`);
       }
     }
   }
 
+  /**
+   * Registers SIGINT, SIGTERM, and beforeExit handlers to call deleteAll().
+   * Returns a function that unregisters the handlers.
+   */
+  enableAutoCleanup(): () => void {
+    const beforeExitHandler = () => {
+      void this.deleteAll();
+    };
+    const sigHandler = () => {
+      void this.deleteAll().finally(() => process.exit(0));
+    };
+
+    process.on("beforeExit", beforeExitHandler);
+    process.on("SIGINT", sigHandler);
+    process.on("SIGTERM", sigHandler);
+
+    return () => {
+      process.off("beforeExit", beforeExitHandler);
+      process.off("SIGINT", sigHandler);
+      process.off("SIGTERM", sigHandler);
+    };
+  }
+
   async [Symbol.asyncDispose](): Promise<void> {
-    await this.close();
+    await this.deleteAll();
   }
 
-  private extractGatewayAddress(
-    obj: Record<string, unknown> | undefined,
-  ): string | undefined {
-    const status = (obj?.status as Record<string, unknown>) ?? {};
-    const addresses = (status.addresses as Array<Record<string, string>>) ?? [];
-    return addresses[0]?.value;
+  // -------------------------------------------------------------------------
+  // Private: Kubernetes provisioning helpers
+  // -------------------------------------------------------------------------
+
+  private async ensureTracer(): Promise<void> {
+    if (this.tracerInitialized || !this.enableTracing) return;
+    await initializeTracer(this.traceServiceName);
+    this.tracerInitialized = true;
   }
 
-  private async createClaim(traceContextStr: string = ""): Promise<void> {
+  private async createClaim(
+    claimName: string,
+    template: string,
+    namespace: string,
+    labels?: Record<string, string>,
+    traceContextStr: string = "",
+  ): Promise<void> {
     const fn = async () => {
-      this.claimName = `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
-
       const span = getCurrentSpan();
       if (span.isRecording()) {
-        span.setAttribute("sandbox.claim.name", this.claimName);
+        span.setAttribute("sandbox.claim.name", claimName);
       }
 
       const annotations: Record<string, string> = {};
@@ -280,60 +402,54 @@ export class SandboxClient {
         annotations["opentelemetry.io/trace-context"] = traceContextStr;
       }
 
-      const manifest = {
+      const manifest: Record<string, unknown> = {
         apiVersion: `${CLAIM_API_GROUP}/${CLAIM_API_VERSION}`,
         kind: "SandboxClaim",
         metadata: {
-          name: this.claimName,
+          name: claimName,
+          namespace,
           annotations,
+          ...(labels ? { labels } : {}),
         },
         spec: {
-          sandboxTemplateRef: { name: this.templateName },
+          sandboxTemplateRef: { name: template },
         },
       };
 
       console.info(
-        `Creating SandboxClaim '${this.claimName}' ` +
-          `in namespace '${this.namespace}' ` +
-          `using template '${this.templateName}'...`,
+        `Creating SandboxClaim '${claimName}' ` +
+          `in namespace '${namespace}' ` +
+          `using template '${template}'...`,
       );
 
       await this.customObjectsApi.createNamespacedCustomObject({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
-        namespace: this.namespace,
+        namespace,
         plural: CLAIM_PLURAL_NAME,
         body: manifest,
       });
     };
 
-    await withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "create_claim",
-      fn,
-      this.tracingManager?.parentContext,
-    );
+    await withSpan(this.tracer, this.traceServiceName, "create_claim", fn);
   }
 
-  private resolveSandboxName(timeoutMs: number): Promise<string> {
-    if (!this.claimName) {
-      return Promise.reject(
-        new Error(
-          "Cannot resolve sandbox name; a sandboxclaim has not been created.",
-        ),
-      );
-    }
-
-    console.info(`Resolving sandbox name from claim '${this.claimName}'...`);
+  private resolveSandboxName(
+    claimName: string,
+    namespace: string,
+    timeoutMs: number,
+  ): Promise<string> {
+    console.info(`Resolving sandbox name from claim '${claimName}'...`);
 
     const watcher = new k8s.Watch(this.kubeConfig);
 
     return new Promise<string>((resolve, reject) => {
       let abortController: AbortController | undefined;
+      let aborted = false;
       let timer: ReturnType<typeof setTimeout>;
 
       const cleanup = () => {
+        aborted = true;
         clearTimeout(timer);
         if (abortController) {
           try {
@@ -348,15 +464,15 @@ export class SandboxClient {
         cleanup();
         reject(
           new Error(
-            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
+            `Sandbox claim '${claimName}' did not resolve within ${Math.floor(timeoutMs / 1000)} seconds.`,
           ),
         );
       }, timeoutMs);
 
       watcher
         .watch(
-          `/apis/${CLAIM_API_GROUP}/${CLAIM_API_VERSION}/namespaces/${this.namespace}/${CLAIM_PLURAL_NAME}`,
-          { fieldSelector: `metadata.name=${this.claimName}` },
+          `/apis/${CLAIM_API_GROUP}/${CLAIM_API_VERSION}/namespaces/${namespace}/${CLAIM_PLURAL_NAME}`,
+          { fieldSelector: `metadata.name=${claimName}` },
           (type: string, obj: Record<string, unknown>) => {
             if (type === "ADDED" || type === "MODIFIED") {
               const status = (obj.status as Record<string, unknown>) ?? {};
@@ -374,31 +490,37 @@ export class SandboxClient {
           },
           (err) => {
             cleanup();
-            // Ignore AbortError that occurs when we intentionally abort the watch
             if (err && !(err instanceof Error && err.name === "AbortError")) {
               reject(err);
             }
           },
         )
         .then((ac) => {
-          abortController = ac;
+          if (aborted) {
+            ac.abort();
+          } else {
+            abortController = ac;
+          }
         });
     });
   }
 
   private watchForSandboxReady(
     sandboxName: string,
+    namespace: string,
     timeoutMs: number,
-  ): Promise<void> {
+  ): Promise<{ podName: string; annotations: Record<string, string> }> {
     console.info("Watching for Sandbox to become ready...");
 
     const watcher = new k8s.Watch(this.kubeConfig);
 
-    return new Promise<void>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       let abortController: AbortController | undefined;
+      let aborted = false;
       let timer: ReturnType<typeof setTimeout>;
 
       const cleanup = () => {
+        aborted = true;
         clearTimeout(timer);
         if (abortController) {
           try {
@@ -413,14 +535,14 @@ export class SandboxClient {
         cleanup();
         reject(
           new Error(
-            `Sandbox did not become ready within ${this.sandboxReadyTimeout} seconds.`,
+            `Sandbox '${sandboxName}' did not become ready within ${Math.floor(timeoutMs / 1000)} seconds.`,
           ),
         );
       }, timeoutMs);
 
       watcher
         .watch(
-          `/apis/${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}/namespaces/${this.namespace}/${SANDBOX_PLURAL_NAME}`,
+          `/apis/${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}/namespaces/${namespace}/${SANDBOX_PLURAL_NAME}`,
           { fieldSelector: `metadata.name=${sandboxName}` },
           (type: string, obj: Record<string, unknown>) => {
             if (type === "ADDED" || type === "MODIFIED") {
@@ -434,8 +556,8 @@ export class SandboxClient {
               if (isReady) {
                 const metadata =
                   (obj.metadata as Record<string, unknown>) ?? {};
-                this.sandboxName = metadata.name as string | undefined;
-                if (!this.sandboxName) {
+                const resolvedName = metadata.name as string | undefined;
+                if (!resolvedName) {
                   cleanup();
                   reject(
                     new Error(
@@ -444,323 +566,74 @@ export class SandboxClient {
                   );
                   return;
                 }
-                console.info(`Sandbox ${this.sandboxName} is ready.`);
+                console.info(`Sandbox ${resolvedName} is ready.`);
 
-                this.annotations =
+                const annotations =
                   (metadata.annotations as Record<string, string>) ?? {};
-                const podName = this.annotations[POD_NAME_ANNOTATION];
-                if (podName) {
-                  this.podName = podName;
-                  console.info(
-                    `Found pod name from annotation: ${this.podName}`,
-                  );
-                } else {
-                  this.podName = this.sandboxName;
+                const podNameAnnotation = annotations[POD_NAME_ANNOTATION];
+                const podName = podNameAnnotation ?? resolvedName;
+                if (podNameAnnotation) {
+                  console.info(`Found pod name from annotation: ${podName}`);
                 }
 
                 cleanup();
-                resolve();
+                resolve({ podName, annotations });
               }
             }
           },
           (err) => {
             cleanup();
-            // Ignore AbortError that occurs when we intentionally abort the watch
             if (err && !(err instanceof Error && err.name === "AbortError")) {
               reject(err);
             }
           },
         )
         .then((ac) => {
-          abortController = ac;
+          if (aborted) {
+            ac.abort();
+          } else {
+            abortController = ac;
+          }
         });
     });
   }
 
-  private async waitForSandboxReady(): Promise<void> {
+  private async waitForSandboxReady(
+    claimName: string,
+    namespace: string,
+    totalTimeoutMs: number,
+  ): Promise<{
+    sandboxName: string;
+    podName: string;
+    annotations: Record<string, string>;
+  }> {
     const fn = async () => {
-      if (!this.claimName) {
-        throw new Error(
-          "Cannot wait for sandbox; a sandboxclaim has not been created.",
-        );
-      }
-
       const startTime = Date.now();
-      const totalTimeoutMs = this.sandboxReadyTimeout * 1000;
 
-      // Step 1: Watch SandboxClaim until status.sandbox.name is populated.
-      // This resolves the actual Sandbox name, which may differ from the claim
-      // name when a sandbox is adopted from a warm pool.
-      const sandboxName = await this.resolveSandboxName(totalTimeoutMs);
+      // Step 1: Resolve actual sandbox name from claim status
+      const sandboxName = await this.resolveSandboxName(
+        claimName,
+        namespace,
+        totalTimeoutMs,
+      );
 
-      // Step 2: Watch the Sandbox by its resolved name with the remaining budget.
+      // Step 2: Watch sandbox with remaining budget
       const elapsed = Date.now() - startTime;
       const remainingMs = Math.max(0, totalTimeoutMs - elapsed);
-      await this.watchForSandboxReady(sandboxName, remainingMs);
+      const { podName, annotations } = await this.watchForSandboxReady(
+        sandboxName,
+        namespace,
+        remainingMs,
+      );
+
+      return { sandboxName, podName, annotations };
     };
 
-    await withSpan(
+    return withSpan(
       this.tracer,
       this.traceServiceName,
       "wait_for_sandbox_ready",
       fn,
-      this.tracingManager?.parentContext,
     );
-  }
-
-  private async waitForGatewayIp(): Promise<void> {
-    const fn = async () => {
-      const span = getCurrentSpan();
-      if (span.isRecording()) {
-        span.setAttribute("sandbox.gateway.name", this.gatewayName!);
-        span.setAttribute("sandbox.gateway.namespace", this.gatewayNamespace);
-      }
-
-      if (this.baseUrl) {
-        console.info(`Using configured API URL: ${this.baseUrl}`);
-        return;
-      }
-
-      console.info(
-        `Waiting for Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}'...`,
-      );
-
-      try {
-        const response = await this.customObjectsApi.getNamespacedCustomObject({
-          group: GATEWAY_API_GROUP,
-          version: GATEWAY_API_VERSION,
-          namespace: this.gatewayNamespace,
-          plural: GATEWAY_PLURAL,
-          name: this.gatewayName!,
-        });
-        const gatewayObj =
-          (response as { body?: Record<string, unknown> }).body ??
-          (response as Record<string, unknown>);
-        const existingAddress = this.extractGatewayAddress(gatewayObj);
-        if (existingAddress) {
-          this.baseUrl = `http://${existingAddress}`;
-          console.info(
-            `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
-          );
-          return;
-        }
-      } catch (err) {
-        const is404 = err instanceof Error && err.message.includes("404");
-        if (!is404) {
-          throw err;
-        }
-      }
-
-      const watcher = new k8s.Watch(this.kubeConfig);
-      const timeoutMs = this.gatewayReadyTimeout * 1000;
-
-      await new Promise<void>((resolve, reject) => {
-        let abortController: AbortController | undefined;
-        let timer: ReturnType<typeof setTimeout>;
-
-        const cleanup = () => {
-          clearTimeout(timer);
-          if (abortController) {
-            try {
-              abortController.abort();
-            } catch {
-              // ignore
-            }
-          }
-        };
-
-        timer = setTimeout(() => {
-          cleanup();
-          reject(
-            new Error(
-              `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' did not get ` +
-                `an IP within ${this.gatewayReadyTimeout} seconds.`,
-            ),
-          );
-        }, timeoutMs);
-
-        watcher
-          .watch(
-            `/apis/${GATEWAY_API_GROUP}/${GATEWAY_API_VERSION}/namespaces/${this.gatewayNamespace}/${GATEWAY_PLURAL}`,
-            { fieldSelector: `metadata.name=${this.gatewayName}` },
-            (type: string, obj: Record<string, unknown>) => {
-              if (type === "ADDED" || type === "MODIFIED") {
-                const ipAddress = this.extractGatewayAddress(obj);
-                if (ipAddress) {
-                  this.baseUrl = `http://${ipAddress}`;
-                  console.info(
-                    `Gateway is ready. Base URL set to: ${this.baseUrl}`,
-                  );
-                  cleanup();
-                  resolve();
-                }
-              }
-            },
-            (err) => {
-              cleanup();
-              // Ignore AbortError that occurs when we intentionally abort the watch
-              if (err && !(err instanceof Error && err.name === "AbortError")) {
-                reject(err);
-              }
-            },
-          )
-          .then((ac) => {
-            abortController = ac;
-          });
-      });
-    };
-
-    await withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "wait_for_gateway",
-      fn,
-      this.tracingManager?.parentContext,
-    );
-  }
-
-  private async startAndWaitForPortForward(): Promise<void> {
-    const fn = async () => {
-      const localPort = await getFreePort();
-      const routerSvc = "svc/sandbox-router-svc";
-
-      console.info(
-        `Starting Dev Mode tunnel: localhost:${localPort} -> ${routerSvc}:8080...`,
-      );
-
-      this.portForwardProcess = spawn(
-        "kubectl",
-        ["port-forward", routerSvc, `${localPort}:8080`, "-n", this.namespace],
-        { stdio: ["ignore", "pipe", "pipe"] },
-      );
-
-      console.info("Waiting for port-forwarding to be ready...");
-      const startTime = Date.now();
-      const timeoutMs = this.portForwardReadyTimeout * 1000;
-
-      while (Date.now() - startTime < timeoutMs) {
-        if (
-          this.portForwardProcess.exitCode !== null ||
-          this.portForwardProcess.signalCode !== null
-        ) {
-          throw new Error(
-            `Tunnel crashed: port-forward process exited with code ${this.portForwardProcess.exitCode}, signal ${this.portForwardProcess.signalCode}`,
-          );
-        }
-
-        const connected = await new Promise<boolean>((resolve) => {
-          const sock = net.createConnection(
-            { host: "127.0.0.1", port: localPort, timeout: 100 },
-            () => {
-              sock.destroy();
-              resolve(true);
-            },
-          );
-          sock.on("error", () => {
-            sock.destroy();
-            resolve(false);
-          });
-          sock.on("timeout", () => {
-            sock.destroy();
-            resolve(false);
-          });
-        });
-
-        if (connected) {
-          this.baseUrl = `http://127.0.0.1:${localPort}`;
-          console.info(`Dev Mode ready. Tunneled to Router at ${this.baseUrl}`);
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          return;
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-
-      await this.close();
-      throw new Error("Failed to establish tunnel to Router Service.");
-    };
-
-    await withSpan(
-      this.tracer,
-      this.traceServiceName,
-      "dev_mode_tunnel",
-      fn,
-      this.tracingManager?.parentContext,
-    );
-  }
-
-  protected async request(
-    method: string,
-    endpoint: string,
-    options: {
-      body?: BodyInit | null;
-      headers?: Record<string, string>;
-      timeout?: number;
-    } = {},
-  ): Promise<Response> {
-    if (!this.isReady()) {
-      throw new Error("Sandbox is not ready for communication.");
-    }
-
-    if (
-      this.portForwardProcess &&
-      (this.portForwardProcess.exitCode !== null ||
-        this.portForwardProcess.signalCode !== null)
-    ) {
-      throw new Error(
-        `Kubectl Port-Forward crashed BEFORE request! ` +
-          `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
-      );
-    }
-
-    const url = `${this.baseUrl!.replace(/\/+$/, "")}/${endpoint.replace(
-      /^\/+/,
-      "",
-    )}`;
-
-    const headers: Record<string, string> = {
-      ...options.headers,
-      "X-Sandbox-ID": this.sandboxName!,
-      "X-Sandbox-Namespace": this.namespace,
-      "X-Sandbox-Port": String(this.serverPort),
-    };
-
-    const fetchOptions: RequestInit = {
-      method,
-      headers,
-      body: options.body,
-    };
-
-    if (options.timeout) {
-      fetchOptions.signal = AbortSignal.timeout(options.timeout * 1000);
-    }
-
-    try {
-      const response = await fetchWithRetry(url, fetchOptions);
-      if (!response.ok) {
-        throw new Error(
-          `Request failed with status ${response.status}: ${response.statusText}`,
-        );
-      }
-      return response;
-    } catch (err) {
-      if (
-        this.portForwardProcess &&
-        (this.portForwardProcess.exitCode !== null ||
-          this.portForwardProcess.signalCode !== null)
-      ) {
-        throw new Error(
-          `Kubectl Port-Forward crashed DURING request! ` +
-            `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
-          { cause: err },
-        );
-      }
-
-      console.error(`Request to gateway router failed: ${err}`);
-      throw new Error(
-        `Failed to communicate with the sandbox via the gateway at ${url}.`,
-        { cause: err },
-      );
-    }
   }
 }

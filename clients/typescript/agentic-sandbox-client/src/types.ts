@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-export interface SandboxOptions {
-  templateName: string;
+export interface SandboxClientOptions {
   namespace?: string;
+  apiUrl?: string;
   gatewayName?: string;
   gatewayNamespace?: string;
-  apiUrl?: string;
   serverPort?: number;
   sandboxReadyTimeout?: number;
   gatewayReadyTimeout?: number;
   portForwardReadyTimeout?: number;
   enableTracing?: boolean;
   traceServiceName?: string;
+}
+
+export interface CreateSandboxOptions {
+  sandboxReadyTimeout?: number;
+  labels?: Record<string, string>;
 }
 
 export interface ExecutionResult {

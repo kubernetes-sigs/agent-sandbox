@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { Sandbox } from "../sandbox.js";
+import type { SandboxInit } from "../sandbox.js";
 import { SandboxClient } from "../sandbox-client.js";
-import type { ExecutionResult, SandboxOptions } from "../types.js";
-
+import type { ExecutionResult } from "../types.js";
 import { withSpan } from "../trace-manager.js";
 
-export class ComputerUseSandbox extends SandboxClient {
-  constructor(options: SandboxOptions) {
+/**
+ * Sandbox handle with computer-use agent support.
+ * Use ComputerUseSandboxClient to create instances.
+ */
+export class ComputerUseSandbox extends Sandbox {
+  constructor(init: SandboxInit) {
     super({
-      ...options,
-      serverPort: options.serverPort ?? 8080,
+      ...init,
+      serverPort: init.serverPort !== 8888 ? init.serverPort : 8080,
     });
   }
 
@@ -31,7 +36,7 @@ export class ComputerUseSandbox extends SandboxClient {
       this.traceServiceName,
       "agent",
       async (span) => {
-        if (!this.isReady()) {
+        if (!this.isActive) {
           throw new Error(
             "Sandbox is not ready. Cannot execute agent queries.",
           );
@@ -72,4 +77,14 @@ export class ComputerUseSandbox extends SandboxClient {
       this.tracingManager?.parentContext,
     );
   }
+}
+
+/**
+ * Registry client that creates ComputerUseSandbox handles.
+ */
+export class ComputerUseSandboxClient extends SandboxClient<ComputerUseSandbox> {
+  protected override readonly sandboxClass =
+    ComputerUseSandbox as unknown as new (
+      init: SandboxInit,
+    ) => ComputerUseSandbox;
 }

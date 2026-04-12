@@ -13,7 +13,13 @@
 // limitations under the License.
 
 export { SandboxClient } from "./sandbox-client.js";
+export { Sandbox } from "./sandbox.js";
 export { CommandExecutor } from "./commands/index.js";
 export { Filesystem } from "./files/index.js";
 export * from "./extensions/index.js";
-export type { ExecutionResult, FileEntry, SandboxOptions } from "./types.js";
+export type {
+  ExecutionResult,
+  FileEntry,
+  SandboxClientOptions,
+  CreateSandboxOptions,
+} from "./types.js";

@@ -135,15 +135,24 @@ export class Filesystem {
           timeout,
         });
 
-        const entries = (await response.json()) as Array<
-          Record<string, unknown>
-        >;
+        const rawText = await response.text();
+        let entries: unknown;
+        try {
+          entries = JSON.parse(rawText);
+        } catch (err) {
+          throw new Error(
+            `Failed to decode JSON response from sandbox: ${rawText}`,
+            { cause: err },
+          );
+        }
 
-        if (!entries) {
+        if (!Array.isArray(entries)) {
           return [];
         }
 
-        const fileEntries: FileEntry[] = entries.map((e) => ({
+        const fileEntries: FileEntry[] = (
+          entries as Array<Record<string, unknown>>
+        ).map((e) => ({
           name: e.name as string,
           size: e.size as number,
           type: e.type as "file" | "directory",
@@ -175,7 +184,16 @@ export class Filesystem {
           timeout,
         });
 
-        const data = (await response.json()) as Record<string, unknown>;
+        const rawText = await response.text();
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(rawText) as Record<string, unknown>;
+        } catch (err) {
+          throw new Error(
+            `Failed to decode JSON response from sandbox: ${rawText}`,
+            { cause: err },
+          );
+        }
         const exists = (data.exists as boolean) ?? false;
 
         if (span.isRecording()) {

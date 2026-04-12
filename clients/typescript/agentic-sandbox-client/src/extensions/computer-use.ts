@@ -47,7 +47,16 @@ export class ComputerUseSandbox extends SandboxClient {
           timeout,
         });
 
-        const data = (await response.json()) as Record<string, unknown>;
+        const rawText = await response.text();
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(rawText) as Record<string, unknown>;
+        } catch (err) {
+          throw new Error(
+            `Failed to decode JSON response from sandbox: ${rawText}`,
+            { cause: err },
+          );
+        }
         const result: ExecutionResult = {
           stdout: (data.stdout as string) ?? "",
           stderr: (data.stderr as string) ?? "",

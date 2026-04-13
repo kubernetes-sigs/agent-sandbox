@@ -137,14 +137,17 @@ class AsyncK8sHelper:
                         )
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event["object"]
-                        status = claim_object.get("status", {})
+                        status = claim_object.get("status") or {}
                         
                         for cond in status.get("conditions", []):
-                            if cond.get("type") == "Ready" and cond.get("status") == "False":
-                                if cond.get("reason") == "TemplateNotFound":
-                                    raise SandboxTemplateNotFoundError(
-                                        f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
-                                    )
+                            if (
+                                cond.get("type") == "Ready"
+                                and cond.get("status") == "False"
+                                and cond.get("reason") == "TemplateNotFound"
+                            ):
+                                raise SandboxTemplateNotFoundError(
+                                    f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                                )
 
                         sandbox_status = status.get("sandbox", {})
                         # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
@@ -180,7 +183,7 @@ class AsyncK8sHelper:
                         continue
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         sandbox_object = event["object"]
-                        status = sandbox_object.get("status", {})
+                        status = sandbox_object.get("status") or {}
                         conditions = status.get("conditions", [])
                         for cond in conditions:
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
@@ -274,7 +277,7 @@ class AsyncK8sHelper:
                         continue
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         gateway_object = event["object"]
-                        status = gateway_object.get("status", {})
+                        status = gateway_object.get("status") or {}
                         addresses = status.get("addresses", [])
                         if addresses:
                             ip_address = addresses[0].get("value")

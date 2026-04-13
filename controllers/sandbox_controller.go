@@ -174,24 +174,23 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	sandboxDeleted := false
 	result := ctrl.Result{}
 
-	expired, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
-	if expired && !sandboxMarkedExpired(sandbox) {
-		setSandboxExpiredCondition(sandbox)
-		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
-			return ctrl.Result{}, statusUpdateErr
-		}
-		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
-	}
-
-	// Check if sandbox has expired
+	expired, _ := checkSandboxExpiry(sandbox, time.Now())
 	if expired {
+		if !sandboxMarkedExpired(sandbox) {
+			setSandboxExpiredCondition(sandbox)
+			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+				return ctrl.Result{}, statusUpdateErr
+			}
+			return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+		}
+
 		log.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
 		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
 	} else {
 		err = r.reconcileChildResources(ctx, sandbox)
-		expired, requeueAfter = checkSandboxExpiry(sandbox, time.Now())
+		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
 		result.RequeueAfter = requeueAfter
-		if expired {
+		if expiredAfterReconcile {
 			setSandboxExpiredCondition(sandbox)
 			result.RequeueAfter = immediateRequeueDelay
 		}

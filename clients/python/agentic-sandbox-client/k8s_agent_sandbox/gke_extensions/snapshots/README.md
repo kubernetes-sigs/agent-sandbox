@@ -11,6 +11,10 @@ The main entry point for the snapshot extension. It inherits from the base `Sand
 
 ### `SandboxWithSnapshotSupport`
 This class wraps the base `Sandbox` to seamlessly provide snapshot capabilities. It manages the sandbox lifecycle while granting access to the underlying snapshot operations via the `.snapshots` property.
+*   **Suspend**: Scales the sandbox down to 0 replicas, temporarily pausing execution. It can optionally take a snapshot immediately before suspending (enabled by default).
+*   **Resume**: Scales the sandbox back up to 1 replica, automatically restoring its state from the most recent available snapshot.
+*   **Is Restored From Snapshot**: Checks if the current sandbox was successfully restored from a specific snapshot UID.
+*   **Is Suspended**: Checks if the sandbox is currently suspended (i.e., scaled down to 0 replicas).
 
 ### `SnapshotEngine`
 The core engine responsible for interacting with the GKE Pod Snapshot Controller.
@@ -32,18 +36,30 @@ client = PodSnapshotSandboxClient()
 
 # Create a sandbox with snapshot capabilities enabled
 sandbox = client.create_sandbox(
-    template_name="python-counter-template", 
+    template="python-counter-template", 
     namespace="default"
 )
 
 try:
-    # Trigger a snapshot via the snapshots engine
+    # Trigger a manual snapshot via the snapshots engine
     response = sandbox.snapshots.create("my-first-snapshot")
 
     if response.success:
         print(f"Snapshot created successfully! UID: {response.snapshot_uid}")
     else:
         print(f"Snapshot failed: {response.error_reason}")
+        
+    # Suspend the sandbox (automatically takes a snapshot and scales to 0 replicas)
+    print("Suspending sandbox...")
+    suspend_response = sandbox.suspend(snapshot_before_suspend=True)
+    if suspend_response.success:
+        print("Sandbox suspended successfully.")
+        
+    # Resume the sandbox (scales to 1 replica and restores from the latest snapshot)
+    print("Resuming sandbox...")
+    resume_response = sandbox.resume()
+    if resume_response.success:
+        print(f"Sandbox resumed! Restored from snapshot: {resume_response.restored_from_snapshot}")
 finally:
     sandbox.terminate()
 ```

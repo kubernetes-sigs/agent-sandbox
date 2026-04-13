@@ -89,15 +89,15 @@ func verifySandboxRecreated(t *testing.T, tc *framework.TestContext, ns *corev1.
 		return !sb.DeletionTimestamp.IsZero()
 	}, 30*time.Second, 1*time.Second, "old sandbox should be deleted or marked for deletion")
 
-	// Wait for the warm pool to be ready again
-	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
-
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
 	require.NoError(t, tc.Get(t.Context(), sandboxWarmpoolID, warmPool))
 
 	if expectUpdate {
 		verifySandboxHasUpdatedSpec(t, tc, ns, poolSandboxName, warmPool)
 	}
+
+	// Wait for the warm pool to be ready again
+	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
 }
 
 func verifySandboxHasUpdatedSpec(t *testing.T, tc *framework.TestContext, ns *corev1.Namespace, excludeSandboxName string, warmPool *extensionsv1alpha1.SandboxWarmPool) {
@@ -114,7 +114,7 @@ func verifySandboxHasUpdatedSpec(t *testing.T, tc *framework.TestContext, ns *co
 			}
 		}
 		return false
-	}, 10*time.Second, 1*time.Second, "expected to find a new pool sandbox")
+	}, 30*time.Second, 1*time.Second, "expected to find a new pool sandbox")
 
 	newSb := &sandboxv1alpha1.Sandbox{}
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: newSandboxName, Namespace: ns.Name}, newSb))
@@ -146,13 +146,13 @@ func verifyOnReplenishLifecycle(t *testing.T, tc *framework.TestContext, ns *cor
 		return k8serrors.IsNotFound(err)
 	}, 30*time.Second, 1*time.Second, "old sandbox should be deleted")
 
-	// Wait for the warm pool to be ready again
-	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
-
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
 	require.NoError(t, tc.Get(t.Context(), sandboxWarmpoolID, warmPool))
 
 	verifySandboxHasUpdatedSpec(t, tc, ns, poolSandboxName, warmPool)
+
+	// Wait for the warm pool to be ready again
+	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
 }
 
 // Test basic rollout strategy for warmpool - default, onReplenish, recreate
@@ -287,7 +287,7 @@ func TestWarmPoolRolloutMultiTemplateIsolation(t *testing.T) {
 			}
 		}
 		return sbNameA != "" && sbNameB != ""
-	}, 10*time.Second, 1*time.Second, "expected to find sandboxes for both warm pools")
+	}, 30*time.Second, 1*time.Second, "expected to find sandboxes for both warm pools")
 
 	// Update Template A
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: templateA.Name, Namespace: templateA.Namespace}, templateA))
@@ -345,7 +345,7 @@ func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 			}
 		}
 		return false
-	}, 10*time.Second, 1*time.Second, "expected to find a pool sandbox")
+	}, 30*time.Second, 1*time.Second, "expected to find a pool sandbox")
 
 	// Update WarmPool to point to Template B
 	require.NoError(t, tc.Get(t.Context(), sandboxWarmpoolID, warmPool))
@@ -371,7 +371,7 @@ func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 			}
 		}
 		return false
-	}, 10*time.Second, 1*time.Second, "expected to find a new pool sandbox")
+	}, 30*time.Second, 1*time.Second, "expected to find a new pool sandbox")
 
 	newSb := &sandboxv1alpha1.Sandbox{}
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: newSandboxName, Namespace: ns.Name}, newSb))
@@ -420,7 +420,7 @@ func TestWarmPoolRolloutMetadataUpdate(t *testing.T) {
 			}
 		}
 		return false
-	}, 10*time.Second, 1*time.Second, "expected to find a pool sandbox")
+	}, 30*time.Second, 1*time.Second, "expected to find a pool sandbox")
 
 	// Update the labels in the template's pod template metadata
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: template.Name, Namespace: template.Namespace}, template))

@@ -134,3 +134,66 @@ func TestSandboxClaimDeleteForeground(t *testing.T) {
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), claim))
 	t.Log("Claim fully deleted")
 }
+
+func TestSandboxClaimTTLAfterFinished(t *testing.T) {
+	testCtx := framework.NewTestContext(t)
+
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("claim-ttl-after-finished-%d", time.Now().UnixNano())
+	require.NoError(t, testCtx.CreateWithCleanup(t.Context(), ns))
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ttl-after-finished-template",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:    "busybox",
+						Image:   "busybox:1.36",
+						Command: []string{"sh", "-c", "exit 0"},
+					}},
+				},
+			},
+		},
+	}
+	require.NoError(t, testCtx.CreateWithCleanup(t.Context(), template))
+
+	ttlAfterFinished := int32(2)
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ttl-after-finished-claim",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: template.Name},
+			Lifecycle: &extensionsv1alpha1.Lifecycle{
+				ShutdownPolicy:          extensionsv1alpha1.ShutdownPolicyDelete,
+				TTLSecondsAfterFinished: &ttlAfterFinished,
+			},
+		},
+	}
+	require.NoError(t, testCtx.CreateWithCleanup(t.Context(), claim))
+
+	podKey := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	require.Eventually(t, func() bool {
+		pod := &corev1.Pod{}
+		if err := testCtx.Get(t.Context(), podKey, pod); err != nil {
+			return false
+		}
+		return pod.Status.Phase == corev1.PodSucceeded
+	}, 60*time.Second, time.Second)
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
+	sandbox := &sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
+
+	require.NoError(t, testCtx.WaitForObjectNotFound(t.Context(), claim))
+	require.NoError(t, testCtx.WaitForObjectNotFound(t.Context(), sandbox))
+	require.NoError(t, testCtx.WaitForObjectNotFound(t.Context(), pod))
+	require.NoError(t, testCtx.WaitForObjectNotFound(t.Context(), svc))
+}

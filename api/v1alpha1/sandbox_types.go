@@ -27,9 +27,15 @@ func (c ConditionType) String() string { return string(c) }
 const (
 	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"
+	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
+	SandboxConditionFinished ConditionType = "Finished"
 
 	// SandboxReasonExpired indicates expired state for Sandbox.
 	SandboxReasonExpired = "SandboxExpired"
+	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
+	SandboxReasonPodSucceeded = "PodSucceeded"
+	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
+	SandboxReasonPodFailed = "PodFailed"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import time
 from typing import List
 from kubernetes import client, config, watch
 from .exceptions import SandboxMetadataError, SandboxNotFoundError
@@ -41,7 +42,7 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 
-    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None):
+    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None):
         """Creates a SandboxClaim custom resource."""
         metadata = {
             "name": name,
@@ -50,15 +51,19 @@ class K8sHelper:
         if labels:
             metadata["labels"] = labels
 
+        spec = {
+            "sandboxTemplateRef": {
+                "name": template
+            }
+        }
+        if lifecycle:
+            spec["lifecycle"] = lifecycle
+
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
             "kind": "SandboxClaim",
             "metadata": metadata,
-            "spec": {
-                "sandboxTemplateRef": {
-                    "name": template
-                }
-            }
+            "spec": spec,
         }
         logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'...")
         self.custom_objects_api.create_namespaced_custom_object(
@@ -75,66 +80,75 @@ class K8sHelper:
         name. This method watches the SandboxClaim until the sandbox name
         appears in the claim's status, then returns it.
         """
-        w = watch.Watch()
+        deadline = time.monotonic() + timeout
         logging.info(f"Resolving sandbox name from claim '{claim_name}'...")
-        for event in w.stream(
-            func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=namespace,
-            group=CLAIM_API_GROUP,
-            version=CLAIM_API_VERSION,
-            plural=CLAIM_PLURAL_NAME,
-            field_selector=f"metadata.name={claim_name}",
-            timeout_seconds=timeout
-        ):
-            if event is None:
-                continue
-            if event["type"] == "DELETED":
-                w.stop()
-                raise SandboxMetadataError(
-                    f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                claim_object = event['object']
-                sandbox_status = claim_object.get(
-                    'status', {}).get('sandbox', {})
-                name = sandbox_status.get('name', '')
-                if name:
-                    logging.info(
-                        f"Resolved sandbox name '{name}' from claim status")
+        while True:
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Could not resolve sandbox name from claim "
+                    f"'{claim_name}' within {timeout} seconds.")
+            w = watch.Watch()
+            for event in w.stream(
+                func=self.custom_objects_api.list_namespaced_custom_object,
+                namespace=namespace,
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                plural=CLAIM_PLURAL_NAME,
+                field_selector=f"metadata.name={claim_name}",
+                timeout_seconds=remaining
+            ):
+                if event is None:
+                    continue
+                if event["type"] == "DELETED":
                     w.stop()
-                    return name
-        raise TimeoutError(
-            f"Could not resolve sandbox name from claim "
-            f"'{claim_name}' within {timeout} seconds.")
+                    raise SandboxMetadataError(
+                        f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
+                if event["type"] in ["ADDED", "MODIFIED"]:
+                    claim_object = event['object']
+                    sandbox_status = claim_object.get(
+                        'status', {}).get('sandbox', {})
+                    # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
+                    name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
+                    if name:
+                        logging.info(
+                            f"Resolved sandbox name '{name}' from claim status")
+                        w.stop()
+                        return name
 
     def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int):
         """Waits for the Sandbox custom resource to have a 'Ready' status."""
+        deadline = time.monotonic() + timeout
         logging.info(f"Watching for Sandbox {name} to become ready...")
-        w = watch.Watch()
-        for event in w.stream(
-            func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=namespace,
-            group=SANDBOX_API_GROUP,
-            version=SANDBOX_API_VERSION,
-            plural=SANDBOX_PLURAL_NAME,
-            field_selector=f"metadata.name={name}",
-            timeout_seconds=timeout
-        ):
-            if event is None:
-                continue
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                sandbox_object = event['object']
-                status = sandbox_object.get('status', {})
-                conditions = status.get('conditions', [])
-                for cond in conditions:
-                    if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                        logging.info(f"Sandbox {name} is ready.")
-                        w.stop()
-                        return
-            elif event["type"] == "DELETED":
-                logging.error(f"Sandbox {name} was deleted before becoming ready.")
-                w.stop()
-                raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
-        raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
+        while True:
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
+            w = watch.Watch()
+            for event in w.stream(
+                func=self.custom_objects_api.list_namespaced_custom_object,
+                namespace=namespace,
+                group=SANDBOX_API_GROUP,
+                version=SANDBOX_API_VERSION,
+                plural=SANDBOX_PLURAL_NAME,
+                field_selector=f"metadata.name={name}",
+                timeout_seconds=remaining
+            ):
+                if event is None:
+                    continue
+                if event["type"] in ["ADDED", "MODIFIED"]:
+                    sandbox_object = event['object']
+                    status = sandbox_object.get('status', {})
+                    conditions = status.get('conditions', [])
+                    for cond in conditions:
+                        if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                            logging.info(f"Sandbox {name} is ready.")
+                            w.stop()
+                            return
+                elif event["type"] == "DELETED":
+                    logging.error(f"Sandbox {name} was deleted before becoming ready.")
+                    w.stop()
+                    raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
 
     def delete_sandbox_claim(self, name: str, namespace: str):
         """Deletes a SandboxClaim custom resource."""
@@ -187,27 +201,31 @@ class K8sHelper:
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
+        deadline = time.monotonic() + timeout
         logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
-        w = watch.Watch()
-        for event in w.stream(
-            func=self.custom_objects_api.list_namespaced_custom_object,
-            namespace=namespace,
-            group=GATEWAY_API_GROUP,
-            version=GATEWAY_API_VERSION,
-            plural=GATEWAY_PLURAL,
-            field_selector=f"metadata.name={gateway_name}",
-            timeout_seconds=timeout,
-        ):
-            if event is None:
-                continue
-            if event["type"] in ["ADDED", "MODIFIED"]:
-                gateway_object = event['object']
-                status = gateway_object.get('status', {})
-                addresses = status.get('addresses', [])
-                if addresses:
-                    ip_address = addresses[0].get('value')
-                    if ip_address:
-                        logging.info(f"Gateway ready. IP: {ip_address}")
-                        w.stop()
-                        return ip_address
-        raise TimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
+        while True:
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
+            w = watch.Watch()
+            for event in w.stream(
+                func=self.custom_objects_api.list_namespaced_custom_object,
+                namespace=namespace,
+                group=GATEWAY_API_GROUP,
+                version=GATEWAY_API_VERSION,
+                plural=GATEWAY_PLURAL,
+                field_selector=f"metadata.name={gateway_name}",
+                timeout_seconds=remaining,
+            ):
+                if event is None:
+                    continue
+                if event["type"] in ["ADDED", "MODIFIED"]:
+                    gateway_object = event['object']
+                    status = gateway_object.get('status', {})
+                    addresses = status.get('addresses', [])
+                    if addresses:
+                        ip_address = addresses[0].get('value')
+                        if ip_address:
+                            logging.info(f"Gateway ready. IP: {ip_address}")
+                            w.stop()
+                            return ip_address

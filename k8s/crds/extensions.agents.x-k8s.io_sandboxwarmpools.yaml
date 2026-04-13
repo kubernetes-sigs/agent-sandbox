@@ -46,6 +46,15 @@ spec:
                 required:
                 - name
                 type: object
+              updateStrategy:
+                properties:
+                  type:
+                    default: OnReplenish
+                    enum:
+                    - Recreate
+                    - OnReplenish
+                    type: string
+                type: object
             required:
             - replicas
             - sandboxTemplateRef

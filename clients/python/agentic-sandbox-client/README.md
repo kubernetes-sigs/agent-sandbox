@@ -189,6 +189,40 @@ client = SandboxClient(
 sandbox = client.create_sandbox(template="node-sandbox-template", namespace="default").
 ```
 
+### 5. Async Client
+
+For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.
+Install the async extras first:
+
+```bash
+pip install k8s-agent-sandbox[async]
+```
+
+The async client requires an explicit connection config — `LocalTunnel` mode is not supported
+because it relies on a synchronous `kubectl port-forward` subprocess. Use `DirectConnection` or
+`GatewayConnection` instead.
+
+```python
+import asyncio
+from k8s_agent_sandbox import AsyncSandboxClient
+from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+async def main():
+    config = SandboxDirectConnectionConfig(
+        api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+    )
+
+    async with AsyncSandboxClient(connection_config=config) as client:
+        sandbox = await client.create_sandbox(
+            template="python-sandbox-template",
+            namespace="default",
+        )
+        result = await sandbox.commands.run("echo 'Hello from async!'")
+        print(result.stdout)
+
+asyncio.run(main())
+```
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

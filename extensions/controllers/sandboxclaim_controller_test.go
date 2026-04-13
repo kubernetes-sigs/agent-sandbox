@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,8 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
@@ -1146,11 +1149,13 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
 
 	testCases := []struct {
-		name                 string
-		claim                *extensionsv1alpha1.SandboxClaim
-		oldStatus            *extensionsv1alpha1.SandboxClaimStatus
-		sandbox              *sandboxv1alpha1.Sandbox
-		expectedObservations int
+		name                           string
+		claim                          *extensionsv1alpha1.SandboxClaim
+		oldStatus                      *extensionsv1alpha1.SandboxClaimStatus
+		sandbox                        *sandboxv1alpha1.Sandbox
+		expectedObservations           int
+		expectedControllerObservations int
+		setupReconciler                func(r *SandboxClaimReconciler)
 	}{
 		{
 			name: "records success on first ready transition",
@@ -1202,20 +1207,55 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			sandbox:              nil,
 			expectedObservations: 1,
 		},
+		{
+			name: "records controller latency using stored time",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "stored-time",
+					Namespace:         "default",
+					CreationTimestamp: pastTime,
+					Annotations: map[string]string{
+						ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:                      &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations:           1,
+			expectedControllerObservations: 1,
+			setupReconciler: func(r *SandboxClaimReconciler) {
+				key := types.NamespacedName{Name: "stored-time", Namespace: "default"}
+				r.observedTimes.Store(key, time.Now().Add(-5*time.Second))
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Reset the metrics registry for a clean test
 			asmetrics.ClaimStartupLatency.Reset()
+			asmetrics.ClaimControllerStartupLatency.Reset()
+
 			r := &SandboxClaimReconciler{}
+
+			if tc.setupReconciler != nil {
+				tc.setupReconciler(r)
+			}
 
 			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
 			if count != tc.expectedObservations {
-				t.Errorf("expected %d observations, got %d", tc.expectedObservations, count)
+				t.Errorf("expected %d observations for ClaimStartupLatency, got %d", tc.expectedObservations, count)
+			}
+
+			countController := testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency)
+			if countController != tc.expectedControllerObservations {
+				t.Errorf("expected %d observations for ClaimControllerStartupLatency, got %d", tc.expectedControllerObservations, countController)
 			}
 		})
 	}
@@ -1691,4 +1731,52 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			t.Error("expected warm pool label to be removed from adopted sandbox")
 		}
 	})
+}
+
+func TestSandboxClaimPredicates(t *testing.T) {
+	r := &SandboxClaimReconciler{}
+	pred := r.getTimingPredicate()
+
+	testCases := []struct {
+		name        string
+		trigger     func(p predicate.Predicate) bool
+		expectedKey types.NamespacedName
+	}{
+		{
+			name: "CreateFunc stores time",
+			trigger: func(p predicate.Predicate) bool {
+				return p.Create(event.CreateEvent{
+					Object: &extensionsv1alpha1.SandboxClaim{
+						ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default"},
+					},
+				})
+			},
+			expectedKey: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		},
+		{
+			name: "UpdateFunc stores time",
+			trigger: func(p predicate.Predicate) bool {
+				return p.Update(event.UpdateEvent{
+					ObjectNew: &extensionsv1alpha1.SandboxClaim{
+						ObjectMeta: metav1.ObjectMeta{Name: "test-claim-update", Namespace: "default"},
+					},
+				})
+			},
+			expectedKey: types.NamespacedName{Name: "test-claim-update", Namespace: "default"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r.observedTimes = sync.Map{} // Reset map for each test case
+			res := tc.trigger(pred)
+			if !res {
+				t.Error("expected predicate to return true")
+			}
+
+			if _, ok := r.observedTimes.Load(tc.expectedKey); !ok {
+				t.Errorf("expected time to be stored in observedTimes map for key %v", tc.expectedKey)
+			}
+		})
+	}
 }

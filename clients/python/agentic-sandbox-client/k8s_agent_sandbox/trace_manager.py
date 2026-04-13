@@ -192,6 +192,30 @@ def trace_span(span_suffix):
     return decorator
 
 
+def async_trace_span(span_suffix):
+    """
+    Async version of trace_span. Wraps an async method in an OpenTelemetry span.
+
+    Same requirements as trace_span: the instance must have `self.tracer` and
+    `self.trace_service_name`.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(self, *args, **kwargs):
+            tracer = getattr(self, 'tracer', None)
+            if not tracer:
+                return await func(self, *args, **kwargs)
+
+            service_name = getattr(
+                self, 'trace_service_name', 'sandbox-client')
+            span_name = f"{service_name}.{span_suffix}"
+
+            with tracer.start_as_current_span(span_name):
+                return await func(self, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
 class TracerManager:
     """
     Manages the tracing lifecycle for a single client instance.

@@ -35,6 +35,8 @@ const (
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
+	// SandboxPodTemplateHashLabel is the label used to track the pod template hash.
+	SandboxPodTemplateHashLabel = "agents.x-k8s.io/sandbox-pod-template-hash"
 )
 
 type PodMetadata struct {

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,18 +29,24 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
+
+const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -59,6 +66,7 @@ type SandboxClaimReconciler struct {
 	Recorder                events.EventRecorder
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
+	observedTimes           sync.Map
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -92,15 +100,30 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID. Inline patch,
-	// no early return, to avoid forcing a second reconcile cycle.
-	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	// Initialize trace ID and observation time for active resources missing them.
+	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
+	traceContext := r.Tracer.GetTraceContext(ctx)
+	needObservabilityPatch := claim.Annotations[ObservabilityAnnotation] == ""
+	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
+
+	if needObservabilityPatch || needTraceContextPatch {
 		patch := client.MergeFrom(claim.DeepCopy())
 		if claim.Annotations == nil {
 			claim.Annotations = make(map[string]string)
 		}
-		claim.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if needObservabilityPatch {
+			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+			if val, ok := r.observedTimes.Load(key); ok {
+				claim.Annotations[ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
+			} else {
+				now := time.Now()
+				claim.Annotations[ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+				r.observedTimes.Store(key, now)
+			}
+		}
+		if needTraceContextPatch {
+			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
+		}
 		if err := r.Patch(ctx, claim, patch); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -430,6 +453,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 		delete(adopted.Labels, warmPoolSandboxLabel)
 		delete(adopted.Labels, sandboxTemplateRefHash)
+		delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
 
 		// Transfer ownership from SandboxWarmPool to SandboxClaim
 		adopted.OwnerReferences = nil
@@ -441,8 +465,8 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		if adopted.Annotations == nil {
 			adopted.Annotations = make(map[string]string)
 		}
-		if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
-			adopted.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+			adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 		}
 
 		// Add sandbox ID label to pod template for NetworkPolicy targeting
@@ -507,17 +531,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 
-	// Determine if we are in "Secure By Default" mode
-	management := template.Spec.NetworkPolicyManagement
-	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
-	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
-
 	// Propagate the trace context annotation to the Sandbox resource
 	if sandbox.Annotations == nil {
 		sandbox.Annotations = make(map[string]string)
 	}
-	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+	if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 	}
 
 	// Track the sandbox template ref to be used by metrics collector
@@ -527,23 +546,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// TODO: this is a workaround, remove replica assignment related issue #202
 	replicas := int32(1)
 	sandbox.Spec.Replicas = &replicas
-	// Enforce a secure-by-default policy by disabling the automatic mounting
-	// of the service account token, adhering to security best practices for
-	// sandboxed environments.
-	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
-		automount := false
-		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
-	}
-	// To prevent internal DNS enumeration while still allowing public domain resolution,
-	// we explicitly override the Pod's DNS config to use external public resolvers.
-	// We only inject this if using the strict "Secure by Default" policy. If the user
-	// provides custom rules or is Unmanaged, we leave DNS alone for air-gapped/proxy compatibility.
-	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
-		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
-		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
-			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
-		}
-	}
+
+	// Apply secure defaults to the sandbox pod spec
+	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
@@ -709,11 +714,27 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 	return template, nil
 }
 
+func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
+			r.observedTimes.LoadOrStore(key, time.Now())
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			key := types.NamespacedName{Name: e.ObjectNew.GetName(), Namespace: e.ObjectNew.GetNamespace()}
+			r.observedTimes.LoadOrStore(key, time.Now())
+			return true
+		},
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extensionsv1alpha1.SandboxClaim{}).
+		For(&extensionsv1alpha1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
 		Owns(&v1alpha1.Sandbox{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
@@ -821,6 +842,18 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
 	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
+
+	// Record controller startup latency
+	if observedTimeString := claim.Annotations[ObservabilityAnnotation]; observedTimeString != "" {
+		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
+		if err != nil {
+			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
+		} else {
+			asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
+			// Clean up map entry after success
+			r.observedTimes.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
+		}
+	}
 
 	// For cold launches, also record the time from Sandbox creation to Ready state to capture controller overhead.
 	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {

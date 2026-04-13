@@ -195,6 +195,15 @@ def main():
     ], cwd=k8s_io_dir, capture_output=True)
 
     print(f"✅ Promotion PR created: {pr_url}")
+    
+    # Write PR URL to a file for use in CI workflows
+    try:
+        with open("promote_pr.url", "w") as f:
+            f.write(pr_url.strip())
+        print("💾 Saved PR URL to promote_pr.url")
+    except Exception as e:
+        print(f"⚠️  Failed to save PR URL to file: {e}")
+
     print("👉 Action Required: Merge the PR and wait for the images to be promoted to registry.k8s.io")
 
 if __name__ == '__main__':

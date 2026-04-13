@@ -28,7 +28,7 @@ pytest.importorskip("kubernetes_asyncio")
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
-from k8s_agent_sandbox.exceptions import SandboxRequestError
+from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxReconcilerError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
@@ -98,6 +98,27 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 await self.client.create_sandbox("test-template", "test-namespace")
 
             mock_delete.assert_called_once()
+
+    async def test_create_sandbox_retry_on_reconciler_error(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            side_effect=[SandboxReconcilerError("Failed"), "resolved-id"]
+        )
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock), \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+
+            sandbox = await self.client.create_sandbox("test-template", "test-namespace")
+
+            self.assertEqual(mock_create.call_count, 2)
+            mock_delete.assert_called_once()
+            self.assertEqual(sandbox, mock_sandbox_instance)
 
     async def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()

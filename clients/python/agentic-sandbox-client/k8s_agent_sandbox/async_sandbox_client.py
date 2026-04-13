@@ -28,7 +28,7 @@ from typing import Generic, TypeVar
 
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxNotFoundError, SandboxReconcilerError
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
@@ -139,31 +139,48 @@ class AsyncSandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        max_retries = 3
+        deadline = time.monotonic() + sandbox_ready_timeout
+        sandbox = None
 
-        try:
-            await self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle)
-            start_time = time.monotonic()
-            sandbox_id = await self.k8s_helper.resolve_sandbox_name(
-                claim_name, namespace, sandbox_ready_timeout
-            )
-            elapsed_time = time.monotonic() - start_time
-            remaining_timeout = max(0, int(sandbox_ready_timeout - elapsed_time))
-            if remaining_timeout <= 0:
-                raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
-            await self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
+        for attempt in range(1, max_retries + 1):
+            claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
-            sandbox = self.sandbox_class(
-                claim_name=claim_name,
-                sandbox_id=sandbox_id,
-                namespace=namespace,
-                connection_config=self.connection_config,
-                tracer_config=self.tracer_config,
-                k8s_helper=self.k8s_helper,
-            )
-        except (Exception, asyncio.CancelledError):
-            await asyncio.shield(self._delete_claim(claim_name, namespace))
-            raise
+            try:
+                await self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle)
+                
+                remaining_timeout = max(0, int(deadline - time.monotonic()))
+                if remaining_timeout <= 0:
+                    raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
+                    
+                sandbox_id = await self.k8s_helper.resolve_sandbox_name(
+                    claim_name, namespace, remaining_timeout
+                )
+                
+                remaining_timeout = max(0, int(deadline - time.monotonic()))
+                if remaining_timeout <= 0:
+                    raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
+                    
+                await self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
+
+                sandbox = self.sandbox_class(
+                    claim_name=claim_name,
+                    sandbox_id=sandbox_id,
+                    namespace=namespace,
+                    connection_config=self.connection_config,
+                    tracer_config=self.tracer_config,
+                    k8s_helper=self.k8s_helper,
+                )
+                break
+            except SandboxReconcilerError as e:
+                await asyncio.shield(self._delete_claim(claim_name, namespace))
+                if attempt == max_retries or time.monotonic() >= deadline:
+                    raise
+                logger.warning(f"SandboxClaim {claim_name} failed with ReconcilerError: {e}. Retrying ({attempt}/{max_retries})...")
+                await asyncio.sleep(2)
+            except (Exception, asyncio.CancelledError):
+                await asyncio.shield(self._delete_claim(claim_name, namespace))
+                raise
 
         async with self._lock:
             self._active_connection_sandboxes[(namespace, claim_name)] = sandbox

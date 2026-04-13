@@ -31,6 +31,7 @@ from k8s_agent_sandbox.constants import POD_NAME_ANNOTATION
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
+    SandboxReconcilerError,
 )
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 
@@ -61,7 +62,7 @@ class TestSandboxClient(unittest.TestCase):
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
             
             mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None)
-            self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
+            self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", ANY)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
             
@@ -81,6 +82,28 @@ class TestSandboxClient(unittest.TestCase):
             self.assertEqual(str(context.exception), "Timeout Error")
             # Ensure delete_sandbox_claim is called to cleanup orphan claim on failure
             self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
+
+    @patch('time.sleep')
+    @patch('uuid.uuid4')
+    def test_create_sandbox_retry_on_reconciler_error(self, mock_uuid, mock_sleep):
+        mock_uuid.return_value.hex = '1234abcd'
+        
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = [
+            SandboxReconcilerError("Failed"),
+            "resolved-id"
+        ]
+        
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+        
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready') as mock_wait:
+            
+            sandbox = self.client.create_sandbox("test-template", "test-namespace")
+            
+            self.assertEqual(mock_create_claim.call_count, 2)
+            self.assertEqual(self.mock_k8s_helper.delete_sandbox_claim.call_count, 1)
+            self.assertEqual(sandbox, mock_sandbox_instance)
 
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()

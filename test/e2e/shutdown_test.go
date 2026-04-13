@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -97,6 +98,63 @@ func TestSandboxShutdownTime(t *testing.T) {
 	// Verify that the sandbox was shut down at or after the specified shutdownTime
 	require.False(t, time.Now().Before(shutdown.Time))
 	// Verify Pod and Service are deleted
+	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), pod))
+	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), service))
+}
+
+func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
+	tc := framework.NewTestContext(t)
+
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("sandbox-retain-expiry-test-%d", time.Now().UnixNano())
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+	shutdown := metav1.NewTime(time.Now().Add(8 * time.Second)).Rfc3339Copy()
+	policy := sandboxv1alpha1.ShutdownPolicyRetain
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "retain-finished-sandbox",
+			Namespace: ns.Name,
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:    "busybox",
+						Image:   "busybox:1.36",
+						Command: []string{"sh", "-c", "exit 0"},
+					}},
+				},
+			},
+			Lifecycle: sandboxv1alpha1.Lifecycle{
+				ShutdownTime:   &shutdown,
+				ShutdownPolicy: &policy,
+			},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))
+
+	tc.MustWaitForObject(sandbox, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded))
+
+	require.Eventually(t, func() bool {
+		current := &sandboxv1alpha1.Sandbox{}
+		if err := tc.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, current); err != nil {
+			return false
+		}
+		readyReasonMatches, err := predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionReady), sandboxv1alpha1.SandboxReasonExpired).Matches(current)
+		if err != nil || !readyReasonMatches {
+			return false
+		}
+		finishedReasonMatches, err := predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded).Matches(current)
+		if err != nil || !finishedReasonMatches {
+			return false
+		}
+		return current.Status.Service == "" && current.Status.ServiceFQDN == "" && current.Status.Replicas == 0
+	}, 60*time.Second, time.Second)
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace}}
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), pod))
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), service))
 }

@@ -121,7 +121,7 @@ class K8sHelper:
                         f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     claim_object = event['object']
-                    status = claim_object.get('status', {})
+                    status = claim_object.get('status') or {}
                     
                     for cond in status.get('conditions', []):
                         if cond.get('type') == 'Ready' and cond.get('status') == 'False':
@@ -135,7 +135,7 @@ class K8sHelper:
                                 w.stop()
                                 raise SandboxReconcilerError(f"SandboxClaim failed with reason '{reason}': {cond.get('message', 'Unknown error')}")
 
-                    sandbox_status = status.get('sandbox', {})
+                    sandbox_status = status.get('sandbox') or {}
                     # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
                     name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
                     if name:
@@ -249,7 +249,7 @@ class K8sHelper:
                     continue
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     gateway_object = event['object']
-                    status = gateway_object.get('status', {})
+                    status = gateway_object.get('status') or {}
                     addresses = status.get('addresses', [])
                     if addresses:
                         ip_address = addresses[0].get('value')

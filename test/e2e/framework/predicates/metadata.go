@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// HasAnnotation verifies the object has the specified annotation
+// HasAnnotation verifies the object has the specified annotation.
 func HasAnnotation(key, wantVal string) ObjectPredicate {
 	return &AnnotationPredicate{
 		Key:     key,
@@ -52,7 +52,7 @@ func (a *AnnotationPredicate) Matches(obj client.Object) (bool, error) {
 	return true, nil
 }
 
-// HasLabel verifies the object has the specified label
+// HasLabel verifies the object has the specified label.
 func HasLabel(key, wantVal string) ObjectPredicate {
 	return &LabelPredicate{
 		Key:     key,
@@ -81,7 +81,7 @@ func (l *LabelPredicate) Matches(obj client.Object) (bool, error) {
 	return true, nil
 }
 
-// HasOwnerReferences verifies the object has the specified owner references
+// HasOwnerReferences verifies the object has the specified owner references.
 func HasOwnerReferences(want []metav1.OwnerReference) ObjectPredicate {
 	return HasOwnerReferencePredicate{Want: want}
 }
@@ -107,7 +107,7 @@ func (h HasOwnerReferencePredicate) Matches(obj client.Object) (bool, error) {
 	return true, nil
 }
 
-// NotDeleted verifies the object has no deletion timestamp
+// NotDeleted verifies the object has no deletion timestamp.
 func NotDeleted() ObjectPredicate {
 	return &NotDeletedPredicate{}
 }
@@ -129,7 +129,7 @@ func (n *NotDeletedPredicate) Matches(obj client.Object) (bool, error) {
 	return true, nil
 }
 
-// HasDeletionTimestamp verifies the object has a deletion timestamp set
+// HasDeletionTimestamp verifies the object has a deletion timestamp set.
 func HasDeletionTimestamp() ObjectPredicate {
 	return &HasDeletionTimestampPredicate{}
 }

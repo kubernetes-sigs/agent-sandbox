@@ -48,9 +48,17 @@ test-e2e-benchmarks:
 lint-go:
 	./dev/tools/lint-go
 
+.PHONY: fix-go
+fix-go:
+	./dev/tools/lint-go --fix
+
 .PHONY: lint-api
 lint-api:
 	./dev/tools/lint-api
+
+.PHONY: fix-api
+fix-api:
+	./dev/tools/lint-api --fix
 
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io

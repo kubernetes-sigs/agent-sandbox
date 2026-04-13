@@ -30,7 +30,7 @@ type NetworkPolicyManagement string
 const (
 	// SandboxIDLabel is the label key applied to the Pod to identify the owning Claim UID.
 	// The SandboxClaim controller injects this label into the Pod
-	// System-injected labels/annotations shouldn't be touched
+	// System-injected labels/annotations shouldn't be touched.
 	SandboxIDLabel = "agents.x-k8s.io/claim-uid"
 
 	// NetworkPolicyManagementManaged means the controller will ensure a shared NetworkPolicy exists.
@@ -58,7 +58,7 @@ type NetworkPolicySpec struct {
 	Egress []networkingv1.NetworkPolicyEgressRule `json:"egress,omitempty"`
 }
 
-// SandboxTemplateSpec defines the desired state of Sandbox
+// SandboxTemplateSpec defines the desired state of Sandbox.
 type SandboxTemplateSpec struct {
 	// podTemplate defines the object template that describes the pod spec that will be used to create
 	// an agent sandbox.
@@ -108,7 +108,7 @@ type SandboxTemplateStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
-// SandboxTemplate is the Schema for the sandbox template API
+// SandboxTemplate is the Schema for the sandbox template API.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -127,7 +127,7 @@ type SandboxTemplate struct {
 
 // +kubebuilder:object:root=true
 
-// SandboxTemplateList contains a list of Sandbox
+// SandboxTemplateList contains a list of Sandbox.
 type SandboxTemplateList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

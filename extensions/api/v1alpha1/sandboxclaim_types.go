@@ -88,14 +88,14 @@ type Lifecycle struct {
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
-// SandboxTemplateRef references a SandboxTemplate
+// SandboxTemplateRef references a SandboxTemplate.
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
 	// +required
 	Name string `json:"name,omitempty" protobuf:"bytes,1,name=name"`
 }
 
-// SandboxClaimSpec defines the desired state of Sandbox
+// SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
 	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
 	// +required
@@ -140,7 +140,7 @@ type SandboxStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim
-// SandboxClaim is the Schema for the sandbox Claim API
+// SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -159,7 +159,7 @@ type SandboxClaim struct {
 
 // +kubebuilder:object:root=true
 
-// SandboxList contains a list of Sandbox
+// SandboxList contains a list of Sandbox.
 type SandboxClaimList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

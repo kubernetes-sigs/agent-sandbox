@@ -131,7 +131,7 @@ func (ws *WatchSet) Subscribe(gvr schema.GroupVersionResource, filter WatchFilte
 	return rw.subscribe(filter)
 }
 
-// Close removes a subscription
+// Close removes a subscription.
 func (s *Subscription) Close() {
 	s.resourceWatch.unsubscribe(s)
 }

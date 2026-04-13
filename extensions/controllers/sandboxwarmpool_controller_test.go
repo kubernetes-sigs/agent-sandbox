@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// Create a test scheme with extensions types registered
+// Create a test scheme with extensions types registered.
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -260,7 +260,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 					Kind:       "SandboxWarmPool",
 					Name:       poolName,
 					UID:        types.UID(ownerUID),
-					Controller: boolPtr(true),
+					Controller: new(true),
 				},
 			}
 		}
@@ -275,7 +275,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 				Kind:       "ReplicaSet",
 				Name:       "other-controller",
 				UID:        "other-uid-456",
-				Controller: boolPtr(true),
+				Controller: new(true),
 			},
 		}
 		return sb
@@ -361,10 +361,6 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 			require.Equal(t, tc.expectedReplicas, warmPool.Status.Replicas, "status replicas mismatch")
 		})
 	}
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }
 
 func TestPoolLabelValueInIntegration(t *testing.T) {

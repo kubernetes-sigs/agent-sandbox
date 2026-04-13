@@ -96,7 +96,7 @@ func init() {
 	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
 }
 
-// SandboxReconciler reconciles a Sandbox object
+// SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -587,9 +587,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 		pod.Labels[sandboxLabel] = nameHash
 		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
-		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-			pod.Labels[k] = v
-		}
+		maps.Copy(pod.Labels, sandbox.Spec.PodTemplate.ObjectMeta.Labels)
 
 		if err := r.Update(ctx, pod); err != nil {
 			return nil, fmt.Errorf("failed to update pod: %w", err)
@@ -609,13 +607,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	labels := map[string]string{
 		sandboxLabel: nameHash,
 	}
-	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-		labels[k] = v
-	}
+	maps.Copy(labels, sandbox.Spec.PodTemplate.ObjectMeta.Labels)
 	annotations := map[string]string{}
-	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
-		annotations[k] = v
-	}
+	maps.Copy(annotations, sandbox.Spec.PodTemplate.ObjectMeta.Annotations)
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 
@@ -730,7 +724,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 	return nil
 }
 
-// handles sandbox expiry by deleting child resources and the sandbox itself if needed
+// handles sandbox expiry by deleting child resources and the sandbox itself if needed.
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
 	log := log.FromContext(ctx)
 	var allErrors error
@@ -810,7 +804,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 
 // checks if the sandbox has expired
 // returns true if expired, false otherwise
-// if not expired, also returns the duration to requeue after
+// if not expired, also returns the duration to requeue after.
 func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
 	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0
@@ -832,7 +826,7 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) 
 	return false, requeueAfter
 }
 
-// sandboxMarkedExpired checks if the sandbox is already marked as expired
+// sandboxMarkedExpired checks if the sandbox is already marked as expired.
 func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
 	return cond != nil && cond.Reason == sandboxv1alpha1.SandboxReasonExpired

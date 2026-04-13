@@ -53,6 +53,9 @@ const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
+// ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
+var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
+
 // getWarmPoolPolicy returns the effective warm pool policy for a claim.
 func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
 	if claim.Spec.WarmPool != nil {
@@ -199,9 +202,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Suppress expected user errors (like missing templates) to avoid crash loops
-	if errors.Is(reconcileErr, ErrTemplateNotFound) {
-		errs := errors.Join(reconcileErr, ErrTemplateNotFound)
-		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "errors", errs, "request", req.NamespacedName)
+	if errors.Is(reconcileErr, ErrTemplateNotFound) || errors.Is(reconcileErr, ErrInvalidMetadata) {
+		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
 	}
 
@@ -229,6 +231,11 @@ func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1alpha1.Sandb
 func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
+
+	// Upfront validation of additional metadata to skip unnecessary processing
+	if err := validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
 
 	// Fast path: try to find existing or adopt from warm pool before template lookup.
 	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
@@ -362,6 +369,16 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            fmt.Sprintf("SandboxTemplate %q not found", claim.Spec.TemplateRef.Name),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrInvalidMetadata) {
+			reason = "InvalidMetadata"
+			return metav1.Condition{
+				Type:               string(v1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            err.Error(),
 				ObservedGeneration: claim.Generation,
 			}
 		}
@@ -553,20 +570,18 @@ func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 	return false
 }
 
-// mergePodMetadata merges labels and annotations from claimMeta into templateMeta,
-// rejecting overrides with different values.
-func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
+// validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
+func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
 	if claimMeta == nil {
 		return nil
 	}
 
-	// Helper to validate label/annotation keys and values
-	validateMetadata := func(key, value string, isLabel bool) error {
+	validate := func(key, value string, isLabel bool) error {
 		// Check restricted domains
 		parts := strings.SplitN(key, "/", 2)
 		domain := ""
 		if len(parts) > 1 {
-			domain = parts[0]
+			domain = strings.ToLower(parts[0])
 		}
 		if domain == "kubernetes.io" || domain == "k8s.io" || strings.HasSuffix(domain, ".agents.x-k8s.io") || domain == "agents.x-k8s.io" {
 			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
@@ -581,11 +596,30 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		return nil
 	}
 
-	// Check for overrides in labels
 	for k, v := range claimMeta.Labels {
-		if err := validateMetadata(k, v, true); err != nil {
+		if err := validate(k, v, true); err != nil {
 			return fmt.Errorf("failed to validate label %q: %w", k, err)
 		}
+	}
+
+	for k, v := range claimMeta.Annotations {
+		if err := validate(k, v, false); err != nil {
+			return fmt.Errorf("failed to validate annotation %q: %w", k, err)
+		}
+	}
+
+	return nil
+}
+
+// mergePodMetadata merges labels and annotations from claimMeta into templateMeta,
+// rejecting overrides with different values.
+func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
+	if err := validateAdditionalPodMetadata(claimMeta); err != nil {
+		return err
+	}
+
+	// Check for overrides in labels
+	for k, v := range claimMeta.Labels {
 		if tv, ok := templateMeta.Labels[k]; ok && tv != v {
 			return fmt.Errorf("metadata override conflict: label %q is defined in template with value %q, but claim requests %q", k, tv, v)
 		}
@@ -593,9 +627,6 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 
 	// Check for overrides in annotations
 	for k, v := range claimMeta.Annotations {
-		if err := validateMetadata(k, v, false); err != nil {
-			return fmt.Errorf("failed to validate annotation %q: %w", k, err)
-		}
 		if tv, ok := templateMeta.Annotations[k]; ok && tv != v {
 			return fmt.Errorf("metadata override conflict: annotation %q is defined in template with value %q, but claim requests %q", k, tv, v)
 		}

@@ -469,9 +469,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 			existingObjects: []client.Object{template},
 			expectSandbox:   false,
-			expectError:     true,
+			expectError:     false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError",
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
 			},
 		},
 		{
@@ -487,9 +487,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 			existingObjects: []client.Object{template},
 			expectSandbox:   false,
-			expectError:     true,
+			expectError:     false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError",
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
 			},
 		},
 		{
@@ -505,9 +505,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 			existingObjects: []client.Object{template},
 			expectSandbox:   false,
-			expectError:     true,
+			expectError:     false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError",
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
 			},
 		},
 	}
@@ -572,9 +572,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				t.Fatalf("expected 1 condition, got %d", len(updatedClaim.Status.Conditions))
 			}
 			condition := updatedClaim.Status.Conditions[0]
-			if tc.expectedCondition.Reason == "ReconcilerError" {
-				if condition.Reason != "ReconcilerError" {
-					t.Errorf("expected condition reason %q, got %q", "ReconcilerError", condition.Reason)
+			if tc.expectedCondition.Reason == "ReconcilerError" || tc.expectedCondition.Reason == "InvalidMetadata" {
+				if condition.Reason != tc.expectedCondition.Reason {
+					t.Errorf("expected condition reason %q, got %q", tc.expectedCondition.Reason, condition.Reason)
 				}
 			} else {
 				if len(tc.expectedPodIPs) > 0 {

@@ -161,8 +161,7 @@ type Lifecycle struct {
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
 	// serviceFQDN that is valid for default cluster settings
-	// Limitation: Hardcoded to the domain .cluster.local
-	// e.g. sandbox-example.default.svc.cluster.local
+	// The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag.
 	// +optional
 	ServiceFQDN string `json:"serviceFQDN,omitempty"`
 

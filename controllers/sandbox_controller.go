@@ -101,8 +101,9 @@ func init() {
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Tracer asmetrics.Instrumenter
+	Scheme        *runtime.Scheme
+	Tracer        asmetrics.Instrumenter
+	ClusterDomain string
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -391,7 +392,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			// Already owned by this sandbox — no action needed.
 		}
 
-		setServiceStatus(sandbox, service)
+		r.setServiceStatus(sandbox, service)
 		return service, nil
 	}
 
@@ -423,15 +424,14 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		return nil, err
 	}
 
-	setServiceStatus(sandbox, service)
+	r.setServiceStatus(sandbox, service)
 	return service, nil
 }
 
 // setServiceStatus updates the sandbox status with the service name and FQDN.
-// TODO(barney-s): hardcoded to svc.cluster.local which is the default. Need a way to change it.
-func setServiceStatus(sandbox *sandboxv1alpha1.Sandbox, service *corev1.Service) {
+func (r *SandboxReconciler) setServiceStatus(sandbox *sandboxv1alpha1.Sandbox, service *corev1.Service) {
 	sandbox.Status.Service = service.Name
-	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc.cluster.local"
+	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc." + r.ClusterDomain
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {

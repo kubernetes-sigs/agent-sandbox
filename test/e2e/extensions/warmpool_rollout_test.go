@@ -31,8 +31,8 @@ import (
 )
 
 const (
-	defaultTestTimeout = 30 * time.Second
-	defaultPollingInterval   = 1 * time.Second
+	defaultTestTimeout     = 30 * time.Second
+	defaultPollingInterval = 1 * time.Second
 )
 
 func createSandboxTemplate(ns *corev1.Namespace, name string) *extensionsv1alpha1.SandboxTemplate {

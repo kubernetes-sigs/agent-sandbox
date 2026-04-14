@@ -14,6 +14,7 @@
 
 import logging
 import time
+from datetime import datetime, UTC
 from typing import List
 from kubernetes import client, config, watch
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
@@ -63,11 +64,9 @@ class K8sHelper:
                 annotations propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
         """
-        from datetime import datetime
-
         updated_annotations = annotations or {}
         if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
-            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.utcnow().isoformat() + "Z"
+            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.now(UTC).isoformat()
 
         metadata = {
             "name": name,

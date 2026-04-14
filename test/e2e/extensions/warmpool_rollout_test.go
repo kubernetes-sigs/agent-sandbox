@@ -155,7 +155,7 @@ func verifyOnReplenishLifecycle(t *testing.T, tc *framework.TestContext, ns *cor
 	verifySandboxHasUpdatedSpec(t, tc, ns, poolSandboxName, warmPool)
 }
 
-// Test basic rollout strategy for warmpool - default, onReplenish, recreate
+// Test basic rollout strategy for warmpool - default, onReplenish, recreate.
 func TestWarmPoolRollout(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -304,7 +304,7 @@ func TestWarmPoolRolloutMultiTemplateIsolation(t *testing.T) {
 	require.True(t, sb.DeletionTimestamp.IsZero(), "Sandbox B should not be marked for deletion")
 }
 
-// Test updating warmpool to point to a different template with the same spec
+// Test updating warmpool to point to a different template with the same spec.
 func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
@@ -379,7 +379,7 @@ func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 	require.Equal(t, templateB.Name, newSb.Annotations[sandboxv1alpha1.SandboxTemplateRefAnnotation], "Sandbox should use the new template name")
 }
 
-// Test that metadata updates to the template does not trigger a rollout
+// Test that metadata updates to the template does not trigger a rollout.
 func TestWarmPoolRolloutMetadataUpdate(t *testing.T) {
 	tc := framework.NewTestContext(t)
 

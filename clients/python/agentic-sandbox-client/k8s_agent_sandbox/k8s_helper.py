@@ -42,10 +42,10 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 
-    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None):
-        """Creates a SandboxClaim custom resource."""
+    def create_sandbox_claim(self, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None) -> str:
+        """Creates a SandboxClaim and returns its generated name."""
         metadata = {
-            "name": name,
+            "generateName": "sandbox-claim-",
             "annotations": annotations or {},
         }
         if labels:
@@ -65,14 +65,17 @@ class K8sHelper:
             "metadata": metadata,
             "spec": spec,
         }
-        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'...")
-        self.custom_objects_api.create_namespaced_custom_object(
+        logging.info(f"Creating SandboxClaim in namespace '{namespace}' using template '{template}'...")
+        created = self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             body=manifest
         )
+        name = created["metadata"]["name"]
+        logging.info(f"SandboxClaim '{name}' created.")
+        return name
     
     def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.

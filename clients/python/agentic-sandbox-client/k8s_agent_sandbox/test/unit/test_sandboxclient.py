@@ -44,43 +44,39 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
 
-    @patch('uuid.uuid4')
-    def test_create_sandbox_success(self, mock_uuid):
-        mock_uuid.return_value.hex = '1234abcd'
+    def test_create_sandbox_success(self):
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
         self.mock_k8s_helper.get_sandbox.return_value = {
             "metadata": {"annotations": {POD_NAME_ANNOTATION: "custom-pod-name"}}
         }
-        
+
         mock_sandbox_instance = MagicMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
-        
-        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+
+        with patch.object(self.client, '_create_claim', return_value="sandbox-claim-gen12") as mock_create_claim, \
              patch.object(self.client, '_wait_for_sandbox_ready') as mock_wait:
-            
+
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
-            
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None)
-            self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
+
+            mock_create_claim.assert_called_once_with("test-template", "test-namespace", labels=None, lifecycle=None)
+            self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-gen12", "test-namespace", 180)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
-            
+
             # Verify the new sandbox is tracked in the registry
             self.assertEqual(len(self.client._active_connection_sandboxes), 1)
-            self.assertEqual(self.client._active_connection_sandboxes[("test-namespace", "sandbox-claim-1234abcd")], mock_sandbox_instance)
+            self.assertEqual(self.client._active_connection_sandboxes[("test-namespace", "sandbox-claim-gen12")], mock_sandbox_instance)
 
-    @patch('uuid.uuid4')
-    def test_create_sandbox_failure_cleanup(self, mock_uuid):
-        mock_uuid.return_value.hex = '1234abcd'
+    def test_create_sandbox_failure_cleanup(self):
         self.mock_k8s_helper.resolve_sandbox_name.side_effect = Exception("Timeout Error")
-        
-        with patch.object(self.client, '_create_claim') as mock_create_claim:
+
+        with patch.object(self.client, '_create_claim', return_value="sandbox-claim-gen12") as mock_create_claim:
             with self.assertRaises(Exception) as context:
                 self.client.create_sandbox("test-template", "test-namespace")
-                
+
             self.assertEqual(str(context.exception), "Timeout Error")
             # Ensure delete_sandbox_claim is called to cleanup orphan claim on failure
-            self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
+            self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-gen12", "test-namespace")
 
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
@@ -183,9 +179,7 @@ class TestSandboxClient(unittest.TestCase):
             mock_delete.assert_any_call("claim1", namespace="ns1")
             mock_delete.assert_any_call("claim2", namespace="ns2")
 
-    @patch('uuid.uuid4')
-    def test_create_sandbox_with_labels(self, mock_uuid):
-        mock_uuid.return_value.hex = '1234abcd'
+    def test_create_sandbox_with_labels(self):
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
 
         mock_sandbox_instance = MagicMock()
@@ -193,13 +187,13 @@ class TestSandboxClient(unittest.TestCase):
 
         labels = {"agent": "code-agent", "team": "platform"}
 
-        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+        with patch.object(self.client, '_create_claim', return_value="sandbox-claim-gen12") as mock_create_claim, \
              patch.object(self.client, '_wait_for_sandbox_ready'):
 
             self.client.create_sandbox("test-template", "test-namespace", labels=labels)
 
             mock_create_claim.assert_called_once_with(
-                "sandbox-claim-1234abcd", "test-template", "test-namespace",
+                "test-template", "test-namespace",
                 labels={"agent": "code-agent", "team": "platform"},
                 lifecycle=None,
             )
@@ -207,12 +201,14 @@ class TestSandboxClient(unittest.TestCase):
     def test_create_claim_with_labels(self):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
+        self.mock_k8s_helper.create_sandbox_claim.return_value = "sandbox-claim-abc12"
 
         labels = {"agent": "code-agent"}
-        self.client._create_claim("test-claim", "test-template", "test-namespace", labels=labels)
+        name = self.client._create_claim("test-template", "test-namespace", labels=labels)
 
+        self.assertEqual(name, "sandbox-claim-abc12")
         self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
-            "test-claim", "test-template", "test-namespace",
+            "test-template", "test-namespace",
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels={"agent": "code-agent"},
             lifecycle=None,
@@ -221,11 +217,13 @@ class TestSandboxClient(unittest.TestCase):
     def test_create_claim(self):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
-        
-        self.client._create_claim("test-claim", "test-template", "test-namespace")
-        
+        self.mock_k8s_helper.create_sandbox_claim.return_value = "sandbox-claim-abc12"
+
+        name = self.client._create_claim("test-template", "test-namespace")
+
+        self.assertEqual(name, "sandbox-claim-abc12")
         self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
-            "test-claim", "test-template", "test-namespace",
+            "test-template", "test-namespace",
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels=None,
             lifecycle=None,
@@ -280,15 +278,13 @@ class TestSandboxClient(unittest.TestCase):
             "sandbox-id", "test-namespace", 45
         )
 
-    @patch('uuid.uuid4')
-    def test_create_sandbox_with_shutdown_after_seconds(self, mock_uuid):
-        mock_uuid.return_value.hex = '1234abcd'
+    def test_create_sandbox_with_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
 
         mock_sandbox_instance = MagicMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
 
-        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+        with patch.object(self.client, '_create_claim', return_value="sandbox-claim-gen12") as mock_create_claim, \
              patch.object(self.client, '_wait_for_sandbox_ready'):
 
             self.client.create_sandbox(
@@ -301,15 +297,13 @@ class TestSandboxClient(unittest.TestCase):
             self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
             self.assertIn("shutdownTime", lifecycle)
 
-    @patch('uuid.uuid4')
-    def test_create_sandbox_without_shutdown_after_seconds(self, mock_uuid):
-        mock_uuid.return_value.hex = '1234abcd'
+    def test_create_sandbox_without_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
 
         mock_sandbox_instance = MagicMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
 
-        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+        with patch.object(self.client, '_create_claim', return_value="sandbox-claim-gen12") as mock_create_claim, \
              patch.object(self.client, '_wait_for_sandbox_ready'):
 
             self.client.create_sandbox("test-template", "test-namespace")
@@ -326,17 +320,19 @@ class TestSandboxClient(unittest.TestCase):
 
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = None
+        self.mock_k8s_helper.create_sandbox_claim.return_value = "sandbox-claim-gen12"
 
         lifecycle = {
             "shutdownTime": "2026-06-15T12:05:00Z",
             "shutdownPolicy": "Delete",
         }
-        self.client._create_claim(
-            "test-claim", "test-template", "test-namespace", lifecycle=lifecycle
+        name = self.client._create_claim(
+            "test-template", "test-namespace", lifecycle=lifecycle
         )
 
+        self.assertEqual(name, "sandbox-claim-gen12")
         self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
-            "test-claim", "test-template", "test-namespace",
+            "test-template", "test-namespace",
             annotations={},
             labels=None,
             lifecycle=lifecycle,
@@ -345,11 +341,13 @@ class TestSandboxClient(unittest.TestCase):
     def test_create_claim_without_lifecycle(self):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = None
+        self.mock_k8s_helper.create_sandbox_claim.return_value = "sandbox-claim-gen12"
 
-        self.client._create_claim("test-claim", "test-template", "test-namespace")
+        name = self.client._create_claim("test-template", "test-namespace")
 
+        self.assertEqual(name, "sandbox-claim-gen12")
         self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
-            "test-claim", "test-template", "test-namespace",
+            "test-template", "test-namespace",
             annotations={},
             labels=None,
             lifecycle=None,

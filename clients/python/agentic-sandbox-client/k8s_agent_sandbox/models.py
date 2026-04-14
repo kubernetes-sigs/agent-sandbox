@@ -49,6 +49,9 @@ SandboxConnectionConfig = Union[SandboxDirectConnectionConfig, SandboxGatewayCon
 
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
+    # Required because tracer_provider accepts a TracerProvider instance.
+    model_config = {"arbitrary_types_allowed": True}
     enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.
     trace_service_name: str = "sandbox-client"  # Service name used for traces.
+    tracer_provider: object = None  # Optional TracerProvider instance.
     

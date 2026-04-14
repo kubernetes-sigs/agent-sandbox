@@ -29,7 +29,9 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         self.helper = AsyncK8sHelper()
         self.helper._initialized = True
         self.helper.custom_objects_api = MagicMock()
-        self.helper.custom_objects_api.create_namespaced_custom_object = AsyncMock()
+        self.helper.custom_objects_api.create_namespaced_custom_object = AsyncMock(
+            return_value={"metadata": {"name": "sandbox-claim-gen12"}}
+        )
         self.helper.core_v1_api = MagicMock()
 
     async def test_lifecycle_included_in_manifest(self):
@@ -38,7 +40,7 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             "shutdownPolicy": "Delete",
         }
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", lifecycle=lifecycle
+            "test-template", "test-namespace", lifecycle=lifecycle
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
@@ -48,7 +50,7 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_lifecycle_omits_key(self):
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace"
+            "test-template", "test-namespace"
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
@@ -61,7 +63,7 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             "shutdownPolicy": "Delete",
         }
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace",
+            "test-template", "test-namespace",
             annotations={"key": "val"},
             labels={"agent": "test"},
             lifecycle=lifecycle,

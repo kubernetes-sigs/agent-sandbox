@@ -59,18 +59,17 @@ class AsyncK8sHelper:
 
     async def create_sandbox_claim(
         self,
-        name: str,
         template: str,
         namespace: str,
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
-    ):
-        """Creates a SandboxClaim custom resource."""
+    ) -> str:
+        """Creates a SandboxClaim and returns its generated name."""
         await self._ensure_initialized()
 
         metadata = {
-            "name": name,
+            "generateName": "sandbox-claim-",
             "annotations": annotations or {},
         }
         if labels:
@@ -91,15 +90,18 @@ class AsyncK8sHelper:
             "spec": spec,
         }
         logger.info(
-            f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'..."
+            f"Creating SandboxClaim in namespace '{namespace}' using template '{template}'..."
         )
-        await self.custom_objects_api.create_namespaced_custom_object(
+        created = await self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             body=manifest,
         )
+        name = created["metadata"]["name"]
+        logger.info(f"SandboxClaim '{name}' created.")
+        return name
 
     async def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.

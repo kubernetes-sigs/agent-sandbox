@@ -1,25 +1,33 @@
 version: 2
 updates:
-  - package-ecosystem: gomod
-    directory: /
+  # Enable version updates for Go modules
+  - package-ecosystem: "gomod"
+    directory: "/"
     schedule:
-      interval: daily
-    groups:
-      k8s-libs:
-        patterns:
-          - "k8s.io/api"
-          - "k8s.io/apiextensions-apiserver"
-          - "k8s.io/apimachinery"
-          - "k8s.io/client-go"
-          - "k8s.io/klog/v2"
-          - "k8s.io/utils"
+      interval: "daily"
+    open-pull-requests-limit: 5
 
-  - package-ecosystem: github-actions
-    directory: /
+  - package-ecosystem: "gomod"
+    directory: "/dev/tools"
     schedule:
-      interval: weekly
+      interval: "daily"
+    open-pull-requests-limit: 5
 
-  - package-ecosystem: docker
-    directory: /
+  - package-ecosystem: "gomod"
+    directory: "/examples/chrome-sandbox"
     schedule:
-      interval: weekly
+      interval: "daily"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "gomod"
+    directory: "/site"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+
+  # Enable version updates for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

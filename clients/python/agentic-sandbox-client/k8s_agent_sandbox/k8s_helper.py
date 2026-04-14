@@ -44,7 +44,7 @@ class K8sHelper:
 
     def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None):
         """Creates a SandboxClaim custom resource."""
-        updated_annotations = annotations or {}
+        updated_annotations = dict(annotations) if annotations else {}
         if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
             updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.now(UTC).isoformat()
 

@@ -71,7 +71,7 @@ class AsyncK8sHelper:
         """Creates a SandboxClaim custom resource."""
         await self._ensure_initialized()
 
-        updated_annotations = annotations or {}
+        updated_annotations = dict(annotations) if annotations else {}
         if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
             updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.now(UTC).isoformat()
 

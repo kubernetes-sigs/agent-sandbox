@@ -17,7 +17,6 @@ package metrics
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -77,7 +76,8 @@ var (
 	ClientClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_client_claim_startup_latency_ms",
-			Help: "End-to-end latency from client request to Sandbox Ready state in milliseconds.",
+			Help: "End-to-end latency from client request to Sandbox Ready state in milliseconds. " +
+				"Note: This metric may be affected by clock skew between the client and controller.",
 			// Buckets for latency from 100ms to 4 minutes
 			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
@@ -175,7 +175,7 @@ func RecordClientClaimStartupLatency(ctx context.Context, startTime time.Time, l
 	duration := float64(time.Since(startTime).Milliseconds())
 	if duration < 0 {
 		logger := log.FromContext(ctx)
-		logger.Error(errors.New("client claim startup latency is negative"), "negative latency", "duration", duration)
+		logger.V(1).Info("negative latency", "duration", duration, "launchType", launchType, "templateName", templateName)
 		return
 	}
 	ClientClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)

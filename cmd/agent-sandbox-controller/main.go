@@ -50,6 +50,7 @@ func main() {
 	var leaderElectionNamespace string
 	var probeAddr string
 	var extensions bool
+	var clusterDomain string
 	var enableTracing bool
 	var enablePprof bool
 	var enablePprofDebug bool
@@ -61,6 +62,7 @@ func main() {
 	var sandboxClaimConcurrentWorkers int
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
+	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -213,9 +215,10 @@ func main() {
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
 	if err = (&controllers.SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Tracer: instrumenter,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Tracer:        instrumenter,
+		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

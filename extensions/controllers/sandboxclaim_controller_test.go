@@ -2203,7 +2203,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 				tc.setupReconciler(r)
 			}
 
-			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
+			r.recordCreationLatencyMetrics(ctx, tc.claim, tc.oldStatus, tc.sandbox)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
@@ -2272,7 +2272,7 @@ func TestClientClaimLatencyMetric(t *testing.T) {
 
 			r := &SandboxClaimReconciler{}
 
-			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, nil)
+			r.recordCreationLatencyMetrics(ctx, tc.claim, tc.oldStatus, nil)
 
 			count := testutil.CollectAndCount(asmetrics.ClientClaimStartupLatency)
 			if count != tc.expectedObservations {

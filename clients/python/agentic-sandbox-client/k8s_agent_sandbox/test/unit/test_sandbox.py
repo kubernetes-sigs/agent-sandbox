@@ -182,8 +182,8 @@ class TestSandbox(unittest.TestCase):
         self.assertFalse(self.sandbox.is_active)
 
     def test_close_connection(self):
-        """Tests the internal _close_connection method."""
-        self.sandbox._close_connection()
+        """Tests the public close_connection method."""
+        self.sandbox.close_connection()
 
         self.mock_connector.close.assert_called_once()
         self.assertIsNone(self.sandbox.commands)
@@ -193,14 +193,14 @@ class TestSandbox(unittest.TestCase):
 
         # Test idempotency
         self.mock_connector.close.reset_mock()
-        self.sandbox._close_connection()
+        self.sandbox.close_connection()
         self.mock_connector.close.assert_not_called()
 
     @patch('logging.error')
     def test_close_connection_with_tracing_error(self, mock_logging_error):
-        """Tests _close_connection with an error in tracing."""
+        """Tests close_connection with an error in tracing."""
         self.mock_tracer_manager.end_lifecycle_span.side_effect = Exception("Tracer error")
-        self.sandbox._close_connection()
+        self.sandbox.close_connection()
 
         self.mock_connector.close.assert_called_once()
         self.assertTrue(self.sandbox._is_closed)
@@ -208,7 +208,7 @@ class TestSandbox(unittest.TestCase):
 
     def test_terminate(self):
         """Tests the terminate method."""
-        with patch.object(self.sandbox, '_close_connection') as mock_close:
+        with patch.object(self.sandbox, 'close_connection') as mock_close:
             self.sandbox.terminate()
             mock_close.assert_called_once()
 

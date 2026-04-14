@@ -19,9 +19,9 @@ file I/O) via the Sandbox resource handle.
 
 import re
 import uuid
+import atexit
 import sys
 import time
-import atexit
 import logging
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
@@ -57,7 +57,21 @@ class SandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
+        cleanup: bool = False,
     ):
+        """
+        Initializes the SandboxClient.
+
+        Args:
+            connection_config: Configuration for connecting to the sandboxes. 
+                Defaults to SandboxLocalTunnelConnectionConfig() which uses 
+                kubectl port-forwarding. Can also be SandboxDirectConnectionConfig 
+                or SandboxGatewayConnectionConfig.
+            tracer_config: Configuration for OpenTelemetry tracing. 
+                Defaults to an empty SandboxTracerConfig (tracing disabled).
+            cleanup: If True, registers an atexit hook to automatically delete 
+                all tracked sandboxes when the program terminates. Defaults to False.
+        """
         # Sandbox related configuration
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
         
@@ -73,9 +87,9 @@ class SandboxClient(Generic[T]):
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         
-        # Register global cleanup for all tracked sandboxes.
-        # Deletes all the sandboxes on program termination
-        atexit.register(self.delete_all)
+        # Optional automatic cleanup of sandboxes on program termination
+        if cleanup:
+            atexit.register(self.delete_all)
 
     def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None, *, shutdown_after_seconds: int | None = None) -> T:
         """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
@@ -237,7 +251,6 @@ class SandboxClient(Generic[T]):
     def delete_all(self):
         """
         Cleanup all tracked sandboxes managed by this client.
-        Triggered automatically on script exit via atexit.
         
         Example:
         

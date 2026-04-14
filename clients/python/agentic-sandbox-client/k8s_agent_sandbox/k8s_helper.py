@@ -14,6 +14,7 @@
 
 import logging
 import time
+from datetime import datetime, UTC
 from typing import List
 from kubernetes import client, config, watch
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
@@ -43,11 +44,9 @@ class K8sHelper:
 
     def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None):
         """Creates a SandboxClaim custom resource."""
-        from datetime import datetime
-
         updated_annotations = annotations or {}
         if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
-            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.utcnow().isoformat() + "Z"
+            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.now(UTC).isoformat()
 
         metadata = {
             "name": name,

@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, UTC
 
 from kubernetes_asyncio import client, config, watch
 
@@ -70,11 +71,9 @@ class AsyncK8sHelper:
         """Creates a SandboxClaim custom resource."""
         await self._ensure_initialized()
 
-        from datetime import datetime
-
         updated_annotations = annotations or {}
         if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
-            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.utcnow().isoformat() + "Z"
+            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.now(UTC).isoformat()
 
         metadata = {
             "name": name,

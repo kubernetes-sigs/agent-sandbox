@@ -64,7 +64,7 @@ class K8sHelper:
                 annotations propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
         """
-        updated_annotations = annotations or {}
+        updated_annotations = dict(annotations) if annotations else {}
         if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
             updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.now(UTC).isoformat()
 

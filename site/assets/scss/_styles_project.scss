@@ -208,6 +208,29 @@ figcaption {
 // --------------------------------------------------
 .nav-tabs {
   border-bottom: none !important;
+  gap: 4px;
+
+  .nav-item .nav-link {
+    color: rgba(255, 255, 255, 0.6);
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-bottom: none;
+    border-radius: 0.75rem 0.75rem 0 0;
+    padding: 0.4rem 1rem;
+    text-decoration: none;
+
+    &:hover {
+      color: #fff;
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    &.active {
+      color: #fff;
+      background: #111;
+      border-color: rgba(255, 255, 255, 0.15);
+      border-bottom-color: #111;
+    }
+  }
 }
 
 .td-content > ul li,
@@ -219,11 +242,10 @@ figcaption {
   margin: 0;
 }
 
-.tab-pane {
-  border-radius: 0.25rem;
-  padding: 0 16px 16px;
-
-  border: 1px solid #dee2e6;
+.tab-content .tab-pane {
+  border: none !important;
+  background: transparent;
+  margin-bottom: 0;
 
   &:first-of-type.active {
     border-top-left-radius: 0;
@@ -464,6 +486,10 @@ h1.text-center {
     padding: 2rem 1rem;
     border-radius: 1rem;
     border: solid #222;
+}
+
+.td-content .tab-content .highlight pre {
+    border-radius: 0 1rem 1rem 1rem;
 }
 
 .td-content pre > code {

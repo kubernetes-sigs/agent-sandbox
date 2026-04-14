@@ -840,9 +840,10 @@ func TestReconcile(t *testing.T) {
 				sb.Annotations = tc.sandboxAnnotations
 			}
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sb)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, sb)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			_, err := r.Reconcile(t.Context(), ctrl.Request{
@@ -1344,9 +1345,10 @@ func TestReconcilePod(t *testing.T) {
 			sandbox := tc.sandbox.DeepCopy()
 
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sandbox)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, sandbox)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
@@ -1577,9 +1579,10 @@ func TestReconcileService(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, tc.sandbox)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			svc, err := r.reconcileService(t.Context(), tc.sandbox, nameHash)
@@ -1905,6 +1908,42 @@ func TestSandboxExpiry(t *testing.T) {
 			} else {
 				require.Equal(t, time.Duration(0), requeueAfter)
 			}
+		})
+	}
+}
+
+func TestSetServiceStatusCustomDomain(t *testing.T) {
+	testCases := []struct {
+		name          string
+		clusterDomain string
+		wantFQDN      string
+	}{
+		{
+			name:          "default cluster.local domain",
+			clusterDomain: "cluster.local",
+			wantFQDN:      "my-svc.my-ns.svc.cluster.local",
+		},
+		{
+			name:          "custom cluster domain",
+			clusterDomain: "custom.domain",
+			wantFQDN:      "my-svc.my-ns.svc.custom.domain",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &SandboxReconciler{
+				ClusterDomain: tc.clusterDomain,
+			}
+			sandbox := &sandboxv1alpha1.Sandbox{}
+			service := &corev1.Service{}
+			service.Name = "my-svc"
+			service.Namespace = "my-ns"
+
+			r.setServiceStatus(sandbox, service)
+
+			require.Equal(t, "my-svc", sandbox.Status.Service)
+			require.Equal(t, tc.wantFQDN, sandbox.Status.ServiceFQDN)
 		})
 	}
 }

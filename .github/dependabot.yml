@@ -1,33 +1,85 @@
 version: 2
 updates:
-  # Enable version updates for Go modules
-  - package-ecosystem: "gomod"
-    directory: "/"
-    schedule:
-      interval: "daily"
-    open-pull-requests-limit: 5
+- package-ecosystem: "gomod"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
 
-  - package-ecosystem: "gomod"
-    directory: "/dev/tools"
-    schedule:
-      interval: "daily"
-    open-pull-requests-limit: 5
+- package-ecosystem: "gomod"
+  directory: "/dev/tools"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
 
-  - package-ecosystem: "gomod"
-    directory: "/examples/chrome-sandbox"
-    schedule:
-      interval: "daily"
-    open-pull-requests-limit: 5
+- package-ecosystem: "gomod"
+  directory: "/examples/chrome-sandbox"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
 
-  - package-ecosystem: "gomod"
-    directory: "/site"
-    schedule:
-      interval: "daily"
-    open-pull-requests-limit: 5
+- package-ecosystem: "gomod"
+  directory: "/site"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
 
-  # Enable version updates for GitHub Actions
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+- package-ecosystem: "pip"
+  directory: "/clients/python/agentic-sandbox-client"
+  schedule:
+    interval: "weekly"
+  groups:
+    python-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "docker"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+
+- package-ecosystem: "docker"
+  directory: "/clients/python/agentic-sandbox-client/sandbox-router"
+  schedule:
+    interval: "weekly"
+
+- package-ecosystem: "docker"
+  directory: "/examples/chrome-sandbox"
+  schedule:
+    interval: "weekly"
+
+- package-ecosystem: "docker"
+  directory: "/examples/gemini-cu-sandbox"
+  schedule:
+    interval: "weekly"
+
+- package-ecosystem: "docker"
+  directory: "/examples/hello-world-sandbox"
+  schedule:
+    interval: "weekly"
+
+- package-ecosystem: "docker"
+  directory: "/examples/python-runtime-sandbox"
+  schedule:
+    interval: "weekly"
+
+- package-ecosystem: "github-actions"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  groups:
+    github-actions:
+      patterns:
+      - "*"

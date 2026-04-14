@@ -188,9 +188,9 @@ def test_claim_annotation(client: SandboxClient, template_name: str, namespace: 
         print(f"Timestamp: {timestamp_str}")
 
         # Verify it can be parsed
-        assert timestamp_str.endswith('Z'), "Timestamp should end with Z"
         try:
-            dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            dt = datetime.fromisoformat(timestamp_str)
+            assert dt.tzname() == 'UTC', "Timestamp should be in UTC"
             print(f"Parsed datetime: {dt}")
         except ValueError as e:
             raise AssertionError(f"Failed to parse timestamp '{timestamp_str}': {e}")

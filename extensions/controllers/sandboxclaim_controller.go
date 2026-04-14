@@ -243,7 +243,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
+	r.recordCreationLatencyMetrics(ctx, claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -1557,8 +1557,8 @@ func (r *SandboxClaimReconciler) recordClientClaimStartupLatency(ctx context.Con
 	asmetrics.RecordClientClaimStartupLatency(ctx, requestTime, launchType, templateName)
 }
 
-// recordCreationLatencyMetric detects and records transitions to Ready state.
-func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
+// recordCreationLatencyMetrics detects and records transitions to Ready state.
+func (r *SandboxClaimReconciler) recordCreationLatencyMetrics(
 	ctx context.Context,
 	claim *extensionsv1beta1.SandboxClaim,
 	oldStatus *extensionsv1beta1.SandboxClaimStatus,

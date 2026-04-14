@@ -1,4 +1,5 @@
-timeout: 2700s
+# Timeout set to 7200s (2 hours) to allow sufficient time for build and push operations. 
+timeout: 7200s
 steps:
   # This step runs the python script to build and push the Docker image.
   # We use the gcloud builder because it comes with python and the docker client.

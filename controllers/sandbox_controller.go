@@ -389,6 +389,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			desiredSelector := map[string]string{
 				sandboxLabel: nameHash,
 			}
+			patch := client.MergeFrom(service.DeepCopy())
 			needsUpdate := false
 
 			if service.Labels == nil {
@@ -404,11 +405,12 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			}
 
 			if needsUpdate {
-				log.Info("Reconciling owned service drift", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
-				if err := r.Update(ctx, service); err != nil {
-					return nil, fmt.Errorf("failed to update owned service: %w", err)
+				log.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
+				if err := r.Patch(ctx, service, patch); err != nil {
+					return nil, fmt.Errorf("failed to patch owned service: %w", err)
 				}
 			}
+
 		}
 
 		setServiceStatus(sandbox, service)

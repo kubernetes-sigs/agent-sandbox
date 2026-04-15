@@ -556,6 +556,16 @@ export class Sandbox {
           } else {
             abortController = ac;
           }
+        })
+        .catch((err: unknown) => {
+          // watcher.watch() itself rejected (auth error, network down, etc.)
+          if (!settled) {
+            cleanup();
+            resolve({
+              type: "error",
+              error: err instanceof Error ? err : new Error(String(err)),
+            });
+          }
         });
     });
   }

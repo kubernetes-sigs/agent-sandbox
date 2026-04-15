@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package agent_sandbox.v1;
+
+option go_package = "sigs.k8s.io/agent-sandbox/proto/v1;agent_sandboxv1";
+
+// AgentSandboxService defines the core interface for execution capabilities inside the sandbox environment.
+service AgentSandboxService {
+  // Executes a shell command inside the sandbox.
+  rpc RunCommand(RunCommandRequest) returns (RunCommandResponse);
+
+  // Reads a file from the sandbox filesystem.
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+
+  // Writes a file to the sandbox filesystem.
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+
+  // Lists files and directories in the sandbox.
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+
+  // Checks if a file or directory exists.
+  rpc FileExists(FileExistsRequest) returns (FileExistsResponse);
+}
+
+message RunCommandRequest {
+  string command = 1;
+  // Optional timeout in seconds for the execution. If 0 or omitted, the server default is used.
+  int32 timeout_seconds = 2;
+}
+
+message RunCommandResponse {
+  string stdout = 1;
+  string stderr = 2;
+  int32 exit_code = 3;
+}
+
+message ReadFileRequest {
+  string path = 1;
+}
+
+message ReadFileResponse {
+  bytes data = 1;
+}
+
+message WriteFileRequest {
+  string path = 1;
+  bytes data = 2;
+}
+
+message WriteFileResponse {}
+
+message ListFilesRequest {
+  string path = 1;
+}
+
+message ListFilesResponse {
+  repeated FileEntry entries = 1;
+}
+
+message FileExistsRequest {
+  string path = 1;
+}
+
+message FileExistsResponse {
+  bool exists = 1;
+}
+
+enum FileType {
+  FILE_TYPE_UNSPECIFIED = 0;
+  FILE_TYPE_FILE = 1;
+  FILE_TYPE_DIRECTORY = 2;
+}
+
+message FileEntry {
+  string name = 1;
+  int64 size = 2;
+  FileType type = 3;
+  // POSIX timestamp of the last modification time
+  double mod_time = 4;
+}

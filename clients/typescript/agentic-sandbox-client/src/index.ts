@@ -22,6 +22,7 @@ export {
   SandboxPortForwardError,
   SandboxMetadataError,
   SandboxRequestError,
+  SandboxResponseTooLargeError,
 } from "./exceptions.js";
 export { CommandExecutor } from "./commands/index.js";
 export { Filesystem } from "./files/index.js";

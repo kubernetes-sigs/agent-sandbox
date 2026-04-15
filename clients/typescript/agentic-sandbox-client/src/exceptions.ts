@@ -74,6 +74,11 @@ export class SandboxRequestError extends SandboxError {
 }
 
 /**
+ * Raised when a response body exceeds the configured size limit.
+ */
+export class SandboxResponseTooLargeError extends SandboxRequestError {}
+
+/**
  * Returns true if the error is a Kubernetes 404 (Not Found).
  * Handles both @kubernetes/client-node ApiException (.code) and
  * older-style errors that include "404" in the message.

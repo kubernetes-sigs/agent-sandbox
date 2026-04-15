@@ -40,6 +40,7 @@ import {
   SandboxMetadataError,
   SandboxNotFoundError,
   SandboxNotReadyError,
+  SandboxTimeoutError,
 } from "./exceptions.js";
 
 // Kubernetes label validation constraints
@@ -121,6 +122,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   private readonly traceServiceName: string;
 
   private tracerInitialized = false;
+  private autoCleanupActive = false;
 
   protected readonly kubeConfig: k8s.KubeConfig;
   protected readonly customObjectsApi: k8s.CustomObjectsApi;
@@ -172,6 +174,13 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
     this.kubeConfig = new k8s.KubeConfig();
     this.kubeConfig.loadFromDefault();
+
+    if (!this.kubeConfig.clusters || this.kubeConfig.clusters.length === 0) {
+      throw new SandboxError(
+        "No Kubernetes configuration found. " +
+          "Set KUBECONFIG, provide ~/.kube/config, or run inside a cluster.",
+      );
+    }
     this.customObjectsApi = this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
 
     this.sandboxClass = Sandbox as unknown as new (init: SandboxInit) => T;
@@ -291,7 +300,23 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
     const existing = this.registry.get(key);
     if (existing?.isActive) {
-      return existing;
+      try {
+        await this.customObjectsApi.getNamespacedCustomObject({
+          group: CLAIM_API_GROUP,
+          version: CLAIM_API_VERSION,
+          namespace: ns,
+          plural: CLAIM_PLURAL_NAME,
+          name: claimName,
+        });
+        return existing; // claim still exists — safe to return cached handle
+      } catch (err) {
+        // Claim gone (404) or unreachable — evict and surface the error immediately
+        this.registry.delete(key);
+        throw new SandboxNotFoundError(
+          `SandboxClaim '${claimName}' not found in namespace '${ns}'.`,
+          { cause: err },
+        );
+      }
     }
 
     // Evict stale handle
@@ -467,13 +492,26 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   /**
    * Registers SIGINT, SIGTERM, and beforeExit handlers to call deleteAll().
    * Returns a function that unregisters the handlers.
+   * Idempotent: subsequent calls return a no-op until the returned stop function is called.
    */
   enableAutoCleanup(): () => void {
+    if (this.autoCleanupActive) {
+      return () => {};
+    }
+    this.autoCleanupActive = true;
+
     const beforeExitHandler = () => {
       void this.deleteAll();
     };
-    const sigHandler = () => {
-      void this.deleteAll().finally(() => process.exit(0));
+
+    const sigHandler = (signal: NodeJS.Signals) => {
+      process.off("beforeExit", beforeExitHandler);
+      process.off("SIGINT", sigHandler);
+      process.off("SIGTERM", sigHandler);
+      this.autoCleanupActive = false;
+      void this.deleteAll().finally(() => {
+        process.kill(process.pid, signal);
+      });
     };
 
     process.on("beforeExit", beforeExitHandler);
@@ -484,6 +522,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       process.off("beforeExit", beforeExitHandler);
       process.off("SIGINT", sigHandler);
       process.off("SIGTERM", sigHandler);
+      this.autoCleanupActive = false;
     };
   }
 
@@ -563,12 +602,40 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     );
   }
 
-  private resolveSandboxName(
+  private async resolveSandboxName(
     claimName: string,
     namespace: string,
     timeoutMs: number,
   ): Promise<string> {
     console.info(`Resolving sandbox name from claim '${claimName}'...`);
+
+    // Initial GET: check if claim is already resolved before starting a watch.
+    // Matches Go/Python pattern: list/get first so we don't miss resources that
+    // were already resolved before the watch stream is established.
+    try {
+      const existing = await this.customObjectsApi.getNamespacedCustomObject({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace,
+        plural: CLAIM_PLURAL_NAME,
+        name: claimName,
+      });
+      const status =
+        ((existing as Record<string, unknown>)?.status as Record<
+          string,
+          unknown
+        >) ?? {};
+      const sandboxStatus = (status.sandbox as Record<string, unknown>) ?? {};
+      const name = sandboxStatus.name as string | undefined;
+      if (name) {
+        console.info(
+          `Resolved sandbox name '${name}' from claim status (initial GET).`,
+        );
+        return name;
+      }
+    } catch {
+      // Claim may not exist yet or sandbox name not set — proceed to watch
+    }
 
     const watcher = new k8s.Watch(this.kubeConfig);
 
@@ -592,7 +659,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       timer = setTimeout(() => {
         cleanup();
         reject(
-          new SandboxNotFoundError(
+          new SandboxTimeoutError(
             `Sandbox claim '${claimName}' did not resolve within ${Math.floor(timeoutMs / 1000)} seconds.`,
           ),
         );
@@ -625,9 +692,19 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
             }
           },
           (err) => {
+            const wasAborted = aborted;
             cleanup();
-            if (err && !(err instanceof Error && err.name === "AbortError")) {
-              reject(err);
+            if (!wasAborted) {
+              if (err && !(err instanceof Error && err.name === "AbortError")) {
+                reject(err);
+              } else if (!err) {
+                // done(null): watch ended cleanly without resolving — reject to avoid hanging
+                reject(
+                  new SandboxNotReadyError(
+                    `Watch for claim '${claimName}' ended without resolving.`,
+                  ),
+                );
+              }
             }
           },
         )
@@ -637,16 +714,61 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           } else {
             abortController = ac;
           }
+        })
+        .catch((err: unknown) => {
+          // watcher.watch() itself rejected (auth error, network down, etc.)
+          if (!aborted) {
+            cleanup();
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
         });
     });
   }
 
-  private watchForSandboxReady(
+  private async watchForSandboxReady(
     sandboxName: string,
     namespace: string,
     timeoutMs: number,
   ): Promise<{ podName: string; annotations: Record<string, string> }> {
     console.info("Watching for Sandbox to become ready...");
+
+    // Initial GET: check if sandbox is already Ready before starting a watch.
+    // Matches Go/Python: get/list first to avoid missing already-ready resources.
+    try {
+      const existing = await this.customObjectsApi.getNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: sandboxName,
+      });
+      const obj = existing as Record<string, unknown>;
+      const status = (obj?.status as Record<string, unknown>) ?? {};
+      const conditions =
+        (status.conditions as Array<Record<string, string>>) ?? [];
+      const isReady = conditions.some(
+        (c) => c.type === "Ready" && c.status === "True",
+      );
+      if (isReady) {
+        const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
+        const resolvedName = metadata.name as string | undefined;
+        if (resolvedName) {
+          console.info(
+            `Sandbox ${resolvedName} is already ready (initial GET).`,
+          );
+          const annotations =
+            (metadata.annotations as Record<string, string>) ?? {};
+          const podNameAnnotation = annotations[POD_NAME_ANNOTATION];
+          const podName = podNameAnnotation ?? resolvedName;
+          if (podNameAnnotation) {
+            console.info(`Found pod name from annotation: ${podName}`);
+          }
+          return { podName, annotations };
+        }
+      }
+    } catch {
+      // Sandbox may not exist yet or not ready — proceed to watch
+    }
 
     const watcher = new k8s.Watch(this.kubeConfig);
 
@@ -670,7 +792,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       timer = setTimeout(() => {
         cleanup();
         reject(
-          new SandboxNotReadyError(
+          new SandboxTimeoutError(
             `Sandbox '${sandboxName}' did not become ready within ${Math.floor(timeoutMs / 1000)} seconds.`,
           ),
         );
@@ -725,9 +847,19 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
             }
           },
           (err) => {
+            const wasAborted = aborted;
             cleanup();
-            if (err && !(err instanceof Error && err.name === "AbortError")) {
-              reject(err);
+            if (!wasAborted) {
+              if (err && !(err instanceof Error && err.name === "AbortError")) {
+                reject(err);
+              } else if (!err) {
+                // done(null): watch ended cleanly without sandbox becoming ready
+                reject(
+                  new SandboxNotReadyError(
+                    `Watch for sandbox '${sandboxName}' ended without it becoming ready.`,
+                  ),
+                );
+              }
             }
           },
         )
@@ -736,6 +868,13 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
             ac.abort();
           } else {
             abortController = ac;
+          }
+        })
+        .catch((err: unknown) => {
+          // watcher.watch() itself rejected (auth error, network down, etc.)
+          if (!aborted) {
+            cleanup();
+            reject(err instanceof Error ? err : new Error(String(err)));
           }
         });
     });

@@ -22,19 +22,23 @@ const {
   mockGetNamespacedCustomObject,
   mockListNamespacedCustomObject,
   mockWatchFn,
+  MockKubeConfig,
 } = vi.hoisted(() => ({
   mockCreateNamespacedCustomObject: vi.fn(),
   mockDeleteNamespacedCustomObject: vi.fn(),
   mockGetNamespacedCustomObject: vi.fn(),
   mockListNamespacedCustomObject: vi.fn(),
   mockWatchFn: vi.fn(),
+  MockKubeConfig: vi.fn(),
 }));
 
 // ---------- mock: @kubernetes/client-node ----------
 
 vi.mock("@kubernetes/client-node", () => {
-  const KubeConfig = vi.fn().mockImplementation(() => ({
+  // Set the default implementation on MockKubeConfig (exposed via hoisted for per-test override)
+  MockKubeConfig.mockImplementation(() => ({
     loadFromDefault: vi.fn(),
+    clusters: [{ name: "test-cluster" }],
     makeApiClient: vi.fn().mockReturnValue({
       createNamespacedCustomObject: mockCreateNamespacedCustomObject,
       deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
@@ -49,7 +53,7 @@ vi.mock("@kubernetes/client-node", () => {
     watch: mockWatchFn,
   }));
 
-  return { KubeConfig, CustomObjectsApi, Watch };
+  return { KubeConfig: MockKubeConfig, CustomObjectsApi, Watch };
 });
 
 // ---------- mock: node:child_process ----------
@@ -133,6 +137,11 @@ function mockSandboxReadyFlow(
 describe("SandboxClient (registry)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset GET and Watch mocks completely so that persistent implementations
+    // (mockResolvedValue / mockImplementation) set in one test don't leak into
+    // subsequent tests via the initial-GET or watch paths.
+    mockGetNamespacedCustomObject.mockReset();
+    mockWatchFn.mockReset();
     vi.stubGlobal("fetch", vi.fn());
   });
 
@@ -381,11 +390,19 @@ describe("SandboxClient (registry)", () => {
 
       const client = new SandboxClient({ apiUrl: "http://api:8080" });
       const sandbox1 = await client.createSandbox("tpl");
+
+      // createSandbox() makes 2 initial GET calls (resolveSandboxName + watchForSandboxReady).
+      // Clear the count so the assertion only covers the getSandbox() call below.
+      mockGetNamespacedCustomObject.mockClear();
+
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: sandbox1.claimName },
+      });
+
       const sandbox2 = await client.getSandbox(sandbox1.claimName);
 
       expect(sandbox2).toBe(sandbox1);
-      // No additional K8s calls
-      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledOnce();
     });
 
     it("re-attaches when cached handle is inactive (closed)", async () => {
@@ -585,6 +602,7 @@ describe("SandboxClient (registry)", () => {
             name: "test-sandbox",
             namespace: "default",
           },
+          conditions: [{ type: "Ready", status: "True" }],
         },
       });
 
@@ -611,6 +629,7 @@ describe("SandboxClient (registry)", () => {
         status: {
           sandbox: { name: sandboxName },
           sandboxRef: { name: sandboxName, namespace: "default" },
+          conditions: [{ type: "Ready", status: "True" }],
         },
       });
 
@@ -630,10 +649,14 @@ describe("SandboxClient (registry)", () => {
         status: {
           sandbox: { name: "my-sandbox" },
           sandboxRef: { name: "my-sandbox", namespace: "default" },
+          conditions: [{ type: "Ready", status: "True" }],
         },
       });
 
       // watch for sandbox name resolution: resolves immediately
+      // (These watch mocks are now unused because the initial GET resolves both
+      //  resolveSandboxName and watchForSandboxReady directly, but are left in
+      //  place as documentation of the intended fallback behavior.)
       mockWatchFn.mockImplementationOnce(
         (
           _path: string,
@@ -682,14 +705,23 @@ describe("SandboxClient (registry)", () => {
           Promise.resolve(new AbortController()),
       );
 
-      // GET returns a claim whose sandbox name is already resolved
-      mockGetNamespacedCustomObject.mockResolvedValue({
-        status: { sandbox: { name: "already-ready-sandbox" } },
-      });
+      // GET returns an object whose status satisfies both:
+      //   - resolveSandboxName:  status.sandbox.name is set
+      //   - watchForSandboxReady: status.conditions includes Ready=True
+      // Use Once×2 (not persistent mockResolvedValue) to avoid polluting later tests.
+      const readyObject = {
+        metadata: { name: "already-ready-sandbox", annotations: {} },
+        status: {
+          sandbox: { name: "already-ready-sandbox" },
+          conditions: [{ type: "Ready", status: "True" }],
+        },
+      };
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(readyObject);
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(readyObject);
 
       const client = new SandboxClient({
         apiUrl: "http://api:8080",
-        sandboxReadyTimeout: 1, // 1s timeout — current watch-only code times out
+        sandboxReadyTimeout: 1, // 1s timeout — watch-only code would time out
       });
 
       await expect(client.createSandbox("tpl")).resolves.toBeInstanceOf(
@@ -762,5 +794,185 @@ describe("SandboxClient (registry)", () => {
 
       await expect(client.createSandbox("tpl")).rejects.toThrow();
     }, 2_000);
+  });
+
+  // ===== SandboxTimeoutError on timeout =====
+
+  describe("timeout throws SandboxTimeoutError", () => {
+    it("resolveSandboxName timeout throws SandboxTimeoutError (not SandboxNotFoundError)", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // watch never fires any event → timeout
+      mockWatchFn.mockImplementation(
+        (_p: string, _q: unknown, _cb: unknown, _done: unknown) =>
+          Promise.resolve(new AbortController()),
+      );
+
+      const client = new SandboxClient({
+        apiUrl: "http://api:8080",
+        sandboxReadyTimeout: 0.05, // 50 ms
+      });
+
+      const { SandboxTimeoutError } = await import("../exceptions.js");
+      await expect(client.createSandbox("tpl")).rejects.toBeInstanceOf(
+        SandboxTimeoutError,
+      );
+    }, 3_000);
+
+    it("watchForSandboxReady timeout throws SandboxTimeoutError", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+
+      // First watch: claim resolves immediately
+      mockWatchFn.mockImplementationOnce(
+        (
+          _p: string,
+          _q: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: { sandbox: { name: "sb-timeout" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Second watch (watchForSandboxReady): never fires → timeout
+      mockWatchFn.mockImplementation(
+        (_p: string, _q: unknown, _cb: unknown, _done: unknown) =>
+          Promise.resolve(new AbortController()),
+      );
+
+      const client = new SandboxClient({
+        apiUrl: "http://api:8080",
+        sandboxReadyTimeout: 0.05,
+      });
+
+      const { SandboxTimeoutError } = await import("../exceptions.js");
+      await expect(client.createSandbox("tpl")).rejects.toBeInstanceOf(
+        SandboxTimeoutError,
+      );
+    }, 3_000);
+  });
+
+  // ===== watch startup failure =====
+
+  describe("watch startup failure propagates", () => {
+    it("resolveSandboxName rejects immediately when watcher.watch() rejects", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // watch() Promise itself rejects (startup failure)
+      mockWatchFn.mockImplementationOnce(
+        (_p: string, _q: unknown, _cb: unknown, _done: unknown) =>
+          Promise.reject(new Error("ECONNREFUSED")),
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("tpl")).rejects.toThrow("ECONNREFUSED");
+    });
+
+    it("watchForSandboxReady rejects immediately when watcher.watch() rejects", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+
+      // First watch succeeds (resolve sandbox name)
+      mockWatchFn.mockImplementationOnce(
+        (
+          _p: string,
+          _q: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: { sandbox: { name: "sb-19" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Second watch (watchForSandboxReady) fails at startup
+      mockWatchFn.mockImplementationOnce(
+        (_p: string, _q: unknown, _cb: unknown, _done: unknown) =>
+          Promise.reject(new Error("watch startup failed")),
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("tpl")).rejects.toThrow(
+        "watch startup failed",
+      );
+    });
+  });
+
+  // ===== KubeConfig fail-fast =====
+
+  describe("KubeConfig validation", () => {
+    it("throws SandboxError when clusters array is empty", () => {
+      MockKubeConfig.mockImplementationOnce(() => ({
+        loadFromDefault: vi.fn(),
+        clusters: [], // empty → no kubeconfig configured
+        makeApiClient: vi.fn(),
+      }));
+      expect(() => new SandboxClient()).toThrow(SandboxError);
+    });
+
+    it("throws SandboxError when clusters is undefined", () => {
+      MockKubeConfig.mockImplementationOnce(() => ({
+        loadFromDefault: vi.fn(),
+        clusters: undefined, // undefined → no kubeconfig configured
+        makeApiClient: vi.fn(),
+      }));
+      expect(() => new SandboxClient()).toThrow(SandboxError);
+    });
+  });
+
+  // ===== enableAutoCleanup idempotency =====
+
+  describe("enableAutoCleanup()", () => {
+    it("is idempotent: second call returns no-op and does not register duplicate handlers", () => {
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const listenerCountBefore = process.listenerCount("SIGINT");
+
+      const stop1 = client.enableAutoCleanup();
+      const stop2 = client.enableAutoCleanup(); // should be no-op
+
+      expect(process.listenerCount("SIGINT")).toBe(listenerCountBefore + 1);
+
+      stop1(); // removes the real handler
+      expect(process.listenerCount("SIGINT")).toBe(listenerCountBefore);
+
+      // stop2 is no-op — calling it should not throw
+      expect(() => stop2()).not.toThrow();
+    });
+
+    it("allows re-registration after stop()", () => {
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const baseLine = process.listenerCount("SIGINT");
+
+      const stop = client.enableAutoCleanup();
+      expect(process.listenerCount("SIGINT")).toBe(baseLine + 1);
+      stop();
+      expect(process.listenerCount("SIGINT")).toBe(baseLine);
+
+      // After stop(), a new call should register again
+      const stop2 = client.enableAutoCleanup();
+      expect(process.listenerCount("SIGINT")).toBe(baseLine + 1);
+      stop2();
+    });
+  });
+
+  // ===== getSandbox() K8s re-validation on cache hit =====
+
+  describe("getSandbox() K8s re-validation on cache hit", () => {
+    it("evicts cached handle and throws when claim returns 404 on cache hit", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-evict");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+
+      // K8s GET returns 404 during cache-hit validation
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        new Error("HTTP 404"),
+      );
+
+      await expect(client.getSandbox(sandbox1.claimName)).rejects.toThrow(
+        "SandboxClaim",
+      );
+      // Registry evicted — no active sandboxes remain
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
   });
 });

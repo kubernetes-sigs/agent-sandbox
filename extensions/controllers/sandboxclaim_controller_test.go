@@ -1276,6 +1276,117 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	}
 }
 
+// TestSandboxClaimResumesPartialAdoption verifies that a claim can resume its
+// own half-finished adoption. If the controller crashes between setting the
+// claimed-by annotation and completing the ownership transfer, the next
+// reconcile must not skip the sandbox — it must complete the adoption.
+func TestSandboxClaimResumesPartialAdoption(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	claimUID := types.UID("claim-uid-partial")
+	warmPoolUID := types.UID("warmpool-uid")
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+
+	// Claim with no status (adoption never completed)
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial-claim", Namespace: "default", UID: claimUID},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	// Sandbox with claimed-by annotation set to this claim's UID, but still
+	// owned by the warm pool (ownership transfer never completed).
+	partialSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pool-sb-partial",
+			Namespace:         "default",
+			CreationTimestamp: metav1.Now(),
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			Annotations: map[string]string{
+				sandboxv1alpha1.SandboxClaimedByAnnotation: string(claimUID),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        warmPoolUID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, partialSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "partial-claim", Namespace: "default"}}
+
+	_, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Verify the sandbox was adopted (ownership transferred to claim)
+	var sb sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-sb-partial", Namespace: "default"}, &sb); err != nil {
+		t.Fatalf("failed to get sandbox: %v", err)
+	}
+
+	controllerRef := metav1.GetControllerOf(&sb)
+	if controllerRef == nil || controllerRef.UID != claimUID {
+		t.Errorf("expected sandbox to be owned by claim %s, got %v", claimUID, controllerRef)
+	}
+
+	if _, exists := sb.Labels[warmPoolSandboxLabel]; exists {
+		t.Error("expected warm pool label to be removed after adoption")
+	}
+
+	// Verify no cold-start sandbox was created (claim should have adopted, not created new)
+	var coldStart sandboxv1alpha1.Sandbox
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: "partial-claim", Namespace: "default"}, &coldStart)
+	if err == nil {
+		t.Error("expected no cold-start sandbox to be created — claim should have resumed partial adoption")
+	}
+}
+
 func TestRecordCreationLatencyMetric(t *testing.T) {
 	ctx := context.Background()
 	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
@@ -1863,6 +1974,224 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			t.Error("expected warm pool label to be removed from adopted sandbox")
 		}
 	})
+}
+
+// TestCrossClaimAdoptionRace is a regression test for #127 and #478.
+// With N concurrent claims and <N warm pool sandboxes, each sandbox must be
+// adopted by exactly one claim and no claim should end up owning more than
+// one sandbox. The race manifests when concurrent reconcilers read the same
+// candidate list from the informer cache.
+//
+// NOTE: This test uses fake.Client which serializes writes in-memory. It
+// validates the reconcile flow and adoption invariants but does not exercise
+// real API server concurrency. See test/e2e/extensions/adoption_race_test.go
+// for integration coverage against a live cluster.
+func TestCrossClaimAdoptionRace(t *testing.T) {
+	const (
+		numClaims    = 10
+		numSandboxes = 3 // Intentionally less than numClaims to force contention
+	)
+
+	scheme := newScheme(t)
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "race-template",
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	warmPoolUID := types.UID("warmpool-uid")
+	poolNameHash := sandboxcontrollers.NameHash("race-pool")
+	templateHash := sandboxcontrollers.NameHash("race-template")
+
+	// Create warm pool sandboxes
+	var sandboxes []client.Object
+	for i := range numSandboxes {
+		name := fmt.Sprintf("pool-sb-%d", i)
+		replicas := int32(1)
+		sb := &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				Namespace:         "default",
+				CreationTimestamp: metav1.Time{Time: time.Now().Add(-time.Duration(numSandboxes-i) * time.Hour)},
+				Labels: map[string]string{
+					warmPoolSandboxLabel:   poolNameHash,
+					sandboxTemplateRefHash: templateHash,
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxWarmPool",
+					Name:       "race-pool",
+					UID:        warmPoolUID,
+					Controller: ptr.To(true),
+				}},
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{
+				Replicas: &replicas,
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: "Ready",
+				}},
+			},
+		}
+		sandboxes = append(sandboxes, sb)
+	}
+
+	// Create N concurrent claims
+	var claims []client.Object
+	for i := range numClaims {
+		claim := &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("claim-%d", i),
+				Namespace: "default",
+				UID:       types.UID(fmt.Sprintf("claim-uid-%d", i)),
+			},
+			Spec: extensionsv1alpha1.SandboxClaimSpec{
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+					Name: "race-template",
+				},
+			},
+		}
+		claims = append(claims, claim)
+	}
+
+	allObjects := []client.Object{template}
+	allObjects = append(allObjects, sandboxes...)
+	allObjects = append(allObjects, claims...)
+
+	statusSubresources := make([]client.Object, len(claims))
+	copy(statusSubresources, claims)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(allObjects...).
+		WithStatusSubresource(statusSubresources...).
+		Build()
+
+	// Run all claims' reconciliations concurrently to maximize contention.
+	var wg sync.WaitGroup
+	reconcileErrors := make([]error, numClaims)
+
+	for i := range numClaims {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			reconciler := &SandboxClaimReconciler{
+				Client:                  fakeClient,
+				Scheme:                  scheme,
+				Recorder:                events.NewFakeRecorder(10),
+				Tracer:                  asmetrics.NewNoOp(),
+				MaxConcurrentReconciles: numClaims,
+			}
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      fmt.Sprintf("claim-%d", idx),
+					Namespace: "default",
+				},
+			}
+			_, reconcileErrors[idx] = reconciler.Reconcile(context.Background(), req)
+		}(i)
+	}
+	wg.Wait()
+
+	// Collect adoption results: for each sandbox, which claim(s) adopted it
+	ctx := context.Background()
+	sandboxOwners := make(map[string]string)    // sandbox name -> claim UID
+	claimSandboxes := make(map[string][]string) // claim UID -> sandbox names
+
+	for i := range numSandboxes {
+		name := fmt.Sprintf("pool-sb-%d", i)
+		var sb sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &sb); err != nil {
+			t.Fatalf("failed to get sandbox %s: %v", name, err)
+		}
+
+		controllerRef := metav1.GetControllerOf(&sb)
+		if controllerRef != nil && controllerRef.Kind == "SandboxClaim" {
+			ownerUID := string(controllerRef.UID)
+			sandboxOwners[name] = ownerUID
+			claimSandboxes[ownerUID] = append(claimSandboxes[ownerUID], name)
+		}
+	}
+
+	// Also check for cold-start sandboxes created by claims
+	for i := range numClaims {
+		claimName := fmt.Sprintf("claim-%d", i)
+		claimUID := fmt.Sprintf("claim-uid-%d", i)
+		var sb sandboxv1alpha1.Sandbox
+		// Cold-start sandboxes use the claim name
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: claimName, Namespace: "default"}, &sb); err == nil {
+			controllerRef := metav1.GetControllerOf(&sb)
+			if controllerRef != nil && controllerRef.Kind == "SandboxClaim" {
+				claimSandboxes[claimUID] = append(claimSandboxes[claimUID], claimName)
+			}
+		}
+	}
+
+	// Invariant 1: No claim adopted more than one warm pool sandbox.
+	// sandboxOwners is sandbox→owner (unique by construction); check the
+	// reverse map owner→sandboxes for multi-adoption.
+	ownerToSandboxes := make(map[string][]string)
+	for sbName, ownerUID := range sandboxOwners {
+		t.Logf("Sandbox %s adopted by claim %s", sbName, ownerUID)
+		ownerToSandboxes[ownerUID] = append(ownerToSandboxes[ownerUID], sbName)
+	}
+	for ownerUID, sbs := range ownerToSandboxes {
+		if len(sbs) > 1 {
+			t.Errorf("claim %s adopted multiple warm pool sandboxes %v — cross-claim race detected", ownerUID, sbs)
+		}
+	}
+
+	// Invariant 2: No claim owns more than one sandbox (warm pool + cold start combined)
+	for claimUID, sandboxNames := range claimSandboxes {
+		if len(sandboxNames) > 1 {
+			t.Errorf("claim %s owns multiple sandboxes %v — 1:1 invariant violated (double-adoption bug)", claimUID, sandboxNames)
+		}
+	}
+
+	// Invariant 3: At most numSandboxes claims adopted from the warm pool
+	warmAdoptions := len(sandboxOwners)
+	if warmAdoptions > numSandboxes {
+		t.Errorf("expected at most %d warm adoptions, got %d — cross-claim race detected", numSandboxes, warmAdoptions)
+	}
+
+	// Invariant 4: The claimed-by annotation matches the owning claim on adopted sandboxes
+	for sbName, ownerUID := range sandboxOwners {
+		var sb sandboxv1alpha1.Sandbox
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: sbName, Namespace: "default"}, &sb); err != nil {
+			t.Fatalf("failed to re-read sandbox %s: %v", sbName, err)
+		}
+		if claimedBy := sb.Annotations[sandboxv1alpha1.SandboxClaimedByAnnotation]; claimedBy != ownerUID {
+			t.Errorf("sandbox %s: claimed-by annotation %q does not match controller owner %q", sbName, claimedBy, ownerUID)
+		}
+	}
+
+	t.Logf("Result: %d warm adoptions, %d total claims, %d reconcile errors",
+		warmAdoptions, numClaims, func() int {
+			n := 0
+			for _, e := range reconcileErrors {
+				if e != nil {
+					n++
+				}
+			}
+			return n
+		}())
 }
 
 func TestSandboxClaimPredicates(t *testing.T) {

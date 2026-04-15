@@ -326,6 +326,7 @@ func TestReconcile(t *testing.T) {
 						ResourceVersion: "1",
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+							"agents.x-k8s.io/pod-template-hash": "bba517df",
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -421,6 +422,7 @@ func TestReconcile(t *testing.T) {
 						ResourceVersion: "1",
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+							"agents.x-k8s.io/pod-template-hash": "21481b6f",
 							"custom-label":                      "label-val",
 						},
 						Annotations: map[string]string{
@@ -955,6 +957,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"agents.x-k8s.io/pod-template-hash": "21481b6f",
 						"custom-label":                      "label-val",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
@@ -981,6 +984,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "1",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"agents.x-k8s.io/pod-template-hash": "21481b6f",
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1083,7 +1087,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxLabel:         nameHash,
+						podTemplateHashLabel: "bba517df",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1337,6 +1342,54 @@ func TestReconcilePod(t *testing.T) {
 			expectErr:              false,
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
 			wantPodSurvives:        "annotated-pod-name",
+		},
+		{
+			name: "deletes pod when template spec drifts",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel:         nameHash,
+							podTemplateHashLabel: "stale-hash-value",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "old-container",
+							},
+						},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: sandboxName,
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "new-container",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantPod: nil,
+			expectErr: false,
 		},
 	}
 

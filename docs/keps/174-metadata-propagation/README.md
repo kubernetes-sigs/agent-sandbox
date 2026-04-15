@@ -29,7 +29,7 @@ Currently, metadata fields exist across several disconnected layers (Sandbox, Sa
 
 ## Proposal
 
-The proposal introduces new fields to `SandboxClaim` and `Sandbox` to allow unique metadata to pass down the stack while keeping `SandboxTemplate` and `Warmpool` unchanged.
+The proposal introduces a new field to `SandboxClaim` to allow unique pod metadata to pass down the stack while keeping `SandboxTemplate` and `Warmpool` unchanged.
 
 ### User Stories (Optional)
 
@@ -45,11 +45,17 @@ Managed programmatically via the Agent Sandbox Python SDK to save and restore th
 
 The model allows `SandboxClaim` to pass unique metadata down the stack:
 1.  **SandboxClaim**: Introduce `additionalPodMetadata`.
-2.  **Sandbox**: Add `SandboxClaim`’s `additionalPodMetadata` into Sandbox's `spec.podTemplate.metadata`.
-3.  **Pod**: Add Sandbox's `spec.podTemplate.metadata` into its own labels and annotations.
+2.  **Sandbox**: Merges `SandboxClaim`’s `additionalPodMetadata` into Sandbox's `spec.podTemplate.metadata`.
+3.  **Pod**: Propagates Sandbox's `spec.podTemplate.metadata` into its own labels and annotations.
 
 #### Safety Principle: No Overrides
 To ensure predictability, the controller will not allow overrides. If a key exists in both the Template and the Claim with different values, the request will be rejected with an error.
+
+#### Tracking Propagated Metadata
+To differentiate between metadata propagated by the controller and metadata added by other sources (like mutating webhooks), the controller adds specific annotations to the Pod:
+*   `agents.x-k8s.io/propagated-labels`: A comma-separated list of label keys that were propagated from the `SandboxClaim`.
+*   `agents.x-k8s.io/propagated-annotations`: A comma-separated list of annotation keys that were propagated from the `SandboxClaim`.
+This allows the controller to safely prune removed labels/annotations without affecting external modifications.
 
 #### API Changes
 
@@ -79,7 +85,7 @@ type SandboxClaimSpec struct {
 ##### Scenario A: Cold Start (No Warmpool)
 This scenario occurs when a user requests a sandbox environment without utilizing a pre-provisioned pool.
 
-1.  **New Pod (Creation)**: If the `Sandbox` is newly created and no Pod exists, the `Sandbox` controller merges the base `podTemplate` from the `SandboxTemplate` with the `additionalPodMetadata` from the `Sandbox` spec. The Pod is created with these labels and annotations already present.
+1.  **New Pod (Creation)**: If the `Sandbox` is newly created and no Pod exists, the `Sandbox` controller merges the base `podTemplate` from the `SandboxTemplate` with the metadata in the `Sandbox`'s `spec.podTemplate.metadata` (which was propagated from the `SandboxClaim`). The Pod is created with these labels and annotations already present.
 2.  **Pod Exists (Metadata Update)**: If a Pod was already created via a Cold Start and the `SandboxClaim` is subsequently updated with new metadata, the `Sandbox` controller performs an **in-place update** of the Pod's `metadata.labels` and `metadata.annotations`. This update does not trigger a Pod restart.
 
 ##### Scenario B: Warmpool

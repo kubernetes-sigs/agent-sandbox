@@ -56,6 +56,8 @@ var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 // ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
 var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
 
+var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
+
 // getWarmPoolPolicy returns the effective warm pool policy for a claim.
 func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
 	if claim.Spec.WarmPool != nil {
@@ -570,6 +572,15 @@ func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 	return false
 }
 
+func isRestrictedDomain(domain string) bool {
+	for _, d := range restrictedDomains {
+		if domain == d || strings.HasSuffix(domain, "."+d) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
 func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
 	if claimMeta == nil {
@@ -583,7 +594,7 @@ func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
 		if len(parts) > 1 {
 			domain = strings.ToLower(parts[0])
 		}
-		if domain == "kubernetes.io" || domain == "k8s.io" || strings.HasSuffix(domain, ".agents.x-k8s.io") || domain == "agents.x-k8s.io" {
+		if isRestrictedDomain(domain) {
 			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
 		}
 

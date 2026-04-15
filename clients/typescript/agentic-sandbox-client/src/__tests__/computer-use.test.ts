@@ -32,6 +32,7 @@ const {
 vi.mock("@kubernetes/client-node", () => {
   const KubeConfig = vi.fn().mockImplementation(() => ({
     loadFromDefault: vi.fn(),
+    clusters: [{ name: "test-cluster" }],
     makeApiClient: vi.fn().mockReturnValue({
       createNamespacedCustomObject: mockCreateNamespacedCustomObject,
       deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,

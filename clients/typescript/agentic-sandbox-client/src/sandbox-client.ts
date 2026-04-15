@@ -330,7 +330,16 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     };
 
     const sandbox = new this.sandboxClass(init);
-    await sandbox.connect();
+    try {
+      await sandbox.connect();
+    } catch (err) {
+      // Release local resources (port-forward process, tracing span) on
+      // connect failure, but do NOT delete the SandboxClaim — the claim belongs
+      // to the existing sandbox which may still be healthy; only the local tunnel
+      // setup failed.
+      await sandbox.closeLocal().catch(() => {});
+      throw err;
+    }
 
     this.registry.set(key, sandbox);
     return sandbox;

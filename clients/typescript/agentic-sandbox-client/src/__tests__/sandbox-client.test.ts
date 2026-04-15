@@ -499,6 +499,108 @@ describe("SandboxClient (registry)", () => {
     });
   });
 
+  // ===== getSandbox() does not delete claim on connect failure =====
+
+  describe("getSandbox() preserves SandboxClaim on connect failure", () => {
+    it("does not delete SandboxClaim when connect() fails", async () => {
+      // GET claim: returns metadata so resolveSandboxName-equivalent resolves,
+      // but the Sandbox stays in port-forward mode and connect() will fail
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        metadata: {
+          name: "test-claim",
+          annotations: {},
+        },
+        status: {
+          sandbox: { name: "test-sandbox" },
+          sandboxRef: {
+            name: "test-sandbox",
+            namespace: "default",
+          },
+        },
+      });
+
+      mockSandboxReadyFlow("test-sandbox");
+
+      // Use direct-URL mode so connect() succeeds (getSandbox just re-attaches)
+      // Then simulate that the sandbox was closed (isActive=false) to force re-attach
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+
+      // First createSandbox so we have something in registry
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = await client.createSandbox("tpl");
+      const claimName = sandbox.claimName;
+      const sandboxName = sandbox.sandboxName;
+
+      // Close locally to mark it inactive (simulates a stale handle)
+      await sandbox.closeLocal();
+      expect(sandbox.isActive).toBe(false);
+
+      // getSandbox should re-attach; set up watch mocks for re-attach flow
+      mockSandboxReadyFlow(sandboxName);
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        metadata: { name: claimName, annotations: {} },
+        status: {
+          sandbox: { name: sandboxName },
+          sandboxRef: { name: sandboxName, namespace: "default" },
+        },
+      });
+
+      const reattached = await client.getSandbox(claimName);
+      expect(reattached).toBeInstanceOf(Sandbox);
+      expect(reattached.isActive).toBe(true);
+
+      // The claim must NOT have been deleted during re-attachment
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("closeLocal() is called (not close()) when getSandbox connect fails", async () => {
+      // Simulate a scenario where getSandbox finds a claim but connect() fails.
+      // The test verifies that the SandboxClaim delete API is never called.
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        metadata: { name: "my-claim", annotations: {} },
+        status: {
+          sandbox: { name: "my-sandbox" },
+          sandboxRef: { name: "my-sandbox", namespace: "default" },
+        },
+      });
+
+      // watch for sandbox name resolution: resolves immediately
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", { status: { sandbox: { name: "my-sandbox" } } });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // watch for sandbox ready: resolves immediately
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            metadata: { name: "my-sandbox", annotations: {} },
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Use direct-URL mode — connect() will succeed
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.getSandbox("my-claim");
+
+      expect(sandbox).toBeInstanceOf(Sandbox);
+      // Claim was never deleted
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+  });
+
   // ===== watch miss on already-ready claim =====
 
   describe("watch miss on already-ready claim", () => {

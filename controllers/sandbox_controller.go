@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -47,6 +48,7 @@ import (
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	sandboxControllerFieldOwner = "sandbox-controller"
+	podTemplateHashLabel        = "agents.x-k8s.io/pod-template-hash"
 )
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
@@ -338,6 +340,19 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
+// computePodTemplateHash computes a hash of the sandbox's PodTemplate.Spec.
+// It intentionally excludes PodTemplate.ObjectMeta (labels/annotations) since
+// those may be modified by other controllers (e.g., SandboxClaim) without
+// requiring pod recreation. Only changes to the actual PodSpec should trigger
+// a recreate.
+func computePodTemplateHash(sandbox *sandboxv1alpha1.Sandbox) (string, error) {
+	specJSON, err := json.Marshal(sandbox.Spec.PodTemplate.Spec)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal pod template spec for hashing: %w", err)
+	}
+	return NameHash(string(specJSON)), nil
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	service := &corev1.Service{}
@@ -542,6 +557,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil
 	}
 
+	// Compute the expected pod template hash for drift detection
+	expectedHash, hashErr := computePodTemplateHash(sandbox)
+	if hashErr != nil {
+		log.Error(hashErr, "Failed to compute pod template hash")
+	}
+
 	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
@@ -581,6 +602,29 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			// No additional action needed — label applied below.
 		}
 
+		// Check for pod template drift and recreate if needed
+		if hashErr == nil && expectedHash != "" && pod.DeletionTimestamp.IsZero() {
+			podHash := pod.Labels[podTemplateHashLabel]
+			if podHash != "" && podHash != expectedHash {
+				log.Info("Pod template spec has drifted, deleting pod to trigger recreation",
+					"Pod.Name", pod.Name,
+					"OldHash", podHash,
+					"NewHash", expectedHash)
+				if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+					return nil, fmt.Errorf("failed to delete drifted pod: %w", err)
+				}
+				// Remove pod name annotation so the sandbox tracks the new pod name
+				if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
+					patch := client.MergeFrom(sandbox.DeepCopy())
+					delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
+					if err := r.Patch(ctx, sandbox, patch); err != nil {
+						log.Error(err, "Failed to remove pod name annotation during drift deletion")
+					}
+				}
+				return nil, nil
+			}
+		}
+
 		// Apply label for both podUnowned and podOwnedBySandbox cases.
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
@@ -589,6 +633,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 			pod.Labels[k] = v
+		}
+		// Set the pod template hash label
+		if expectedHash != "" {
+			pod.Labels[podTemplateHashLabel] = expectedHash
 		}
 
 		if err := r.Update(ctx, pod); err != nil {
@@ -611,6 +659,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		labels[k] = v
+	}
+	if expectedHash != "" {
+		labels[podTemplateHashLabel] = expectedHash
 	}
 	annotations := map[string]string{}
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {

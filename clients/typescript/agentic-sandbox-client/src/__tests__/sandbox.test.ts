@@ -84,7 +84,9 @@ import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
+  MAX_UPLOAD_SIZE,
 } from "../constants.js";
+import { SandboxRequestError } from "../exceptions.js";
 
 /**
  * Test helper: exposes protected members for test assertions.
@@ -443,6 +445,16 @@ describe("Sandbox", () => {
       await expect(sandbox.files.write(filePath, "data")).rejects.toThrow(
         /is not a plain filename/,
       );
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects when content exceeds MAX_UPLOAD_SIZE", async () => {
+      const sandbox = createReadySandbox();
+      const bigContent = Buffer.alloc(MAX_UPLOAD_SIZE + 1);
+
+      await expect(
+        sandbox.files.write("big.bin", bigContent),
+      ).rejects.toBeInstanceOf(SandboxRequestError);
       expect(fetch).not.toHaveBeenCalled();
     });
   });

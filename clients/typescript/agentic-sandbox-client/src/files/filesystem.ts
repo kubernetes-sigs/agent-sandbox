@@ -98,6 +98,7 @@ export class Filesystem {
         await this.requestFn("POST", "upload", {
           body: formData,
           timeout,
+          maxRetries: 1, // file upload is non-idempotent; never retry
         });
 
         console.info(`File '${base}' uploaded successfully.`);

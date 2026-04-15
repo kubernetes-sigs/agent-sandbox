@@ -51,6 +51,7 @@ export class ComputerUseSandbox extends Sandbox {
           body: JSON.stringify({ query }),
           headers: { "Content-Type": "application/json" },
           timeout,
+          maxRetries: 1, // agent invocation is non-idempotent; never retry
         });
 
         const rawText = await response.text();

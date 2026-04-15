@@ -25,10 +25,7 @@ import { SandboxNotReadyError, SandboxRequestError } from "../exceptions.js";
  */
 export class ComputerUseSandbox extends Sandbox {
   constructor(init: SandboxInit) {
-    super({
-      ...init,
-      serverPort: init.serverPort !== 8888 ? init.serverPort : 8080,
-    });
+    super(init);
   }
 
   async agent(query: string, timeout: number = 60): Promise<ExecutionResult> {

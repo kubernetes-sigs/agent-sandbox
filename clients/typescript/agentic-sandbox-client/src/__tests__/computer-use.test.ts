@@ -115,9 +115,9 @@ describe("ComputerUseSandbox (handle)", () => {
   // ===== constructor =====
 
   describe("constructor", () => {
-    it("defaults serverPort to 8080 when init.serverPort is 8888", () => {
+    it("preserves serverPort 8888 (no override)", () => {
       const sandbox = new TestableComputerUseSandbox(makeBaseInit());
-      expect(sandbox._serverPort).toBe(8080);
+      expect(sandbox._serverPort).toBe(8888);
     });
 
     it("preserves explicitly set serverPort", () => {
@@ -131,11 +131,6 @@ describe("ComputerUseSandbox (handle)", () => {
     it("is an instance of Sandbox", () => {
       const sandbox = new TestableComputerUseSandbox(makeBaseInit());
       expect(sandbox).toBeInstanceOf(Sandbox);
-    });
-
-    it("serverPort 8888 should NOT be changed to 8080", () => {
-      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
-      expect(sandbox._serverPort).toBe(8888); // currently FAIL: returns 8080
     });
   });
 
@@ -174,7 +169,7 @@ describe("ComputerUseSandbox (handle)", () => {
       expect(JSON.parse(opts.body as string)).toEqual({
         query: "open the browser and search for cats",
       });
-      expect(opts.headers["X-Sandbox-Port"]).toBe("8080");
+      expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
     });
 
     it("throws when sandbox is not connected (no baseUrl)", async () => {
@@ -275,7 +270,7 @@ describe("ComputerUseSandboxClient (registry)", () => {
     expect(sandbox.isActive).toBe(true);
   });
 
-  it("created sandbox has serverPort 8080 by default", async () => {
+  it("created sandbox has serverPort 8888 by default", async () => {
     mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
     mockSandboxReadyFlow("cu-sandbox-2");
 
@@ -284,7 +279,7 @@ describe("ComputerUseSandboxClient (registry)", () => {
       "cu-template",
     )) as TestableComputerUseSandbox;
 
-    // ComputerUseSandbox overrides 8888 → 8080
+    // ComputerUseSandbox uses serverPort 8888 (no override)
     // Since TestableComputerUseSandbox is not used here, verify via agent() header
     (fetch as Mock).mockResolvedValueOnce(
       new Response(JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }), {
@@ -295,7 +290,7 @@ describe("ComputerUseSandboxClient (registry)", () => {
 
     await sandbox.agent("test query");
     expect((fetch as Mock).mock.calls[0][1].headers["X-Sandbox-Port"]).toBe(
-      "8080",
+      "8888",
     );
   });
 });

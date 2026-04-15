@@ -285,6 +285,37 @@ describe("Sandbox", () => {
     });
   });
 
+  // ===== closeLocal() =====
+
+  describe("closeLocal()", () => {
+    it("kills port-forward and marks sandbox inactive WITHOUT deleting the SandboxClaim", async () => {
+      const fakeProcess = {
+        kill: vi.fn(),
+        on: vi.fn((_event: string, cb: () => void) => {
+          if (_event === "exit") setTimeout(cb, 0);
+        }),
+        exitCode: null,
+        signalCode: null,
+      };
+
+      const sandbox = createReadySandbox();
+      sandbox._portForwardProcess = fakeProcess as never;
+
+      await sandbox.closeLocal();
+
+      expect(fakeProcess.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(sandbox.isActive).toBe(false);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("is idempotent: second call does not kill a null process or call K8s", async () => {
+      const sandbox = createReadySandbox();
+      await sandbox.closeLocal();
+      await sandbox.closeLocal(); // second call should be a no-op
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+  });
+
   // ===== close() =====
 
   describe("close()", () => {
@@ -433,6 +464,19 @@ describe("Sandbox", () => {
       const [url] = (fetch as Mock).mock.calls[0];
       expect(url).toBe("http://localhost:9999/download/tmp%2Fhello.txt");
     });
+
+    it("fully encodes RFC 3986 sub-delimiters in path (!, ', (, ), *)", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("data", { status: 200 }),
+      );
+
+      await sandbox.files.read("a!b'c(d)e*f");
+
+      const [url] = (fetch as Mock).mock.calls[0];
+      // encodeURIComponent leaves ! ' ( ) * unencoded; encodePathSegment must encode them
+      expect(url).toBe("http://localhost:9999/download/a%21b%27c%28d%29e%2Af");
+    });
   });
 
   // ===== files.list =====
@@ -504,6 +548,18 @@ describe("Sandbox", () => {
       );
 
       expect(await sandbox.files.exists("tmp/missing.txt")).toBe(false);
+    });
+
+    it("fully encodes RFC 3986 sub-delimiters in exists path", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), { status: 200 }),
+      );
+
+      await sandbox.files.exists("dir/file!name.txt");
+
+      const [url] = (fetch as Mock).mock.calls[0];
+      expect(url).toBe("http://localhost:9999/exists/dir%2Ffile%21name.txt");
     });
   });
 

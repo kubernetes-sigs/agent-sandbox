@@ -220,9 +220,12 @@ export class Sandbox {
   }
 
   /**
-   * Terminates the port-forward process (if any) and deletes the SandboxClaim.
+   * Stops the port-forward process (if any) and clears local state.
+   * Does NOT delete the SandboxClaim from Kubernetes.
+   * Use this when a reconnect fails and you want to release local resources
+   * without destroying the live claim.
    */
-  async close(): Promise<void> {
+  async closeLocal(): Promise<void> {
     if (this.portForwardProcess) {
       try {
         console.info("Stopping port-forwarding...");
@@ -243,6 +246,25 @@ export class Sandbox {
       this.portForwardProcess = null;
     }
 
+    this._commands = null;
+    this._files = null;
+    this._isClosed = true;
+
+    if (this.tracingManager) {
+      try {
+        this.tracingManager.endLifecycleSpan();
+      } catch (err) {
+        console.error(`Failed to end tracing span: ${err}`);
+      }
+    }
+  }
+
+  /**
+   * Terminates the port-forward process (if any) and deletes the SandboxClaim.
+   */
+  async close(): Promise<void> {
+    await this.closeLocal();
+
     if (this.claimName) {
       console.info(`Deleting SandboxClaim: ${this.claimName}`);
       try {
@@ -257,18 +279,6 @@ export class Sandbox {
         if (!isK8s404(err)) {
           console.error(`Error deleting sandbox claim: ${err}`);
         }
-      }
-    }
-
-    this._commands = null;
-    this._files = null;
-    this._isClosed = true;
-
-    if (this.tracingManager) {
-      try {
-        this.tracingManager.endLifecycleSpan();
-      } catch (err) {
-        console.error(`Failed to end tracing span: ${err}`);
       }
     }
   }
@@ -458,7 +468,7 @@ export class Sandbox {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
-      await this.close();
+      await this.closeLocal();
       throw new SandboxPortForwardError(
         "Failed to establish tunnel to Router Service.",
       );

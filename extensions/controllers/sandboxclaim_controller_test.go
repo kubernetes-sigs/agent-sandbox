@@ -872,6 +872,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		existingObjects         []client.Object
 		expectSandboxAdoption   bool
 		expectedAdoptedSandbox  string
+		expectedAnnotations     map[string]string
 		expectNewSandboxCreated bool
 		simulateConflicts       int
 	}{
@@ -958,6 +959,46 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
+			name: "corrects stale pod-name annotation when adopting sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Annotations = map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "stale-pod-name",
+					}
+					return sb
+				}(),
+				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "pool-sb-1",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "accepts existing correct pod-name annotation when adopting sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Annotations = map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "pool-sb-1",
+						"test.annotation/preserved":              "true",
+					}
+					return sb
+				}(),
+				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedAnnotations: map[string]string{
+				"test.annotation/preserved": "true",
+			},
+			expectNewSandboxCreated: false,
+		},
+		{
 			name: "retries on conflict when adopting sandbox",
 			existingObjects: []client.Object{
 				template,
@@ -1037,6 +1078,17 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				controllerRef := metav1.GetControllerOf(&adoptedSandbox)
 				if controllerRef == nil || controllerRef.UID != claim.UID {
 					t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
+				}
+
+				// 4. Verify the adopted sandbox records the adopted pod name
+				if val := adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; val != adoptedSandbox.Name {
+					t.Errorf("expected adopted sandbox to have %q annotation %q, got %q; annotations=%v", sandboxv1alpha1.SandboxPodNameAnnotation, adoptedSandbox.Name, val, adoptedSandbox.Annotations)
+				}
+
+				for key, expected := range tc.expectedAnnotations {
+					if val := adoptedSandbox.Annotations[key]; val != expected {
+						t.Errorf("expected adopted sandbox to preserve annotation %q=%q, got %q; annotations=%v", key, expected, val, adoptedSandbox.Annotations)
+					}
 				}
 
 			} else if tc.expectNewSandboxCreated {

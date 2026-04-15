@@ -592,6 +592,179 @@ describe("Sandbox", () => {
     });
   });
 
+  // ===== response body drain before retry =====
+
+  describe("response body drain before retry", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("calls response.text() to drain body before retrying on 503", async () => {
+      const sandbox = createReadySandbox();
+
+      // Spy on the text() method of the first (503) response
+      const drainSpy = vi.fn().mockResolvedValue("service unavailable");
+      const errorResponse = Object.assign(
+        new Response("service unavailable", { status: 503 }),
+        { text: drainSpy },
+      );
+      const okResponse = new Response(JSON.stringify({ exists: true }), {
+        status: 200,
+      });
+      (fetch as Mock)
+        .mockResolvedValueOnce(errorResponse)
+        .mockResolvedValueOnce(okResponse);
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      const settled = existsPromise.catch(() => {});
+
+      // Flush the backoff delay
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled;
+
+      // The drain spy must have been called before the retry
+      expect(drainSpy).toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ===== overall timeout stops retry =====
+
+  describe("overall timeout stops retry loop", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("aborts retry loop when overall request timeout fires", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockRejectedValue(
+        Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      );
+
+      // list() uses GET (retryable); timeout = 0.1 s = 100 ms
+      const listPromise = sandbox.files.list(".", 0.1);
+      const settled = listPromise.catch(() => {});
+
+      // Advance 200 ms — past the 100 ms overall timeout but before the
+      // first 500 ms backoff sleep completes
+      await vi.advanceTimersByTimeAsync(200);
+      await settled;
+
+      // The overall timeout fired during the backoff sleep, stopping the loop
+      // after the very first attempt — fetch should be called exactly once
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== SandboxRequestError includes body and operation =====
+
+  describe("SandboxRequestError includes HTTP body and operation", () => {
+    it("sets body and operation fields on non-2xx response", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response('{"error":"not found"}', { status: 404 }),
+      );
+
+      const err = await sandbox.commands.run("cat missing").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.statusCode).toBe(404);
+      expect(err.body).toBe('{"error":"not found"}');
+      expect(err.operation).toBe("POST execute");
+    });
+
+    it("truncates body to MAX_ERROR_BODY_BYTES (512)", async () => {
+      const sandbox = createReadySandbox();
+      const longBody = "x".repeat(1000);
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(longBody, { status: 500 }),
+      );
+
+      const err = await sandbox.commands.run("big output").catch((e) => e);
+
+      expect(err.body).toHaveLength(512);
+    });
+  });
+
+  // ===== port-forward auto-reconnect =====
+
+  describe("port-forward auto-reconnect", () => {
+    it("reconnects port-forward when process has died before a request", async () => {
+      // Fake a free-port server
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 54321 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      // Fake a kubectl process that starts alive
+      const fakeProc = {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn((ev: string, cb: () => void) => {
+          if (ev === "exit") setTimeout(cb, 0);
+        }),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProc);
+
+      // createConnection: succeed immediately for the reconnect port-forward check
+      mockCreateConnection.mockImplementation(
+        (_opts: unknown, cb: () => void) => {
+          const sock = {
+            destroy: vi.fn(),
+            on: vi.fn(),
+          };
+          process.nextTick(cb);
+          return sock;
+        },
+      );
+
+      // Create sandbox in port-forward mode, manually set a dead process + valid baseUrl
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 1 }),
+      );
+      sandbox._baseUrl = "http://127.0.0.1:12345";
+
+      // Simulate port-forward process death
+      const deadProc = {
+        exitCode: 1,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn((ev: string, cb: () => void) => {
+          if (ev === "exit") setTimeout(cb, 0);
+        }),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      sandbox._portForwardProcess = deadProc as never;
+
+      // fetch returns OK after reconnect
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), { status: 200 }),
+      );
+
+      await sandbox.files.exists("test.txt");
+
+      // SIGTERM was sent to the dead process
+      expect(deadProc.kill).toHaveBeenCalledWith("SIGTERM");
+      // A new kubectl process was spawned for the reconnect
+      expect(mockSpawn).toHaveBeenCalled();
+      // fetch was eventually called (reconnect succeeded)
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // ===== port-forward timeout deletes claim =====
 
   describe("port-forward timeout deletes claim", () => {

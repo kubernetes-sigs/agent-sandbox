@@ -27,7 +27,11 @@ import {
   GATEWAY_API_GROUP,
   GATEWAY_API_VERSION,
   GATEWAY_PLURAL,
+  MAX_ERROR_BODY_BYTES,
+  MAX_GATEWAY_REWATCH,
+  MAX_RECONNECT_ATTEMPTS,
   MAX_RETRIES,
+  PER_ATTEMPT_TIMEOUT_MS,
   RETRY_STATUS_CODES,
 } from "./constants.js";
 import { TracerManager, withSpan } from "./trace-manager.js";
@@ -40,38 +44,112 @@ import {
   SandboxRequestError,
 } from "./exceptions.js";
 
+/**
+ * Sleeps for `ms` milliseconds, aborting early if `signal` fires.
+ * Throws the signal's reason (or a generic AbortError) when interrupted.
+ */
+async function sleepWithSignal(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) {
+    throw (
+      signal.reason ??
+      new DOMException("The operation was aborted.", "AbortError")
+    );
+  }
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(
+          signal.reason ??
+            new DOMException("The operation was aborted.", "AbortError"),
+        );
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * Fetches a URL with retry logic.
+ *
+ * - maxRetries controls total attempt count (1 = no retry, 5 = up to 4 retries).
+ * - overallSignal is an optional AbortSignal that caps the entire operation.
+ *   When it fires, the retry loop stops immediately without further attempts.
+ * - Each attempt gets its own per-attempt timeout (PER_ATTEMPT_TIMEOUT_MS).
+ * - Before retrying a 5xx response, the response body is drained to allow
+ *   the underlying TCP connection to be reused.
+ */
 async function fetchWithRetry(
   url: string,
   options: RequestInit,
   maxRetries: number = MAX_RETRIES,
   backoffFactor: number = BACKOFF_FACTOR,
   retryStatusCodes: number[] = RETRY_STATUS_CODES,
+  overallSignal?: AbortSignal,
 ): Promise<Response> {
+  const attempts = Math.max(1, maxRetries);
   let lastError: Error | null = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    // Check overall deadline before starting (and before sleeping)
+    if (overallSignal?.aborted) {
+      throw (
+        overallSignal.reason ??
+        new DOMException("The operation was aborted.", "AbortError")
+      );
+    }
+
+    // Each attempt gets its own timeout; combine with the overall signal if present
+    const perAttemptSignal = AbortSignal.timeout(PER_ATTEMPT_TIMEOUT_MS);
+    const attemptSignal = overallSignal
+      ? AbortSignal.any([overallSignal, perAttemptSignal])
+      : perAttemptSignal;
+
     try {
-      const response = await fetch(url, options);
-      if (attempt < maxRetries && retryStatusCodes.includes(response.status)) {
+      const response = await fetch(url, { ...options, signal: attemptSignal });
+
+      if (
+        attempt < attempts - 1 &&
+        retryStatusCodes.includes(response.status)
+      ) {
         const delay = backoffFactor * Math.pow(2, attempt) * 1000;
         console.debug(
           `Request to ${url} returned ${response.status}, retrying in ${delay}ms (attempt ${
             attempt + 1
-          }/${maxRetries})...`,
+          }/${attempts})...`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Drain the body (up to MAX_DRAIN_BYTES) to allow TCP connection reuse
+        try {
+          await response.text();
+        } catch {
+          // Ignore drain errors; the retry is more important
+        }
+        await sleepWithSignal(delay, overallSignal);
         continue;
       }
       return response;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < maxRetries) {
+
+      // If the overall deadline fired, propagate immediately — no more retries
+      if (overallSignal?.aborted) {
+        throw overallSignal.reason ?? lastError;
+      }
+
+      // Any other AbortError (per-attempt timeout) is treated as a transient failure
+      if (attempt < attempts - 1) {
         const delay = backoffFactor * Math.pow(2, attempt) * 1000;
         console.debug(
           `Request to ${url} failed: ${lastError.message}, retrying in ${delay}ms (attempt ${
             attempt + 1
-          }/${maxRetries})...`,
+          }/${attempts})...`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await sleepWithSignal(delay, overallSignal);
       }
     }
   }
@@ -306,100 +384,86 @@ export class Sandbox {
         `Waiting for Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}'...`,
       );
 
-      try {
-        const response = await this.customObjectsApi.getNamespacedCustomObject({
-          group: GATEWAY_API_GROUP,
-          version: GATEWAY_API_VERSION,
-          namespace: this.gatewayNamespace,
-          plural: GATEWAY_PLURAL,
-          name: this.gatewayName!,
-        });
-        const gatewayObj =
-          (response as { body?: Record<string, unknown> }).body ??
-          (response as Record<string, unknown>);
-        const existingAddress = this.extractGatewayAddress(gatewayObj);
-        if (existingAddress) {
-          this.baseUrl = `http://${existingAddress}`;
+      const startTime = Date.now();
+      const timeoutMs = this.gatewayReadyTimeout * 1000;
+
+      // Helper: (re-)fetch the gateway object and return its address if available
+      const getExistingAddress = async (): Promise<string | undefined> => {
+        try {
+          const response =
+            await this.customObjectsApi.getNamespacedCustomObject({
+              group: GATEWAY_API_GROUP,
+              version: GATEWAY_API_VERSION,
+              namespace: this.gatewayNamespace,
+              plural: GATEWAY_PLURAL,
+              name: this.gatewayName!,
+            });
+          const gatewayObj =
+            (response as { body?: Record<string, unknown> }).body ??
+            (response as Record<string, unknown>);
+          return this.extractGatewayAddress(gatewayObj);
+        } catch (err) {
+          if (!isK8s404(err)) throw err;
+          return undefined;
+        }
+      };
+
+      // Initial GET: resolve immediately if the gateway already has an address
+      const existingAddress = await getExistingAddress();
+      if (existingAddress) {
+        this.baseUrl = `http://${existingAddress}`;
+        console.info(
+          `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
+        );
+        return;
+      }
+
+      // Watch loop: on clean-close (err === null), re-list and re-watch
+      for (
+        let watchAttempt = 0;
+        watchAttempt < MAX_GATEWAY_REWATCH;
+        watchAttempt++
+      ) {
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= timeoutMs) {
+          throw new SandboxNotReadyError(
+            `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' did not get ` +
+              `an IP within ${this.gatewayReadyTimeout} seconds.`,
+          );
+        }
+        const remainingMs = timeoutMs - elapsed;
+
+        const result = await this.watchGatewayOnce(remainingMs);
+
+        if (result.type === "resolved") {
+          this.baseUrl = `http://${result.address}`;
+          console.info(`Gateway is ready. Base URL set to: ${this.baseUrl}`);
+          return;
+        }
+
+        if (result.type === "error") {
+          throw result.error;
+        }
+
+        // result.type === "clean-close": the watch stream ended normally.
+        // Re-list before re-watching to avoid missing an update that arrived
+        // between the stream closing and the next watch starting.
+        console.debug(
+          `Gateway watch closed cleanly, re-listing and re-watching (attempt ${watchAttempt + 1})...`,
+        );
+        const relistAddress = await getExistingAddress();
+        if (relistAddress) {
+          this.baseUrl = `http://${relistAddress}`;
           console.info(
-            `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
+            `Gateway is ready (after re-list). Base URL set to: ${this.baseUrl}`,
           );
           return;
         }
-      } catch (err) {
-        if (!isK8s404(err)) {
-          throw err;
-        }
       }
 
-      const watcher = new k8s.Watch(this.kubeConfig);
-      const timeoutMs = this.gatewayReadyTimeout * 1000;
-
-      await new Promise<void>((resolve, reject) => {
-        let abortController: AbortController | undefined;
-        let aborted = false;
-        let timer: ReturnType<typeof setTimeout>;
-
-        const cleanup = () => {
-          aborted = true;
-          clearTimeout(timer);
-          if (abortController) {
-            try {
-              abortController.abort();
-            } catch {
-              // ignore
-            }
-          }
-        };
-
-        timer = setTimeout(() => {
-          cleanup();
-          reject(
-            new SandboxNotReadyError(
-              `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' did not get ` +
-                `an IP within ${this.gatewayReadyTimeout} seconds.`,
-            ),
-          );
-        }, timeoutMs);
-
-        watcher
-          .watch(
-            `/apis/${GATEWAY_API_GROUP}/${GATEWAY_API_VERSION}/namespaces/${this.gatewayNamespace}/${GATEWAY_PLURAL}`,
-            { fieldSelector: `metadata.name=${this.gatewayName}` },
-            (type: string, obj: Record<string, unknown>) => {
-              if (type === "ADDED" || type === "MODIFIED") {
-                const ipAddress = this.extractGatewayAddress(obj);
-                if (ipAddress) {
-                  this.baseUrl = `http://${ipAddress}`;
-                  console.info(
-                    `Gateway is ready. Base URL set to: ${this.baseUrl}`,
-                  );
-                  cleanup();
-                  resolve();
-                }
-              } else if (type === "DELETED") {
-                cleanup();
-                reject(
-                  new SandboxNotFoundError(
-                    `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' was deleted while waiting for it to become ready.`,
-                  ),
-                );
-              }
-            },
-            (err) => {
-              cleanup();
-              if (err && !(err instanceof Error && err.name === "AbortError")) {
-                reject(err);
-              }
-            },
-          )
-          .then((ac) => {
-            if (aborted) {
-              ac.abort();
-            } else {
-              abortController = ac;
-            }
-          });
-      });
+      throw new SandboxNotReadyError(
+        `Gateway '${this.gatewayName}' watch loop exhausted after ${MAX_GATEWAY_REWATCH} reconnects.`,
+      );
     };
 
     await withSpan(
@@ -409,6 +473,91 @@ export class Sandbox {
       fn,
       this.tracingManager?.parentContext,
     );
+  }
+
+  /**
+   * Runs a single watch against the Gateway resource and returns a discriminated result:
+   * - "resolved": an IP address was found
+   * - "error":    a fatal error occurred (gateway deleted, watch error, timeout)
+   * - "clean-close": the watch stream closed normally; caller should re-list and re-watch
+   */
+  private watchGatewayOnce(
+    timeoutMs: number,
+  ): Promise<
+    | { type: "resolved"; address: string }
+    | { type: "error"; error: Error }
+    | { type: "clean-close" }
+  > {
+    return new Promise((resolve) => {
+      const watcher = new k8s.Watch(this.kubeConfig);
+      let abortController: AbortController | undefined;
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
+
+      const cleanup = () => {
+        settled = true;
+        clearTimeout(timer);
+        try {
+          abortController?.abort();
+        } catch {
+          // ignore
+        }
+      };
+
+      timer = setTimeout(() => {
+        cleanup();
+        resolve({
+          type: "error",
+          error: new SandboxNotReadyError(
+            `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' did not get ` +
+              `an IP within the allotted time.`,
+          ),
+        });
+      }, timeoutMs);
+
+      watcher
+        .watch(
+          `/apis/${GATEWAY_API_GROUP}/${GATEWAY_API_VERSION}/namespaces/${this.gatewayNamespace}/${GATEWAY_PLURAL}`,
+          { fieldSelector: `metadata.name=${this.gatewayName}` },
+          (type: string, obj: Record<string, unknown>) => {
+            if (settled) return;
+            if (type === "ADDED" || type === "MODIFIED") {
+              const ipAddress = this.extractGatewayAddress(obj);
+              if (ipAddress) {
+                cleanup();
+                resolve({ type: "resolved", address: ipAddress });
+              }
+            } else if (type === "DELETED") {
+              cleanup();
+              resolve({
+                type: "error",
+                error: new SandboxNotFoundError(
+                  `Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}' was deleted while waiting for it to become ready.`,
+                ),
+              });
+            }
+          },
+          (err) => {
+            cleanup();
+            if (err && !(err instanceof Error && err.name === "AbortError")) {
+              resolve({
+                type: "error",
+                error: err instanceof Error ? err : new Error(String(err)),
+              });
+            } else {
+              // err === null or AbortError from our own cleanup: clean close
+              resolve({ type: "clean-close" });
+            }
+          },
+        )
+        .then((ac) => {
+          if (settled) {
+            ac.abort();
+          } else {
+            abortController = ac;
+          }
+        });
+    });
   }
 
   private async startAndWaitForPortForward(): Promise<void> {
@@ -490,21 +639,20 @@ export class Sandbox {
       body?: BodyInit | null;
       headers?: Record<string, string>;
       timeout?: number;
+      maxRetries?: number;
     } = {},
   ): Promise<Response> {
     if (!this.baseUrl) {
       throw new SandboxNotReadyError("Sandbox is not ready for communication.");
     }
 
+    // If the port-forward process has died, attempt to reconnect before failing
     if (
       this.portForwardProcess &&
       (this.portForwardProcess.exitCode !== null ||
         this.portForwardProcess.signalCode !== null)
     ) {
-      throw new SandboxPortForwardError(
-        `Kubectl Port-Forward crashed BEFORE request! ` +
-          `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
-      );
+      await this.reconnect();
     }
 
     const url = `${this.baseUrl!.replace(/\/+$/, "")}/${endpoint.replace(
@@ -525,20 +673,43 @@ export class Sandbox {
       body: options.body,
     };
 
-    if (options.timeout) {
-      fetchOptions.signal = AbortSignal.timeout(options.timeout * 1000);
-    }
+    // The overall timeout signal caps the entire operation including retries
+    const overallSignal = options.timeout
+      ? AbortSignal.timeout(options.timeout * 1000)
+      : undefined;
 
     try {
-      const response = await fetchWithRetry(url, fetchOptions);
+      const response = await fetchWithRetry(
+        url,
+        fetchOptions,
+        options.maxRetries ?? MAX_RETRIES,
+        BACKOFF_FACTOR,
+        RETRY_STATUS_CODES,
+        overallSignal,
+      );
       if (!response.ok) {
+        // Read the body so callers can inspect the failure payload
+        let body = "";
+        try {
+          body = (await response.text()).slice(0, MAX_ERROR_BODY_BYTES);
+        } catch {
+          // Ignore body-read errors
+        }
         throw new SandboxRequestError(
-          `Request failed with status ${response.status}: ${response.statusText}`,
-          { statusCode: response.status, response },
+          `Request failed with status ${response.status}: ${response.statusText}` +
+            (body ? ` — ${body}` : ""),
+          {
+            statusCode: response.status,
+            response,
+            body,
+            operation: `${method} ${endpoint}`,
+          },
         );
       }
       return response;
     } catch (err) {
+      if (err instanceof SandboxRequestError) throw err;
+
       if (
         this.portForwardProcess &&
         (this.portForwardProcess.exitCode !== null ||
@@ -556,6 +727,82 @@ export class Sandbox {
         `Failed to communicate with the sandbox via the gateway at ${url}.`,
         { cause: err },
       );
+    }
+  }
+
+  /**
+   * Stops the port-forward process and resets transport state.
+   * Unlike closeLocal(), this does NOT mark the Sandbox as closed.
+   */
+  private async stopPortForward(): Promise<void> {
+    if (!this.portForwardProcess) return;
+    try {
+      this.portForwardProcess.kill("SIGTERM");
+      const proc = this.portForwardProcess;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          proc.kill("SIGKILL");
+          resolve();
+        }, 2000);
+        proc.on("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    } catch (err) {
+      console.error(`Failed to stop port-forward process: ${err}`);
+    } finally {
+      this.portForwardProcess = null;
+      this.baseUrl = undefined;
+    }
+  }
+
+  private _reconnecting = false;
+
+  /**
+   * Re-establishes the port-forward tunnel.
+   * Only applies to port-forward mode (no apiUrl, no gatewayName).
+   * Concurrent callers wait for the in-progress reconnect instead of
+   * starting a second one.
+   */
+  private async reconnect(): Promise<void> {
+    // Gateway or direct-URL modes do not use port-forward
+    if (this.apiUrl || this.gatewayName) return;
+
+    if (this._reconnecting) {
+      // Another request already started a reconnect; wait briefly and re-check
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (!this.baseUrl) {
+        throw new SandboxPortForwardError(
+          "Port-forward reconnect is in progress but did not complete in time.",
+        );
+      }
+      return;
+    }
+
+    this._reconnecting = true;
+    try {
+      await this.stopPortForward();
+      for (let i = 1; i <= MAX_RECONNECT_ATTEMPTS; i++) {
+        try {
+          console.info(
+            `Port-forward reconnect attempt ${i}/${MAX_RECONNECT_ATTEMPTS}...`,
+          );
+          await this.startAndWaitForPortForward();
+          console.info("Port-forward reconnect succeeded.");
+          return;
+        } catch (err) {
+          console.warn(`Port-forward reconnect attempt ${i} failed: ${err}`);
+          if (i < MAX_RECONNECT_ATTEMPTS) {
+            await new Promise((resolve) => setTimeout(resolve, 1000 * i));
+          }
+        }
+      }
+      throw new SandboxPortForwardError(
+        `Failed to re-establish port-forward after ${MAX_RECONNECT_ATTEMPTS} attempts.`,
+      );
+    } finally {
+      this._reconnecting = false;
     }
   }
 }

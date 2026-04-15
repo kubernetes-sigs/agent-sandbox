@@ -1388,7 +1388,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantPod: nil,
+			wantPod:   nil,
 			expectErr: false,
 		},
 	}

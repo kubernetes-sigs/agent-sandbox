@@ -15,6 +15,19 @@
 import * as path from "node:path";
 
 import type { FileEntry, RequestFn } from "../types.js";
+
+/**
+ * Percent-encodes a file path segment so that every character not in the
+ * RFC 3986 unreserved set is escaped.  encodeURIComponent() leaves
+ * ! ' ( ) * unescaped; this function encodes those as well, matching the
+ * behaviour of the Go and Python clients.
+ */
+function encodePathSegment(s: string): string {
+  return encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+}
 import type { Tracer } from "../trace-manager.js";
 import { withSpan } from "../trace-manager.js";
 import { SandboxRequestError } from "../exceptions.js";
@@ -103,7 +116,7 @@ export class Filesystem {
           span.setAttribute("sandbox.file.path", filePath);
         }
 
-        const encodedPath = encodeURIComponent(filePath);
+        const encodedPath = encodePathSegment(filePath);
         const response = await this.requestFn(
           "GET",
           `download/${encodedPath}`,
@@ -135,7 +148,7 @@ export class Filesystem {
           span.setAttribute("sandbox.file.path", dirPath);
         }
 
-        const encodedPath = encodeURIComponent(dirPath);
+        const encodedPath = encodePathSegment(dirPath);
         const response = await this.requestFn("GET", `list/${encodedPath}`, {
           timeout,
         });
@@ -184,7 +197,7 @@ export class Filesystem {
           span.setAttribute("sandbox.file.path", filePath);
         }
 
-        const encodedPath = encodeURIComponent(filePath);
+        const encodedPath = encodePathSegment(filePath);
         const response = await this.requestFn("GET", `exists/${encodedPath}`, {
           timeout,
         });

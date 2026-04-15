@@ -21,6 +21,7 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
+    "prepare": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },

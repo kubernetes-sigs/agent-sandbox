@@ -53,14 +53,23 @@ export class SandboxTimeoutError extends SandboxError {}
 export class SandboxRequestError extends SandboxError {
   readonly statusCode: number | undefined;
   readonly response: Response | undefined;
+  readonly body: string | undefined;
+  readonly operation: string | undefined;
 
   constructor(
     message: string,
-    options?: ErrorOptions & { statusCode?: number; response?: Response },
+    options?: ErrorOptions & {
+      statusCode?: number;
+      response?: Response;
+      body?: string;
+      operation?: string;
+    },
   ) {
     super(message, options);
     this.statusCode = options?.statusCode;
     this.response = options?.response;
+    this.body = options?.body;
+    this.operation = options?.operation;
   }
 }
 

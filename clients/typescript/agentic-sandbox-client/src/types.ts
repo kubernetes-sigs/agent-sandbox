@@ -50,5 +50,6 @@ export type RequestFn = (
     body?: BodyInit | null;
     headers?: Record<string, string>;
     timeout?: number;
+    maxRetries?: number;
   },
 ) => Promise<Response>;

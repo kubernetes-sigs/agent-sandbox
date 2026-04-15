@@ -49,6 +49,7 @@ export class CommandExecutor {
           body: JSON.stringify({ command }),
           headers: { "Content-Type": "application/json" },
           timeout,
+          maxRetries: 1, // command execution is non-idempotent; never retry
         });
 
         const rawText = await response.text();

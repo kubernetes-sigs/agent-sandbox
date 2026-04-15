@@ -16,6 +16,8 @@ import type { ExecutionResult, RequestFn } from "../types.js";
 import type { Tracer } from "../trace-manager.js";
 import { withSpan } from "../trace-manager.js";
 import { SandboxRequestError } from "../exceptions.js";
+import { readBoundedText, parseExecutionResult } from "../response-utils.js";
+import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
 
 export class CommandExecutor {
   private requestFn: RequestFn;
@@ -52,21 +54,21 @@ export class CommandExecutor {
           maxRetries: 1, // command execution is non-idempotent; never retry
         });
 
-        const rawText = await response.text();
-        let data: Record<string, unknown>;
+        const rawText = await readBoundedText(
+          response,
+          MAX_EXECUTION_RESPONSE_SIZE,
+          "execute",
+        );
+        let data: unknown;
         try {
-          data = JSON.parse(rawText) as Record<string, unknown>;
+          data = JSON.parse(rawText);
         } catch (err) {
           throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );
         }
-        const result: ExecutionResult = {
-          stdout: (data.stdout as string) ?? "",
-          stderr: (data.stderr as string) ?? "",
-          exitCode: (data.exit_code as number) ?? -1,
-        };
+        const result = parseExecutionResult(data);
 
         if (span.isRecording()) {
           span.setAttribute("sandbox.exit_code", result.exitCode);

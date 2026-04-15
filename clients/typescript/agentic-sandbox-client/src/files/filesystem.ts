@@ -15,6 +15,17 @@
 import * as path from "node:path";
 
 import type { FileEntry, RequestFn } from "../types.js";
+import {
+  readBoundedText,
+  readBoundedBuffer,
+  parseFileEntries,
+  parseExistsResult,
+} from "../response-utils.js";
+import {
+  MAX_METADATA_RESPONSE_SIZE,
+  MAX_DOWNLOAD_SIZE,
+  MAX_UPLOAD_SIZE,
+} from "../constants.js";
 
 /**
  * Percent-encodes a file path segment so that every character not in the
@@ -91,6 +102,13 @@ export class Filesystem {
                 content.byteLength,
               );
 
+        if (contentBytes.byteLength > MAX_UPLOAD_SIZE) {
+          throw new SandboxRequestError(
+            `File too large: ${contentBytes.byteLength} bytes exceeds upload limit of ${MAX_UPLOAD_SIZE} bytes`,
+            { operation: "POST upload" },
+          );
+        }
+
         const blob = new Blob([contentBytes]);
         const formData = new FormData();
         formData.append("file", blob, base);
@@ -126,8 +144,11 @@ export class Filesystem {
           },
         );
 
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
+        const buffer = await readBoundedBuffer(
+          response,
+          MAX_DOWNLOAD_SIZE,
+          "download",
+        );
 
         if (span.isRecording()) {
           span.setAttribute("sandbox.file.size", buffer.length);
@@ -154,29 +175,21 @@ export class Filesystem {
           timeout,
         });
 
-        const rawText = await response.text();
-        let entries: unknown;
+        const rawText = await readBoundedText(
+          response,
+          MAX_METADATA_RESPONSE_SIZE,
+          "list",
+        );
+        let data: unknown;
         try {
-          entries = JSON.parse(rawText);
+          data = JSON.parse(rawText);
         } catch (err) {
           throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );
         }
-
-        if (!Array.isArray(entries)) {
-          return [];
-        }
-
-        const fileEntries: FileEntry[] = (
-          entries as Array<Record<string, unknown>>
-        ).map((e) => ({
-          name: e.name as string,
-          size: e.size as number,
-          type: e.type as "file" | "directory",
-          modTime: e.mod_time as number,
-        }));
+        const fileEntries = parseFileEntries(data);
 
         if (span.isRecording()) {
           span.setAttribute("sandbox.file.count", fileEntries.length);
@@ -203,17 +216,21 @@ export class Filesystem {
           timeout,
         });
 
-        const rawText = await response.text();
-        let data: Record<string, unknown>;
+        const rawText = await readBoundedText(
+          response,
+          MAX_METADATA_RESPONSE_SIZE,
+          "exists",
+        );
+        let data: unknown;
         try {
-          data = JSON.parse(rawText) as Record<string, unknown>;
+          data = JSON.parse(rawText);
         } catch (err) {
           throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );
         }
-        const exists = (data.exists as boolean) ?? false;
+        const exists = parseExistsResult(data);
 
         if (span.isRecording()) {
           span.setAttribute("sandbox.file.exists", exists);

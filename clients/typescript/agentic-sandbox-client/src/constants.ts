@@ -48,3 +48,9 @@ export const PER_ATTEMPT_TIMEOUT_MS = 30_000;
 
 // Maximum number of gateway watch reconnects within a single waitForGatewayIp call
 export const MAX_GATEWAY_REWATCH = 10;
+
+// Response / request size limits (matches Go client constants)
+export const MAX_EXECUTION_RESPONSE_SIZE = 16 * 1024 * 1024; // 16 MB: run/agent stdout+stderr
+export const MAX_METADATA_RESPONSE_SIZE = 8 * 1024 * 1024; //  8 MB: list/exists JSON
+export const MAX_DOWNLOAD_SIZE = 256 * 1024 * 1024; // 256 MB: file download
+export const MAX_UPLOAD_SIZE = 256 * 1024 * 1024; // 256 MB: file upload (pre-check)

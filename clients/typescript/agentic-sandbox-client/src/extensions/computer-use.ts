@@ -18,6 +18,8 @@ import { SandboxClient } from "../sandbox-client.js";
 import type { ExecutionResult } from "../types.js";
 import { withSpan } from "../trace-manager.js";
 import { SandboxNotReadyError, SandboxRequestError } from "../exceptions.js";
+import { readBoundedText, parseExecutionResult } from "../response-utils.js";
+import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
 
 /**
  * Sandbox handle with computer-use agent support.
@@ -51,21 +53,21 @@ export class ComputerUseSandbox extends Sandbox {
           maxRetries: 1, // agent invocation is non-idempotent; never retry
         });
 
-        const rawText = await response.text();
-        let data: Record<string, unknown>;
+        const rawText = await readBoundedText(
+          response,
+          MAX_EXECUTION_RESPONSE_SIZE,
+          "agent",
+        );
+        let data: unknown;
         try {
-          data = JSON.parse(rawText) as Record<string, unknown>;
+          data = JSON.parse(rawText);
         } catch (err) {
           throw new SandboxRequestError(
             `Failed to decode JSON response from sandbox: ${rawText}`,
             { cause: err },
           );
         }
-        const result: ExecutionResult = {
-          stdout: (data.stdout as string) ?? "",
-          stderr: (data.stderr as string) ?? "",
-          exitCode: (data.exit_code as number) ?? -1,
-        };
+        const result = parseExecutionResult(data);
 
         if (span.isRecording()) {
           span.setAttribute("sandbox.exit_code", result.exitCode);

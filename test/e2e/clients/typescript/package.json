@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "pretest": "npm run --prefix ../../../../clients/typescript/agentic-sandbox-client build",
     "test": "vitest run",
     "test:watch": "vitest"
   },

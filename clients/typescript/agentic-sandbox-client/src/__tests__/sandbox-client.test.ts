@@ -498,4 +498,98 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.isActive).toBe(false);
     });
   });
+
+  // ===== watch miss on already-ready claim =====
+
+  describe("watch miss on already-ready claim", () => {
+    it("createSandbox resolves when claim is already ready (initial GET needed)", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+
+      // watch fires no events — simulates a resource that was ready before watch started
+      mockWatchFn.mockImplementation(
+        (_path: string, _query: unknown, _cb: unknown, _done: unknown) =>
+          Promise.resolve(new AbortController()),
+      );
+
+      // GET returns a claim whose sandbox name is already resolved
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        status: { sandbox: { name: "already-ready-sandbox" } },
+      });
+
+      const client = new SandboxClient({
+        apiUrl: "http://api:8080",
+        sandboxReadyTimeout: 1, // 1s timeout — current watch-only code times out
+      });
+
+      await expect(client.createSandbox("tpl")).resolves.toBeInstanceOf(
+        Sandbox,
+      );
+    }, 5_000);
+  });
+
+  // ===== watch done(null) causes promise hang =====
+
+  describe("watch stream clean close causes hang", () => {
+    it("resolveSandboxName rejects when done(null) fires (no hang)", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+
+      // watch immediately calls done(null) — clean close with no events
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _cb: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          Promise.resolve().then(() => done(null));
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({
+        apiUrl: "http://api:8080",
+        sandboxReadyTimeout: 60,
+      });
+
+      await expect(client.createSandbox("tpl")).rejects.toThrow();
+    }, 2_000);
+
+    it("watchForSandboxReady rejects when done(null) fires (no hang)", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+
+      // First watch: claim resolves sandbox name normally
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: { sandbox: { name: "test-sandbox" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Second watch (watchForSandboxReady): done(null) — clean close, no ready event
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _cb: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          Promise.resolve().then(() => done(null));
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({
+        apiUrl: "http://api:8080",
+        sandboxReadyTimeout: 60,
+      });
+
+      await expect(client.createSandbox("tpl")).rejects.toThrow();
+    }, 2_000);
+  });
 });

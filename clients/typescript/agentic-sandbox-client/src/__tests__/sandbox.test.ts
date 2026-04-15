@@ -23,12 +23,14 @@ const {
   mockWatchFn,
   mockSpawn,
   mockCreateServer,
+  mockCreateConnection,
 } = vi.hoisted(() => ({
   mockDeleteNamespacedCustomObject: vi.fn(),
   mockGetNamespacedCustomObject: vi.fn(),
   mockWatchFn: vi.fn(),
   mockSpawn: vi.fn(),
   mockCreateServer: vi.fn(),
+  mockCreateConnection: vi.fn(),
 }));
 
 // ---------- mock: @kubernetes/client-node ----------
@@ -64,8 +66,13 @@ vi.mock("node:net", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
     ...actual,
-    default: { ...actual, createServer: mockCreateServer },
+    default: {
+      ...actual,
+      createServer: mockCreateServer,
+      createConnection: mockCreateConnection,
+    },
     createServer: mockCreateServer,
+    createConnection: mockCreateConnection,
   };
 });
 
@@ -142,6 +149,24 @@ function createReadySandbox(
   const sandbox = new TestableSandbox(createTestInit(overrides));
   sandbox._baseUrl = "http://localhost:9999";
   return sandbox;
+}
+
+/** Returns a fake socket that always emits an ECONNREFUSED error. */
+function makeFakeSocketAlwaysError() {
+  return {
+    destroy: vi.fn(),
+    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      if (event === "error") {
+        process.nextTick(() =>
+          handler(
+            Object.assign(new Error("connect ECONNREFUSED"), {
+              code: "ECONNREFUSED",
+            }),
+          ),
+        );
+      }
+    }),
+  };
 }
 
 // ---------- tests ----------
@@ -479,6 +504,90 @@ describe("Sandbox", () => {
       );
 
       expect(await sandbox.files.exists("tmp/missing.txt")).toBe(false);
+    });
+  });
+
+  // ===== POST /execute is not retried =====
+
+  describe("POST /execute is not retried", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("fetch called once only on 500 — not retried", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(
+        new Response("server error", { status: 500 }),
+      );
+
+      const runPromise = sandbox.commands.run("echo test");
+      // Attach rejection handler before advancing timers to prevent
+      // Node.js from flagging the rejection as unhandled
+      const settled = runPromise.catch(() => {});
+
+      // Flush all retry delays (MAX_RETRIES=5, backoff starts at 500ms)
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settled;
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== port-forward timeout deletes claim =====
+
+  describe("port-forward timeout deletes claim", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("SandboxClaim is NOT deleted when port-forward times out", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      // getFreePort: synchronous mock server
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 12345 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      // kubectl: living process (exitCode stays null throughout)
+      const fakeProc = {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn(),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProc);
+
+      // createConnection: always refuses connection
+      mockCreateConnection.mockImplementation(() =>
+        makeFakeSocketAlwaysError(),
+      );
+
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 0.1 }),
+      );
+
+      const connectPromise = sandbox.connect();
+      // Attach rejection handler before advancing timers to prevent
+      // Node.js from flagging the rejection as unhandled
+      const settled = connectPromise.catch(() => {});
+
+      // Advance past the 100ms timeout and all 500ms retry sleeps
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled;
+
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
     });
   });
 });

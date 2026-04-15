@@ -132,6 +132,11 @@ describe("ComputerUseSandbox (handle)", () => {
       const sandbox = new TestableComputerUseSandbox(makeBaseInit());
       expect(sandbox).toBeInstanceOf(Sandbox);
     });
+
+    it("serverPort 8888 should NOT be changed to 8080", () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      expect(sandbox._serverPort).toBe(8888); // currently FAIL: returns 8080
+    });
   });
 
   // ===== agent() =====
@@ -182,6 +187,36 @@ describe("ComputerUseSandbox (handle)", () => {
       await expect(sandbox.agent("do something")).rejects.toThrow(
         "Sandbox is not ready",
       );
+    });
+  });
+
+  // ===== POST /agent is not retried =====
+
+  describe("POST /agent is not retried", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("fetch called once only on 500 — not retried", async () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
+      (fetch as Mock).mockResolvedValue(
+        new Response("server error", { status: 500 }),
+      );
+
+      const agentPromise = sandbox.agent("do something");
+      // Attach rejection handler before advancing timers to prevent
+      // Node.js from flagging the rejection as unhandled
+      const settled = agentPromise.catch(() => {});
+
+      // Flush all retry delays
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settled;
+
+      expect(fetch).toHaveBeenCalledTimes(1);
     });
   });
 });

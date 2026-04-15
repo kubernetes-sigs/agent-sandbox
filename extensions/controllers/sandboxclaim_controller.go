@@ -501,21 +501,31 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 		logger.Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
-		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
+		// Reserve via optimistic-lock annotation patch before ownership transfer.
+		claimUID := string(claim.UID)
+		patch := client.MergeFromWithOptions(adopted.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		if adopted.Annotations == nil {
+			adopted.Annotations = make(map[string]string)
+		}
+		adopted.Annotations[v1alpha1.SandboxClaimedByAnnotation] = claimUID
+		if err := r.Patch(ctx, adopted, patch); err != nil {
+			if k8errors.IsConflict(err) || k8errors.IsNotFound(err) {
+				asmetrics.AdoptionConflictsTotal.WithLabelValues(claim.Namespace).Inc()
+				continue
+			}
+			logger.Error(err, "Failed to patch claimed-by annotation", "sandbox candidate", adopted.Name, "claim", claim.Name)
+			return nil, err
+		}
+
 		delete(adopted.Labels, warmPoolSandboxLabel)
 		delete(adopted.Labels, sandboxTemplateRefHash)
 		delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
 
-		// Transfer ownership from SandboxWarmPool to SandboxClaim
 		adopted.OwnerReferences = nil
 		if err := controllerutil.SetControllerReference(claim, adopted, r.Scheme); err != nil {
 			return nil, fmt.Errorf("failed to set controller reference on adopted sandbox: %w", err)
 		}
 
-		// Propagate trace context from claim
-		if adopted.Annotations == nil {
-			adopted.Annotations = make(map[string]string)
-		}
 		// Ensure the adopted sandbox records its pod name before it can be observed Ready.
 		if podName := adopted.Annotations[v1alpha1.SandboxPodNameAnnotation]; podName != adopted.Name {
 			if podName != "" {
@@ -523,6 +533,8 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			adopted.Annotations[v1alpha1.SandboxPodNameAnnotation] = adopted.Name
 		}
+
+		// Propagate trace context from claim
 		if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
 			adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 		}
@@ -539,11 +551,9 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			return nil, err
 		}
 
-		// Update uses optimistic concurrency (resourceVersion) so concurrent
-		// claims racing to adopt the same sandbox will conflict and retry.
 		if err := r.Update(ctx, adopted); err != nil {
 			if k8errors.IsConflict(err) || k8errors.IsNotFound(err) {
-				// Another worker adopted this sandbox while we were processing; try next candidate.
+				asmetrics.AdoptionConflictsTotal.WithLabelValues(claim.Namespace).Inc()
 				continue
 			}
 			logger.Error(err, "Failed to update adoption candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
@@ -795,6 +805,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	policy := getWarmPoolPolicy(claim)
 	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+
 	var adoptionCandidates []*v1alpha1.Sandbox
 
 	for i := range allSandboxes.Items {
@@ -832,6 +843,13 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if sb.Labels[warmPoolSandboxLabel] != specificPoolHash {
 				continue
 			}
+		}
+
+		// Skip sandboxes already claimed by a different SandboxClaim.
+		// Allow sandboxes claimed by THIS claim through so a partially-
+		// completed adoption can be resumed after controller restart.
+		if claimedBy, ok := sb.Annotations[v1alpha1.SandboxClaimedByAnnotation]; ok && claimedBy != "" && claimedBy != string(claim.UID) {
+			continue
 		}
 
 		adoptionCandidates = append(adoptionCandidates, sb)

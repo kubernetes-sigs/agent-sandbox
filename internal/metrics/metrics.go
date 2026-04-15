@@ -87,6 +87,18 @@ var (
 		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition"},
 	)
 
+	// AdoptionConflictsTotal counts optimistic locking conflicts during warm pool adoption.
+	// High values indicate thundering herd contention on the API server.
+	// Labels:
+	// - namespace: the namespace of the claim
+	AdoptionConflictsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_adoption_conflicts_total",
+			Help: "Total number of optimistic locking conflicts during warm pool sandbox adoption.",
+		},
+		[]string{"namespace"},
+	)
+
 	// AgentSandboxesDesc describes the agent_sandboxes metric point-in-time counts.
 	// Labels:
 	// - namespace: the namespace of the sandbox
@@ -108,6 +120,7 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
+	metrics.Registry.MustRegister(AdoptionConflictsTotal)
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.

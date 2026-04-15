@@ -18,6 +18,7 @@ export {
   SandboxError,
   SandboxNotReadyError,
   SandboxNotFoundError,
+  SandboxTimeoutError,
   SandboxPortForwardError,
   SandboxMetadataError,
   SandboxRequestError,

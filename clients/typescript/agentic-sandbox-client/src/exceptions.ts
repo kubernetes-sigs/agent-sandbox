@@ -43,6 +43,11 @@ export class SandboxPortForwardError extends SandboxError {}
 export class SandboxMetadataError extends SandboxError {}
 
 /**
+ * Raised when an operation times out waiting for a sandbox resource.
+ */
+export class SandboxTimeoutError extends SandboxError {}
+
+/**
  * Raised when an HTTP request to the sandbox fails.
  */
 export class SandboxRequestError extends SandboxError {

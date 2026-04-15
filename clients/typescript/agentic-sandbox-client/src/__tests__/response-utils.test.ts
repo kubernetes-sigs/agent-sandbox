@@ -159,7 +159,7 @@ describe("parseFileEntries", () => {
     ]);
   });
 
-  it("skips entries with unrecognised type (Go 準拠)", () => {
+  it("skips entries with unrecognised type", () => {
     const entries = parseFileEntries([
       { name: "valid.txt", size: 10, type: "file", mod_time: 1 },
       { name: "weird", size: 0, type: "symlink", mod_time: 2 },

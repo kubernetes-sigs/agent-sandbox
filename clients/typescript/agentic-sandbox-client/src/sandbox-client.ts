@@ -36,6 +36,7 @@ import {
 import type { Tracer } from "./trace-manager.js";
 import {
   isK8s404,
+  SandboxError,
   SandboxMetadataError,
   SandboxNotFoundError,
   SandboxNotReadyError,
@@ -127,6 +128,37 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   private readonly registry: Map<string, T> = new Map();
 
   constructor(options: SandboxClientOptions = {}) {
+    if (options.serverPort !== undefined) {
+      if (
+        !Number.isInteger(options.serverPort) ||
+        options.serverPort < 1 ||
+        options.serverPort > 65535
+      ) {
+        throw new SandboxError(
+          `serverPort must be an integer between 1 and 65535, got: ${options.serverPort}`,
+        );
+      }
+    }
+    for (const [key, value] of [
+      ["sandboxReadyTimeout", options.sandboxReadyTimeout],
+      ["gatewayReadyTimeout", options.gatewayReadyTimeout],
+      ["portForwardReadyTimeout", options.portForwardReadyTimeout],
+    ] as [string, number | undefined][]) {
+      if (value !== undefined && value <= 0) {
+        throw new SandboxError(
+          `${key} must be a positive number, got: ${value}`,
+        );
+      }
+    }
+    for (const [key, value] of [
+      ["namespace", options.namespace],
+      ["gatewayNamespace", options.gatewayNamespace],
+    ] as [string, string | undefined][]) {
+      if (value !== undefined && value.length === 0) {
+        throw new SandboxError(`${key} must be a non-empty string`);
+      }
+    }
+
     this.defaultNamespace = options.namespace ?? "default";
     this.apiUrl = options.apiUrl;
     this.gatewayName = options.gatewayName;

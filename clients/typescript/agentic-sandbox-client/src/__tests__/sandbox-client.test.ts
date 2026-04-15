@@ -74,6 +74,7 @@ vi.mock("node:net", async (importOriginal) => {
 
 import { SandboxClient } from "../sandbox-client.js";
 import { Sandbox } from "../sandbox.js";
+import { SandboxError } from "../exceptions.js";
 import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
@@ -157,6 +158,74 @@ describe("SandboxClient (registry)", () => {
         traceServiceName: "my-service",
       });
       expect(client).toBeInstanceOf(SandboxClient);
+    });
+  });
+
+  // ===== constructor validation =====
+
+  describe("constructor validation", () => {
+    it("throws SandboxError for serverPort 0", () => {
+      expect(() => new SandboxClient({ serverPort: 0 })).toThrow(SandboxError);
+    });
+
+    it("throws SandboxError for serverPort 65536", () => {
+      expect(() => new SandboxClient({ serverPort: 65536 })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for non-integer serverPort", () => {
+      expect(() => new SandboxClient({ serverPort: 8080.5 })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("accepts serverPort 1 (minimum valid)", () => {
+      expect(() => new SandboxClient({ serverPort: 1 })).not.toThrow();
+    });
+
+    it("accepts serverPort 65535 (maximum valid)", () => {
+      expect(() => new SandboxClient({ serverPort: 65535 })).not.toThrow();
+    });
+
+    it("throws SandboxError for sandboxReadyTimeout 0", () => {
+      expect(() => new SandboxClient({ sandboxReadyTimeout: 0 })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for sandboxReadyTimeout negative", () => {
+      expect(() => new SandboxClient({ sandboxReadyTimeout: -1 })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for gatewayReadyTimeout negative", () => {
+      expect(() => new SandboxClient({ gatewayReadyTimeout: -1 })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for portForwardReadyTimeout negative", () => {
+      expect(() => new SandboxClient({ portForwardReadyTimeout: -1 })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("accepts positive fractional timeout", () => {
+      expect(
+        () => new SandboxClient({ sandboxReadyTimeout: 0.1 }),
+      ).not.toThrow();
+    });
+
+    it("throws SandboxError for empty namespace", () => {
+      expect(() => new SandboxClient({ namespace: "" })).toThrow(SandboxError);
+    });
+
+    it("throws SandboxError for empty gatewayNamespace", () => {
+      expect(() => new SandboxClient({ gatewayNamespace: "" })).toThrow(
+        SandboxError,
+      );
     });
   });
 

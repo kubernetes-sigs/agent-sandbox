@@ -29,12 +29,12 @@ Currently, metadata fields exist across several disconnected layers (Sandbox, Sa
 
 ## Proposal
 
-The proposal introduces new fields to `SandboxClaim` and `Sandbox` to allow unique metadata to pass down the stack while keeping `SandboxTemplate` and `Warmpool` unchanged.
+The proposal introduces a new field to `SandboxClaim` to allow unique pod metadata to pass down the stack while keeping `SandboxTemplate` and `Warmpool` unchanged.
 
 ### User Stories (Optional)
 
 #### Use Case 1: Custom Metadata Propagation (Identification)
-Allows users to add unique, user-defined labels and annotations to a Sandbox and its Pod to distinguish specific workloads for observability and cost attribution (billing).
+Allows users to add unique, user-defined labels and annotations to its Pod to distinguish specific workloads for observability and cost attribution (billing).
 
 #### Use Case 2: Stateful Session Management (Pod Snapshots)
 Managed programmatically via the Agent Sandbox Python SDK to save and restore the exact execution state of an agent. This enables "save game" functionality and rapid pause/resume cycles for cost optimization.
@@ -45,12 +45,17 @@ Managed programmatically via the Agent Sandbox Python SDK to save and restore th
 
 The model allows `SandboxClaim` to pass unique metadata down the stack:
 1.  **SandboxClaim**: Introduce `additionalPodMetadata`.
-2.  **Sandbox**: Introduce `additionalPodMetadata` to store values from the Claim.
-3.  **Sandbox**: Add `SandboxClaim`’s `additionalPodMetadata` into its own labels and annotations.
-4.  **Pod**: Add `Sandbox`’s `additionalPodMetadata` into its own labels and annotations. 
+2.  **Sandbox**: Merges `SandboxClaim`’s `additionalPodMetadata` into Sandbox's `spec.podTemplate.metadata`.
+3.  **Pod**: Propagates Sandbox's `spec.podTemplate.metadata` into its own labels and annotations.
 
 #### Safety Principle: No Overrides
 To ensure predictability, the controller will not allow overrides. If a key exists in both the Template and the Claim with different values, the request will be rejected with an error.
+
+#### Tracking Propagated Metadata
+To differentiate between metadata propagated by the controller and metadata added by other sources (like mutating webhooks), the controller adds specific annotations to the Pod:
+*   `agents.x-k8s.io/propagated-labels`: A comma-separated list of label keys that were propagated from the `SandboxClaim`.
+*   `agents.x-k8s.io/propagated-annotations`: A comma-separated list of annotation keys that were propagated from the `SandboxClaim`.
+This allows the controller to safely prune removed labels/annotations without affecting external modifications.
 
 #### API Changes
 
@@ -60,13 +65,6 @@ To ensure predictability, the controller will not allow overrides. If a key exis
 type PodMetadata struct {
     Labels      map[string]string `json:"labels,omitempty" protobuf:"bytes,1,rep,name=labels"`
     Annotations map[string]string `json:"annotations,omitempty" protobuf:"bytes,2,rep,name=annotations"`
-}
-
-type SandboxSpec struct {
-    // ...
-
-    // New
-    AdditionalPodMetadata PodMetadata `json:"additionalPodMetadata,omitempty"`
 }
 
 // sandboxclaim_types.go:
@@ -87,14 +85,14 @@ type SandboxClaimSpec struct {
 ##### Scenario A: Cold Start (No Warmpool)
 This scenario occurs when a user requests a sandbox environment without utilizing a pre-provisioned pool.
 
-1.  **New Pod (Creation)**: If the `Sandbox` is newly created and no Pod exists, the `Sandbox` controller merges the base `podTemplate` from the `SandboxTemplate` with the `additionalPodMetadata` from the `Sandbox` spec. The Pod is created with these labels and annotations already present.
+1.  **New Pod (Creation)**: If the `Sandbox` is newly created and no Pod exists, the `Sandbox` controller merges the base `podTemplate` from the `SandboxTemplate` with the metadata in the `Sandbox`'s `spec.podTemplate.metadata` (which was propagated from the `SandboxClaim`). The Pod is created with these labels and annotations already present.
 2.  **Pod Exists (Metadata Update)**: If a Pod was already created via a Cold Start and the `SandboxClaim` is subsequently updated with new metadata, the `Sandbox` controller performs an **in-place update** of the Pod's `metadata.labels` and `metadata.annotations`. This update does not trigger a Pod restart.
 
 ##### Scenario B: Warmpool
 This scenario involves the use of a `SandboxWarmPool` to provide rapid resource assignment.
 
-1.  **New Pod Claim (Adoption/Injection)**: When a `SandboxClaim` is first assigned that "adopts" a Sandbox from the Warmpool, the `SandboxClaim` controller performs an **in-place update** to inject the `additionalPodMetadata` into the Sandbox's labels and annotations and add the `additionalPodMetadata`. This achieves sub-millisecond dispatch latency without restarting the container or re-creating the resource.
-2.  **After Pod Claimed (Metadata Update)**: If the `SandboxClaim` is updated after the Sandbox has already been adopted from the Warmpool, the `SandboxClaim` controller watches the changes and performs an **in-place update** to inject the `additionalPodMetadata` into the Sandbox's labels and annotations and add the `additionalPodMetadata` to reflect the changes, ensuring continuous consistency without resource re-creation.
+1.  **New Pod Claim (Adoption/Injection)**: When a `SandboxClaim` is first assigned that "adopts" a Sandbox from the Warmpool, the `SandboxClaim` controller performs an update to add the `SandboxClaim`’s `additionalPodMetadata` into the Sandbox's `spec.podTemplate.metadata`. This achieves sub-millisecond dispatch latency without restarting the container or re-creating the resource.
+2.  **After Pod Claimed (Metadata Update)**: If the `SandboxClaim` is updated after the Sandbox has already been adopted from the Warmpool, the `SandboxClaim` controller watches the changes and performs an update to add the `SandboxClaim`’s `additionalPodMetadata` into the Sandbox's `spec.podTemplate.metadata` to reflect the changes, ensuring continuous consistency without resource re-creation.
 
 ## Scalability
 

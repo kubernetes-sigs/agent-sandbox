@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -50,6 +52,11 @@ const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
+
+// ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
+var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
+
+var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
 // getWarmPoolPolicy returns the effective warm pool policy for a claim.
 func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
@@ -197,9 +204,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Suppress expected user errors (like missing templates) to avoid crash loops
-	if errors.Is(reconcileErr, ErrTemplateNotFound) {
-		errs := errors.Join(reconcileErr, ErrTemplateNotFound)
-		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "errors", errs, "request", req.NamespacedName)
+	if errors.Is(reconcileErr, ErrTemplateNotFound) || errors.Is(reconcileErr, ErrInvalidMetadata) {
+		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
 	}
 
@@ -228,6 +234,11 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
 
+	// Upfront validation of additional metadata to skip unnecessary processing
+	if err := validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
 	// Fast path: try to find existing or adopt from warm pool before template lookup.
 	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
 	logger.V(1).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
@@ -240,10 +251,40 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {
 			logger.Error(templateErr, "failed to get template for network policy reconciliation (non-fatal)", "claim", claim.Name)
+
+			// If we can't get the template but we have metadata to propagate, we should fail
+			// to ensure consistency and enforce the "No Overrides" rule.
+			if len(claim.Spec.AdditionalPodMetadata.Labels) > 0 || len(claim.Spec.AdditionalPodMetadata.Annotations) > 0 {
+				return nil, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
+			}
 		}
+
 		if template != nil {
 			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
 				logger.Error(npErr, "network policy reconcile failed after adoption (non-fatal)", "claim", claim.Name)
+			}
+
+			// Check if metadata needs update
+			var mergedMeta v1alpha1.PodMetadata
+			template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
+
+			// Preserve system-injected labels
+			if mergedMeta.Labels == nil {
+				mergedMeta.Labels = make(map[string]string)
+			}
+			mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+			mergedMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
+
+			if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+				return nil, err
+			}
+
+			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
+				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
+				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
+				if err := r.Update(ctx, sandbox); err != nil {
+					return nil, err
+				}
 			}
 		}
 		return sandbox, nil
@@ -330,6 +371,16 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            fmt.Sprintf("SandboxTemplate %q not found", claim.Spec.TemplateRef.Name),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrInvalidMetadata) {
+			reason = "InvalidMetadata"
+			return metav1.Condition{
+				Type:               string(v1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            err.Error(),
 				ObservedGeneration: claim.Generation,
 			}
 		}
@@ -481,6 +532,12 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 		}
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+
+		// Merge metadata from claim
+		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+			return nil, err
+		}
 
 		// Update uses optimistic concurrency (resourceVersion) so concurrent
 		// claims racing to adopt the same sandbox will conflict and retry.
@@ -522,6 +579,100 @@ func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 	return false
 }
 
+func isRestrictedDomain(domain string) bool {
+	for _, d := range restrictedDomains {
+		if domain == d || strings.HasSuffix(domain, "."+d) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
+func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
+	if claimMeta == nil {
+		return nil
+	}
+
+	validate := func(key, value string, isLabel bool) error {
+		// Check restricted domains
+		parts := strings.SplitN(key, "/", 2)
+		domain := ""
+		if len(parts) > 1 {
+			domain = strings.ToLower(parts[0])
+		}
+		if isRestrictedDomain(domain) {
+			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+		}
+
+		// Validate label values (annotations have less restrictions)
+		if isLabel {
+			if errs := validation.IsValidLabelValue(value); len(errs) > 0 {
+				return fmt.Errorf("invalid label value: %q does not match allowed pattern: %s", value, strings.Join(errs, "; "))
+			}
+		}
+		return nil
+	}
+
+	for k, v := range claimMeta.Labels {
+		if err := validate(k, v, true); err != nil {
+			return fmt.Errorf("failed to validate label %q: %w", k, err)
+		}
+	}
+
+	for k, v := range claimMeta.Annotations {
+		if err := validate(k, v, false); err != nil {
+			return fmt.Errorf("failed to validate annotation %q: %w", k, err)
+		}
+	}
+
+	return nil
+}
+
+// mergePodMetadata merges labels and annotations from claimMeta into templateMeta,
+// rejecting overrides with different values.
+func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
+	if err := validateAdditionalPodMetadata(claimMeta); err != nil {
+		return err
+	}
+
+	// Check for overrides in labels
+	for k, v := range claimMeta.Labels {
+		if tv, ok := templateMeta.Labels[k]; ok && tv != v {
+			return fmt.Errorf("metadata override conflict: label %q is defined in template with value %q, but claim requests %q", k, tv, v)
+		}
+	}
+
+	// Check for overrides in annotations
+	for k, v := range claimMeta.Annotations {
+		if tv, ok := templateMeta.Annotations[k]; ok && tv != v {
+			return fmt.Errorf("metadata override conflict: annotation %q is defined in template with value %q, but claim requests %q", k, tv, v)
+		}
+	}
+
+	// Merge labels
+	if len(claimMeta.Labels) > 0 {
+		if templateMeta.Labels == nil {
+			templateMeta.Labels = make(map[string]string)
+		}
+		for k, v := range claimMeta.Labels {
+			templateMeta.Labels[k] = v
+		}
+	}
+
+	// Merge annotations
+	if len(claimMeta.Annotations) > 0 {
+		if templateMeta.Annotations == nil {
+			templateMeta.Annotations = make(map[string]string)
+		}
+		for k, v := range claimMeta.Annotations {
+			templateMeta.Annotations[k] = v
+		}
+	}
+
+	return nil
+}
+
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 
@@ -550,18 +701,23 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Annotations[v1alpha1.SandboxTemplateRefAnnotation] = template.Name
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	// TODO: this is a workaround, remove replica assignment related issue #202
-	replicas := int32(1)
-	sandbox.Spec.Replicas = &replicas
-
-	// Apply secure defaults to the sandbox pod spec
-	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
+
+	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		return nil, err
+	}
+
+	// TODO: this is a workaround, remove replica assignment related issue #202
+	replicas := int32(1)
+	sandbox.Spec.Replicas = &replicas
+
+	// Apply secure defaults to the sandbox pod spec
+	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)

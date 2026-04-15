@@ -26,6 +26,25 @@ export const SANDBOX_PLURAL_NAME = "sandboxes";
 
 export const POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name";
 
-export const MAX_RETRIES = 5;
+// Total attempt count for idempotent operations (matches Go client's maxAttempts=6).
+// With the loop `for (let attempt = 0; attempt < MAX_RETRIES; attempt++)` this gives
+// attempts 0–5, i.e. up to 5 retries after the first attempt.
+// Non-idempotent callers (POST /execute, /upload, /agent) pass maxRetries: 1 explicitly.
+export const MAX_RETRIES = 6;
 export const BACKOFF_FACTOR = 0.5;
 export const RETRY_STATUS_CODES = [500, 502, 503, 504];
+
+// Maximum bytes to drain from a response body before retrying (allows TCP connection reuse)
+export const MAX_DRAIN_BYTES = 4096;
+
+// Maximum bytes of response body to include in SandboxRequestError.body
+export const MAX_ERROR_BODY_BYTES = 512;
+
+// Number of port-forward reconnect attempts before giving up
+export const MAX_RECONNECT_ATTEMPTS = 3;
+
+// Per-attempt timeout in milliseconds (independent of the overall request timeout)
+export const PER_ATTEMPT_TIMEOUT_MS = 30_000;
+
+// Maximum number of gateway watch reconnects within a single waitForGatewayIp call
+export const MAX_GATEWAY_REWATCH = 10;

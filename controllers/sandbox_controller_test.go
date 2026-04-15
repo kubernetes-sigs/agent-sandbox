@@ -326,7 +326,7 @@ func TestReconcile(t *testing.T) {
 						ResourceVersion: "1",
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
-							"agents.x-k8s.io/pod-template-hash": "bba517df",
+							"agents.x-k8s.io/pod-template-hash": "7e531891",
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -422,7 +422,7 @@ func TestReconcile(t *testing.T) {
 						ResourceVersion: "1",
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
-							"agents.x-k8s.io/pod-template-hash": "21481b6f",
+							"agents.x-k8s.io/pod-template-hash": "7e531891",
 							"custom-label":                      "label-val",
 						},
 						Annotations: map[string]string{
@@ -957,7 +957,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
-						"agents.x-k8s.io/pod-template-hash": "21481b6f",
+						"agents.x-k8s.io/pod-template-hash": "7e531891",
 						"custom-label":                      "label-val",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
@@ -984,7 +984,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "1",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
-						"agents.x-k8s.io/pod-template-hash": "21481b6f",
+						"agents.x-k8s.io/pod-template-hash": "7e531891",
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1088,7 +1088,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						sandboxLabel:         nameHash,
-						podTemplateHashLabel: "bba517df",
+						podTemplateHashLabel: "7e531891",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},

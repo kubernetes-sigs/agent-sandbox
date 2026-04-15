@@ -340,11 +340,15 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
-// computePodTemplateHash computes a hash of the sandbox's PodTemplate spec.
+// computePodTemplateHash computes a hash of the sandbox's PodTemplate.Spec.
+// It intentionally excludes PodTemplate.ObjectMeta (labels/annotations) since
+// those may be modified by other controllers (e.g., SandboxClaim) without
+// requiring pod recreation. Only changes to the actual PodSpec should trigger
+// a recreate.
 func computePodTemplateHash(sandbox *sandboxv1alpha1.Sandbox) (string, error) {
-	specJSON, err := json.Marshal(sandbox.Spec.PodTemplate)
+	specJSON, err := json.Marshal(sandbox.Spec.PodTemplate.Spec)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
+		return "", fmt.Errorf("failed to marshal pod template spec for hashing: %w", err)
 	}
 	return NameHash(string(specJSON)), nil
 }

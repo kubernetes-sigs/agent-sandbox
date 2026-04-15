@@ -1233,13 +1233,11 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		simulateConflicts       int
 	}{
 		{
-			name: "adopts oldest ready sandbox from warm pool",
+			name: "adopts a sandbox from warm pool",
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-3600 * time.Second)}, true),
-				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-1800 * time.Second)}, true),
-				createWarmPoolSandbox("pool-sb-3", metav1.Now(), true),
+				createWarmPoolSandbox("pool-sb-1", metav1.Now(), true),
 			},
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "pool-sb-1",
@@ -1290,28 +1288,14 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: true,
 		},
 		{
-			name: "prioritizes ready sandboxes over not-ready ones",
+			name: "adopts sandbox even if not ready",
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolSandbox("not-ready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
-				createWarmPoolSandbox("middle-ready", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
-				createWarmPoolSandbox("young-ready", metav1.Now(), true),
+				createWarmPoolSandbox("not-ready-sb", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
 			},
 			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "middle-ready",
-			expectNewSandboxCreated: false,
-		},
-		{
-			name: "adopts oldest non-ready sandbox when no ready sandboxes exist",
-			existingObjects: []client.Object{
-				template,
-				claim,
-				createWarmPoolSandbox("not-ready-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
-				createWarmPoolSandbox("not-ready-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
-			},
-			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "not-ready-1",
+			expectedAdoptedSandbox:  "not-ready-sb",
 			expectNewSandboxCreated: false,
 		},
 		{
@@ -1326,7 +1310,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					}
 					return sb
 				}(),
-				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
 			},
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "pool-sb-1",
@@ -1345,7 +1328,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					}
 					return sb
 				}(),
-				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
 			},
 			expectSandboxAdoption:  true,
 			expectedAdoptedSandbox: "pool-sb-1",
@@ -1359,11 +1341,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			existingObjects: []client.Object{
 				template,
 				claim,
-				createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
-				createWarmPoolSandbox("pool-sb-2", metav1.Now(), true),
+				createWarmPoolSandbox("pool-sb-1", metav1.Now(), true),
 			},
 			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "pool-sb-2",
+			expectedAdoptedSandbox:  "pool-sb-1",
 			expectNewSandboxCreated: false,
 			simulateConflicts:       1, // Fail update on the first sandbox, succeed on the second
 		},

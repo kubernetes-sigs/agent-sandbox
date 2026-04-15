@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/rand"
 	"slices"
 	"strings"
 	"sync"
@@ -459,41 +460,18 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 // adoptSandboxFromCandidates picks the best candidate and transfers ownership to the claim.
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, candidates []*v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-
-	// Sort: ready sandboxes first, then by creation time (oldest first)
-	slices.SortFunc(candidates, func(a, b *v1alpha1.Sandbox) int {
-		aReady := isSandboxReady(a)
-		bReady := isSandboxReady(b)
-		if aReady != bReady {
-			if aReady {
-				return -1 // a ready, b not ready -> a first
-			}
-			return 1 // b ready, a not ready -> b first
-		}
-		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
-	})
-
-	if len(candidates) == 0 {
+	n := len(candidates)
+	if n == 0 {
 		logger.Info("No warm pool candidates available, falling through to cold start", "claim", claim.Name)
 		return nil, nil
 	}
 
-	// Determine the search range for collision avoidance.
-	n := len(candidates)
-	workerCount := r.MaxConcurrentReconciles
-	if workerCount <= 0 {
-		workerCount = 1
-	}
-	searchWindow := min(n, workerCount)
+	// If two workers randomly pick the same pod and one gets a 409 Conflict, we try again.
+	for range 3 {
 
-	// Compute a starting index deterministic to this specific Claim UID.
-	hashValue := sandboxcontrollers.GetNumericHash(string(claim.UID))
-	startIndex := int(hashValue % uint32(searchWindow))
-
-	// Iterate through the entire list starting from the hashed offset.
-	for i := range n {
-		currIndex := (startIndex + i) % n
-		adopted := candidates[currIndex]
+		// Ignore readiness check and return always. No need for a loop.
+		randomIndex := rand.Intn(n)
+		adopted := candidates[randomIndex]
 
 		// Extract pool name from owner reference before clearing
 		poolName := "none"
@@ -518,13 +496,6 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		if adopted.Annotations == nil {
 			adopted.Annotations = make(map[string]string)
 		}
-		// Ensure the adopted sandbox records its pod name before it can be observed Ready.
-		if podName := adopted.Annotations[v1alpha1.SandboxPodNameAnnotation]; podName != adopted.Name {
-			if podName != "" {
-				logger.Info("Correcting adopted sandbox pod-name annotation", "sandbox", adopted.Name, "oldPodName", podName, "newPodName", adopted.Name)
-			}
-			adopted.Annotations[v1alpha1.SandboxPodNameAnnotation] = adopted.Name
-		}
 		if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
 			adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 		}
@@ -534,14 +505,19 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 		}
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
-		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 
-		// Merge metadata from claim
+		// Ensure the adopted sandbox records its pod name before it can be observed Ready.
+		if podName := adopted.Annotations[v1alpha1.SandboxPodNameAnnotation]; podName != adopted.Name {
+			adopted.Annotations[v1alpha1.SandboxPodNameAnnotation] = adopted.Name
+		}
+
+		templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
 		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return nil, err
 		}
 
-		// Update uses optimistic concurrency (resourceVersion) so concurrent
+		// Update uses optimistic concurrency (resourceVersion)
 		// claims racing to adopt the same sandbox will conflict and retry.
 		if err := r.Update(ctx, adopted); err != nil {
 			if k8errors.IsConflict(err) || k8errors.IsNotFound(err) {
@@ -567,8 +543,8 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		return adopted, nil
 	}
 
-	logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
-	return nil, nil // Return nil, nil to fall completely to cold start
+	logger.Info("Failed to adopt any sandbox after hitting max collision retries", "claim", claim.Name)
+	return nil, nil
 }
 
 // isSandboxReady checks if a sandbox has Ready=True condition.
@@ -881,13 +857,25 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	// Single List: ownership guard + adoption candidate scan.
 	// This queries the informer cache (not the API server), so it's fast.
 	logger.V(1).Info("Listing sandbox adoption candidates", "claim", claim.Name)
+	policy := getWarmPoolPolicy(claim)
+	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+
+	listLabels := client.MatchingLabels{
+		sandboxTemplateRefHash: templateHash, // Only get pods for this template
+	}
+
+	// Filter 2: If a specific pool is requested, filter by that pool directly in the query
+	if policy.IsSpecificPool() {
+		listLabels[warmPoolSandboxLabel] = sandboxcontrollers.NameHash(string(policy))
+	}
+
+	logger.V(1).Info("Listing targeted sandbox adoption candidates", "claim", claim.Name)
 	allSandboxes := &v1alpha1.SandboxList{}
-	if err := r.List(ctx, allSandboxes, client.InNamespace(claim.Namespace)); err != nil {
+	// Informer cache handles label filtering natively.
+	if err := r.List(ctx, allSandboxes, client.InNamespace(claim.Namespace), listLabels); err != nil {
 		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
 	}
 
-	policy := getWarmPoolPolicy(claim)
-	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 	var adoptionCandidates []*v1alpha1.Sandbox
 
 	for i := range allSandboxes.Items {
@@ -917,14 +905,6 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		controllerRef := metav1.GetControllerOf(sb)
 		if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 			continue
-		}
-
-		// If a specific pool is requested, only consider sandboxes from that pool
-		if policy.IsSpecificPool() {
-			specificPoolHash := sandboxcontrollers.NameHash(string(policy))
-			if sb.Labels[warmPoolSandboxLabel] != specificPoolHash {
-				continue
-			}
 		}
 
 		adoptionCandidates = append(adoptionCandidates, sb)

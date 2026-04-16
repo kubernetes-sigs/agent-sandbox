@@ -162,52 +162,6 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "automount-template"}},
 	}
 
-	templateOptOut := &extensionsv1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-template-opt-out",
-			Namespace: "default",
-		},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
-			PodTemplate: sandboxv1alpha1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
-				},
-			},
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
-				Egress: []networkingv1.NetworkPolicyEgressRule{{}},
-			},
-		},
-	}
-
-	existingNPToDelete := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-template-opt-out-network-policy", // Must match the expected generated name
-			Namespace: "default",
-		},
-		Spec: networkingv1.NetworkPolicySpec{}, // The contents don't matter, we just want it to exist
-	}
-
-	// Represents a policy that was created in the past, but the template has since changed
-	outdatedNPToUpdate := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-template-with-np-network-policy", // Matches templateWithNP
-			Namespace: "default",
-		},
-		Spec: networkingv1.NetworkPolicySpec{
-			// Purposely outdated/wrong spec
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{"old-label": "outdated"},
-			},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
-		},
-	}
-
-	claimOptOut := &extensionsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-opt-out", Namespace: "default", UID: "claim-uid-opt-out"},
-		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-opt-out"}},
-	}
-
 	templateWithEnv := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-env", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
@@ -388,6 +342,8 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		expectedCondition metav1.Condition
 		expectedPodIPs    []string
 		validateSandbox   func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
+		expectDeletedNP   string // Asserts this NP is completely gone
+		expectRetainedNP  string // Asserts this NP survived the reconcile loop
 	}{
 		{
 			name:             "sandbox is created when a claim is made",
@@ -502,44 +458,73 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
-			name:             "Existing NetworkPolicy is deleted when template opts out and removes custom policy",
-			claimToReconcile: claimOptOut, // Uses the template with disableDefaultNetworkPolicy: true
-			existingObjects:  []client.Object{templateOptOut, existingNPToDelete},
-			expectSandbox:    true,
+			name:             "Existing NetworkPolicy is safely deleted (and controller survives) if SandboxTemplate is suddenly deleted",
+			claimToReconcile: claim,
+			existingObjects: []client.Object{
+				&networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-claim-network-policy", // Matches the claim name
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+						}},
+					},
+				},
+			},
+			expectSandbox: false, // Controller will fail to build sandbox, which is correct
+			expectError:   false, // Controller survives the reconcile loop without crashing
 			expectedCondition: metav1.Condition{
 				Type:    string(sandboxv1alpha1.SandboxConditionReady),
 				Status:  metav1.ConditionFalse,
-				Reason:  "SandboxNotReady",
-				Message: "Sandbox is not ready",
+				Reason:  "TemplateNotFound",
+				Message: `SandboxTemplate "test-template" not found`,
 			},
+			expectDeletedNP: "test-claim-network-policy", // Assert it was deleted
 		},
 		{
-			name: "Existing NetworkPolicy is updated when template spec changes and a new sandboxclaim is created",
-			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-claim-update", Namespace: "default", UID: "claim-update-uid"},
-				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-with-np"}},
+			name:             "Deprecated per-claim NetworkPolicy is aggressively deleted by Claim controller",
+			claimToReconcile: claim,
+			existingObjects: []client.Object{
+				template,
+				&networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-claim-network-policy",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+						}},
+					},
+				},
 			},
-			// Seed the cluster with the correct template, but the wrong/outdated network policy
-			existingObjects: []client.Object{templateWithNP, outdatedNPToUpdate},
-			expectSandbox:   true,
+			expectSandbox: true,
 			expectedCondition: metav1.Condition{
 				Type:    string(sandboxv1alpha1.SandboxConditionReady),
 				Status:  metav1.ConditionFalse,
 				Reason:  "SandboxNotReady",
 				Message: "Sandbox is not ready",
 			},
+			expectDeletedNP: "test-claim-network-policy", // Assert it was deleted
 		},
 		{
-			name:             "NetworkPolicy is not created when template has NetworkPolicyManagement set to Unmanaged",
-			claimToReconcile: claimOptOut,
-			existingObjects:  []client.Object{templateOptOut},
-			expectSandbox:    true,
+			name:             "User-created NetworkPolicy with reserved name is PRESERVED because it lacks the claim OwnerReference",
+			claimToReconcile: claim,
+			existingObjects: []client.Object{
+				template,
+				&networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-claim-network-policy",
+						Namespace: "default",
+					},
+				},
+			},
+			expectSandbox: true,
 			expectedCondition: metav1.Condition{
 				Type:    string(sandboxv1alpha1.SandboxConditionReady),
 				Status:  metav1.ConditionFalse,
 				Reason:  "SandboxNotReady",
 				Message: "Sandbox is not ready",
 			},
+			expectRetainedNP: "test-claim-network-policy", // Assert it survived the GC!
 		},
 		{
 			name: "trace context is propagated from claim to sandbox",
@@ -860,6 +845,23 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				}
 				if diff := cmp.Diff(tc.expectedCondition, condition, cmp.Comparer(ignoreTimestamp)); diff != "" {
 					t.Errorf("unexpected condition:\n%s", diff)
+				}
+			}
+
+			// Assert NetworkPolicy Cleanup and Preservation
+			if tc.expectDeletedNP != "" {
+				var np networkingv1.NetworkPolicy
+				err := client.Get(context.Background(), types.NamespacedName{Name: tc.expectDeletedNP, Namespace: "default"}, &np)
+				if !k8errors.IsNotFound(err) {
+					t.Errorf("expected NetworkPolicy %q to be DELETED, but it was found or got err: %v", tc.expectDeletedNP, err)
+				}
+			}
+
+			if tc.expectRetainedNP != "" {
+				var np networkingv1.NetworkPolicy
+				err := client.Get(context.Background(), types.NamespacedName{Name: tc.expectRetainedNP, Namespace: "default"}, &np)
+				if err != nil {
+					t.Errorf("expected NetworkPolicy %q to be RETAINED, but it was missing or got err: %v", tc.expectRetainedNP, err)
 				}
 			}
 		})

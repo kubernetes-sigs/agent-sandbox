@@ -84,7 +84,9 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -99,6 +101,13 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
+	}
+
+	// Unconditionally clean up legacy per-claim NetworkPolicies.
+	// We log the error but do not block the main reconcile flow so
+	// transient API issues don't prevent Sandbox adoption/creation.
+	if err := r.cleanupLegacyNetworkPolicy(ctx, claim); err != nil {
+		logger.Error(err, "Non-fatal error cleaning up legacy per-claim NetworkPolicy")
 	}
 
 	// Start Tracing Span
@@ -262,9 +271,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		}
 
 		if template != nil {
-			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-				logger.Error(npErr, "network policy reconcile failed after adoption (non-fatal)", "claim", claim.Name)
-			}
 
 			// Check if metadata needs update
 			var mergedMeta v1alpha1.PodMetadata
@@ -298,13 +304,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr != nil && !k8errors.IsNotFound(templateErr) {
 		return nil, templateErr
-	}
-	if templateErr != nil {
-		return nil, ErrTemplateNotFound
-	}
-
-	if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-		return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
 	}
 
 	return r.createSandbox(ctx, claim, template)
@@ -1002,66 +1001,37 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		Complete(r)
 }
 
-// reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.
-func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
+// cleanupLegacyNetworkPolicy cleans up any deprecated per-claim NetworkPolicies.
+func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
 	logger := log.FromContext(ctx)
+	npKey := types.NamespacedName{Name: claim.Name + "-network-policy", Namespace: claim.Namespace}
 
-	// Skip if the template opts out of managed network policies
-	if template != nil && template.Spec.NetworkPolicyManagement == extensionsv1alpha1.NetworkPolicyManagementUnmanaged {
-		return nil
-	}
+	existingNP := &networkingv1.NetworkPolicy{}
+	if err := r.Get(ctx, npKey, existingNP); err == nil {
 
-	// Cleanup Check: If missing, delete existing policy
-	if template == nil || template.Spec.NetworkPolicy == nil {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-network-policy",
-				Namespace: claim.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, existingNP); err != nil {
-			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
-				return err
-			}
-		} else {
-			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
-		}
-		return nil
-	}
+		// Verify this policy was actually created by this controller
+		// before deleting it. We check if the SandboxClaim is the controller.
+		controllerRef := metav1.GetControllerOf(existingNP)
+		isControlledByClaim := controllerRef != nil && controllerRef.UID == claim.UID && controllerRef.Kind == "SandboxClaim"
 
-	np := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      claim.Name + "-network-policy",
-			Namespace: claim.Namespace,
-		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
-		np.Spec.PodSelector = metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
-			},
-		}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress,
-			networkingv1.PolicyTypeEgress,
+		if !isControlledByClaim {
+			// A user manually created a policy with our reserved name. We should not delete it, but log a warning so it can be resolved.
+			logger.V(1).Info("Found NetworkPolicy with reserved name, but it is not controlled by this claim. Skipping deletion.", "name", existingNP.Name)
+			return nil
 		}
 
-		templateNP := template.Spec.NetworkPolicy
-
-		np.Spec.Ingress = templateNP.Ingress
-		np.Spec.Egress = templateNP.Egress
-
-		return controllerutil.SetControllerReference(claim, np, r.Scheme)
-	})
-
-	if err != nil {
-		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
+		// Use client.IgnoreNotFound to prevent benign race conditions
+		// if the object is deleted between our Get and Delete calls.
+		if deleteErr := r.Delete(ctx, existingNP); client.IgnoreNotFound(deleteErr) != nil {
+			logger.Error(deleteErr, "Failed to clean up deprecated per-claim NetworkPolicy")
+			return deleteErr
+		}
+		logger.Info("Cleaned up deprecated per-claim NetworkPolicy in favor of shared Template policy", "name", existingNP.Name)
+	} else if !k8errors.IsNotFound(err) {
+		logger.Error(err, "Failed to check cache for deprecated per-claim NetworkPolicy")
 		return err
 	}
 
-	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
 	return nil
 }
 

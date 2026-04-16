@@ -28,6 +28,13 @@ spec:
             type: object
           spec:
             properties:
+              envVarsInjectionPolicy:
+                default: Disallowed
+                enum:
+                - Allowed
+                - Overrides
+                - Disallowed
+                type: string
               networkPolicy:
                 properties:
                   egress:

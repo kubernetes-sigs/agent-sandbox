@@ -27,6 +27,9 @@ import (
 // and manages a shared NetworkPolicy for this template.
 type NetworkPolicyManagement string
 
+// EnvVarsInjectionPolicy defines whether a SandboxClaim is allowed to inject or override environment variables.
+type EnvVarsInjectionPolicy string
+
 const (
 	// SandboxIDLabel is the label key applied to the Pod to identify the owning Claim UID.
 	// The SandboxClaim controller injects this label into the Pod
@@ -41,6 +44,15 @@ const (
 	// NetworkPolicyManagementUnmanaged means the controller will skip NetworkPolicy
 	// creation entirely, allowing external systems (like Cilium) to manage networking.
 	NetworkPolicyManagementUnmanaged NetworkPolicyManagement = "Unmanaged"
+
+	// EnvVarsInjectionPolicyAllowed allows a SandboxClaim to inject new environment variables, but not override existing ones.
+	EnvVarsInjectionPolicyAllowed EnvVarsInjectionPolicy = "Allowed"
+
+	// EnvVarsInjectionPolicyOverrides allows a SandboxClaim to inject new and override existing environment variables.
+	EnvVarsInjectionPolicyOverrides EnvVarsInjectionPolicy = "Overrides"
+
+	// EnvVarsInjectionPolicyDisallowed prevents a SandboxClaim from injecting any environment variables.
+	EnvVarsInjectionPolicyDisallowed EnvVarsInjectionPolicy = "Disallowed"
 )
 
 // NetworkPolicySpec defines the desired state of the NetworkPolicy.
@@ -98,6 +110,13 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:default=Managed
 	// +optional
 	NetworkPolicyManagement NetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
+
+	// envVarsInjectionPolicy allows a SandboxClaim to inject or override environment variables defined in the template.
+	// If set to Disallowed, the SandboxClaim will be rejected if it specifies any environment variables.
+	// +kubebuilder:validation:Enum=Allowed;Overrides;Disallowed
+	// +kubebuilder:default=Disallowed
+	// +optional
+	EnvVarsInjectionPolicy EnvVarsInjectionPolicy `json:"envVarsInjectionPolicy,omitempty"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

@@ -1,0 +1,13 @@
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: agent-sandbox-controller-monitoring
+  namespace: agent-sandbox-system # Namespace where the controller is running
+spec:
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller # Label to select the controller pods
+  endpoints:
+  - port: 8080 # Port where metrics are exposed
+    path: /metrics # Path to the metrics endpoint
+    interval: 15s # How frequently to scrape

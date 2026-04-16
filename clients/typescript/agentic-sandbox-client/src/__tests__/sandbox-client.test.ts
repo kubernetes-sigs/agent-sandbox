@@ -418,6 +418,19 @@ describe("SandboxClient (registry)", () => {
         "K8s API unavailable",
       );
     });
+
+    // empty namespace string should be normalized to defaultNamespace
+    it("normalizes empty namespace string to default namespace", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-ns-norm");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("tpl", "");
+
+      expect(sandbox.namespace).toBe("default");
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.namespace).toBe("default");
+    });
   });
 
   // ===== getSandbox =====
@@ -474,6 +487,19 @@ describe("SandboxClient (registry)", () => {
       await expect(client.getSandbox("nonexistent-claim")).rejects.toThrow(
         "SandboxClaim 'nonexistent-claim' not found",
       );
+    });
+
+    // empty namespace string should be normalized to defaultNamespace
+    it("normalizes empty namespace string to default namespace", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        new Error("HTTP 404"),
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.getSandbox("some-claim", "")).rejects.toThrow();
+
+      const callArgs = mockGetNamespacedCustomObject.mock.calls[0][0];
+      expect(callArgs.namespace).toBe("default");
     });
   });
 
@@ -963,6 +989,80 @@ describe("SandboxClient (registry)", () => {
         makeApiClient: vi.fn(),
       }));
       expect(() => new SandboxClient()).toThrow(SandboxError);
+    });
+  });
+
+  // ===== option validation =====
+
+  describe("apiUrl option validation", () => {
+    it("throws SandboxError for non-URL apiUrl", () => {
+      expect(() => new SandboxClient({ apiUrl: "not-a-url" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for non-http/https scheme", () => {
+      expect(
+        () => new SandboxClient({ apiUrl: "ftp://api.example.com" }),
+      ).toThrow(SandboxError);
+    });
+
+    it("accepts http scheme", () => {
+      expect(
+        () => new SandboxClient({ apiUrl: "http://api.example.com:8080" }),
+      ).not.toThrow();
+    });
+
+    it("accepts https scheme", () => {
+      expect(
+        () => new SandboxClient({ apiUrl: "https://api.example.com" }),
+      ).not.toThrow();
+    });
+  });
+
+  describe("namespace DNS label validation", () => {
+    it("throws SandboxError for namespace with uppercase letters", () => {
+      expect(() => new SandboxClient({ namespace: "MyNamespace" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for namespace exceeding 63 characters", () => {
+      expect(() => new SandboxClient({ namespace: "a".repeat(64) })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for namespace starting with a hyphen", () => {
+      expect(() => new SandboxClient({ namespace: "-bad-ns" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("accepts valid lowercase namespace", () => {
+      expect(
+        () => new SandboxClient({ namespace: "my-namespace" }),
+      ).not.toThrow();
+    });
+  });
+
+  describe("gatewayName DNS subdomain validation", () => {
+    it("throws SandboxError for gatewayName with uppercase letters", () => {
+      expect(() => new SandboxClient({ gatewayName: "MyGateway" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for gatewayName with invalid characters", () => {
+      expect(() => new SandboxClient({ gatewayName: "gateway_name" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("accepts valid gatewayName with dots and hyphens", () => {
+      expect(
+        () => new SandboxClient({ gatewayName: "my-gateway.prod" }),
+      ).not.toThrow();
     });
   });
 

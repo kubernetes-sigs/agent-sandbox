@@ -100,6 +100,21 @@ function validateLabels(labels: Record<string, string>): void {
   }
 }
 
+function isValidDNSLabel(s: string): boolean {
+  if (s.length === 0 || s.length > 63) return false;
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(s);
+}
+
+function isValidDNSSubdomain(s: string): boolean {
+  if (s.length === 0 || s.length > 253) return false;
+  return (
+    /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(s) &&
+    !s.includes("..") &&
+    !s.includes(".-") &&
+    !s.includes("-.")
+  );
+}
+
 /**
  * Registry-based client for managing multiple Sandbox handles.
  * Tracks all created sandboxes and supports creating, retrieving,
@@ -161,6 +176,52 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       }
     }
 
+    // apiUrl URL structure validation (http/https scheme, non-empty host)
+    if (options.apiUrl !== undefined) {
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(options.apiUrl);
+      } catch {
+        throw new SandboxError(
+          `apiUrl must be a valid URL, got: ${options.apiUrl}`,
+        );
+      }
+      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+        throw new SandboxError(
+          `apiUrl must use http or https scheme, got: ${parsedUrl.protocol}`,
+        );
+      }
+      if (!parsedUrl.host) {
+        throw new SandboxError(
+          `apiUrl must include a host, got: ${options.apiUrl}`,
+        );
+      }
+    }
+
+    // DNS label validation for namespace and gatewayNamespace
+    for (const [key, value] of [
+      ["namespace", options.namespace],
+      ["gatewayNamespace", options.gatewayNamespace],
+    ] as [string, string | undefined][]) {
+      if (value !== undefined && value.length > 0 && !isValidDNSLabel(value)) {
+        throw new SandboxError(
+          `${key} must be a valid Kubernetes namespace (DNS label): ` +
+            `lowercase alphanumeric or hyphens, max 63 characters, got: ${value}`,
+        );
+      }
+    }
+
+    // DNS subdomain validation for gatewayName
+    if (
+      options.gatewayName !== undefined &&
+      options.gatewayName.length > 0 &&
+      !isValidDNSSubdomain(options.gatewayName)
+    ) {
+      throw new SandboxError(
+        `gatewayName must be a valid Kubernetes DNS subdomain name, got: ${options.gatewayName}`,
+      );
+    }
+
     this.defaultNamespace = options.namespace ?? "default";
     this.apiUrl = options.apiUrl;
     this.gatewayName = options.gatewayName;
@@ -175,7 +236,11 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     this.kubeConfig = new k8s.KubeConfig();
     this.kubeConfig.loadFromDefault();
 
-    if (!this.kubeConfig.clusters || this.kubeConfig.clusters.length === 0) {
+    const clusters = this.kubeConfig.clusters ?? [];
+    const isOnlyFallback =
+      clusters.length === 0 ||
+      clusters.every((c) => c.server === "http://localhost:8080");
+    if (isOnlyFallback) {
       throw new SandboxError(
         "No Kubernetes configuration found. " +
           "Set KUBECONFIG, provide ~/.kube/config, or run inside a cluster.",
@@ -199,7 +264,8 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       throw new Error("Template name cannot be empty.");
     }
 
-    const ns = namespace ?? this.defaultNamespace;
+    // Review #16: normalize empty string to defaultNamespace (matches Go behaviour)
+    const ns = namespace || this.defaultNamespace;
     const sandboxReadyTimeout =
       opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;
 
@@ -295,7 +361,8 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
    * Returns the cached handle if still active, otherwise re-attaches.
    */
   async getSandbox(claimName: string, namespace?: string): Promise<T> {
-    const ns = namespace ?? this.defaultNamespace;
+    // normalize empty string to defaultNamespace (matches Go behaviour)
+    const ns = namespace || this.defaultNamespace;
     const key = `${ns}/${claimName}`;
 
     const existing = this.registry.get(key);

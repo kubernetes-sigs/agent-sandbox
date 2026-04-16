@@ -2003,9 +2003,10 @@ func TestSandboxExpiry(t *testing.T) {
 			if tc.deletionPolicy != "" {
 				sandbox.Spec.ShutdownPolicy = new(tc.deletionPolicy)
 			}
-			expired, requeueAfter := checkSandboxExpiryAt(sandbox, now)
+			expired, requeueAfter := checkSandboxExpiry(sandbox, now)
 			require.Equal(t, tc.wantExpired, expired)
 			require.Equal(t, tc.wantRequeue, requeueAfter)
+
 		})
 	}
 }

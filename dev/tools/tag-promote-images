@@ -35,9 +35,17 @@ IMAGES_TO_PROMOTE = [
 ]
 
 # Git Remotes (Adjust if your remote names differ)
-REMOTE_UPSTREAM = "upstream"
 REMOTE_FORK = "origin"
 
+def get_remote_name(cwd=None):
+    """Returns 'upstream' if it exists as a remote, otherwise 'origin'."""
+    try:
+        remotes = run_command(["git", "remote"], cwd=cwd, capture_output=True).splitlines()
+        if "upstream" in remotes:
+            return "upstream"
+        return "origin"
+    except Exception:
+        return "origin" # Fallback
 
 def get_gh_username():
     """Fetches the authenticated GitHub username."""
@@ -92,13 +100,23 @@ def main():
     print(f"✅ Authenticated as: {gh_user}")
 
     print(f"🚀 Starting promotion process for {tag}")
+    
+    remote_agent_sandbox = get_remote_name()
+    print(f"ℹ️  Detected remote for agent-sandbox: {remote_agent_sandbox}")
 
     # --- Pre-flight Check ---
-    check_local_repo_state(REMOTE_UPSTREAM)
+    check_local_repo_state(remote_agent_sandbox)
+    check_tag_exists(tag, remote=remote_agent_sandbox)
 
-    # --- Step 1: Wait for Staging Images ---
+    # --- Step 1: Create and Push Tag ---
+    print(f"--- Step 1: Handling Git Tag {tag} and Publish to PyPI---")
+    create_and_push_tag(tag, remote=remote_agent_sandbox)
+
+    print("✅ Done! The 'pypi-publish' GitHub Action should now be running.")
+
+    # --- Step 2: Wait for Staging Images ---
     # CI job: https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images
-    print(f"--- Step 1: Waiting for Staging Images ---")
+    print(f"--- Step 2: Waiting for Staging Images ---")
     print("⏳ Polling registry (timeout: 45 mins)...")
     
     collected_digests = {}
@@ -126,11 +144,13 @@ def main():
         print("   Please stash or commit them before running the release script.")
         sys.exit(1)
 
-    # Sync k8s.io repo from UPSTREAM
-    print(f"🔄 Syncing k8s.io main branch from {REMOTE_UPSTREAM}...")
-    run_command(["git", "fetch", REMOTE_UPSTREAM], cwd=k8s_io_dir)
+    # Sync k8s.io repo from remote
+    remote_k8s_io = get_remote_name(cwd=k8s_io_dir)
+    print(f"ℹ️  Detected remote for k8s.io: {remote_k8s_io}")
+    print(f"🔄 Syncing k8s.io main branch from {remote_k8s_io}...")
+    run_command(["git", "fetch", remote_k8s_io], cwd=k8s_io_dir)
     run_command(["git", "checkout", "main"], cwd=k8s_io_dir)
-    run_command(["git", "reset", "--hard", f"{REMOTE_UPSTREAM}/main"], cwd=k8s_io_dir)
+    run_command(["git", "reset", "--hard", f"{remote_k8s_io}/main"], cwd=k8s_io_dir)
     
     branch_name = f"promote-agent-sandbox-{tag}"
     # Cleanup old promotion branch if already exists, and create the new promotion branch

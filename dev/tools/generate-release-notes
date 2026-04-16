@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import sys
+import json
+import urllib.request
+import subprocess
+import argparse
+
+def get_previous_tag(current_tag):
+    try:
+        tags_out = subprocess.run(
+            ["git", "tag", "--list", "v*", "--sort=-v:refname"],
+            check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.splitlines()
+        
+        if current_tag in tags_out:
+            idx = tags_out.index(current_tag)
+            if idx + 1 < len(tags_out):
+                return tags_out[idx + 1]
+        if len(tags_out) > 1:
+            return tags_out[1]
+        return None
+    except subprocess.CalledProcessError:
+        return None
+
+def get_commit_titles(prev_tag, current_tag):
+    range_str = f"{prev_tag}..{current_tag}" if prev_tag else current_tag
+    try:
+        titles = subprocess.run(
+            ["git", "log", range_str, "--pretty=format:%s"],
+            check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.strip()
+        return titles
+    except subprocess.CalledProcessError:
+        return ""
+
+def generate_highlights(titles):
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("⚠️ GEMINI_API_KEY not set. Skipping Gemini highlights.")
+        return None
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    
+    prompt = f"You are a release assistant. Please summarize the following commit titles into a professional release note. Include an introductory paragraph highlighting the main achievements of this release, followed by a section called '### Key Highlights' with a bulleted list grouped logically. Keep it concise and focused on user-visible changes.\n\n{titles}"
+    
+    data = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(data).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            resp_data = json.loads(response.read().decode("utf-8"))
+            candidates = resp_data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text")
+            return None
+    except Exception as e:
+        print(f"⚠️ Error calling Gemini API: {e}")
+        return None
+
+def main():
+    parser = argparse.ArgumentParser(description='Generate and preview release notes.')
+    parser.add_argument('--tag', required=True, help='The target git tag for the release.')
+    parser.add_argument('--output', default='release_notes_preview.md', help='File to save notes to.')
+    args = parser.parse_args()
+
+    tag = args.tag
+
+    # Get Gemini highlights
+    prev_tag = get_previous_tag(tag)
+    print(f"INFO: Found previous tag: {prev_tag}")
+    titles = get_commit_titles(prev_tag, tag)
+    
+    highlights = generate_highlights(titles)
+    
+    # Get default GitHub notes
+    print("INFO: Fetching default GitHub release notes...")
+    default_notes = ""
+    try:
+        default_notes = subprocess.run(
+            ["gh", "release", "generate-notes", "--tag", tag, "--repo", "kubernetes-sigs/agent-sandbox"],
+            check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.strip()
+    except Exception as e:
+        print(f"⚠️ Error generating default notes: {e}")
+        
+    installation_notes = f"""
+### Installation
+
+#### Core & Extensions
+```bash
+# To install only the core components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/manifest.yaml
+
+# To install the extensions components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/extensions.yaml
+```
+
+#### Python SDK
+```bash
+pip install k8s-agent-sandbox=={tag.lstrip('v')}
+```
+"""
+
+    combined_content = f"# 🚀 Announcing Agent Sandbox {tag}!\nWe are excited to announce the release of Agent Sandbox {tag}!\n\n"
+    if highlights:
+        combined_content += highlights + "\n\n"
+        
+    combined_content += installation_notes + "\n\n"
+        
+    if default_notes:
+        combined_content += default_notes
+        
+    if combined_content:
+        print(f"INFO: Saving release notes to {args.output}...")
+        with open(args.output, 'w') as f:
+            f.write(combined_content)
+        print("\n--- Preview ---\n")
+        print(combined_content)
+    else:
+        print("❌ No notes could be generated.")
+
+if __name__ == '__main__':
+    main()

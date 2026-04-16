@@ -12,6 +12,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # ratchet:actions/checkout@v4
 
-      - uses: devops-actions/actionlint@v0.1.10
+      - uses: devops-actions/actionlint@467e2ce19b2310e93c9ffa0b50fe31f86b5a7f23 # ratchet:devops-actions/actionlint@v0.1.10

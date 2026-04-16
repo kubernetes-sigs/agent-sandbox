@@ -11,6 +11,7 @@
     - [Use Case 2: Stateful Session Management (Pod Snapshots)](#use-case-2-stateful-session-management-pod-snapshots)
   - [High-Level Design](#high-level-design)
     - [Safety Principle: No Overrides](#safety-principle-no-overrides)
+    - [Tracking Propagated Metadata](#tracking-propagated-metadata)
     - [API Changes](#api-changes)
     - [Implementation Guidance](#implementation-guidance)
       - [Scenario A: Cold Start (No Warmpool)](#scenario-a-cold-start-no-warmpool)

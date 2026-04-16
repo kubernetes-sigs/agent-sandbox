@@ -424,7 +424,9 @@ func TestReconcile(t *testing.T) {
 							"custom-label":                      "label-val",
 						},
 						Annotations: map[string]string{
-							"custom-annotation": "anno-val",
+							"custom-annotation":                      "anno-val",
+							"agents.x-k8s.io/propagated-labels":      "custom-label",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation",
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -957,6 +959,11 @@ func TestReconcilePod(t *testing.T) {
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"custom-label":                      "label-val",
 					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.PodSpec{
@@ -984,7 +991,9 @@ func TestReconcilePod(t *testing.T) {
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
-						"custom-annotation": "anno-val",
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1337,6 +1346,83 @@ func TestReconcilePod(t *testing.T) {
 			expectErr:              false,
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
 			wantPodSurvives:        "annotated-pod-name",
+		},
+		{
+			name: "reconcilePod deletes label and annotation removed from sandbox",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel:                   nameHash,
+							"remove-label":                 "value",
+							"keep-label":                   "value",
+							"agents.x-k8s.io/system-label": "value",
+						},
+						Annotations: map[string]string{
+							"remove-annotation":                      "value",
+							"keep-annotation":                        "value",
+							"kubernetes.io/system-annotation":        "value",
+							"agents.x-k8s.io/propagated-labels":      "remove-label,keep-label",
+							"agents.x-k8s.io/propagated-annotations": "remove-annotation,keep-annotation",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						ObjectMeta: sandboxv1alpha1.PodMetadata{
+							Labels: map[string]string{
+								"keep-label": "value",
+							},
+							Annotations: map[string]string{
+								"keep-annotation": "value",
+							},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					},
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						sandboxLabel:                   nameHash,
+						"keep-label":                   "value",
+						"agents.x-k8s.io/system-label": "value",
+					},
+					Annotations: map[string]string{
+						"keep-annotation":                        "value",
+						"kubernetes.io/system-annotation":        "value",
+						"agents.x-k8s.io/propagated-labels":      "keep-label",
+						"agents.x-k8s.io/propagated-annotations": "keep-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1alpha1.SandboxPodNameAnnotation: sandboxName,
+			},
 		},
 	}
 

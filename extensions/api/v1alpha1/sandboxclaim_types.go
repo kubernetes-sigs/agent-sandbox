@@ -16,6 +16,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
@@ -112,6 +113,11 @@ type SandboxClaimSpec struct {
 	// +optional
 	// +kubebuilder:default=default
 	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
+
+	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
+	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
+	// +optional
+	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

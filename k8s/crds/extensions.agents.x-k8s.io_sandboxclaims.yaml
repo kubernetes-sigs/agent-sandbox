@@ -28,6 +28,17 @@ spec:
             type: object
           spec:
             properties:
+              additionalPodMetadata:
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    type: object
+                type: object
               lifecycle:
                 properties:
                   shutdownPolicy:

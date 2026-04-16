@@ -17,6 +17,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/signal"
 	"sync"
@@ -218,9 +219,7 @@ func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string)
 func (c *Client) DeleteAll(ctx context.Context) {
 	c.mu.Lock()
 	snapshot := make(map[Key]*Sandbox, len(c.registry))
-	for k, v := range c.registry {
-		snapshot[k] = v
-	}
+	maps.Copy(snapshot, c.registry)
 	c.registry = make(map[Key]*Sandbox)
 	c.mu.Unlock()
 

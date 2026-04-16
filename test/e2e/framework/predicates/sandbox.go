@@ -35,7 +35,7 @@ func asSandbox(obj client.Object) (*sandboxv1alpha1.Sandbox, error) {
 	return sandbox, nil
 }
 
-// SandboxHasStatus verifies that the Sandbox object has the specified status
+// SandboxHasStatus verifies that the Sandbox object has the specified status.
 func SandboxHasStatus(status sandboxv1alpha1.SandboxStatus) ObjectPredicate {
 	return &sandboxHasStatusPredicate{
 		WantStatus: status,

@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -100,8 +99,8 @@ func TestSimpleSandbox(t *testing.T) {
 		predicates.HasOwnerReferences([]metav1.OwnerReference{
 			{
 				APIVersion:         "agents.x-k8s.io/v1alpha1",
-				BlockOwnerDeletion: ptr.To(true),
-				Controller:         ptr.To(true),
+				BlockOwnerDeletion: new(true),
+				Controller:         new(true),
 				Kind:               "Sandbox",
 				Name:               "my-sandbox",
 				UID:                sandboxObj.UID,
@@ -117,8 +116,8 @@ func TestSimpleSandbox(t *testing.T) {
 		predicates.HasOwnerReferences([]metav1.OwnerReference{
 			{
 				APIVersion:         "agents.x-k8s.io/v1alpha1",
-				BlockOwnerDeletion: ptr.To(true),
-				Controller:         ptr.To(true),
+				BlockOwnerDeletion: new(true),
+				Controller:         new(true),
 				Kind:               "Sandbox",
 				Name:               "my-sandbox",
 				UID:                sandboxObj.UID,

@@ -36,7 +36,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-// SandboxTemplateReconciler reconciles a SandboxTemplate object
+// SandboxTemplateReconciler reconciles a SandboxTemplate object.
 type SandboxTemplateReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme

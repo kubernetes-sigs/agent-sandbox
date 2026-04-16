@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -126,7 +125,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-claim", Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
 			}},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
@@ -147,13 +146,13 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 
 	controlledSandboxWithDefault := controlledSandbox.DeepCopy()
-	controlledSandboxWithDefault.Spec.PodTemplate.Spec.AutomountServiceAccountToken = ptr.To(false)
+	controlledSandboxWithDefault.Spec.PodTemplate.Spec.AutomountServiceAccountToken = new(false)
 
 	templateWithAutomount := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "automount-template", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
 			PodTemplate: sandboxv1alpha1.PodTemplate{
-				Spec: corev1.PodSpec{AutomountServiceAccountToken: ptr.To(true), Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+				Spec: corev1.PodSpec{AutomountServiceAccountToken: new(true), Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
 			},
 		},
 	}
@@ -221,7 +220,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	// Validation Functions
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
 		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
-		expectedSpec.AutomountServiceAccountToken = ptr.To(false)
+		expectedSpec.AutomountServiceAccountToken = new(false)
 
 		expectedSpec.DNSPolicy = corev1.DNSNone
 		expectedSpec.DNSConfig = &corev1.PodDNSConfig{
@@ -626,7 +625,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				Name:      claimName,
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{
-					{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: ptr.To(true)},
+					{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: new(true)},
 				},
 			},
 			Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
@@ -874,7 +873,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       "test-pool",
 						UID:        warmPoolUID,
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},
@@ -919,7 +918,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Kind:       "ReplicaSet",
 						Name:       "other-controller",
 						UID:        "other-uid-456",
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},
@@ -1216,11 +1215,11 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			Name: "adopted-sb", Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim",
-				Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
+				Name: "test-claim", UID: "claim-uid", Controller: new(true),
 			}},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas:    ptr.To(int32(1)),
+			Replicas:    new(int32(1)),
 			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 	}
@@ -1235,7 +1234,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas:    ptr.To(int32(1)),
+			Replicas:    new(int32(1)),
 			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 		Status: sandboxv1alpha1.SandboxStatus{
@@ -1453,12 +1452,12 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       "test-pool",
 						UID:        "pool-uid",
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},
 			Spec: sandboxv1alpha1.SandboxSpec{
-				Replicas:    ptr.To(int32(1)),
+				Replicas:    new(int32(1)),
 				PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}},
 			},
 			Status: sandboxv1alpha1.SandboxStatus{
@@ -1576,7 +1575,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       poolName,
 						UID:        warmPoolUID,
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},

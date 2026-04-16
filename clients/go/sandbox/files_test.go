@@ -947,7 +947,7 @@ func TestBackoff_ScaleReducesDuration(t *testing.T) {
 	c.connector.backoffScale = 0.001
 	c.connector.mu.Unlock()
 
-	for attempt := 0; attempt < 6; attempt++ {
+	for attempt := range 6 {
 		d := c.connector.backoff(attempt)
 		if d > 50*time.Millisecond {
 			t.Errorf("attempt %d: scaled backoff %v should be very small", attempt, d)

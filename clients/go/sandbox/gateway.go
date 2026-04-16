@@ -176,15 +176,15 @@ func (g *gatewayStrategy) formatURL(addr string) string {
 // If the address is present but fails validation, rejected contains the raw
 // value so the caller can log a diagnostic message.
 func extractGatewayAddress(gw *unstructured.Unstructured) (addr, rejected string) {
-	status, ok := gw.Object["status"].(map[string]interface{})
+	status, ok := gw.Object["status"].(map[string]any)
 	if !ok {
 		return "", ""
 	}
-	addresses, ok := status["addresses"].([]interface{})
+	addresses, ok := status["addresses"].([]any)
 	if !ok || len(addresses) == 0 {
 		return "", ""
 	}
-	first, ok := addresses[0].(map[string]interface{})
+	first, ok := addresses[0].(map[string]any)
 	if !ok {
 		return "", ""
 	}

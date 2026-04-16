@@ -25,10 +25,10 @@ type ConditionType string
 func (c ConditionType) String() string { return string(c) }
 
 const (
-	// SandboxConditionReady indicates readiness for Sandbox
+	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"
 
-	// SandboxReasonExpired indicates expired state for Sandbox
+	// SandboxReasonExpired indicates expired state for Sandbox.
 	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
@@ -104,7 +104,7 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 }
 
-// SandboxSpec defines the desired state of Sandbox
+// SandboxSpec defines the desired state of Sandbox.
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
@@ -193,7 +193,7 @@ type SandboxStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
-// Sandbox is the Schema for the sandboxes API
+// Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -212,7 +212,7 @@ type Sandbox struct {
 
 // +kubebuilder:object:root=true
 
-// SandboxList contains a list of Sandbox
+// SandboxList contains a list of Sandbox.
 type SandboxList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

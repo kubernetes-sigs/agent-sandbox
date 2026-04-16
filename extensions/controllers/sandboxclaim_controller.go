@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -66,7 +67,7 @@ func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha
 	return extensionsv1alpha1.WarmPoolPolicyDefault
 }
 
-// SandboxClaimReconciler reconciles a SandboxClaim object
+// SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
@@ -468,7 +469,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			return 1 // b ready, a not ready -> b first
 		}
-		return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
+		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
 	})
 
 	if len(candidates) == 0 {
@@ -489,7 +490,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	startIndex := int(hashValue % uint32(searchWindow))
 
 	// Iterate through the entire list starting from the hashed offset.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		currIndex := (startIndex + i) % n
 		adopted := candidates[currIndex]
 
@@ -569,7 +570,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	return nil, nil // Return nil, nil to fall completely to cold start
 }
 
-// isSandboxReady checks if a sandbox has Ready=True condition
+// isSandboxReady checks if a sandbox has Ready=True condition.
 func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 	for _, cond := range sb.Status.Conditions {
 		if cond.Type == string(v1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
@@ -655,9 +656,7 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		if templateMeta.Labels == nil {
 			templateMeta.Labels = make(map[string]string)
 		}
-		for k, v := range claimMeta.Labels {
-			templateMeta.Labels[k] = v
-		}
+		maps.Copy(templateMeta.Labels, claimMeta.Labels)
 	}
 
 	// Merge annotations
@@ -665,9 +664,7 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		if templateMeta.Annotations == nil {
 			templateMeta.Annotations = make(map[string]string)
 		}
-		for k, v := range claimMeta.Annotations {
-			templateMeta.Annotations[k] = v
-		}
+		maps.Copy(templateMeta.Annotations, claimMeta.Annotations)
 	}
 
 	return nil
@@ -1032,12 +1029,12 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	}
 }
 
-// isSandboxExpired checks the Sandbox status condition set by the Core Controller
+// isSandboxExpired checks the Sandbox status condition set by the Core Controller.
 func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
 	return hasExpiredCondition(sandbox.Status.Conditions)
 }
 
-// hasExpiredCondition Helper to check if conditions list contains the expired reason
+// hasExpiredCondition Helper to check if conditions list contains the expired reason.
 func hasExpiredCondition(conditions []metav1.Condition) bool {
 	for _, cond := range conditions {
 		if cond.Type == string(v1alpha1.SandboxConditionReady) {

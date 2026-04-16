@@ -119,7 +119,7 @@ func TestParallelSandboxes(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, numSandboxes)
 
-	for i := 0; i < numSandboxes; i++ {
+	for i := range numSandboxes {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -176,7 +176,7 @@ func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolS
 	var wg sync.WaitGroup
 	errCh := make(chan error, numClaims)
 
-	for i := 0; i < numClaims; i++ {
+	for i := range numClaims {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

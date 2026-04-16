@@ -53,8 +53,8 @@ func sandboxControllerRef(name string) metav1.OwnerReference {
 		Kind:               "Sandbox",
 		Name:               name,
 		UID:                sandboxUID,
-		Controller:         ptr.To(true),
-		BlockOwnerDeletion: ptr.To(true),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
 	}
 }
 
@@ -587,7 +587,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -639,7 +639,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -688,7 +688,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyDelete),
 				},
 			},
@@ -712,8 +712,8 @@ func TestReconcile(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-deployment",
 								UID:                "other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -733,7 +733,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -781,7 +781,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -812,7 +812,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -902,7 +902,7 @@ func TestReconcilePod(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: ptr.To(int32(1)),
+			Replicas: new(int32(1)),
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -1028,7 +1028,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod: nil,
@@ -1041,7 +1041,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod: nil,
@@ -1074,7 +1074,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1121,8 +1121,8 @@ func TestReconcilePod(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "some-other-controller",
 								UID:                "some-other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1151,7 +1151,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1180,8 +1180,8 @@ func TestReconcilePod(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-deployment",
 								UID:                "other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1200,7 +1200,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
@@ -1232,7 +1232,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
@@ -1266,7 +1266,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
@@ -1287,8 +1287,8 @@ func TestReconcilePod(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-deployment",
 								UID:                "other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1306,7 +1306,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
@@ -1339,7 +1339,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
@@ -1382,7 +1382,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						ObjectMeta: sandboxv1alpha1.PodMetadata{
 							Labels: map[string]string{
@@ -1494,7 +1494,7 @@ func TestReconcileService(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: ptr.To(int32(1)),
+			Replicas: new(int32(1)),
 		},
 	}
 
@@ -1561,8 +1561,8 @@ func TestReconcileService(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "some-other-controller",
 								UID:                "some-other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1720,8 +1720,8 @@ func TestCheckOwnership(t *testing.T) {
 		Kind:               "Deployment",
 		Name:               "other-controller",
 		UID:                "other-uid",
-		Controller:         ptr.To(true),
-		BlockOwnerDeletion: ptr.To(true),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
 	}
 
 	sandboxOwnerRef := metav1.OwnerReference{
@@ -1729,8 +1729,8 @@ func TestCheckOwnership(t *testing.T) {
 		Kind:               "Sandbox",
 		Name:               sandboxName,
 		UID:                sandboxUID,
-		Controller:         ptr.To(true),
-		BlockOwnerDeletion: ptr.To(true),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
 	}
 
 	testCases := []struct {
@@ -1868,8 +1868,8 @@ func TestReconcilePVCs(t *testing.T) {
 								Kind:               "Sandbox",
 								Name:               sandboxName,
 								UID:                sandboxUID,
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1890,8 +1890,8 @@ func TestReconcilePVCs(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-controller",
 								UID:                otherUID,
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1961,20 +1961,20 @@ func TestSandboxExpiry(t *testing.T) {
 		},
 		{
 			name:         "shutdown time in future",
-			shutdownTime: ptr.To(metav1.NewTime(time.Now().Add(2 * time.Hour))),
+			shutdownTime: new(metav1.NewTime(time.Now().Add(2 * time.Hour))),
 			wantExpired:  false,
 			wantRequeue:  true,
 		},
 		{
 			name:           "shutdown time in past - retain",
-			shutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-10 * time.Second))),
+			shutdownTime:   new(metav1.NewTime(time.Now().Add(-10 * time.Second))),
 			deletionPolicy: sandboxv1alpha1.ShutdownPolicyRetain,
 			wantExpired:    true,
 			wantRequeue:    false,
 		},
 		{
 			name:           "shutdown time in past - delete",
-			shutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Minute))),
+			shutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Minute))),
 			deletionPolicy: sandboxv1alpha1.ShutdownPolicyDelete,
 			wantExpired:    true,
 			wantRequeue:    false,
@@ -1985,7 +1985,7 @@ func TestSandboxExpiry(t *testing.T) {
 			sandbox := &sandboxv1alpha1.Sandbox{}
 			sandbox.Spec.ShutdownTime = tc.shutdownTime
 			if tc.deletionPolicy != "" {
-				sandbox.Spec.ShutdownPolicy = ptr.To(tc.deletionPolicy)
+				sandbox.Spec.ShutdownPolicy = new(tc.deletionPolicy)
 			}
 			expired, requeueAfter := checkSandboxExpiry(sandbox)
 			require.Equal(t, tc.wantExpired, expired)

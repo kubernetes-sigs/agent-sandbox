@@ -44,12 +44,14 @@ def main():
             return build_result.returncode
 
     # Run custom golangci-lint with KAL plugin
-    result = subprocess.run([
-        kal_binary, "run",
-        "--config", kal_config,
+    args = [kal_binary, "run", "--config", kal_config]
+    if "--fix" in sys.argv:
+        args.append("--fix")
+    args.extend([
         "./api/...",
         "./extensions/api/...",
-    ], cwd=repo_root)
+    ])
+    result = subprocess.run(args, cwd=repo_root)
 
     return result.returncode
 

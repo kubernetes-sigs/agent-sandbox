@@ -22,10 +22,10 @@ from shared import utils
 def main():
     """ invokes go linter """
     repo_root = utils.get_repo_root()
-    result = subprocess.run(utils.go_tool_args(
-        "golangci-lint", "run",
-        f"--config={repo_root}/dev/tools/.golangci.yaml",
-    ), cwd=repo_root)
+    args = ["golangci-lint", "run", f"--config={repo_root}/dev/tools/.golangci.yaml"]
+    if "--fix" in sys.argv:
+        args.append("--fix")
+    result = subprocess.run(utils.go_tool_args(*args), cwd=repo_root)
 
     return result.returncode
 

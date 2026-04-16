@@ -21,29 +21,29 @@ import (
 
 // AtomicTimeDuration is a wrapper around time.Duration that allows for concurrent updates and retrievals.
 type AtomicTimeDuration struct {
-	v uint64
+	v atomic.Uint64
 }
 
 // Seconds returns the duration in seconds as a float64.
 func (s *AtomicTimeDuration) Seconds() float64 {
-	v := atomic.LoadUint64(&s.v)
+	v := s.v.Load()
 	d := time.Duration(v)
 	return d.Seconds()
 }
 
 // IsEmpty returns true if the duration is zero.
 func (s *AtomicTimeDuration) IsEmpty() bool {
-	return atomic.LoadUint64(&s.v) == 0
+	return s.v.Load() == 0
 }
 
 // Set sets the duration to the given value.
 func (s *AtomicTimeDuration) Set(d time.Duration) {
-	atomic.StoreUint64(&s.v, uint64(d))
+	s.v.Store(uint64(d))
 }
 
 // String returns the duration as a string.
 func (s *AtomicTimeDuration) String() string {
-	v := atomic.LoadUint64(&s.v)
+	v := s.v.Load()
 	d := time.Duration(v)
 	return d.String()
 }

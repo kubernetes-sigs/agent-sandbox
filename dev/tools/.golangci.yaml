@@ -2,10 +2,20 @@ version: "2"
 linters:
   enable:
     - depguard
-    - govet
+    - exptostd
+    - godot
+    - iface
+    - importas
+    - iotamixing
+    - modernize
+    - nilnesserr
+    - recvcheck
     - revive
-    - staticcheck
+    - sloglint
+    - testifylint
     - unconvert
+    - govet
+    - staticcheck
     - unparam
     - misspell
     - errcheck

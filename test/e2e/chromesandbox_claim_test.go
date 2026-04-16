@@ -125,7 +125,7 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	metrics := &ChromeSandboxClaimMetrics{}
 
 	// Unique name for this claim
-	claimName := fmt.Sprintf("claim-%d-%d", time.Now().UnixNano(), atomic.AddInt64(&claimCounter, 1))
+	claimName := fmt.Sprintf("claim-%d-%d", time.Now().UnixNano(), claimCounter.Add(1))
 
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	claim.Name = claimName
@@ -152,4 +152,4 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	return metrics
 }
 
-var claimCounter int64
+var claimCounter atomic.Int64

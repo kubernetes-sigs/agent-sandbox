@@ -77,7 +77,7 @@ func TestRunChromeSandbox(t *testing.T) {
 
 // BenchmarkChromeSandboxStartup measures the time for Chrome to start in a sandbox.
 // Run with: go test -bench=BenchmarkChromeSandboxStartup -benchtime=1x ./test/e2e/...
-// Compare results with: benchstat old.txt new.txt
+// Compare results with: benchstat old.txt new.txt.
 func BenchmarkChromeSandboxStartup(b *testing.B) {
 	time.Sleep(2 * time.Second) // Give cluster a moment to settle, and to help us split the logs by time
 

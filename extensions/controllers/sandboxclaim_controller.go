@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -655,9 +656,7 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		if templateMeta.Labels == nil {
 			templateMeta.Labels = make(map[string]string)
 		}
-		for k, v := range claimMeta.Labels {
-			templateMeta.Labels[k] = v
-		}
+		maps.Copy(templateMeta.Labels, claimMeta.Labels)
 	}
 
 	// Merge annotations
@@ -665,9 +664,7 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		if templateMeta.Annotations == nil {
 			templateMeta.Annotations = make(map[string]string)
 		}
-		for k, v := range claimMeta.Annotations {
-			templateMeta.Annotations[k] = v
-		}
+		maps.Copy(templateMeta.Annotations, claimMeta.Annotations)
 	}
 
 	return nil

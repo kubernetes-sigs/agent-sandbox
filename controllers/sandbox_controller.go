@@ -691,8 +691,8 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Handle deletion of labels
 	propagatedLabelsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
-		propagatedLabels := strings.Split(propagatedLabelsStr, ",")
-		for _, k := range propagatedLabels {
+		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
+		for k := range propagatedLabels {
 			if k == "" {
 				continue
 			}
@@ -719,8 +719,8 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Handle deletion of annotations
 	propagatedAnnotationsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation]
 	if propagatedAnnotationsStr != "" {
-		propagatedAnnotations := strings.Split(propagatedAnnotationsStr, ",")
-		for _, k := range propagatedAnnotations {
+		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
+		for k := range propagatedAnnotations {
 			if k == "" {
 				continue
 			}

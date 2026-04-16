@@ -1382,7 +1382,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						ObjectMeta: sandboxv1alpha1.PodMetadata{
 							Labels: map[string]string{

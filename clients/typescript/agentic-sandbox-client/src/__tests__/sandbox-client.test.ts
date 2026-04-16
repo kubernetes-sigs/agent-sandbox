@@ -795,10 +795,12 @@ describe("SandboxClient (registry)", () => {
     }, 5_000);
   });
 
-  // ===== watch done(null) causes promise hang =====
+  // ===== watch done(null) triggers re-list (not immediate hang) =====
+  // done(null) now causes re-list + re-watch in a loop.
+  // The loop terminates via SandboxTimeoutError when the budget is exhausted.
 
-  describe("watch stream clean close causes hang", () => {
-    it("resolveSandboxName rejects when done(null) fires (no hang)", async () => {
+  describe("watch stream clean close triggers re-list, not hang", () => {
+    it("resolveSandboxName times out (not hangs) when done(null) fires and re-list stays unresolved", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
 
       // watch immediately calls done(null) — clean close with no events
@@ -813,16 +815,24 @@ describe("SandboxClient (registry)", () => {
           return Promise.resolve(new AbortController());
         },
       );
+      // Subsequent watch passes never fire events → internal timer fires "closed"
+      mockWatchFn.mockImplementation(
+        (_p: string, _q: unknown, _cb: unknown, _done: unknown) =>
+          Promise.resolve(new AbortController()),
+      );
 
+      const { SandboxTimeoutError } = await import("../exceptions.js");
       const client = new SandboxClient({
         apiUrl: "http://api:8080",
-        sandboxReadyTimeout: 60,
+        sandboxReadyTimeout: 0.05, // 50 ms — exhausted after re-list + backoff
       });
 
-      await expect(client.createSandbox("tpl")).rejects.toThrow();
-    }, 2_000);
+      await expect(client.createSandbox("tpl")).rejects.toBeInstanceOf(
+        SandboxTimeoutError,
+      );
+    }, 3_000);
 
-    it("watchForSandboxReady rejects when done(null) fires (no hang)", async () => {
+    it("watchForSandboxReady times out (not hangs) when done(null) fires and sandbox stays not ready", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
 
       // First watch: claim resolves sandbox name normally
@@ -851,14 +861,22 @@ describe("SandboxClient (registry)", () => {
           return Promise.resolve(new AbortController());
         },
       );
+      // Subsequent watch passes never fire events → internal timer fires "closed"
+      mockWatchFn.mockImplementation(
+        (_p: string, _q: unknown, _cb: unknown, _done: unknown) =>
+          Promise.resolve(new AbortController()),
+      );
 
+      const { SandboxTimeoutError } = await import("../exceptions.js");
       const client = new SandboxClient({
         apiUrl: "http://api:8080",
-        sandboxReadyTimeout: 60,
+        sandboxReadyTimeout: 0.05, // 50 ms
       });
 
-      await expect(client.createSandbox("tpl")).rejects.toThrow();
-    }, 2_000);
+      await expect(client.createSandbox("tpl")).rejects.toBeInstanceOf(
+        SandboxTimeoutError,
+      );
+    }, 3_000);
   });
 
   // ===== SandboxTimeoutError on timeout =====
@@ -1142,9 +1160,6 @@ describe("SandboxClient (registry)", () => {
       // Set up re-attach watch flow for the new sandbox name
       mockSandboxReadyFlow("sandbox-changed");
 
-      // Expected: getSandbox detects the name change and re-attaches with the
-      // new sandbox. Current behavior: returns the stale cached handle with the
-      // old name — so this assertion will FAIL until Phase 2 is implemented.
       const sandbox2 = await client.getSandbox(sandbox1.claimName);
       expect(sandbox2.sandboxName).toBe("sandbox-changed");
     });
@@ -1200,5 +1215,111 @@ describe("SandboxClient (registry)", () => {
       const sandbox = await client.createSandbox("tpl");
       expect(sandbox.sandboxName).toBe("sandbox-relisted");
     }, 5_000);
+  });
+
+  // ===== initial GET 404 → immediate SandboxNotFoundError, no watch =====
+
+  describe("resolveSandboxName() 404 on initial GET (#10)", () => {
+    it("throws SandboxNotFoundError immediately and never calls watch on 404", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // Initial GET for claim returns 404
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      const { SandboxNotFoundError } = await import("../exceptions.js");
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("tpl")).rejects.toBeInstanceOf(
+        SandboxNotFoundError,
+      );
+      // Watch must NEVER be called — 404 must fail immediately
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    }, 3_000);
+  });
+
+  // ===== non-404 K8s errors are not collapsed into SandboxNotFoundError =====
+
+  describe("getSandbox() non-404 error discrimination (#7)", () => {
+    it("throws SandboxError (not SandboxNotFoundError) on non-404 error during cache miss", async () => {
+      const k8sErr = Object.assign(new Error("Service Unavailable"), {
+        code: 503,
+      });
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(k8sErr);
+
+      const { SandboxError, SandboxNotFoundError } = await import(
+        "../exceptions.js"
+      );
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const err = await client
+        .getSandbox("some-claim")
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SandboxError);
+      expect(err).not.toBeInstanceOf(SandboxNotFoundError);
+      // Original error preserved as cause
+      expect((err as SandboxError).cause).toBe(k8sErr);
+    });
+
+    it("throws SandboxError (not SandboxNotFoundError) on non-404 error during cache hit", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-non404");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+
+      // Cache-hit validation returns non-404 error
+      const k8sErr = Object.assign(new Error("Internal Server Error"), {
+        code: 500,
+      });
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(k8sErr);
+
+      const { SandboxError, SandboxNotFoundError } = await import(
+        "../exceptions.js"
+      );
+      const err = await client
+        .getSandbox(sandbox1.claimName)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SandboxError);
+      expect(err).not.toBeInstanceOf(SandboxNotFoundError);
+      expect((err as SandboxError).cause).toBe(k8sErr);
+      // Handle evicted from registry
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
+  });
+
+  // ===== resolveSandboxName budget exhaustion =====
+
+  describe("waitForSandboxReady() budget exhaustion (#19)", () => {
+    it("throws SandboxTimeoutError when resolveSandboxName consumes entire budget", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // Initial GET: claim not yet resolved
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+      // Watch: delays longer than the entire sandboxReadyTimeout before resolving
+      mockWatchFn.mockImplementationOnce(
+        (
+          _p: string,
+          _q: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          setTimeout(
+            () =>
+              callback("MODIFIED", {
+                status: { sandbox: { name: "sb-late" } },
+              }),
+            200, // longer than sandboxReadyTimeout of 50 ms
+          );
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const { SandboxTimeoutError } = await import("../exceptions.js");
+      const client = new SandboxClient({
+        apiUrl: "http://api:8080",
+        sandboxReadyTimeout: 0.05, // 50 ms
+      });
+
+      await expect(client.createSandbox("tpl")).rejects.toBeInstanceOf(
+        SandboxTimeoutError,
+      );
+    }, 3_000);
   });
 });

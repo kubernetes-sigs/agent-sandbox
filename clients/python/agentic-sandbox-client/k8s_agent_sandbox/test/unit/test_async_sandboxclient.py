@@ -28,7 +28,7 @@ pytest.importorskip("kubernetes_asyncio")
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
-from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxReconcilerError
+from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxClaimFailedError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
@@ -99,9 +99,9 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
             mock_delete.assert_called_once()
 
-    async def test_create_sandbox_retry_on_reconciler_error(self):
+    async def test_create_sandbox_retry_on_claim_failed_error(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
-            side_effect=[SandboxReconcilerError("Failed"), "resolved-id"]
+            side_effect=[SandboxClaimFailedError("Failed"), "resolved-id"]
         )
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -116,9 +116,26 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
             sandbox = await self.client.create_sandbox("test-template", "test-namespace")
 
-            self.assertEqual(mock_create.call_count, 2)
-            mock_delete.assert_called_once()
+            mock_create.assert_called_once()
+            self.assertEqual(self.mock_k8s_helper.resolve_sandbox_name.call_count, 2)
+            mock_delete.assert_not_called()
             self.assertEqual(sandbox, mock_sandbox_instance)
+
+    async def test_create_sandbox_claim_failed_error_fails_after_3_attempts(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            side_effect=SandboxClaimFailedError("Mocked claim failed error")
+        )
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+
+            with self.assertRaises(SandboxClaimFailedError):
+                await self.client.create_sandbox("test-template", "test-namespace")
+
+            mock_create.assert_called_once()
+            self.assertEqual(self.mock_k8s_helper.resolve_sandbox_name.call_count, 3)
+            mock_delete.assert_called_once()
 
     async def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()

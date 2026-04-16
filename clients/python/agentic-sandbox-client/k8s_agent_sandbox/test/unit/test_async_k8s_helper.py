@@ -20,7 +20,7 @@ import pytest
 pytest.importorskip("kubernetes_asyncio")
 
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
-from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError, SandboxReconcilerError
+from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError, SandboxClaimFailedError
 
 
 class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
@@ -163,7 +163,7 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         mock_watch.stream = mock_stream
         mock_watch_class.return_value = mock_watch
         
-        with self.assertRaises(SandboxReconcilerError) as context:
+        with self.assertRaises(SandboxClaimFailedError) as context:
             await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
             
         self.assertIn("SandboxClaim failed with reason 'ReconcilerError': Reconciliation failed", str(context.exception))

@@ -19,7 +19,7 @@ import sys
 import subprocess
 from unittest.mock import MagicMock
 from pydantic import ValidationError
-from k8s_agent_sandbox import SandboxClient, SandboxTemplateNotFoundError
+from k8s_agent_sandbox import SandboxClient, SandboxTemplateNotFoundError, SandboxClaimFailedError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -185,6 +185,30 @@ def test_explicit_close_connection_and_persistence(client: SandboxClient, templa
     reattached_sandbox.terminate()
     print("--- Explicit Close Connection Test Passed ---")
 
+def test_claim_failed_error_retry(client: SandboxClient, template_name: str, namespace: str):
+    print("\n--- Testing Claim Failed Error Retry ---")
+    
+    original_resolve = client.k8s_helper.resolve_sandbox_name
+    
+    call_count = 0
+    def mock_resolve(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise SandboxClaimFailedError("Mocked claim failed error")
+
+    client.k8s_helper.resolve_sandbox_name = mock_resolve
+    
+    try:
+        client.create_sandbox(template_name, namespace=namespace)
+        raise AssertionError("Expected SandboxClaimFailedError was not raised")
+    except SandboxClaimFailedError as e:
+        print(f"Caught expected SandboxClaimFailedError: {e}")
+        assert call_count == 3, f"Expected 3 retries, got {call_count}"
+    finally:
+        client.k8s_helper.resolve_sandbox_name = original_resolve
+        
+    print("--- Claim Failed Error Retry Test Passed! ---")
+
 def test_creation_get_and_list_sandboxes(client: SandboxClient, template_name: str, namespace: str) -> tuple[Sandbox, Sandbox]:
     print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
     sandbox = client.create_sandbox(template_name, namespace=namespace)
@@ -298,6 +322,9 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
 
     # Test Sandbox deletion at Kubernetes cluster
     test_termination_and_deletion(client, sandbox, sandbox2, namespace)
+    
+    # Test reconciliation error failures
+    test_claim_failed_error_retry(client, template_name, namespace)
     
 
 def test_client_cleanup_flag(client: SandboxClient, template_name: str, namespace: str, connection_config):

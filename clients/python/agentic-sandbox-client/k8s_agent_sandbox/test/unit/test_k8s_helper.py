@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.k8s_helper import K8sHelper
-from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError, SandboxReconcilerError
+from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError, SandboxClaimFailedError
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
@@ -171,7 +171,7 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
 
         helper = K8sHelper()
 
-        with self.assertRaises(SandboxReconcilerError) as context:
+        with self.assertRaises(SandboxClaimFailedError) as context:
             helper.resolve_sandbox_name("test-claim", "default", timeout=5)
 
         self.assertIn("SandboxClaim failed with reason 'ReconcilerError': Missing warm pods", str(context.exception))

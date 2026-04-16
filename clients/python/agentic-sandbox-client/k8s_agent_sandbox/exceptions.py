@@ -30,7 +30,7 @@ class SandboxNotFoundError(SandboxError):
 class SandboxTemplateNotFoundError(SandboxError):
     """Raised when the requested sandbox template does not exist."""
 
-class SandboxReconcilerError(SandboxError):
+class SandboxClaimFailedError(SandboxError):
     """Raised when the sandbox claim reconciliation fails."""
 
 class SandboxPortForwardError(SandboxError):

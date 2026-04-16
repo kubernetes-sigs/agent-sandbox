@@ -31,7 +31,7 @@ from k8s_agent_sandbox.constants import POD_NAME_ANNOTATION
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
-    SandboxReconcilerError,
+    SandboxClaimFailedError,
 )
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 
@@ -85,11 +85,11 @@ class TestSandboxClient(unittest.TestCase):
 
     @patch('time.sleep')
     @patch('uuid.uuid4')
-    def test_create_sandbox_retry_on_reconciler_error(self, mock_uuid, mock_sleep):
+    def test_create_sandbox_retry_on_claim_failed_error(self, mock_uuid, mock_sleep):
         mock_uuid.return_value.hex = '1234abcd'
         
         self.mock_k8s_helper.resolve_sandbox_name.side_effect = [
-            SandboxReconcilerError("Failed"),
+            SandboxClaimFailedError("Failed"),
             "resolved-id"
         ]
         
@@ -101,9 +101,29 @@ class TestSandboxClient(unittest.TestCase):
             
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
             
-            self.assertEqual(mock_create_claim.call_count, 2)
-            self.assertEqual(self.mock_k8s_helper.delete_sandbox_claim.call_count, 1)
+            # Claim is created only once, outside the retry loop
+            mock_create_claim.assert_called_once()
+            # resolve_sandbox_name is called twice (1 fail, 1 success)
+            self.assertEqual(self.mock_k8s_helper.resolve_sandbox_name.call_count, 2)
+            # delete is not called on successful retry
+            self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
             self.assertEqual(sandbox, mock_sandbox_instance)
+
+    @patch('time.sleep')
+    @patch('uuid.uuid4')
+    def test_create_sandbox_claim_failed_error_fails_after_3_attempts(self, mock_uuid, mock_sleep):
+        mock_uuid.return_value.hex = '1234abcd'
+        
+        # Mock resolve_sandbox_name to always fail with SandboxClaimFailedError
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = SandboxClaimFailedError("Mocked claim failed error")
+        
+        with self.assertRaises(SandboxClaimFailedError):
+            self.client.create_sandbox("test-template", "test-namespace")
+            
+        # Verify it was called 3 times before failing
+        self.assertEqual(self.mock_k8s_helper.resolve_sandbox_name.call_count, 3)
+        # Verify the claim was cleaned up on final failure
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
 
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()

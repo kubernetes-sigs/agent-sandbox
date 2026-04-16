@@ -31,7 +31,7 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
 )
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxReconcilerError
+from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxClaimFailedError
 
 
 class AsyncK8sHelper:
@@ -147,7 +147,7 @@ class AsyncK8sHelper:
                                         f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
                                     )
                                 elif reason == "ReconcilerError":
-                                    raise SandboxReconcilerError(
+                                    raise SandboxClaimFailedError(
                                         f"SandboxClaim failed with reason '{reason}': {cond.get('message', 'Unknown error')}"
                                     )
 

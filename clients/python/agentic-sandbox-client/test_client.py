@@ -320,12 +320,11 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     # Test persistence of Sandbox in Kubernetes cluster after client side disconnection
     test_explicit_close_connection_and_persistence(client, template_name, namespace)
 
-    # Test Sandbox deletion at Kubernetes cluster
-    test_termination_and_deletion(client, sandbox, sandbox2, namespace)
-    
     # Test reconciliation error failures
     test_claim_failed_error_retry(client, template_name, namespace)
     
+    # Test Sandbox deletion at Kubernetes cluster
+    test_termination_and_deletion(client, sandbox, sandbox2, namespace)
 
 def test_client_cleanup_flag(client: SandboxClient, template_name: str, namespace: str, connection_config):
     print("\n--- Testing SandboxClient cleanup flag (Subprocess Simulation) ---")

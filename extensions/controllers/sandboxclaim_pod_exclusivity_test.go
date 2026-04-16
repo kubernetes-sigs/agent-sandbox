@@ -137,36 +137,45 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 		require.NoError(t, err, "reconcile %s", cl.Name)
 	}
 
-	// Collect all sandboxes owned by claims
+	// Collect all sandboxes and build sandbox → []owning claims
 	var allSandboxes sandboxv1alpha1.SandboxList
 	require.NoError(t, fc.List(ctx, &allSandboxes, client.InNamespace("default")))
 
-	sandboxOwners := make(map[string]string) // sandbox name → claim name
+	sandboxToOwners := make(map[string][]string) // sandbox name → [claim names]
 	for _, sb := range allSandboxes.Items {
 		ref := metav1.GetControllerOf(&sb)
 		if ref != nil && ref.Kind == "SandboxClaim" {
-			sandboxOwners[sb.Name] = ref.Name
+			sandboxToOwners[sb.Name] = append(sandboxToOwners[sb.Name], ref.Name)
 		}
 	}
 
-	// Each warm pool sandbox must be owned by at most one claim
+	// Each sandbox must be owned by at most one claim
 	warmPoolNames := map[string]bool{"pool-sb-0": true, "pool-sb-1": true}
-	adoptedBy := make(map[string]string) // warm pool sandbox → claim
-	for sbName, claimName := range sandboxOwners {
+	warmAdoptions := 0
+	for sbName, owners := range sandboxToOwners {
+		require.NotEmpty(t, owners,
+			"sandbox %s has no claim owner — warm pool sandboxes should be adopted",
+			sbName)
 		if warmPoolNames[sbName] {
-			if existing, ok := adoptedBy[sbName]; ok {
-				t.Errorf("warm pool sandbox %s adopted by both %s and %s — "+
-					"each sandbox must be adopted by at most one claim (#127)",
-					sbName, existing, claimName)
-			}
-			adoptedBy[sbName] = claimName
+			warmAdoptions++
 		}
 	}
 
-	t.Logf("Warm pool adoptions: %v", adoptedBy)
-	t.Logf("Total claim-owned sandboxes: %d (expected 3: 2 warm + 1 cold)", len(sandboxOwners))
+	// Each claim must own exactly one sandbox
+	claimToSandbox := make(map[string][]string) // claim name → [sandbox names]
+	for sbName, owners := range sandboxToOwners {
+		for _, owner := range owners {
+			claimToSandbox[owner] = append(claimToSandbox[owner], sbName)
+		}
+	}
+	for _, cl := range claims {
+		owned := claimToSandbox[cl.Name]
+		require.Len(t, owned, 1,
+			"claim %s owns %v — each claim must own exactly one sandbox",
+			cl.Name, owned)
+	}
 
-	// Verify totals: 2 warm adoptions + 1 cold start = 3 sandboxes
-	require.Len(t, sandboxOwners, 3, "each claim should own exactly one sandbox")
-	require.Len(t, adoptedBy, 2, "both warm pool sandboxes should be adopted")
+	t.Logf("Sandbox assignments: %v", sandboxToOwners)
+
+	require.Equal(t, 2, warmAdoptions, "both warm pool sandboxes should be adopted")
 }

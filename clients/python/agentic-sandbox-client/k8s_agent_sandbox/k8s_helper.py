@@ -16,20 +16,18 @@ import logging
 import time
 from typing import List
 from kubernetes import client, config, watch
-from .exceptions import SandboxMetadataError, SandboxNotFoundError
-
-# Constants for API Groups and Resources
-CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
-CLAIM_API_VERSION = "v1alpha1"
-CLAIM_PLURAL_NAME = "sandboxclaims"
-
-SANDBOX_API_GROUP = "agents.x-k8s.io"
-SANDBOX_API_VERSION = "v1alpha1"
-SANDBOX_PLURAL_NAME = "sandboxes"
-
-GATEWAY_API_GROUP = "gateway.networking.k8s.io"
-GATEWAY_API_VERSION = "v1"
-GATEWAY_PLURAL = "gateways"
+from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .constants import (
+    CLAIM_API_GROUP,
+    CLAIM_API_VERSION,
+    CLAIM_PLURAL_NAME,
+    GATEWAY_API_GROUP,
+    GATEWAY_API_VERSION,
+    GATEWAY_PLURAL,
+    SANDBOX_API_GROUP,
+    SANDBOX_API_VERSION,
+    SANDBOX_PLURAL_NAME,
+)
 
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
@@ -106,8 +104,20 @@ class K8sHelper:
                         f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     claim_object = event['object']
-                    sandbox_status = claim_object.get(
-                        'status', {}).get('sandbox', {})
+                    status = claim_object.get('status') or {}
+                    
+                    for cond in status.get('conditions', []):
+                        if (
+                            cond.get('type') == 'Ready'
+                            and cond.get('status') == 'False'
+                            and cond.get('reason') == 'TemplateNotFound'
+                        ):
+                            w.stop()
+                            raise SandboxTemplateNotFoundError(
+                                f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                            )
+
+                    sandbox_status = status.get('sandbox', {})
                     # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
                     name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
                     if name:
@@ -138,7 +148,7 @@ class K8sHelper:
                     continue
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     sandbox_object = event['object']
-                    status = sandbox_object.get('status', {})
+                    status = sandbox_object.get('status') or {}
                     conditions = status.get('conditions', [])
                     for cond in conditions:
                         if cond.get('type') == 'Ready' and cond.get('status') == 'True':
@@ -221,7 +231,7 @@ class K8sHelper:
                     continue
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     gateway_object = event['object']
-                    status = gateway_object.get('status', {})
+                    status = gateway_object.get('status') or {}
                     addresses = status.get('addresses', [])
                     if addresses:
                         ip_address = addresses[0].get('value')

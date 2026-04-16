@@ -1,5 +1,5 @@
 # Compile our golang binaries in a separate stage to keep the final image small.
-FROM golang:1.26.1 AS builder
+FROM golang:1.26.2 AS builder
 
 WORKDIR /src
 

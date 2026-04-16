@@ -25,7 +25,7 @@ The client operates in three modes:
 - The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
 - The **Sandbox Router** deployed in the target namespace (`sandbox-router-svc`).
 - A `SandboxTemplate` created in the target namespace.
-- Go 1.26.1+.
+- Go 1.26+.
 
 ## Installation
 

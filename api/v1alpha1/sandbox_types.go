@@ -37,6 +37,10 @@ const (
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
 	// SandboxPodTemplateHashLabel is the label used to track the pod template hash.
 	SandboxPodTemplateHashLabel = "agents.x-k8s.io/sandbox-pod-template-hash"
+	// SandboxPropagatedLabelsAnnotation is the annotation used to track the labels explicitly propagated from sandbox spec to pod.
+	SandboxPropagatedLabelsAnnotation = "agents.x-k8s.io/propagated-labels"
+	// SandboxPropagatedAnnotationsAnnotation is the annotation used to track the annotations explicitly propagated from sandbox spec to pod.
+	SandboxPropagatedAnnotationsAnnotation = "agents.x-k8s.io/propagated-annotations"
 )
 
 type PodMetadata struct {
@@ -157,8 +161,7 @@ type Lifecycle struct {
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
 	// serviceFQDN that is valid for default cluster settings
-	// Limitation: Hardcoded to the domain .cluster.local
-	// e.g. sandbox-example.default.svc.cluster.local
+	// The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag.
 	// +optional
 	ServiceFQDN string `json:"serviceFQDN,omitempty"`
 

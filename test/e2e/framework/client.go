@@ -62,6 +62,11 @@ func (cl *ClusterClient) WatchSet() *WatchSet {
 	return cl.watchSet
 }
 
+// DynamicClient returns the dynamic client backing the test framework.
+func (cl *ClusterClient) DynamicClient() dynamic.Interface {
+	return cl.dynamicClient
+}
+
 // List retrieves a list of objects matching the provided options.
 func (cl *ClusterClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	cl.Helper()

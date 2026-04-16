@@ -127,8 +127,13 @@ class Sandbox:
         """
         return not self._is_closed and self._commands is not None and self._files is not None
 
-    def _close_connection(self):
-        """Closes the client-side connection and disables execution engines."""
+    def close_connection(self):
+        """
+        Closes the client-side connection and disables execution engines locally,
+        but leaves the remote Kubernetes Sandbox infrastructure running.
+        
+        Use this to free up local resources (like port-forwards or HTTP sessions).
+        """
         if self._is_closed:
             return
         # Close client side connection
@@ -151,7 +156,7 @@ class Sandbox:
     def terminate(self):
         """Permanent deletion of all server side infrastructure and client side connection."""
         # Close the client side connection and trace manager lifecycle
-        self._close_connection()
+        self.close_connection()
         
         # Delete this Sandbox
         self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)

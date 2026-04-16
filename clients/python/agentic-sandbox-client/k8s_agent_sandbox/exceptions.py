@@ -27,6 +27,10 @@ class SandboxNotFoundError(SandboxError):
     """Raised when the sandbox or sandbox claim cannot be found or was deleted."""
 
 
+class SandboxTemplateNotFoundError(SandboxError):
+    """Raised when the requested sandbox template does not exist."""
+
+
 class SandboxPortForwardError(SandboxError):
     """Raised when the port-forward process crashes."""
 

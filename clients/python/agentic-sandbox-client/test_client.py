@@ -15,9 +15,11 @@
 import argparse
 import time
 import logging
+import sys
+import subprocess
 from unittest.mock import MagicMock
 from pydantic import ValidationError
-from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -30,15 +32,8 @@ from k8s_agent_sandbox.sandbox import Sandbox
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
  
-def run_sandbox_tests(sandbox: Sandbox):
-    """Tests methods on the Sandbox object (execution, files, etc)."""
-    
-    print("\n--- Testing Sandbox Status ---")
-    status, message = sandbox.status()
-    print(f"Status: {status}, Message: '{message}'")
-    assert status == "SandboxReady", f"Expected 'SandboxReady', got '{status}'"
-    print("--- Sandbox Status Test Passed! ---")
-    
+def test_command_execution(sandbox: Sandbox):
+    """Tests command execution and pod introspection."""
     print("\n--- Testing Command Execution ---")
     command_to_run = "echo 'Hello from the sandbox shruti!'"
     print(f"Executing command: '{command_to_run}'")
@@ -54,7 +49,21 @@ def run_sandbox_tests(sandbox: Sandbox):
 
     print("\n--- Command Execution Test Passed! ---")
 
-    # Test file operations
+    # Test introspection commands
+    print("\n--- Testing Pod Introspection ---")
+
+    print("\n--- Listing files in /app ---")
+    list_files_result = sandbox.commands.run("ls -la /app")
+    print(list_files_result.stdout)
+
+    print("\n--- Printing environment variables ---")
+    env_result = sandbox.commands.run("env")
+    print(env_result.stdout)
+
+    print("--- Introspection Tests Finished ---")
+
+def test_file_operations(sandbox: Sandbox):
+    """Tests file write, read, list, and existence checks."""
     print("\n--- Testing File Operations ---")
     file_content = "This is a test file."
     file_path = "test.txt"
@@ -90,19 +99,6 @@ def run_sandbox_tests(sandbox: Sandbox):
     file_entry = next(f for f in files if f.name == file_path)
     assert file_entry.size == len(file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
     print("--- List and Exists Test Passed! ---")
-
-    # Test introspection commands
-    print("\n--- Testing Pod Introspection ---")
-
-    print("\n--- Listing files in /app ---")
-    list_files_result = sandbox.commands.run("ls -la /app")
-    print(list_files_result.stdout)
-
-    print("\n--- Printing environment variables ---")
-    env_result = sandbox.commands.run("env")
-    print(env_result.stdout)
-
-    print("--- Introspection Tests Finished ---")
     
     print("\n--- Testing Pydantic Validation ---")
     
@@ -141,8 +137,55 @@ def run_sandbox_tests(sandbox: Sandbox):
     sandbox.connector.send_request = original_send_request
     print("--- Pydantic Validation Tests Passed ---")
 
+def run_sandbox_tests(sandbox: Sandbox):
+    """Tests methods on the Sandbox object (execution, files, etc)."""
+    
+    print("\n--- Testing Sandbox Status ---")
+    status, message = sandbox.status()
+    print(f"Status: {status}, Message: '{message}'")
+    assert status == "SandboxReady", f"Expected 'SandboxReady', got '{status}'"
+    print("--- Sandbox Status Test Passed! ---")
+    
+    test_command_execution(sandbox)
+    test_file_operations(sandbox)
 
-def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
+def test_wrong_template_name(client: SandboxClient, namespace: str):
+    print("\n--- Testing Wrong Template Name ---")
+    wrong_template = "this-template-does-not-exist-123"
+    print(f"Attempting to create sandbox with non-existent template '{wrong_template}'...")
+    try:
+        client.create_sandbox(wrong_template, namespace=namespace)
+        raise AssertionError("Expected SandboxTemplateNotFoundError was not raised")
+    except SandboxTemplateNotFoundError as e:
+        print(f"Caught expected SandboxTemplateNotFoundError: {e}")
+    print("--- Wrong Template Name Test Passed! ---")
+
+
+def test_explicit_close_connection_and_persistence(client: SandboxClient, template_name: str, namespace: str):
+    print("\n--- Testing Explicit Disconnect and Persistence ---")
+    persist_sandbox = client.create_sandbox(template_name, namespace=namespace)
+    persist_claim = persist_sandbox.claim_name
+    
+    print(f"Explicitly closing connection for sandbox '{persist_claim}'...")
+    persist_sandbox.close_connection()
+    assert not persist_sandbox.is_active, "Sandbox should be inactive after close_connection()"
+    
+    print("Checking active sandboxes list...")
+    active_list = client.list_active_sandboxes()
+    assert (namespace, persist_claim) not in active_list, "Sandbox with closed connection should be removed from active list"
+    
+    print(f"Re-attaching to sandbox '{persist_claim}' with closed connection...")
+    reattached_sandbox = client.get_sandbox(persist_claim, namespace=namespace)
+    assert reattached_sandbox.is_active, "Reattached sandbox should be active"
+    assert (namespace, persist_claim) in client.list_active_sandboxes(), "Restored sandbox should be back in active list"
+    assert persist_sandbox is not reattached_sandbox, "Expected different sandbox objects after close_connection and re-attach"
+    assert persist_sandbox.connector.session is not reattached_sandbox.connector.session, "Expected different requests.Session objects after close_connection and re-attach"
+    
+    print("Cleaning up persisted sandbox...")
+    reattached_sandbox.terminate()
+    print("--- Explicit Close Connection Test Passed ---")
+
+def test_creation_get_and_list_sandboxes(client: SandboxClient, template_name: str, namespace: str) -> tuple[Sandbox, Sandbox]:
     print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
     sandbox = client.create_sandbox(template_name, namespace=namespace)
     print(f"Sandbox created with claim name: {sandbox.claim_name}")
@@ -171,16 +214,14 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     assert reattached_result.exit_code == 0
     assert reattached_result.stdout.strip() == "Re-attached"
     print("\n--- get_sandbox Test Passed ---")
+    
+    return sandbox, sandbox2
 
-    # Run Sandbox Tests
-    run_sandbox_tests(sandbox)
-
+def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandbox2: Sandbox, namespace: str):
     print("\n--- Testing Termination and Get ---")
     print(f"Terminating sandbox {sandbox.claim_name}...")
     sandbox.terminate()
-    
-    client.delete_sandbox(sandbox.claim_name, namespace=namespace)
-    
+
     print(f"Attempting to get terminated sandbox {sandbox.claim_name}...")
     # Wait for K8s to fully delete the resource
     start_time = time.monotonic()
@@ -242,6 +283,94 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
             break
     print("--- Sandbox 2 Retrieval Failure Verified ---")
 
+def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
+    # Test Create, Get and List sandboxes
+    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, template_name, namespace)
+
+    # Test wrong template name
+    test_wrong_template_name(client, namespace)
+
+    # Run Sandbox Tests
+    run_sandbox_tests(sandbox)
+
+    # Test persistence of Sandbox in Kubernetes cluster after client side disconnection
+    test_explicit_close_connection_and_persistence(client, template_name, namespace)
+
+    # Test Sandbox deletion at Kubernetes cluster
+    test_termination_and_deletion(client, sandbox, sandbox2, namespace)
+    
+
+def test_client_cleanup_flag(client: SandboxClient, template_name: str, namespace: str, connection_config):
+    print("\n--- Testing SandboxClient cleanup flag (Subprocess Simulation) ---")
+    
+    # Reconstruct the connection config dynamically for the subprocess
+    if isinstance(connection_config, SandboxGatewayConnectionConfig):
+        conn_code = f"SandboxGatewayConnectionConfig(gateway_name='{connection_config.gateway_name}', gateway_namespace='{connection_config.gateway_namespace}', server_port={connection_config.server_port})"
+    elif isinstance(connection_config, SandboxDirectConnectionConfig):
+        conn_code = f"SandboxDirectConnectionConfig(api_url='{connection_config.api_url}', server_port={connection_config.server_port})"
+    else:
+        conn_code = f"SandboxLocalTunnelConnectionConfig(server_port={connection_config.server_port})"
+
+    script = f"""
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig, SandboxDirectConnectionConfig, SandboxLocalTunnelConnectionConfig
+import sys
+
+cleanup_flag = sys.argv[1] == 'True'
+conn_config = {conn_code}
+client = SandboxClient(connection_config=conn_config, cleanup=cleanup_flag)
+
+sb = client.create_sandbox('{template_name}', namespace='{namespace}')
+print(f"CLAIM_NAME:{{sb.claim_name}}")
+"""
+    
+    print("Simulating script exit with cleanup=True...")
+    res_true = subprocess.run([sys.executable, "-c", script, "True"], capture_output=True, text=True)
+    if res_true.returncode != 0:
+        raise RuntimeError(f"Subprocess failed:\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
+        
+    claim_true = next((line.split("CLAIM_NAME:")[1].strip() for line in res_true.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
+    if not claim_true:
+        raise RuntimeError(f"Could not parse claim name.\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
+        
+    print(f"Created sandbox '{claim_true}' in subprocess. Verifying deletion...")
+    
+    # Verify the claim was successfully deleted by the OS closing the subprocess
+    start_time = time.monotonic()
+    deleted = False
+    while time.monotonic() - start_time < 60:
+        try:
+            client.get_sandbox(claim_true, namespace=namespace)
+            time.sleep(2)
+        except Exception as e:
+            if "not found" in str(e).lower():
+                deleted = True
+                break
+            time.sleep(2)
+            
+    if not deleted:
+        raise AssertionError(f"Sandbox {claim_true} should have been deleted by atexit!")
+    print("Verified: Sandbox was successfully deleted on script exit.")
+
+    print("Simulating script exit with cleanup=False...")
+    res_false = subprocess.run([sys.executable, "-c", script, "False"], capture_output=True, text=True)
+    if res_false.returncode != 0:
+        raise RuntimeError(f"Subprocess failed:\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
+        
+    claim_false = next((line.split("CLAIM_NAME:")[1].strip() for line in res_false.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
+    if not claim_false:
+        raise RuntimeError(f"Could not parse claim name.\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
+        
+    print(f"Created sandbox '{claim_false}' in subprocess. Verifying persistence...")
+    
+    # Verify the claim was NOT deleted by verifying we can cleanly reconnect to it
+    sb_false = client.get_sandbox(claim_false, namespace=namespace)
+    assert sb_false.is_active, f"Sandbox {claim_false} should still be active!"
+    print("Verified: Sandbox persisted after script exit.")
+    
+    # Clean up the persisted sandbox explicitly
+    sb_false.terminate()
+    print("--- SandboxClient cleanup flag Test Passed ---")
 
 def main(template_name: str, gateway_name: str | None, api_url: str | None, namespace: str,
                server_port: int, enable_tracing: bool):
@@ -282,8 +411,11 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
 
     client = SandboxClient(
         connection_config=connection_config,
-        tracer_config=tracer_config
+        tracer_config=tracer_config,
+        cleanup=True
     )
+    
+    test_client_cleanup_flag(client, template_name, namespace, connection_config)
 
     try:
         run_client_tests(client, template_name, namespace)

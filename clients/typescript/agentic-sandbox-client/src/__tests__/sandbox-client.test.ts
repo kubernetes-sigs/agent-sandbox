@@ -379,6 +379,45 @@ describe("SandboxClient (registry)", () => {
       expect(active).toHaveLength(1);
       expect(active[0].claimName).toBe(sandbox.claimName);
     });
+
+    it("propagates claim deletion failure during rollback instead of swallowing it", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+
+      // First watch: claim resolves sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", { status: { sandbox: { name: "s-rb" } } });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Second watch: error — triggers rollback
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _callback: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          done(new Error("watch failed"));
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Rollback deletion also fails
+      mockDeleteNamespacedCustomObject.mockRejectedValueOnce(
+        new Error("K8s API unavailable"),
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("tpl")).rejects.toThrow(
+        "K8s API unavailable",
+      );
+    });
   });
 
   // ===== getSandbox =====
@@ -916,6 +955,15 @@ describe("SandboxClient (registry)", () => {
       }));
       expect(() => new SandboxClient()).toThrow(SandboxError);
     });
+
+    it("throws SandboxError when only cluster is localhost:8080 (loadFromDefault fallback)", () => {
+      MockKubeConfig.mockImplementationOnce(() => ({
+        loadFromDefault: vi.fn(),
+        clusters: [{ name: "in-cluster", server: "http://localhost:8080" }],
+        makeApiClient: vi.fn(),
+      }));
+      expect(() => new SandboxClient()).toThrow(SandboxError);
+    });
   });
 
   // ===== enableAutoCleanup idempotency =====
@@ -974,5 +1022,83 @@ describe("SandboxClient (registry)", () => {
       // Registry evicted — no active sandboxes remain
       expect(client.listActiveSandboxes()).toHaveLength(0);
     });
+
+    it("evicts cached handle when sandboxRef name has changed since creation", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-original");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+
+      // Cache-hit validation returns claim with a *different* sandbox name
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: sandbox1.claimName },
+        status: {
+          sandbox: { name: "sandbox-changed" },
+          sandboxRef: { name: "sandbox-changed", namespace: "default" },
+        },
+      });
+
+      // Set up re-attach watch flow for the new sandbox name
+      mockSandboxReadyFlow("sandbox-changed");
+
+      // Expected: getSandbox detects the name change and re-attaches with the
+      // new sandbox. Current behavior: returns the stale cached handle with the
+      // old name — so this assertion will FAIL until Phase 2 is implemented.
+      const sandbox2 = await client.getSandbox(sandbox1.claimName);
+      expect(sandbox2.sandboxName).toBe("sandbox-changed");
+    });
+  });
+
+  // ===== watch done(null) triggers re-list and re-watch =====
+
+  describe("watch done(null) triggers re-list and re-watch", () => {
+    it("createSandbox succeeds after done(null) if re-list finds resolved sandbox", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+
+      // Initial GET for resolveSandboxName: not yet resolved
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      // First watch: done(null) immediately — clean close with no events
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _cb: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          Promise.resolve().then(() => done(null));
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      // Re-list GET after done(null): claim is now resolved
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: "sandbox-relisted", annotations: {} },
+        status: {
+          sandbox: { name: "sandbox-relisted" },
+          conditions: [{ type: "Ready", status: "True" }],
+        },
+      });
+
+      // Second watch pass (watchForSandboxReady): sandbox already ready via GET
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: "sandbox-relisted", annotations: {} },
+        status: {
+          sandbox: { name: "sandbox-relisted" },
+          conditions: [{ type: "Ready", status: "True" }],
+        },
+      });
+
+      const client = new SandboxClient({
+        apiUrl: "http://api:8080",
+        sandboxReadyTimeout: 2,
+      });
+
+      // Expected: createSandbox eventually succeeds by re-listing after done(null).
+      // Current behavior: throws SandboxNotReadyError immediately on done(null).
+      const sandbox = await client.createSandbox("tpl");
+      expect(sandbox.sandboxName).toBe("sandbox-relisted");
+    }, 5_000);
   });
 });

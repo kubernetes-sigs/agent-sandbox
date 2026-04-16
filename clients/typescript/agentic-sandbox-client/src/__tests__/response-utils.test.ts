@@ -99,6 +99,26 @@ describe("readBoundedBuffer", () => {
       readBoundedBuffer(resp, 10, "download"),
     ).rejects.toBeInstanceOf(SandboxResponseTooLargeError);
   });
+
+  it("preserves binary data when response.body is null (non-streaming fallback)", async () => {
+    // Bytes that are invalid UTF-8 sequences — text() + TextEncoder round-trip corrupts them
+    const binaryBytes = new Uint8Array([0xff, 0xfe, 0x00, 0x80, 0xd8, 0x00]);
+
+    const resp = new Response(Buffer.from(binaryBytes), {
+      status: 200,
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+
+    // Simulate a non-streaming environment: response.body is null
+    Object.defineProperty(resp, "body", { value: null, configurable: true });
+
+    // Expected: readBoundedBuffer preserves the exact bytes.
+    // Current behavior: fallback path calls response.text() which interprets bytes as UTF-8,
+    // then re-encodes via TextEncoder — non-UTF-8 bytes are replaced by U+FFFD (0xEF 0xBF 0xBD).
+    const buf = await readBoundedBuffer(resp, 100, "download");
+    expect(buf).toBeInstanceOf(Buffer);
+    expect(Array.from(buf)).toEqual(Array.from(binaryBytes));
+  });
 });
 
 // --- parseExecutionResult ---

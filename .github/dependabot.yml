@@ -49,31 +49,55 @@ updates:
   directory: "/"
   schedule:
     interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
 
 - package-ecosystem: "docker"
   directory: "/clients/python/agentic-sandbox-client/sandbox-router"
   schedule:
     interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
 
 - package-ecosystem: "docker"
   directory: "/examples/chrome-sandbox"
   schedule:
     interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
 
 - package-ecosystem: "docker"
   directory: "/examples/gemini-cu-sandbox"
   schedule:
     interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
 
 - package-ecosystem: "docker"
   directory: "/examples/hello-world-sandbox"
   schedule:
     interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
 
 - package-ecosystem: "docker"
   directory: "/examples/python-runtime-sandbox"
   schedule:
     interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
 
 - package-ecosystem: "github-actions"
   directory: "/"

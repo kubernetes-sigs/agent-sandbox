@@ -181,7 +181,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var err error
 	sandboxDeleted := false
 
-	expired, requeueAfter := checkSandboxExpiry(sandbox)
+	expired, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
 
 	// Check if sandbox has expired
 	if expired {
@@ -922,18 +922,18 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 // checks if the sandbox has expired
 // returns true if expired, false otherwise
 // if not expired, also returns the duration to requeue after.
-func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
+func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox, now time.Time) (bool, time.Duration) {
 	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0
 	}
 
 	expiryTime := sandbox.Spec.ShutdownTime.Time
-	if time.Now().After(expiryTime) {
+	if !now.Before(expiryTime) {
 		return true, 0
 	}
 
 	// Calculate remaining time
-	remainingTime := time.Until(expiryTime)
+	remainingTime := expiryTime.Sub(now)
 
 	// TODO(barney-s): Do we need a inverse exponential backoff here ?
 	//requeueAfter := max(remainingTime/2, 2*time.Second)

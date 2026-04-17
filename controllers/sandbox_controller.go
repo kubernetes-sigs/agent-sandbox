@@ -897,7 +897,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 
 // checks if the sandbox has expired
 // returns true if expired, false otherwise
-// if not expired, also returns the duration to requeue after
+// if not expired, also returns the duration to requeue after.
 func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox, now time.Time) (bool, time.Duration) {
 	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0

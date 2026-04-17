@@ -32,4 +32,5 @@ export type {
   FileEntry,
   SandboxClientOptions,
   CreateSandboxOptions,
+  RequestFn,
 } from "./types.js";

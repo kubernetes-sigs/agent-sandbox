@@ -161,6 +161,18 @@ The current Roadmap can be found at [roadmap.md](roadmap.md).
 
 This is a community-driven effort, and we welcome collaboration!
 
+**Note on PR Velocity:** To maintain high velocity and keep our queues clean, this project uses stale PR management (30-day auto-stale and 15-day auto-close for inactive PRs) and allows maintainers to fast-track or take over approved community PRs. Please read our [Contributing Guidelines](CONTRIBUTING.md) for our full code review and PR policies.
+
+### AI-Assisted Code Reviews (Experimental)
+
+To help improve our review velocity, we are currently experimenting with AI-assisted code reviews, starting with GitHub Copilot as our automated first-pass reviewer.
+
+We actively welcome your feedback on the quality, relevance, and helpfulness of these automated reviews! As we iterate on this process, we also plan to evaluate and test different AI review tools to find the best fit for our project's workflow.
+
+**⚠️ Important Contribution Note:** If you receive a code suggestion from Copilot in your PR, please read our [Contributing Guidelines](CONTRIBUTING.md) carefully on how to apply it. Directly committing suggestions via the GitHub UI will break the Kubernetes CLA requirements.
+
+### Contact Us
+
 Learn how to engage with the Kubernetes community on the [community page](http://kubernetes.io/community/).
 
 You can reach the maintainers of this project at:

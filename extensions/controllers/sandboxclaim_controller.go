@@ -18,11 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -66,7 +68,7 @@ func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha
 	return extensionsv1alpha1.WarmPoolPolicyDefault
 }
 
-// SandboxClaimReconciler reconciles a SandboxClaim object
+// SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
@@ -82,7 +84,9 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -97,6 +101,13 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
+	}
+
+	// Unconditionally clean up legacy per-claim NetworkPolicies.
+	// We log the error but do not block the main reconcile flow so
+	// transient API issues don't prevent Sandbox adoption/creation.
+	if err := r.cleanupLegacyNetworkPolicy(ctx, claim); err != nil {
+		logger.Error(err, "Non-fatal error cleaning up legacy per-claim NetworkPolicy")
 	}
 
 	// Start Tracing Span
@@ -260,9 +271,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		}
 
 		if template != nil {
-			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-				logger.Error(npErr, "network policy reconcile failed after adoption (non-fatal)", "claim", claim.Name)
-			}
 
 			// Check if metadata needs update
 			var mergedMeta v1alpha1.PodMetadata
@@ -296,13 +304,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr != nil && !k8errors.IsNotFound(templateErr) {
 		return nil, templateErr
-	}
-	if templateErr != nil {
-		return nil, ErrTemplateNotFound
-	}
-
-	if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-		return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
 	}
 
 	return r.createSandbox(ctx, claim, template)
@@ -468,7 +469,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			return 1 // b ready, a not ready -> b first
 		}
-		return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
+		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
 	})
 
 	if len(candidates) == 0 {
@@ -489,7 +490,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	startIndex := int(hashValue % uint32(searchWindow))
 
 	// Iterate through the entire list starting from the hashed offset.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		currIndex := (startIndex + i) % n
 		adopted := candidates[currIndex]
 
@@ -569,7 +570,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	return nil, nil // Return nil, nil to fall completely to cold start
 }
 
-// isSandboxReady checks if a sandbox has Ready=True condition
+// isSandboxReady checks if a sandbox has Ready=True condition.
 func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 	for _, cond := range sb.Status.Conditions {
 		if cond.Type == string(v1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
@@ -655,9 +656,7 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		if templateMeta.Labels == nil {
 			templateMeta.Labels = make(map[string]string)
 		}
-		for k, v := range claimMeta.Labels {
-			templateMeta.Labels[k] = v
-		}
+		maps.Copy(templateMeta.Labels, claimMeta.Labels)
 	}
 
 	// Merge annotations
@@ -665,11 +664,36 @@ func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.Po
 		if templateMeta.Annotations == nil {
 			templateMeta.Annotations = make(map[string]string)
 		}
-		for k, v := range claimMeta.Annotations {
-			templateMeta.Annotations[k] = v
-		}
+		maps.Copy(templateMeta.Annotations, claimMeta.Annotations)
 	}
 
+	return nil
+}
+
+// injectEnvs is a helper to inject/override a set of environment variables in a container.
+func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1alpha1.EnvVar, policy extensionsv1alpha1.EnvVarsInjectionPolicy, claimName string) error {
+	for _, claimEnv := range envsToInject {
+		existingIdx := -1
+		for j, env := range container.Env {
+			if env.Name == claimEnv.Name {
+				existingIdx = j
+				break
+			}
+		}
+
+		if existingIdx >= 0 {
+			if policy != extensionsv1alpha1.EnvVarsInjectionPolicyOverrides {
+				err := fmt.Errorf("environment variable override is not allowed by the template policy for variable %q", claimEnv.Name)
+				logger.Error(err, "Environment variable override rejected", "claimName", claimName, "envName", claimEnv.Name)
+				return err
+			}
+			logger.Info("Overriding existing environment variable", "envName", claimEnv.Name, "container", container.Name)
+			container.Env[existingIdx] = corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value}
+		} else {
+			logger.Info("Appending new environment variable", "envName", claimEnv.Name, "container", container.Name)
+			container.Env = append(container.Env, corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value})
+		}
+	}
 	return nil
 }
 
@@ -710,6 +734,74 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
+	}
+
+	// Inject environment variables from the SandboxClaim
+	if len(claim.Spec.Env) > 0 {
+		if template.Spec.EnvVarsInjectionPolicy != extensionsv1alpha1.EnvVarsInjectionPolicyAllowed && template.Spec.EnvVarsInjectionPolicy != extensionsv1alpha1.EnvVarsInjectionPolicyOverrides {
+			err := fmt.Errorf("environment variable injection is not allowed by the template policy")
+			logger.Error(err, "Environment variable injection rejected", "claimName", claim.Name)
+			return nil, err
+		}
+
+		// Group envs by container name for efficient lookup.
+		envsByContainer := make(map[string][]extensionsv1alpha1.EnvVar)
+		defaultEnvs := []extensionsv1alpha1.EnvVar{}
+		for _, env := range claim.Spec.Env {
+			if env.ContainerName == "" {
+				defaultEnvs = append(defaultEnvs, env)
+			} else {
+				envsByContainer[env.ContainerName] = append(envsByContainer[env.ContainerName], env)
+			}
+		}
+
+		// Validate that all targeted containers exist.
+		allContainerNames := make(map[string]struct{})
+		for _, c := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+			allContainerNames[c.Name] = struct{}{}
+		}
+		for _, c := range sandbox.Spec.PodTemplate.Spec.Containers {
+			allContainerNames[c.Name] = struct{}{}
+		}
+		for containerName := range envsByContainer {
+			if _, ok := allContainerNames[containerName]; !ok {
+				err := fmt.Errorf("target container %q not found in template", containerName)
+				// To provide a more helpful error, we find which env var caused it.
+				for _, e := range envsByContainer[containerName] {
+					err = fmt.Errorf("target container %q not found in template for environment variable %q", containerName, e.Name)
+					break
+				}
+				logger.Error(err, "Environment variable injection rejected: container not found", "claimName", claim.Name)
+				return nil, err
+			}
+		}
+
+		// Inject into init containers
+		for i := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+			container := &sandbox.Spec.PodTemplate.Spec.InitContainers[i]
+			if envs, ok := envsByContainer[container.Name]; ok {
+				if err := r.injectEnvs(logger, container, envs, template.Spec.EnvVarsInjectionPolicy, claim.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		// Inject into regular containers
+		for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+			container := &sandbox.Spec.PodTemplate.Spec.Containers[i]
+			var envsToInject []extensionsv1alpha1.EnvVar
+			if envs, ok := envsByContainer[container.Name]; ok {
+				envsToInject = append(envsToInject, envs...)
+			}
+			if i == 0 { // Default envs go to the first main container
+				envsToInject = append(envsToInject, defaultEnvs...)
+			}
+			if len(envsToInject) > 0 {
+				if err := r.injectEnvs(logger, container, envsToInject, template.Spec.EnvVarsInjectionPolicy, claim.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 
 	// TODO: this is a workaround, remove replica assignment related issue #202
@@ -837,6 +929,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		adoptionCandidates = append(adoptionCandidates, sb)
 	}
 
+	if policy != extensionsv1alpha1.WarmPoolPolicyNone && len(claim.Spec.Env) > 0 {
+		err := fmt.Errorf("custom environment variables are not supported when using a warm pool")
+		logger.Error(err, "Invalid configuration", "claim", claim.Name)
+		return nil, err
+	}
+
 	if policy == extensionsv1alpha1.WarmPoolPolicyNone {
 		logger.Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
 		return nil, nil
@@ -903,66 +1001,37 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		Complete(r)
 }
 
-// reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.
-func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
+// cleanupLegacyNetworkPolicy cleans up any deprecated per-claim NetworkPolicies.
+func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
 	logger := log.FromContext(ctx)
+	npKey := types.NamespacedName{Name: claim.Name + "-network-policy", Namespace: claim.Namespace}
 
-	// Skip if the template opts out of managed network policies
-	if template != nil && template.Spec.NetworkPolicyManagement == extensionsv1alpha1.NetworkPolicyManagementUnmanaged {
-		return nil
-	}
+	existingNP := &networkingv1.NetworkPolicy{}
+	if err := r.Get(ctx, npKey, existingNP); err == nil {
 
-	// Cleanup Check: If missing, delete existing policy
-	if template == nil || template.Spec.NetworkPolicy == nil {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-network-policy",
-				Namespace: claim.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, existingNP); err != nil {
-			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
-				return err
-			}
-		} else {
-			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
-		}
-		return nil
-	}
+		// Verify this policy was actually created by this controller
+		// before deleting it. We check if the SandboxClaim is the controller.
+		controllerRef := metav1.GetControllerOf(existingNP)
+		isControlledByClaim := controllerRef != nil && controllerRef.UID == claim.UID && controllerRef.Kind == "SandboxClaim"
 
-	np := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      claim.Name + "-network-policy",
-			Namespace: claim.Namespace,
-		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
-		np.Spec.PodSelector = metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
-			},
-		}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress,
-			networkingv1.PolicyTypeEgress,
+		if !isControlledByClaim {
+			// A user manually created a policy with our reserved name. We should not delete it, but log a warning so it can be resolved.
+			logger.V(1).Info("Found NetworkPolicy with reserved name, but it is not controlled by this claim. Skipping deletion.", "name", existingNP.Name)
+			return nil
 		}
 
-		templateNP := template.Spec.NetworkPolicy
-
-		np.Spec.Ingress = templateNP.Ingress
-		np.Spec.Egress = templateNP.Egress
-
-		return controllerutil.SetControllerReference(claim, np, r.Scheme)
-	})
-
-	if err != nil {
-		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
+		// Use client.IgnoreNotFound to prevent benign race conditions
+		// if the object is deleted between our Get and Delete calls.
+		if deleteErr := r.Delete(ctx, existingNP); client.IgnoreNotFound(deleteErr) != nil {
+			logger.Error(deleteErr, "Failed to clean up deprecated per-claim NetworkPolicy")
+			return deleteErr
+		}
+		logger.Info("Cleaned up deprecated per-claim NetworkPolicy in favor of shared Template policy", "name", existingNP.Name)
+	} else if !k8errors.IsNotFound(err) {
+		logger.Error(err, "Failed to check cache for deprecated per-claim NetworkPolicy")
 		return err
 	}
 
-	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
 	return nil
 }
 
@@ -1032,12 +1101,12 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	}
 }
 
-// isSandboxExpired checks the Sandbox status condition set by the Core Controller
+// isSandboxExpired checks the Sandbox status condition set by the Core Controller.
 func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
 	return hasExpiredCondition(sandbox.Status.Conditions)
 }
 
-// hasExpiredCondition Helper to check if conditions list contains the expired reason
+// hasExpiredCondition Helper to check if conditions list contains the expired reason.
 func hasExpiredCondition(conditions []metav1.Condition) bool {
 	for _, cond := range conditions {
 		if cond.Type == string(v1alpha1.SandboxConditionReady) {

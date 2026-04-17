@@ -3,7 +3,7 @@ name: Publish Python 🐍 distribution 📦 to PyPI
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: read
@@ -20,23 +20,23 @@ jobs:
         working-directory: clients/python/agentic-sandbox-client
 
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # ratchet:actions/checkout@v4
-      with: 
-        fetch-depth: 0  # Important: Fetches all history and tags for setuptools-scm
-    
-    - name: Set up Python
-      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # ratchet:actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-    
-    - name: Display Python version
-      run: python -c "import sys; print(sys.version)"
-        
-    - name: Install dependencies (including tests)
-      run: python3 -m pip install ".[test]" 
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # ratchet:actions/checkout@v4
+        with:
+          fetch-depth: 0 # Important: Fetches all history and tags for setuptools-scm
 
-    - name: Run Unit Tests
-      run: python3 -m pytest
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # ratchet:actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Display Python version
+        run: python -c "import sys; print(sys.version)"
+
+      - name: Install dependencies (including tests)
+        run: python3 -m pip install ".[test]"
+
+      - name: Run Unit Tests
+        run: python3 -m pytest
 
   build:
     name: Build distribution 📦
@@ -48,37 +48,39 @@ jobs:
         working-directory: clients/python/agentic-sandbox-client
 
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # ratchet:actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # ratchet:actions/setup-python@v5
-      with:
-        python-version: "3.10"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # ratchet:actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch full history and tags for setuptools-scm during build
 
-    - name: Install pypa/build
-      run: >-
-        python3 -m pip install build
-        
-    - name: Build a binary wheel and a source tarball
-      run: python3 -m build
-      
-    - name: Store the distribution packages
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4
-      with:
-        name: python-package-distributions
-        path: clients/python/agentic-sandbox-client/dist/
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # ratchet:actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install pypa/build
+        run: >-
+          python3 -m pip install build
+
+      - name: Build a binary wheel and a source tarball
+        run: python3 -m build
+
+      - name: Store the distribution packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: clients/python/agentic-sandbox-client/dist/
 
   publish-to-pypi:
     name: >-
       Publish Python 🐍 distribution 📦 to PyPI
     needs:
-    - build
+      - build
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/k8s-agent-sandbox
     permissions:
-      id-token: write  # IMPORTANT: mandatory for trusted publishing
+      id-token: write # IMPORTANT: mandatory for trusted publishing
       contents: read
 
     # Run if it is a push event AND NOT a release candidate
@@ -86,11 +88,11 @@ jobs:
       (github.event_name == 'push' && !contains(github.ref, 'rc'))
 
     steps:
-    - name: Download all the dists
-      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # ratchet:actions/download-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
-        
-    - name: Publish distribution 📦 to PyPI
-      uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # ratchet:pypa/gh-action-pypi-publish@release/v1
+      - name: Download all the dists
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # ratchet:actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distribution 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # ratchet:pypa/gh-action-pypi-publish@release/v1

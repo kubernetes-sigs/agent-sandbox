@@ -57,12 +57,15 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install pypa/build
+      - name: Install pypa/build and twine
         run: >-
-          python3 -m pip install build
+          python3 -m pip install build==1.4.3 twine==6.2.0
 
       - name: Build a binary wheel and a source tarball
         run: python3 -m build
+
+      - name: Check distribution packages
+        run: python3 -m twine check dist/*
 
       - name: Store the distribution packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4

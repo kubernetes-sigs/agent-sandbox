@@ -389,7 +389,31 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			}
 
 		case resourceOwnedBySandbox:
-			// Already owned by this sandbox — no action needed.
+			desiredSelector := map[string]string{
+				sandboxLabel: nameHash,
+			}
+			patch := client.MergeFrom(service.DeepCopy())
+			needsUpdate := false
+
+			if service.Labels == nil {
+				service.Labels = make(map[string]string)
+			}
+			if service.Labels[sandboxLabel] != nameHash {
+				service.Labels[sandboxLabel] = nameHash
+				needsUpdate = true
+			}
+			if !reflect.DeepEqual(service.Spec.Selector, desiredSelector) {
+				service.Spec.Selector = desiredSelector
+				needsUpdate = true
+			}
+
+			if needsUpdate {
+				log.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
+				if err := r.Patch(ctx, service, patch); err != nil {
+					return nil, fmt.Errorf("failed to patch owned service: %w", err)
+				}
+			}
+
 		}
 
 		r.setServiceStatus(sandbox, service)

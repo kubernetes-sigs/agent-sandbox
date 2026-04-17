@@ -193,7 +193,7 @@ finally:
 
 Use `SandboxDirectConnectionConfig` to bypass discovery entirely. Useful for:
 
-- **Internal Agents:** Running inside the cluster (connect via K8s DNS).
+- **Internal Agents:** Running inside the cluster (e.g. router Service DNS).
 - **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.example.com`).
 
 ```python
@@ -237,9 +237,35 @@ Install the async extras first:
 pip install k8s-agent-sandbox[async]
 ```
 
-The async client requires an explicit connection config — `LocalTunnel` mode is not supported
-because it relies on a synchronous `kubectl port-forward` subprocess. Use `GatewayConnection`,
-`DirectConnection`, or `SandboxInClusterConnectionConfig` instead.
+The async client requires an explicit connection config — `SandboxLocalTunnelConnectionConfig`
+is not supported because it relies on a synchronous `kubectl port-forward` subprocess. Use
+`SandboxGatewayConnectionConfig`, `SandboxDirectConnectionConfig`, or
+`SandboxInClusterConnectionConfig` instead.
+
+**Direct connection (explicit URL, e.g. router service):**
+
+```python
+import asyncio
+from k8s_agent_sandbox import AsyncSandboxClient
+from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+async def main():
+    config = SandboxDirectConnectionConfig(
+        api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+    )
+
+    async with AsyncSandboxClient(connection_config=config) as client:
+        sandbox = await client.create_sandbox(
+            template="python-sandbox-template",
+            namespace="default",
+        )
+        result = await sandbox.commands.run("echo 'Hello from async!'")
+        print(result.stdout)
+
+asyncio.run(main())
+```
+
+**In-cluster (direct to sandbox pod; default: cluster DNS):**
 
 ```python
 import asyncio

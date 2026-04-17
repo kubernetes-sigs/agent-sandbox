@@ -9,14 +9,16 @@ Router, while maintaining a convenient **Developer Mode** for local testing.
 
 ## Architecture
 
-The client operates in three modes:
+The client operates in four modes:
 
 1.  **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
     -> Router Service -> Sandbox Pod. This supports high-scale deployments.
 2.  **Development (Tunnel Mode):** Traffic flows from Localhost -> `kubectl port-forward` -> Router
     Service -> Sandbox Pod. This requires no public IP and works on Kind/Minikube.
-3.  **Advanced / Internal Mode**: The client connects directly to a provided api_url, bypassing
-    discovery. This is useful for in-cluster communication or when connecting through a custom domain.
+3.  **In-Cluster Mode:** The client connects **directly to the sandbox pod** (via pod IP or cluster
+    DNS), bypassing the router. Intended for workloads running inside the cluster.
+4.  **Advanced / Internal Mode:** The client connects directly to a provided `api_url`, bypassing
+    discovery. This is useful when connecting through a custom domain or a manually specified router URL.
 
 ## Prerequisites
 
@@ -100,7 +102,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
         If you are using [tracing with GCP](GCP.md#tracing-with-open-telemetry-and-google-cloud-trace),
         install with the optional tracing dependencies:
 
-        ```
+        ```bash
         pip install -e ".[tracing]"
         ```
 
@@ -150,7 +152,44 @@ finally:
     sandbox.terminate()
 ```
 
-### 3. Advanced / Internal Mode
+### 3. In-Cluster Mode (Direct Pod Connection)
+
+Use this when the client runs **inside the cluster** (for example, another pod in the same cluster).
+The client connects **directly to the sandbox runtime pod**, bypassing the sandbox router.
+
+The **default** is **cluster DNS** (`use_pod_ip=False`). Omit the argument or pass `use_pod_ip=False`
+to use it; set `use_pod_ip=True` only when you want the pod IP path.
+
+**Option A: Direct Pod IP** — `SandboxInClusterConnectionConfig(use_pod_ip=True)`
+
+- Uses the pod IP from the Sandbox status for **low-latency**, direct connections without relying on
+  cluster DNS resolution.
+
+**Option B: Cluster DNS** — `SandboxInClusterConnectionConfig(use_pod_ip=False)`
+
+- Uses a stable DNS-style endpoint (typically `http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`).
+  Prefer this when you want **stable DNS-based routing** across pod lifecycle events.
+
+```python
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxInClusterConnectionConfig
+
+# Choose one connection_config (default = cluster DNS):
+#   SandboxInClusterConnectionConfig()  # same as use_pod_ip=False
+# Option A — direct pod IP (low latency):
+#   SandboxInClusterConnectionConfig(use_pod_ip=True)
+connection_config = SandboxInClusterConnectionConfig()
+
+client = SandboxClient(connection_config=connection_config)
+
+sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+try:
+    print(sandbox.commands.run("echo 'Hello from in-cluster!'").stdout)
+finally:
+    sandbox.terminate()
+```
+
+### 4. Advanced / Internal Mode
 
 Use `SandboxDirectConnectionConfig` to bypass discovery entirely. Useful for:
 
@@ -174,7 +213,7 @@ finally:
     sandbox.terminate()
 ```
 
-### 4. Custom Ports
+### 5. Custom Ports
 
 If your sandbox runtime listens on a port other than 8888 (e.g., a Node.js app on 3000), specify `server_port`.
 
@@ -186,10 +225,10 @@ client = SandboxClient(
     connection_config=SandboxLocalTunnelConnectionConfig(server_port=3000)
 )
 
-sandbox = client.create_sandbox(template="node-sandbox-template", namespace="default").
+sandbox = client.create_sandbox(template="node-sandbox-template", namespace="default")
 ```
 
-### 5. Async Client
+### 6. Async Client
 
 For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.
 Install the async extras first:
@@ -199,18 +238,16 @@ pip install k8s-agent-sandbox[async]
 ```
 
 The async client requires an explicit connection config — `LocalTunnel` mode is not supported
-because it relies on a synchronous `kubectl port-forward` subprocess. Use `DirectConnection` or
-`GatewayConnection` instead.
+because it relies on a synchronous `kubectl port-forward` subprocess. Use `GatewayConnection`,
+`DirectConnection`, or `SandboxInClusterConnectionConfig` instead.
 
 ```python
 import asyncio
 from k8s_agent_sandbox import AsyncSandboxClient
-from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+from k8s_agent_sandbox.models import SandboxInClusterConnectionConfig
 
 async def main():
-    config = SandboxDirectConnectionConfig(
-        api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
-    )
+    config = SandboxInClusterConnectionConfig()  # default: cluster DNS
 
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
@@ -229,12 +266,12 @@ A test script is included to verify the full lifecycle (Creation -> Execution ->
 
 ### Run in Dev Mode:
 
-```
+```bash
 python test_client.py --namespace default
 ```
 
 ### Run in Production Mode:
 
-```
+```bash
 python test_client.py --gateway-name external-http-gateway
 ```

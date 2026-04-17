@@ -116,12 +116,11 @@ class TestableSandbox extends Sandbox {
     return this.serverPort;
   }
 
-  // Review #9: expose reconnect flag for test assertions
-  get _isReconnecting(): boolean {
-    return (this as unknown as { _reconnecting: boolean })._reconnecting;
+  get testReconnectPromise(): Promise<void> | null {
+    return this._reconnectPromise;
   }
-  set _isReconnecting(value: boolean) {
-    (this as unknown as { _reconnecting: boolean })._reconnecting = value;
+  set testReconnectPromise(value: Promise<void> | null) {
+    this._reconnectPromise = value;
   }
 }
 
@@ -723,15 +722,14 @@ describe("Sandbox", () => {
       vi.useRealTimers();
     });
 
-    it("calls response.text() to drain body before retrying on 503", async () => {
+    it("drains body before retrying on 503 (bounded read, no response.text() call)", async () => {
       const sandbox = createReadySandbox();
 
-      // Spy on the text() method of the first (503) response
-      const drainSpy = vi.fn().mockResolvedValue("service unavailable");
-      const errorResponse = Object.assign(
-        new Response("service unavailable", { status: 503 }),
-        { text: drainSpy },
-      );
+      // 503 response with body
+      const errorResponse = new Response("service unavailable", {
+        status: 503,
+      });
+      const textSpy = vi.spyOn(errorResponse, "text");
       const okResponse = new Response(JSON.stringify({ exists: true }), {
         status: 200,
       });
@@ -746,8 +744,8 @@ describe("Sandbox", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       await settled;
 
-      // The drain spy must have been called before the retry
-      expect(drainSpy).toHaveBeenCalled();
+      // Bounded reader is used; text() must NOT be called
+      expect(textSpy).not.toHaveBeenCalled();
       expect(fetch).toHaveBeenCalledTimes(2);
     });
   });
@@ -1086,43 +1084,32 @@ describe("Sandbox", () => {
         createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 5 }),
       );
 
-      // Dead process — request() will call reconnect()
-      const deadProc = {
-        exitCode: 1 as number | null,
-        signalCode: null as string | null,
-        kill: vi.fn(),
-        on: vi.fn((ev: string, cb: () => void) => {
-          if (ev === "exit") setTimeout(cb, 0);
-        }),
-        stdout: { on: vi.fn() },
-        stderr: { on: vi.fn() },
-      };
-      sandbox._portForwardProcess = deadProc as never;
-
-      // Mark as already reconnecting (simulates 1st concurrent request owns the reconnect)
-      sandbox._isReconnecting = true;
-      // baseUrl not yet restored by the ongoing reconnect
+      // simulate an in-flight reconnect via shared promise
+      let resolveReconnect!: () => void;
+      const pendingReconnect = new Promise<void>((res) => {
+        resolveReconnect = res;
+      });
+      sandbox.testReconnectPromise = pendingReconnect.finally(() => {
+        sandbox.testReconnectPromise = null;
+      });
+      // baseUrl not yet restored (reconnect still in progress)
 
       (fetch as Mock).mockResolvedValue(
         new Response(JSON.stringify({ exists: true }), { status: 200 }),
       );
 
-      // Second request — hits the `if (_reconnecting)` branch → fixed 2s sleep
+      // Second request — awaits the shared reconnect promise
       const requestPromise = sandbox.files.exists("test.txt");
       const errPromise = requestPromise.catch((e) => e);
 
-      // Advance 2s (the fixed sleep fires) but baseUrl is still not set yet
-      await vi.advanceTimersByTimeAsync(2000);
-      // Simulate reconnect completing at t=2500ms (after the 2s window)
+      // Simulate reconnect completing: set baseUrl then resolve the promise
       sandbox._baseUrl = "http://127.0.0.1:54321";
-      await vi.advanceTimersByTimeAsync(600);
+      resolveReconnect();
+      await vi.advanceTimersByTimeAsync(100);
 
       const result = await errPromise;
 
-      // Expected (after Phase 3): second request shares the reconnect promise and
-      // succeeds when reconnect finishes at t=2500ms, so result === true.
-      // Current behavior: request() checks baseUrl at t=0 (before any reconnect wait),
-      // finds it undefined, and throws SandboxNotReadyError immediately.
+      // Expected: second request shares the reconnect promise and succeeds.
       expect(result).toBe(true);
     });
   });
@@ -1166,9 +1153,7 @@ describe("Sandbox", () => {
       vi.useRealTimers();
     });
 
-    // Requires real fetch to observe: AbortSignal.timeout wired to body stream is not
-    // reproducible with mock fetch — skip until Phase 3 adds an integration-level check.
-    it.skip("large response body read succeeds even if body takes longer than PER_ATTEMPT_TIMEOUT_MS", async () => {
+    it("large response body read succeeds even if body takes longer than PER_ATTEMPT_TIMEOUT_MS", async () => {
       const sandbox = createReadySandbox();
 
       // Body arrives PER_ATTEMPT_TIMEOUT_MS + 5000 ms after headers.

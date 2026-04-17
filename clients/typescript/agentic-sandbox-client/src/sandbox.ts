@@ -27,6 +27,7 @@ import {
   GATEWAY_API_GROUP,
   GATEWAY_API_VERSION,
   GATEWAY_PLURAL,
+  MAX_DRAIN_BYTES,
   MAX_ERROR_BODY_BYTES,
   MAX_GATEWAY_REWATCH,
   MAX_RECONNECT_ATTEMPTS,
@@ -42,6 +43,7 @@ import {
   SandboxNotReadyError,
   SandboxPortForwardError,
   SandboxRequestError,
+  SandboxTimeoutError,
 } from "./exceptions.js";
 
 /**
@@ -98,20 +100,45 @@ async function fetchWithRetry(
   for (let attempt = 0; attempt < attempts; attempt++) {
     // Check overall deadline before starting (and before sleeping)
     if (overallSignal?.aborted) {
-      throw (
-        overallSignal.reason ??
-        new DOMException("The operation was aborted.", "AbortError")
+      throw new SandboxTimeoutError(
+        "Request timed out (overall deadline exceeded).",
       );
     }
 
-    // Each attempt gets its own timeout; combine with the overall signal if present
-    const perAttemptSignal = AbortSignal.timeout(PER_ATTEMPT_TIMEOUT_MS);
+    // use manual setTimeout so fake timers can control per-attempt timeout
+    const attemptController = new AbortController();
+    const attemptTimer = setTimeout(
+      () =>
+        attemptController.abort(
+          new DOMException("per-attempt timeout", "TimeoutError"),
+        ),
+      PER_ATTEMPT_TIMEOUT_MS,
+    );
     const attemptSignal = overallSignal
-      ? AbortSignal.any([overallSignal, perAttemptSignal])
-      : perAttemptSignal;
+      ? AbortSignal.any([overallSignal, attemptController.signal])
+      : attemptController.signal;
 
+    let response: Response;
     try {
-      const response = await fetch(url, { ...options, signal: attemptSignal });
+      try {
+        response = await fetch(url, { ...options, signal: attemptSignal });
+      } finally {
+        // stop per-attempt timer once headers are received
+        clearTimeout(attemptTimer);
+      }
+
+      // race condition guard: per-attempt timer fired just as fetch resolved
+      if (attemptController.signal.aborted && !overallSignal?.aborted) {
+        response.body?.cancel().catch(() => {});
+        lastError = new Error(
+          "per-attempt timer race — discarding response and retrying",
+        );
+        if (attempt < attempts - 1) {
+          const delay = backoffFactor * Math.pow(2, attempt) * 1000;
+          await sleepWithSignal(delay, overallSignal);
+        }
+        continue;
+      }
 
       if (
         attempt < attempts - 1 &&
@@ -123,11 +150,20 @@ async function fetchWithRetry(
             attempt + 1
           }/${attempts})...`,
         );
-        // Drain the body (up to MAX_DRAIN_BYTES) to allow TCP connection reuse
+        // bounded drain to allow TCP connection reuse
         try {
-          await response.text();
+          const reader = response.body?.getReader();
+          if (reader) {
+            let total = 0;
+            while (total < MAX_DRAIN_BYTES) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              total += value.byteLength;
+            }
+            await reader.cancel();
+          }
         } catch {
-          // Ignore drain errors; the retry is more important
+          // best-effort
         }
         await sleepWithSignal(delay, overallSignal);
         continue;
@@ -136,9 +172,11 @@ async function fetchWithRetry(
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
 
-      // If the overall deadline fired, propagate immediately — no more retries
+      // If the overall deadline fired, throw SandboxTimeoutError
       if (overallSignal?.aborted) {
-        throw overallSignal.reason ?? lastError;
+        throw new SandboxTimeoutError(
+          "Request timed out (overall deadline exceeded).",
+        );
       }
 
       // Any other AbortError (per-attempt timeout) is treated as a transient failure
@@ -149,11 +187,32 @@ async function fetchWithRetry(
             attempt + 1
           }/${attempts})...`,
         );
-        await sleepWithSignal(delay, overallSignal);
+        try {
+          await sleepWithSignal(delay, overallSignal);
+        } catch (sleepErr) {
+          if (overallSignal?.aborted) {
+            throw new SandboxTimeoutError(
+              "Request timed out (overall deadline exceeded).",
+            );
+          }
+          throw sleepErr;
+        }
       }
     }
   }
   throw lastError ?? new Error("Request failed after retries");
+}
+
+function formatGatewayAddress(addr: string): string {
+  if (/[/?#@]/.test(addr)) {
+    throw new SandboxNotReadyError(
+      `Gateway address contains invalid characters: "${addr}"`,
+    );
+  }
+  if (net.isIP(addr) === 6) {
+    return `[${addr}]`;
+  }
+  return addr;
 }
 
 function getFreePort(): Promise<number> {
@@ -411,7 +470,7 @@ export class Sandbox {
       // Initial GET: resolve immediately if the gateway already has an address
       const existingAddress = await getExistingAddress();
       if (existingAddress) {
-        this.baseUrl = `http://${existingAddress}`;
+        this.baseUrl = `http://${formatGatewayAddress(existingAddress)}`;
         console.info(
           `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
         );
@@ -436,7 +495,7 @@ export class Sandbox {
         const result = await this.watchGatewayOnce(remainingMs);
 
         if (result.type === "resolved") {
-          this.baseUrl = `http://${result.address}`;
+          this.baseUrl = `http://${formatGatewayAddress(result.address)}`;
           console.info(`Gateway is ready. Base URL set to: ${this.baseUrl}`);
           return;
         }
@@ -453,7 +512,7 @@ export class Sandbox {
         );
         const relistAddress = await getExistingAddress();
         if (relistAddress) {
-          this.baseUrl = `http://${relistAddress}`;
+          this.baseUrl = `http://${formatGatewayAddress(relistAddress)}`;
           console.info(
             `Gateway is ready (after re-list). Base URL set to: ${this.baseUrl}`,
           );
@@ -585,52 +644,78 @@ export class Sandbox {
         { stdio: ["ignore", "pipe", "pipe"] },
       );
 
+      // capture spawn errors (e.g. kubectl not found)
+      let rejectSpawnError!: (err: Error) => void;
+      const spawnErrorPromise = new Promise<never>((_, reject) => {
+        rejectSpawnError = reject;
+      });
+      this.portForwardProcess.on("error", (err: Error) => {
+        rejectSpawnError(
+          new SandboxPortForwardError(
+            `Failed to spawn kubectl: ${err.message}`,
+            { cause: err },
+          ),
+        );
+      });
+
       console.info("Waiting for port-forwarding to be ready...");
       const startTime = Date.now();
       const timeoutMs = this.portForwardReadyTimeout * 1000;
 
-      while (Date.now() - startTime < timeoutMs) {
-        if (
-          this.portForwardProcess.exitCode !== null ||
-          this.portForwardProcess.signalCode !== null
-        ) {
-          throw new SandboxPortForwardError(
-            `Tunnel crashed: port-forward process exited with code ${this.portForwardProcess.exitCode}, signal ${this.portForwardProcess.signalCode}`,
-          );
-        }
+      // use try-finally so closeLocal() is never called on timeout
+      try {
+        while (Date.now() - startTime < timeoutMs) {
+          if (
+            this.portForwardProcess.exitCode !== null ||
+            this.portForwardProcess.signalCode !== null
+          ) {
+            throw new SandboxPortForwardError(
+              `Tunnel crashed: port-forward process exited with code ${this.portForwardProcess.exitCode}, signal ${this.portForwardProcess.signalCode}`,
+            );
+          }
 
-        const connected = await new Promise<boolean>((resolve) => {
-          const sock = net.createConnection(
-            { host: "127.0.0.1", port: localPort, timeout: 100 },
-            () => {
-              sock.destroy();
-              resolve(true);
-            },
-          );
-          sock.on("error", () => {
-            sock.destroy();
-            resolve(false);
-          });
-          sock.on("timeout", () => {
-            sock.destroy();
-            resolve(false);
-          });
-        });
+          const connected = await Promise.race([
+            new Promise<boolean>((resolve) => {
+              const sock = net.createConnection(
+                { host: "127.0.0.1", port: localPort, timeout: 100 },
+                () => {
+                  sock.destroy();
+                  resolve(true);
+                },
+              );
+              sock.on("error", () => {
+                sock.destroy();
+                resolve(false);
+              });
+              sock.on("timeout", () => {
+                sock.destroy();
+                resolve(false);
+              });
+            }),
+            spawnErrorPromise,
+          ]);
 
-        if (connected) {
-          this.baseUrl = `http://127.0.0.1:${localPort}`;
-          console.info(`Dev Mode ready. Tunneled to Router at ${this.baseUrl}`);
+          if (connected) {
+            this.baseUrl = `http://127.0.0.1:${localPort}`;
+            console.info(
+              `Dev Mode ready. Tunneled to Router at ${this.baseUrl}`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            return;
+          }
+
           await new Promise((resolve) => setTimeout(resolve, 500));
-          return;
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        throw new SandboxPortForwardError(
+          "Failed to establish tunnel to Router Service.",
+        );
+      } finally {
+        // cleanup transport only on failure; do NOT touch _isClosed
+        if (!this.baseUrl) {
+          await this.stopPortForward();
+        }
       }
-
-      await this.closeLocal();
-      throw new SandboxPortForwardError(
-        "Failed to establish tunnel to Router Service.",
-      );
     };
 
     await withSpan(
@@ -652,17 +737,24 @@ export class Sandbox {
       maxRetries?: number;
     } = {},
   ): Promise<Response> {
-    if (!this.baseUrl) {
-      throw new SandboxNotReadyError("Sandbox is not ready for communication.");
+    // reject pre-captured references used after close()
+    if (this._isClosed) {
+      throw new SandboxNotReadyError("Sandbox connection has been closed.");
     }
 
-    // If the port-forward process has died, attempt to reconnect before failing
-    if (
+    // if reconnect is in flight, await the shared promise
+    if (this._reconnectPromise) {
+      await this._reconnectPromise; // may throw SandboxPortForwardError
+    } else if (
       this.portForwardProcess &&
       (this.portForwardProcess.exitCode !== null ||
         this.portForwardProcess.signalCode !== null)
     ) {
       await this.reconnect();
+    }
+
+    if (!this.baseUrl) {
+      throw new SandboxNotReadyError("Sandbox is not ready for communication.");
     }
 
     const url = `${this.baseUrl!.replace(/\/+$/, "")}/${endpoint.replace(
@@ -719,6 +811,7 @@ export class Sandbox {
       return response;
     } catch (err) {
       if (err instanceof SandboxRequestError) throw err;
+      if (err instanceof SandboxTimeoutError) throw err;
 
       if (
         this.portForwardProcess &&
@@ -767,31 +860,23 @@ export class Sandbox {
     }
   }
 
-  private _reconnecting = false;
+  protected _reconnectPromise: Promise<void> | null = null;
 
   /**
    * Re-establishes the port-forward tunnel.
    * Only applies to port-forward mode (no apiUrl, no gatewayName).
-   * Concurrent callers wait for the in-progress reconnect instead of
-   * starting a second one.
+   * Concurrent callers share the same promise instead of starting a second reconnect.
    */
   private async reconnect(): Promise<void> {
     // Gateway or direct-URL modes do not use port-forward
     if (this.apiUrl || this.gatewayName) return;
 
-    if (this._reconnecting) {
-      // Another request already started a reconnect; wait briefly and re-check
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      if (!this.baseUrl) {
-        throw new SandboxPortForwardError(
-          "Port-forward reconnect is in progress but did not complete in time.",
-        );
-      }
-      return;
+    // concurrent callers share the same promise
+    if (this._reconnectPromise) {
+      return this._reconnectPromise;
     }
 
-    this._reconnecting = true;
-    try {
+    const doReconnect = async (): Promise<void> => {
       await this.stopPortForward();
       for (let i = 1; i <= MAX_RECONNECT_ATTEMPTS; i++) {
         try {
@@ -811,8 +896,12 @@ export class Sandbox {
       throw new SandboxPortForwardError(
         `Failed to re-establish port-forward after ${MAX_RECONNECT_ATTEMPTS} attempts.`,
       );
-    } finally {
-      this._reconnecting = false;
-    }
+    };
+
+    this._reconnectPromise = doReconnect().finally(() => {
+      this._reconnectPromise = null;
+    });
+
+    return this._reconnectPromise;
   }
 }

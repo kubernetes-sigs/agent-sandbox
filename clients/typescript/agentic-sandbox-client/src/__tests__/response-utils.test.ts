@@ -20,7 +20,10 @@ import {
   parseFileEntries,
   parseExistsResult,
 } from "../response-utils.js";
-import { SandboxResponseTooLargeError } from "../exceptions.js";
+import {
+  SandboxRequestError,
+  SandboxResponseTooLargeError,
+} from "../exceptions.js";
 
 // --- helpers ---
 
@@ -100,6 +103,16 @@ describe("readBoundedBuffer", () => {
     ).rejects.toBeInstanceOf(SandboxResponseTooLargeError);
   });
 
+  it("throws SandboxResponseTooLargeError when response.body is null and body exceeds limit", async () => {
+    const bytes = new Uint8Array(20);
+    const resp = new Response(Buffer.from(bytes), { status: 200 });
+    Object.defineProperty(resp, "body", { value: null, configurable: true });
+
+    await expect(
+      readBoundedBuffer(resp, 10, "download"),
+    ).rejects.toBeInstanceOf(SandboxResponseTooLargeError);
+  });
+
   it("preserves binary data when response.body is null (non-streaming fallback)", async () => {
     // Bytes that are invalid UTF-8 sequences — text() + TextEncoder round-trip corrupts them
     const binaryBytes = new Uint8Array([0xff, 0xfe, 0x00, 0x80, 0xd8, 0x00]);
@@ -145,14 +158,14 @@ describe("parseExecutionResult", () => {
     expect(result.exitCode).toBe(-1);
   });
 
-  it("returns defaults for a non-object input (null)", () => {
-    const result = parseExecutionResult(null);
-    expect(result).toEqual({ stdout: "", stderr: "", exitCode: -1 });
+  it("throws SandboxRequestError for null input", () => {
+    expect(() => parseExecutionResult(null)).toThrow(SandboxRequestError);
   });
 
-  it("returns defaults for a string input", () => {
-    const result = parseExecutionResult("not an object");
-    expect(result).toEqual({ stdout: "", stderr: "", exitCode: -1 });
+  it("throws SandboxRequestError for string input", () => {
+    expect(() => parseExecutionResult("not an object")).toThrow(
+      SandboxRequestError,
+    );
   });
 
   it("falls back to defaults for wrong-typed fields", () => {
@@ -196,12 +209,14 @@ describe("parseFileEntries", () => {
     expect(entries).toHaveLength(0);
   });
 
-  it("returns [] for non-array input", () => {
-    expect(parseFileEntries({ name: "foo.txt" })).toEqual([]);
+  it("throws SandboxRequestError for non-array input", () => {
+    expect(() => parseFileEntries({ name: "foo.txt" })).toThrow(
+      SandboxRequestError,
+    );
   });
 
-  it("returns [] for null", () => {
-    expect(parseFileEntries(null)).toEqual([]);
+  it("throws SandboxRequestError for null input", () => {
+    expect(() => parseFileEntries(null)).toThrow(SandboxRequestError);
   });
 
   it("returns [] for an empty array", () => {
@@ -230,10 +245,10 @@ describe("parseExistsResult", () => {
     expect(parseExistsResult({})).toBe(false);
   });
 
-  it("returns false for non-object input", () => {
-    expect(parseExistsResult("true")).toBe(false);
-    expect(parseExistsResult(null)).toBe(false);
-    expect(parseExistsResult(1)).toBe(false);
+  it("throws SandboxRequestError for non-object input", () => {
+    expect(() => parseExistsResult("true")).toThrow(SandboxRequestError);
+    expect(() => parseExistsResult(null)).toThrow(SandboxRequestError);
+    expect(() => parseExistsResult(1)).toThrow(SandboxRequestError);
   });
 
   it("returns false when exists is not a boolean", () => {

@@ -13,7 +13,10 @@
 // limitations under the License.
 
 import type { ExecutionResult, FileEntry } from "./types.js";
-import { SandboxResponseTooLargeError } from "./exceptions.js";
+import {
+  SandboxRequestError,
+  SandboxResponseTooLargeError,
+} from "./exceptions.js";
 
 // --- bounded read helpers ---
 
@@ -38,9 +41,10 @@ async function collectChunks(
 
   const reader = response.body?.getReader();
   if (!reader) {
-    // Fallback for environments without body streaming
-    const text = await response.text();
-    const bytes = new TextEncoder().encode(text);
+    // Fallback for environments without body streaming — use arrayBuffer() to
+    // preserve raw bytes (response.text() would corrupt non-UTF-8 binary data).
+    const arrayBuffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
     if (bytes.byteLength > maxBytes) {
       throw new SandboxResponseTooLargeError(
         `Response too large for ${operationDesc}: ${bytes.byteLength} bytes exceeds ${maxBytes} bytes`,
@@ -104,7 +108,10 @@ export async function readBoundedBuffer(
  */
 export function parseExecutionResult(data: unknown): ExecutionResult {
   if (typeof data !== "object" || data === null) {
-    return { stdout: "", stderr: "", exitCode: -1 };
+    throw new SandboxRequestError(
+      `Invalid execution result: expected object, got ${data === null ? "null" : typeof data}`,
+      { operation: "execute" },
+    );
   }
   const d = data as Record<string, unknown>;
   return {
@@ -119,7 +126,12 @@ export function parseExecutionResult(data: unknown): ExecutionResult {
  * Entries with an unrecognised type are silently skipped, matching Go behaviour.
  */
 export function parseFileEntries(data: unknown): FileEntry[] {
-  if (!Array.isArray(data)) return [];
+  if (!Array.isArray(data)) {
+    throw new SandboxRequestError(
+      `Invalid file listing: expected array, got ${data === null ? "null" : typeof data}`,
+      { operation: "list" },
+    );
+  }
   const entries: FileEntry[] = [];
   for (const e of data) {
     if (typeof e !== "object" || e === null) continue;
@@ -142,7 +154,12 @@ export function parseFileEntries(data: unknown): FileEntry[] {
  * Returns false for missing or wrong-typed values.
  */
 export function parseExistsResult(data: unknown): boolean {
-  if (typeof data !== "object" || data === null) return false;
+  if (typeof data !== "object" || data === null) {
+    throw new SandboxRequestError(
+      `Invalid exists response: expected object, got ${data === null ? "null" : typeof data}`,
+      { operation: "exists" },
+    );
+  }
   const d = data as Record<string, unknown>;
   return typeof d.exists === "boolean" ? d.exists : false;
 }

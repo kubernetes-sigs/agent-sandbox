@@ -135,6 +135,10 @@ export class Filesystem {
           span.setAttribute("sandbox.file.path", filePath);
         }
 
+        if (!filePath) {
+          throw new Error("read: file path cannot be empty");
+        }
+
         const encodedPath = encodePathSegment(filePath);
         const response = await this.requestFn(
           "GET",
@@ -168,6 +172,10 @@ export class Filesystem {
       async (span) => {
         if (span.isRecording()) {
           span.setAttribute("sandbox.file.path", dirPath);
+        }
+
+        if (!dirPath) {
+          throw new Error("list: directory path cannot be empty");
         }
 
         const encodedPath = encodePathSegment(dirPath);
@@ -209,6 +217,10 @@ export class Filesystem {
       async (span) => {
         if (span.isRecording()) {
           span.setAttribute("sandbox.file.path", filePath);
+        }
+
+        if (!filePath) {
+          throw new Error("exists: file path cannot be empty");
         }
 
         const encodedPath = encodePathSegment(filePath);

@@ -627,7 +627,7 @@ describe("Sandbox", () => {
       ]);
     });
 
-    it("returns empty array for null response", async () => {
+    it("rejects with SandboxRequestError when server returns null instead of array", async () => {
       const sandbox = createReadySandbox();
       (fetch as Mock).mockResolvedValueOnce(
         new Response(JSON.stringify(null), {
@@ -636,7 +636,9 @@ describe("Sandbox", () => {
         }),
       );
 
-      expect(await sandbox.files.list("empty-dir")).toEqual([]);
+      await expect(sandbox.files.list("empty-dir")).rejects.toBeInstanceOf(
+        SandboxRequestError,
+      );
     });
   });
 

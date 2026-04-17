@@ -57,6 +57,8 @@ import (
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
+const PodSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -363,6 +365,13 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 				return nil, err
 			}
 
+			if mergedMeta.Annotations == nil {
+				mergedMeta.Annotations = make(map[string]string)
+			}
+			if _, ok := mergedMeta.Annotations[PodSafeToEvictAnnotation]; !ok {
+				mergedMeta.Annotations[PodSafeToEvictAnnotation] = "on-completion"
+			}
+
 			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
@@ -608,10 +617,9 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 				// Ignore it and instantly pop the next one.
 				continue
 			}
-			// For real errors, put the key back in line and error out
-			r.WarmSandboxQueue.Add(templateHash, adoptedKey)
 			return nil, queue.SandboxKey{}, err
 		}
+
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted for template", "sandbox", adopted.Name, "templateHash", templateHash, "reason", err.Error())
@@ -687,6 +695,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
 				return false, err
 			}
+
 
 			logger.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
 
@@ -775,6 +784,17 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
+	}
+
+	logger := log.FromContext(ctx)
+	if adopted.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+		adopted.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+	}
+	if val, ok := adopted.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; !ok || val != "on-completion" {
+		if ok {
+			logger.Info("Overriding safe-to-evict annotation to on-completion on adopted sandbox", "claim", claim.Name, "sandbox", adopted.Name, "oldValue", val)
+		}
+		adopted.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] = "on-completion"
 	}
 
 	if err := r.Patch(ctx, adopted, client.MergeFrom(originalAdopted)); err != nil {
@@ -957,6 +977,13 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
+	}
+
+	if sandbox.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+		sandbox.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+	}
+	if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; !ok {
+		sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] = "on-completion"
 	}
 
 	// Inject environment variables from the SandboxClaim

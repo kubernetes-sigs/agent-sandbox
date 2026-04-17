@@ -49,6 +49,9 @@ export const PER_ATTEMPT_TIMEOUT_MS = 30_000;
 // Maximum number of gateway watch reconnects within a single waitForGatewayIp call
 export const MAX_GATEWAY_REWATCH = 10;
 
+// Maximum time (ms) allowed for cleanup operations (claim deletion, in-flight drain)
+export const CLEANUP_TIMEOUT_MS = 5_000;
+
 // Response / request size limits (matches Go client constants)
 export const MAX_EXECUTION_RESPONSE_SIZE = 16 * 1024 * 1024; // 16 MB: run/agent stdout+stderr
 export const MAX_METADATA_RESPONSE_SIZE = 8 * 1024 * 1024; //  8 MB: list/exists JSON

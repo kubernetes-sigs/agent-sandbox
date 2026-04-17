@@ -22,6 +22,7 @@ import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
+  CLEANUP_TIMEOUT_MS,
   POD_NAME_ANNOTATION,
   SANDBOX_API_GROUP,
   SANDBOX_API_VERSION,
@@ -318,15 +319,25 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       sandboxTracingManager?.endLifecycleSpan();
       // Clean up orphaned claim before re-throwing
       try {
-        await this.customObjectsApi.deleteNamespacedCustomObject({
-          group: CLAIM_API_GROUP,
-          version: CLAIM_API_VERSION,
-          namespace: ns,
-          plural: CLAIM_PLURAL_NAME,
-          name: claimName,
-        });
-      } catch {
-        // ignore cleanup errors
+        await Promise.race([
+          this.customObjectsApi.deleteNamespacedCustomObject({
+            group: CLAIM_API_GROUP,
+            version: CLAIM_API_VERSION,
+            namespace: ns,
+            plural: CLAIM_PLURAL_NAME,
+            name: claimName,
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Rollback cleanup timed out")),
+              CLEANUP_TIMEOUT_MS,
+            ),
+          ),
+        ]);
+      } catch (cleanupErr) {
+        // Rollback deletion failed — surface it so callers can observe leaked claims
+        console.error(`Original error that triggered rollback: ${err}`);
+        throw cleanupErr;
       }
       throw err;
     }

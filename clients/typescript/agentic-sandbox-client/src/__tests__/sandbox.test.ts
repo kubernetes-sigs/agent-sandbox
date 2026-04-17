@@ -1203,6 +1203,47 @@ describe("Sandbox", () => {
     });
   });
 
+  // ===== close() drains in-flight requests =====
+
+  describe("close() drains in-flight requests before destroying transport", () => {
+    it("does not call K8s delete while a request is still in flight", async () => {
+      let resolveRequest!: (r: Response) => void;
+      vi.mocked(fetch).mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveRequest = resolve;
+        }),
+      );
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      const sandbox = createReadySandbox();
+
+      // Start in-flight request (do not await yet)
+      const runPromise = sandbox.commands.run("slow-cmd");
+
+      // Call close() concurrently
+      const closePromise = sandbox.close();
+
+      // Yield microtasks so close() can start, but in-flight fetch is still pending
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // K8s claim deletion must NOT have been called yet
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+
+      // Resolve the in-flight fetch with a valid execute response
+      resolveRequest(
+        new Response(JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }), {
+          status: 200,
+        }),
+      );
+
+      // Both should now complete
+      await closePromise;
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      await expect(runPromise).resolves.toBeDefined();
+    });
+  });
+
   describe("empty path is rejected by files methods", () => {
     beforeEach(() => {
       vi.useFakeTimers();

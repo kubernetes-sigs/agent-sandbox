@@ -24,6 +24,7 @@ import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
+  CLEANUP_TIMEOUT_MS,
   GATEWAY_API_GROUP,
   GATEWAY_API_VERSION,
   GATEWAY_PLURAL,
@@ -283,6 +284,8 @@ export class Sandbox {
   private _isClosed = false;
   private _commands: CommandExecutor | null;
   private _files: Filesystem | null;
+  private _inflightCount = 0;
+  private _drainResolvers: Array<() => void> = [];
 
   constructor(init: SandboxInit) {
     this.claimName = init.claimName;
@@ -400,18 +403,41 @@ export class Sandbox {
    * Terminates the port-forward process (if any) and deletes the SandboxClaim.
    */
   async close(): Promise<void> {
+    // Prevent new requests immediately so in-flight count stabilises
+    this._isClosed = true;
+
+    // Drain in-flight requests; give up after CLEANUP_TIMEOUT_MS so close() is bounded
+    await Promise.race([
+      this.drainInflight(),
+      new Promise<void>((resolve) => setTimeout(resolve, CLEANUP_TIMEOUT_MS)),
+    ]);
+
+    // Kill port-forward and clear local resources (also sets _isClosed = true, idempotent)
     await this.closeLocal();
 
     if (this.claimName) {
       console.info(`Deleting SandboxClaim: ${this.claimName}`);
       try {
-        await this.customObjectsApi.deleteNamespacedCustomObject({
-          group: CLAIM_API_GROUP,
-          version: CLAIM_API_VERSION,
-          namespace: this.namespace,
-          plural: CLAIM_PLURAL_NAME,
-          name: this.claimName,
-        });
+        await Promise.race([
+          this.customObjectsApi.deleteNamespacedCustomObject({
+            group: CLAIM_API_GROUP,
+            version: CLAIM_API_VERSION,
+            namespace: this.namespace,
+            plural: CLAIM_PLURAL_NAME,
+            name: this.claimName,
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
+                  ),
+                ),
+              CLEANUP_TIMEOUT_MS,
+            ),
+          ),
+        ]);
       } catch (err: unknown) {
         if (!isK8s404(err)) {
           console.error(`Error deleting sandbox claim: ${err}`);
@@ -742,94 +768,105 @@ export class Sandbox {
       throw new SandboxNotReadyError("Sandbox connection has been closed.");
     }
 
-    // if reconnect is in flight, await the shared promise
-    if (this._reconnectPromise) {
-      await this._reconnectPromise; // may throw SandboxPortForwardError
-    } else if (
-      this.portForwardProcess &&
-      (this.portForwardProcess.exitCode !== null ||
-        this.portForwardProcess.signalCode !== null)
-    ) {
-      await this.reconnect();
-    }
-
-    if (!this.baseUrl) {
-      throw new SandboxNotReadyError("Sandbox is not ready for communication.");
-    }
-
-    const url = `${this.baseUrl!.replace(/\/+$/, "")}/${endpoint.replace(
-      /^\/+/,
-      "",
-    )}`;
-
-    const headers: Record<string, string> = {
-      ...options.headers,
-      "X-Sandbox-ID": this.sandboxName,
-      "X-Sandbox-Namespace": this.namespace,
-      "X-Sandbox-Port": String(this.serverPort),
-    };
-
-    const fetchOptions: RequestInit = {
-      method,
-      headers,
-      body: options.body,
-    };
-
-    // The overall timeout signal caps the entire operation including retries
-    const overallSignal = options.timeout
-      ? AbortSignal.timeout(options.timeout * 1000)
-      : undefined;
-
+    this._inflightCount++;
     try {
-      const response = await fetchWithRetry(
-        url,
-        fetchOptions,
-        options.maxRetries ?? MAX_RETRIES,
-        BACKOFF_FACTOR,
-        RETRY_STATUS_CODES,
-        overallSignal,
-      );
-      if (!response.ok) {
-        // Read the body so callers can inspect the failure payload
-        let body = "";
-        try {
-          body = (await response.text()).slice(0, MAX_ERROR_BODY_BYTES);
-        } catch {
-          // Ignore body-read errors
-        }
-        throw new SandboxRequestError(
-          `Request failed with status ${response.status}: ${response.statusText}` +
-            (body ? ` — ${body}` : ""),
-          {
-            statusCode: response.status,
-            response,
-            body,
-            operation: `${method} ${endpoint}`,
-          },
-        );
-      }
-      return response;
-    } catch (err) {
-      if (err instanceof SandboxRequestError) throw err;
-      if (err instanceof SandboxTimeoutError) throw err;
-
-      if (
+      // if reconnect is in flight, await the shared promise
+      if (this._reconnectPromise) {
+        await this._reconnectPromise; // may throw SandboxPortForwardError
+      } else if (
         this.portForwardProcess &&
         (this.portForwardProcess.exitCode !== null ||
           this.portForwardProcess.signalCode !== null)
       ) {
-        throw new SandboxPortForwardError(
-          `Kubectl Port-Forward crashed DURING request! ` +
-            `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
-          { cause: err },
+        await this.reconnect();
+      }
+
+      if (!this.baseUrl) {
+        throw new SandboxNotReadyError(
+          "Sandbox is not ready for communication.",
         );
       }
 
-      console.error(`Request to gateway router failed: ${err}`);
-      throw new SandboxRequestError(
-        `Failed to communicate with the sandbox via the gateway at ${url}.`,
-        { cause: err },
-      );
+      const url = `${this.baseUrl!.replace(/\/+$/, "")}/${endpoint.replace(
+        /^\/+/,
+        "",
+      )}`;
+
+      const headers: Record<string, string> = {
+        ...options.headers,
+        "X-Sandbox-ID": this.sandboxName,
+        "X-Sandbox-Namespace": this.namespace,
+        "X-Sandbox-Port": String(this.serverPort),
+      };
+
+      const fetchOptions: RequestInit = {
+        method,
+        headers,
+        body: options.body,
+      };
+
+      // The overall timeout signal caps the entire operation including retries
+      const overallSignal = options.timeout
+        ? AbortSignal.timeout(options.timeout * 1000)
+        : undefined;
+
+      try {
+        const response = await fetchWithRetry(
+          url,
+          fetchOptions,
+          options.maxRetries ?? MAX_RETRIES,
+          BACKOFF_FACTOR,
+          RETRY_STATUS_CODES,
+          overallSignal,
+        );
+        if (!response.ok) {
+          // Read the body so callers can inspect the failure payload
+          let body = "";
+          try {
+            body = (await response.text()).slice(0, MAX_ERROR_BODY_BYTES);
+          } catch {
+            // Ignore body-read errors
+          }
+          throw new SandboxRequestError(
+            `Request failed with status ${response.status}: ${response.statusText}` +
+              (body ? ` — ${body}` : ""),
+            {
+              statusCode: response.status,
+              response,
+              body,
+              operation: `${method} ${endpoint}`,
+            },
+          );
+        }
+        return response;
+      } catch (err) {
+        if (err instanceof SandboxRequestError) throw err;
+        if (err instanceof SandboxTimeoutError) throw err;
+
+        if (
+          this.portForwardProcess &&
+          (this.portForwardProcess.exitCode !== null ||
+            this.portForwardProcess.signalCode !== null)
+        ) {
+          throw new SandboxPortForwardError(
+            `Kubectl Port-Forward crashed DURING request! ` +
+              `Exit code: ${this.portForwardProcess.exitCode}, signal: ${this.portForwardProcess.signalCode}`,
+            { cause: err },
+          );
+        }
+
+        console.error(`Request to gateway router failed: ${err}`);
+        throw new SandboxRequestError(
+          `Failed to communicate with the sandbox via the gateway at ${url}.`,
+          { cause: err },
+        );
+      }
+    } finally {
+      this._inflightCount--;
+      if (this._inflightCount === 0 && this._drainResolvers.length > 0) {
+        for (const resolve of this._drainResolvers) resolve();
+        this._drainResolvers = [];
+      }
     }
   }
 
@@ -861,6 +898,13 @@ export class Sandbox {
   }
 
   protected _reconnectPromise: Promise<void> | null = null;
+
+  private drainInflight(): Promise<void> {
+    if (this._inflightCount === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this._drainResolvers.push(resolve);
+    });
+  }
 
   /**
    * Re-establishes the port-forward tunnel.

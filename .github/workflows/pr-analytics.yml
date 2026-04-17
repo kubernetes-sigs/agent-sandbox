@@ -11,7 +11,7 @@ jobs:
       issues: write # Required for creating reports (as issues)
     steps:
       - name: "Generate PR Report"
-        uses: AlexSim93/pull-request-analytics-action@v4.10.0
+        uses: AlexSim93/pull-request-analytics-action@8d0c5e1aa4fdcb8aae6cfe3fa2d6acf1a68b7d91 # v4.10.0
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_OWNERS_REPOS: "kubernetes-sigs/agent-sandbox"

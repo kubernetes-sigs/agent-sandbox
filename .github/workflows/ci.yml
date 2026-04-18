@@ -4,15 +4,6 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
-      - "api/**"
-      - "extensions/**"
-      - "controllers/**"
-      - "helm/**"
-      - "cmd/**"
-      - "dev/tools/fix-*"
-      - "dev/tools/bump-chart-version"
-      - "dev/ci/presubmits/**"
-      - "codegen.go"
 
 jobs:
   lint-workflows:

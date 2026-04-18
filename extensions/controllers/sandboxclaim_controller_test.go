@@ -1491,6 +1491,11 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					}
 				}
 
+				// 5. Verify safe-to-evict annotation was added to pod template
+				if val := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; val != "on-completion" {
+					t.Errorf("expected pod template to have annotation %q with value \"on-completion\", got %q", PodSafeToEvictAnnotation, val)
+				}
+
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
 				var sandbox sandboxv1alpha1.Sandbox

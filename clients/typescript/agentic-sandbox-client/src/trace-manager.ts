@@ -15,6 +15,8 @@
 interface Span {
   isRecording(): boolean;
   setAttribute(key: string, value: string | number | boolean): void;
+  recordException(exception: unknown): void;
+  setStatus(status: { code: number; message?: string }): void;
   end(): void;
 }
 
@@ -24,6 +26,7 @@ interface Tracer {
 }
 
 interface OtelApi {
+  SpanStatusCode: { ERROR: number };
   trace: {
     getTracer(name: string): Tracer;
     setSpanInContext(span: Span, ctx: unknown): unknown;
@@ -44,6 +47,8 @@ class NoOpSpan implements Span {
     return false;
   }
   setAttribute(_key: string, _value: string | number | boolean): void {}
+  recordException(_exception: unknown): void {}
+  setStatus(_status: { code: number; message?: string }): void {}
   end(): void {}
 }
 
@@ -65,6 +70,8 @@ async function loadOtel(): Promise<OtelApi | null> {
   try {
     const api = await import("@opentelemetry/api");
     otelApi = {
+      SpanStatusCode:
+        api.SpanStatusCode as unknown as OtelApi["SpanStatusCode"],
       trace: api.trace as unknown as OtelApi["trace"],
       context: api.context as unknown as OtelApi["context"],
       propagation: api.propagation as unknown as OtelApi["propagation"],
@@ -152,6 +159,12 @@ export async function initializeTracer(serviceName: string): Promise<void> {
   }
 }
 
+function recordSpanError(span: Span, err: unknown): void {
+  span.recordException(err);
+  const message = err instanceof Error ? err.message : String(err);
+  span.setStatus({ code: otelApi?.SpanStatusCode.ERROR ?? 2, message });
+}
+
 export async function withSpan<T>(
   tracer: Tracer | null,
   serviceName: string,
@@ -167,6 +180,9 @@ export async function withSpan<T>(
     tracer.startActiveSpan(spanName, async (span) => {
       try {
         return await fn(span);
+      } catch (err) {
+        recordSpanError(span, err);
+        throw err;
       } finally {
         span.end();
       }

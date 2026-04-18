@@ -23,6 +23,8 @@ import type { Span, Tracer } from "../trace-manager.js";
 interface FakeSpan extends Span {
   end: Mock;
   setAttribute: Mock;
+  recordException: Mock;
+  setStatus: Mock;
 }
 
 function makeFakeTracer(): {
@@ -36,6 +38,8 @@ function makeFakeTracer(): {
     const span: FakeSpan = {
       isRecording: () => true,
       setAttribute: vi.fn(),
+      recordException: vi.fn(),
+      setStatus: vi.fn(),
       end: vi.fn(),
     };
     spans.push({ name, span });
@@ -45,6 +49,8 @@ function makeFakeTracer(): {
     const span: FakeSpan = {
       isRecording: () => true,
       setAttribute: vi.fn(),
+      recordException: vi.fn(),
+      setStatus: vi.fn(),
       end: vi.fn(),
     };
     spans.push({ name, span });
@@ -89,6 +95,51 @@ describe("withSpan", () => {
       }).catch(() => {});
 
       expect(spans[0].span.end).toHaveBeenCalled();
+    });
+
+    it("records exception on span when callback throws", async () => {
+      const { tracer, spans } = makeFakeTracer();
+      const err = new Error("boom");
+
+      await withSpan(tracer, "svc", "op", () => {
+        throw err;
+      }).catch(() => {});
+
+      expect(spans[0].span.recordException).toHaveBeenCalledWith(err);
+    });
+
+    it("sets error status on span when callback throws", async () => {
+      const { tracer, spans } = makeFakeTracer();
+
+      await withSpan(tracer, "svc", "op", () => {
+        throw new Error("boom");
+      }).catch(() => {});
+
+      expect(spans[0].span.setStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "boom" }),
+      );
+    });
+
+    it("rethrows the original error after recording", async () => {
+      const { tracer } = makeFakeTracer();
+
+      await expect(
+        withSpan(tracer, "svc", "op", () => {
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom");
+    });
+
+    it("records non-Error thrown values using String()", async () => {
+      const { tracer, spans } = makeFakeTracer();
+
+      await withSpan(tracer, "svc", "op", () => {
+        throw "oops";
+      }).catch(() => {});
+
+      expect(spans[0].span.setStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "oops" }),
+      );
     });
 
     it("returns the value from the callback", async () => {

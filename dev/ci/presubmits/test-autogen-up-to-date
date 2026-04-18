@@ -34,6 +34,41 @@ def run_and_verify_no_changes(command):
         sys.exit(1)
 
 
+GENERATED_HELM_PATHS = [
+    "helm/crds/",
+    "helm/templates/rbac.generated.yaml",
+    "helm/templates/extensions-rbac.generated.yaml",
+]
+
+
+def verify_helm_chart_version_bumped():
+    """Fails if generated helm files changed vs the merge base but Chart.yaml did not."""
+    base_ref = os.environ.get("GITHUB_BASE_REF", "main")
+    try:
+        merge_base = subprocess.check_output(
+            ["git", "merge-base", "HEAD", f"origin/{base_ref}"],
+            stderr=subprocess.DEVNULL,
+        ).strip().decode("utf-8")
+    except subprocess.CalledProcessError:
+        print(f"WARNING: could not determine merge base against origin/{base_ref}; skipping helm sync check.")
+        return
+
+    def changed_files(paths):
+        return subprocess.check_output(
+            ["git", "diff", "--name-only", merge_base, "HEAD", "--"] + paths
+        ).decode("utf-8").strip()
+
+    generated_changed = changed_files(GENERATED_HELM_PATHS)
+    chart_changed = changed_files(["helm/Chart.yaml"])
+
+    if generated_changed and not chart_changed:
+        print("ERROR: Generated helm files changed but helm/Chart.yaml version was not bumped.")
+        print("Please run 'make fix-go-generate' and commit the result.")
+        print("Changed generated files:")
+        print(generated_changed)
+        sys.exit(1)
+
+
 def main():
     """Runs the validation logic."""
 
@@ -46,6 +81,12 @@ def main():
         print(f"Running: {script}")
         print(f"{'='*60}")
         run_and_verify_no_changes([script])
+
+    print(f"\n{'='*60}")
+    print("Checking helm chart version is bumped with generated files")
+    print(f"{'='*60}")
+    verify_helm_chart_version_bumped()
+
 
 if __name__ == "__main__":
     main()

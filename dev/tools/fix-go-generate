@@ -30,5 +30,8 @@ def main():
     print(f"Running go generate ./... in {repo_root}")
     subprocess.check_call(["go", "generate", "-v", "./..."], cwd=repo_root)
 
+    print("Bumping chart version if generated files changed...")
+    subprocess.check_call([os.path.join(script_dir, "bump-chart-version")], cwd=repo_root)
+
 if __name__ == "__main__":
     main()

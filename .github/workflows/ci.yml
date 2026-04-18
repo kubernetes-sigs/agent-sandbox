@@ -3,14 +3,14 @@ name: CI
 on:
   pull_request:
     paths:
-      - '.github/workflows/**'
-      - 'api/**'
-      - 'extensions/**'
-      - 'controllers/**'
-      - 'helm/**'
-      - 'cmd/**'
-      - 'dev/tools/fix-*'
-      - 'codegen.go'
+      - ".github/workflows/**"
+      - "api/**"
+      - "extensions/**"
+      - "controllers/**"
+      - "helm/**"
+      - "cmd/**"
+      - "dev/tools/fix-*"
+      - "codegen.go"
 
 jobs:
   lint-workflows:

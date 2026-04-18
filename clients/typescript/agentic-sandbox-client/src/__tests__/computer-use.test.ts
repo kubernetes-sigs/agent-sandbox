@@ -65,6 +65,7 @@ import {
 import { Sandbox } from "../sandbox.js";
 import type { SandboxInit } from "../sandbox.js";
 import { POD_NAME_ANNOTATION } from "../constants.js";
+import { SandboxRequestError } from "../exceptions.js";
 
 /**
  * Test helper: exposes protected members for test assertions.
@@ -213,6 +214,64 @@ describe("ComputerUseSandbox (handle)", () => {
       await settled;
 
       expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== agent() error handling =====
+
+  describe("agent() error handling", () => {
+    it("throws SandboxRequestError with SyntaxError cause on malformed JSON", async () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("not valid json {{", { status: 200 }),
+      );
+
+      const err = await sandbox.agent("do something").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(err.cause).toBeInstanceOf(SyntaxError);
+    });
+
+    it("throws SandboxRequestError when JSON top-level is null", async () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify(null), { status: 200 }),
+      );
+
+      const err = await sandbox.agent("do something").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(err.message).toMatch(/expected object/i);
+    });
+
+    it("throws SandboxRequestError when JSON top-level is a string", async () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify("oops"), { status: 200 }),
+      );
+
+      const err = await sandbox.agent("do something").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(err.message).toMatch(/expected object/i);
+    });
+
+    it("returns ExecutionResult without throwing on non-zero exit_code and stderr", async () => {
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ stdout: "", stderr: "boom", exit_code: 1 }),
+          { status: 200 },
+        ),
+      );
+
+      const result = await sandbox.agent("do something");
+
+      expect(result).toEqual({ stdout: "", stderr: "boom", exitCode: 1 });
     });
   });
 });

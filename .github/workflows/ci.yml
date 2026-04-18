@@ -4,6 +4,15 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      - "api/**"
+      - "extensions/**"
+      - "controllers/**"
+      - "helm/**"
+      - "cmd/**"
+      - "dev/tools/fix-*"
+      - "dev/tools/bump-chart-version"
+      - "dev/ci/presubmits/**"
+      - "codegen.go"
 
 jobs:
   lint-workflows:
@@ -14,3 +23,21 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: devops-actions/actionlint@467e2ce19b2310e93c9ffa0b50fe31f86b5a7f23 # v0.1.10
+
+  verify-generate:
+    name: Verify Generated Files Up To Date
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run autogen check
+        run: dev/ci/presubmits/test-autogen-up-to-date

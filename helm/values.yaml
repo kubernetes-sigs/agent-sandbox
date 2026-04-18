@@ -11,13 +11,23 @@ image:
 replicaCount: 1
 
 controller:
-  # leaderElect enables leader election for high availability.
+  clusterDomain: "cluster.local"
   leaderElect: true
-  # extraArgs passes additional flags to the controller binary.
+  leaderElectionNamespace: ""
+  enableTracing: false
+  enablePprof: false
+  enablePprofDebug: false
+  pprofBlockProfileRate: 1000000
+  pprofMutexProfileFraction: 10
+  kubeApiQps: -1.0
+  kubeApiBurst: 10
+  sandboxConcurrentWorkers: 1
+  sandboxClaimConcurrentWorkers: 1
+  sandboxWarmPoolConcurrentWorkers: 1
+  sandboxTemplateConcurrentWorkers: 1
+  # extraArgs passes additional flags not listed above (e.g. zap logging flags).
   extraArgs: []
 
-# extensions enables the extensions controller (SandboxWarmPool, SandboxTemplate, SandboxClaim).
-# When enabled, the --extensions flag is passed to the binary and the extensions RBAC is installed.
 extensions:
   enabled: false
 

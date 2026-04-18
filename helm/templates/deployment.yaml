@@ -21,13 +21,7 @@ spec:
         image: {{ include "agent-sandbox.image" . }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         args:
-        - --leader-elect={{ .Values.controller.leaderElect }}
-        {{- if .Values.extensions.enabled }}
-        - --extensions
-        {{- end }}
-        {{- range .Values.controller.extraArgs }}
-        - {{ . | quote }}
-        {{- end }}
+        {{- include "agent-sandbox.controllerArgs" . | nindent 8 }}
         ports:
         - name: metrics
           containerPort: 8080

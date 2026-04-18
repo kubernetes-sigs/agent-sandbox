@@ -5,15 +5,7 @@ CRDs are bundled in the `crds/` directory and are installed automatically by Hel
 
 ## Installation
 
-### Basic install (core controller only)
-
-```bash
-helm install agent-sandbox ./helm/ \
-  --namespace agent-sandbox-system \
-  --create-namespace
-```
-
-### Install with a specific image tag
+### Basic install
 
 ```bash
 helm install agent-sandbox ./helm/ \
@@ -30,6 +22,7 @@ Extensions add support for `SandboxWarmPool`, `SandboxTemplate`, and `SandboxCla
 helm install agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --create-namespace \
+  --set image.tag=v0.3.10 \
   --set extensions.enabled=true
 ```
 
@@ -38,6 +31,7 @@ helm install agent-sandbox ./helm/ \
 ```bash
 helm install agent-sandbox ./helm/ \
   --namespace my-namespace \
+  --set image.tag=v0.3.10 \
   --set namespace.create=false \
   --set namespace.name=my-namespace
 ```
@@ -75,12 +69,12 @@ The following table lists the configurable parameters and their defaults.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `namespace.create` | Create the namespace as part of the release | `true` |
-| `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |
+| `image.tag` | Controller image tag — **required**, no chart-level default version | `"v0.3.10"` |
 | `image.repository` | Controller image repository | `registry.k8s.io/agent-sandbox/agent-sandbox-controller` |
-| `image.tag` | Image tag | `"v0.3.10"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `replicaCount` | Number of controller replicas | `1` |
+| `namespace.create` | Create the namespace as part of the release | `true` |
+| `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |
 | `controller.leaderElect` | Enable leader election | `true` |
 | `controller.extraArgs` | Additional arguments passed to the controller binary | `[]` |
 | `extensions.enabled` | Enable extensions controller (WarmPool, Template, Claim) | `false` |

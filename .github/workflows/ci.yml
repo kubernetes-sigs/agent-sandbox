@@ -8,6 +8,7 @@ on:
       - 'extensions/**'
       - 'controllers/**'
       - 'helm/**'
+      - 'cmd/**'
       - 'dev/tools/fix-*'
       - 'codegen.go'
 

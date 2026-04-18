@@ -27,6 +27,8 @@ GENERATED_PATHS = [
     "helm/crds/",
     "helm/templates/rbac.generated.yaml",
     "helm/templates/extensions-rbac.generated.yaml",
+    "helm/templates/_controller-args.generated.tpl",
+    "helm/values.yaml",
 ]
 
 

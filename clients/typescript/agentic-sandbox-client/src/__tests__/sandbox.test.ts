@@ -186,6 +186,14 @@ function makeFakeSocketAlwaysError() {
   };
 }
 
+/** Returns a fake socket whose destroy/on are no-ops (connect listener fires externally). */
+function makeFakeSocketConnects() {
+  return {
+    destroy: vi.fn(),
+    on: vi.fn(),
+  };
+}
+
 // ---------- tests ----------
 
 describe("Sandbox", () => {
@@ -282,6 +290,13 @@ describe("Sandbox", () => {
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         body: { status: { addresses: [{ value: "10.0.0.42" }] } },
       });
+      mockCreateConnection.mockImplementation(
+        (_opts: unknown, cb?: () => void) => {
+          const sock = makeFakeSocketConnects();
+          process.nextTick(() => cb?.());
+          return sock;
+        },
+      );
 
       const sandbox = new TestableSandbox(
         createTestInit({
@@ -335,6 +350,13 @@ describe("Sandbox", () => {
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         body: { status: { addresses: [{ value: "2001:db8::1" }] } },
       });
+      mockCreateConnection.mockImplementation(
+        (_opts: unknown, cb?: () => void) => {
+          const sock = makeFakeSocketConnects();
+          process.nextTick(() => cb?.());
+          return sock;
+        },
+      );
 
       const sandbox = new TestableSandbox(
         createTestInit({

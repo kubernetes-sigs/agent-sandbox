@@ -28,6 +28,8 @@ import {
   GATEWAY_API_GROUP,
   GATEWAY_API_VERSION,
   GATEWAY_PLURAL,
+  GATEWAY_PROBE_INTERVAL_MS,
+  GATEWAY_PROBE_TIMEOUT_MS,
   HEADER_REQUEST_ID,
   MAX_DRAIN_BYTES,
   MAX_ERROR_BODY_BYTES,
@@ -556,6 +558,10 @@ export class Sandbox {
         console.info(
           `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
         );
+        await this.probeGatewayConnectivity(
+          existingAddress,
+          timeoutMs - (Date.now() - startTime),
+        );
         return;
       }
 
@@ -579,6 +585,10 @@ export class Sandbox {
         if (result.type === "resolved") {
           this.baseUrl = `http://${formatGatewayAddress(result.address)}`;
           console.info(`Gateway is ready. Base URL set to: ${this.baseUrl}`);
+          await this.probeGatewayConnectivity(
+            result.address,
+            timeoutMs - (Date.now() - startTime),
+          );
           return;
         }
 
@@ -597,6 +607,10 @@ export class Sandbox {
           this.baseUrl = `http://${formatGatewayAddress(relistAddress)}`;
           console.info(
             `Gateway is ready (after re-list). Base URL set to: ${this.baseUrl}`,
+          );
+          await this.probeGatewayConnectivity(
+            relistAddress,
+            timeoutMs - (Date.now() - startTime),
           );
           return;
         }
@@ -709,6 +723,63 @@ export class Sandbox {
           }
         });
     });
+  }
+
+  /**
+   * After the gateway reports an IP address, the underlying proxy (e.g. Envoy)
+   * may not yet be accepting TCP connections. This method polls until a TCP
+   * connect succeeds or the remaining timeout budget is exhausted.
+   */
+  private async probeGatewayConnectivity(
+    address: string,
+    remainingMs: number,
+  ): Promise<void> {
+    const host = formatGatewayAddress(address);
+    // Derive port from the base URL (defaults to 80 for http).
+    const port = 80;
+    const deadline = Date.now() + Math.max(remainingMs, 0);
+    const probeTimeoutMs = Math.min(
+      GATEWAY_PROBE_TIMEOUT_MS,
+      Math.max(remainingMs, 0),
+    );
+
+    console.info(
+      `Probing gateway connectivity at ${host}:${port} (timeout ${probeTimeoutMs}ms)...`,
+    );
+
+    const startTime = Date.now();
+    while (Date.now() < deadline) {
+      const connected = await new Promise<boolean>((resolve) => {
+        const sock = net.createConnection({ host, port, timeout: 500 }, () => {
+          sock.destroy();
+          resolve(true);
+        });
+        sock.on("error", () => {
+          sock.destroy();
+          resolve(false);
+        });
+        sock.on("timeout", () => {
+          sock.destroy();
+          resolve(false);
+        });
+      });
+
+      if (connected) {
+        console.info(
+          `Gateway at ${host}:${port} is accepting connections ` +
+            `(took ${Date.now() - startTime}ms).`,
+        );
+        return;
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, GATEWAY_PROBE_INTERVAL_MS),
+      );
+    }
+
+    throw new SandboxNotReadyError(
+      `Gateway at ${host}:${port} did not accept connections within the timeout.`,
+    );
   }
 
   private async startAndWaitForPortForward(): Promise<void> {

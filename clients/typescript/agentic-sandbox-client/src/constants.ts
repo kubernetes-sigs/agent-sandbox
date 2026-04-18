@@ -54,6 +54,13 @@ export const HEADER_REQUEST_ID = "X-Request-ID";
 // Maximum number of gateway watch reconnects within a single waitForGatewayIp call
 export const MAX_GATEWAY_REWATCH = 10;
 
+// Maximum time (ms) for the TCP connectivity probe after gateway IP resolution.
+// The gateway may report an IP before the proxy (e.g. Envoy) is ready to accept connections.
+export const GATEWAY_PROBE_TIMEOUT_MS = 30_000;
+
+// Interval (ms) between TCP connectivity probe attempts.
+export const GATEWAY_PROBE_INTERVAL_MS = 500;
+
 // Maximum time (ms) allowed for cleanup operations (claim deletion, in-flight drain)
 export const CLEANUP_TIMEOUT_MS = 5_000;
 

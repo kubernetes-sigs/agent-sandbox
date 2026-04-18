@@ -13,22 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Runs bump-chart-version after all other fix-* generators have completed.
+
+This script is intentionally named fix-zz-* so it sorts last in the
+fix-* execution order used by dev/ci/presubmits/test-autogen-up-to-date.
+"""
 
 import os
 import subprocess
-import sys
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(script_dir)
+repo_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 
-from shared import headers
-
-def main():
-    # Find the repo root from the script's location
-    repo_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
-
-    print(f"Running go generate ./... in {repo_root}")
-    subprocess.check_call(["go", "generate", "-v", "./..."], cwd=repo_root)
-
-if __name__ == "__main__":
-    main()
+subprocess.check_call([os.path.join(script_dir, "bump-chart-version")], cwd=repo_root)

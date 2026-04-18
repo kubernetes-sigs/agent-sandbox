@@ -10,6 +10,8 @@ on:
       - "helm/**"
       - "cmd/**"
       - "dev/tools/fix-*"
+      - "dev/tools/bump-chart-version"
+      - "dev/ci/presubmits/**"
       - "codegen.go"
 
 jobs:

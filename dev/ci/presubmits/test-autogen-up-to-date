@@ -36,6 +36,8 @@ def run_and_verify_no_changes(command):
 
 GENERATED_HELM_PATHS = [
     "helm/crds/",
+    "helm/values.yaml",
+    "helm/templates/_controller-args.generated.tpl",
     "helm/templates/rbac.generated.yaml",
     "helm/templates/extensions-rbac.generated.yaml",
 ]

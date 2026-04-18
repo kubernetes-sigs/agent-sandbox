@@ -141,8 +141,9 @@ def run_typescript_e2e_tests(repo_root, artifact_dir, env, npm_path, npx_path):
     junit_report_path = os.path.join(repo_root, "bin", "e2e-ts-sdk-junit.xml")
     vitest_cmd = [
         npx_path, "vitest", "run",
+        "--reporter=verbose",
         "--reporter=junit",
-        f"--outputFile={junit_report_path}",
+        f"--outputFile.junit={junit_report_path}",
     ]
 
     print(f"Running command: {' '.join(vitest_cmd)}")

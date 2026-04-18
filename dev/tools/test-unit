@@ -119,8 +119,9 @@ def run_typescript_tests(repo_root):
     print("\n=== Running TypeScript unit tests ===")
     result = subprocess.run([
         npx_path, "vitest", "run",
+        "--reporter=verbose",
         "--reporter=junit",
-        f"--outputFile={junit_file}",
+        f"--outputFile.junit={junit_file}",
     ], cwd=ts_dir, env=env)
 
     return result.returncode

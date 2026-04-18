@@ -1,0 +1,36 @@
+namespace:
+  # create controls whether the namespace is created by this chart.
+  create: true
+  name: agent-sandbox-system
+
+image:
+  repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
+  tag: "v0.3.10"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+controller:
+  # leaderElect enables leader election for high availability.
+  leaderElect: true
+  # extraArgs passes additional flags to the controller binary.
+  extraArgs: []
+
+# extensions enables the extensions controller (SandboxWarmPool, SandboxTemplate, SandboxClaim).
+# When enabled, the --extensions flag is passed to the binary and the extensions RBAC is installed.
+extensions:
+  enabled: false
+
+resources: {}
+  # limits:
+  #   cpu: 500m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 10m
+  #   memory: 64Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

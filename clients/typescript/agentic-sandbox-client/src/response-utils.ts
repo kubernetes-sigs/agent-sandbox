@@ -100,6 +100,51 @@ export async function readBoundedBuffer(
   return Buffer.concat(chunks.map((c) => Buffer.from(c)));
 }
 
+/**
+ * Reads an HTTP error-response body up to maxBytes and silently truncates
+ * beyond it. Mirrors Go's io.LimitReader pattern (connector.go) — never
+ * throws, so it never masks the original HTTPError being wrapped.
+ * Returns "" on any read failure.
+ */
+export async function readBoundedErrorBody(
+  response: Response,
+  maxBytes: number,
+): Promise<string> {
+  try {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const contentLength = response.headers.get("content-length");
+      if (contentLength !== null && parseInt(contentLength, 10) > maxBytes) {
+        return "";
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return Buffer.from(bytes.subarray(0, maxBytes)).toString("utf-8");
+    }
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (total < maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const remaining = maxBytes - total;
+        if (value.byteLength > remaining) {
+          chunks.push(value.subarray(0, remaining));
+          total += remaining;
+          break;
+        }
+        chunks.push(value);
+        total += value.byteLength;
+      }
+      await reader.cancel();
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf-8");
+  } catch {
+    return "";
+  }
+}
+
 // --- response parsers ---
 
 /**

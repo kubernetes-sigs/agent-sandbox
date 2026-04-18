@@ -811,6 +811,81 @@ describe("Sandbox", () => {
 
       expect(err.body).toHaveLength(512);
     });
+
+    it("does not pull entire large error body from stream (bounded reader)", async () => {
+      const sandbox = createReadySandbox();
+      const CHUNK_SIZE = 256;
+      const CHUNK_COUNT = 400; // 100 KB total — far beyond MAX_ERROR_BODY_BYTES
+      let pulledBytes = 0;
+      let chunkIdx = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (chunkIdx >= CHUNK_COUNT) {
+            controller.close();
+            return;
+          }
+          const chunk = new Uint8Array(CHUNK_SIZE);
+          chunk.fill(0x78); // 'x'
+          pulledBytes += chunk.byteLength;
+          chunkIdx++;
+          controller.enqueue(chunk);
+        },
+      });
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(stream, { status: 500 }),
+      );
+
+      const err = await sandbox.commands.run("huge output").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.body).toHaveLength(512);
+      // Should pull at most MAX_ERROR_BODY_BYTES + one extra chunk before
+      // cancelling — not the full 100 KB body.
+      expect(pulledBytes).toBeLessThanOrEqual(512 + CHUNK_SIZE);
+    });
+
+    it("does not throw on non-UTF-8 binary error body", async () => {
+      const sandbox = createReadySandbox();
+      // Bytes that are not valid UTF-8 sequences on their own.
+      const nonUtf8 = new Uint8Array([0xff, 0xfe, 0xfd, 0xfc, 0x80, 0x81]);
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(nonUtf8, { status: 502 }),
+      );
+
+      const err = await sandbox.commands.run("binary err").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.statusCode).toBe(502);
+      // Body is best-effort utf-8 decoded; the key invariant is that the
+      // original HTTP error is not masked by a decode-side exception.
+      expect(typeof err.body).toBe("string");
+    });
+
+    it("skips arrayBuffer fallback when content-length exceeds limit", async () => {
+      const sandbox = createReadySandbox();
+      // Simulate a Response implementation with no streaming body, content-length
+      // declaring a huge payload. readBoundedErrorBody must not materialise it.
+      const hugeBody = "y".repeat(2000);
+      const fakeResponse = {
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        body: null,
+        headers: new Headers({ "content-length": "10000000" }),
+        arrayBuffer: vi.fn(
+          async () => new TextEncoder().encode(hugeBody).buffer,
+        ),
+        text: vi.fn(async () => hugeBody),
+      } as unknown as Response;
+      (fetch as Mock).mockResolvedValueOnce(fakeResponse);
+
+      const err = await sandbox.commands.run("over-claimed").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.body).toBe("");
+      expect(fakeResponse.arrayBuffer).not.toHaveBeenCalled();
+      expect(fakeResponse.text).not.toHaveBeenCalled();
+    });
   });
 
   // ===== port-forward auto-reconnect =====

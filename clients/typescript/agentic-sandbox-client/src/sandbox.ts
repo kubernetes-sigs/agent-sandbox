@@ -46,6 +46,7 @@ import {
   SandboxRequestError,
   SandboxTimeoutError,
 } from "./exceptions.js";
+import { readBoundedErrorBody } from "./response-utils.js";
 
 /**
  * Sleeps for `ms` milliseconds, aborting early if `signal` fires.
@@ -820,13 +821,12 @@ export class Sandbox {
           overallSignal,
         );
         if (!response.ok) {
-          // Read the body so callers can inspect the failure payload
-          let body = "";
-          try {
-            body = (await response.text()).slice(0, MAX_ERROR_BODY_BYTES);
-          } catch {
-            // Ignore body-read errors
-          }
+          // Bounded read so a hostile server cannot force arbitrarily large
+          // payloads into memory via the error path.
+          const body = await readBoundedErrorBody(
+            response,
+            MAX_ERROR_BODY_BYTES,
+          );
           throw new SandboxRequestError(
             `Request failed with status ${response.status}: ${response.statusText}` +
               (body ? ` — ${body}` : ""),

@@ -84,6 +84,7 @@ import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
+  HEADER_REQUEST_ID,
   MAX_DRAIN_BYTES,
   MAX_UPLOAD_SIZE,
   PER_ATTEMPT_TIMEOUT_MS,
@@ -1373,6 +1374,196 @@ describe("Sandbox", () => {
       await settled;
 
       expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("configurable per-attempt timeout", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("applies the overridden perAttemptTimeoutMs to fetch's AbortSignal", async () => {
+      const customTimeoutMs = 5_000;
+      const sandbox = createReadySandbox({
+        perAttemptTimeoutMs: customTimeoutMs,
+      });
+
+      // fetch never resolves unless aborted; when the per-attempt signal fires,
+      // reject with the abort reason so the retry loop can continue.
+      (fetch as Mock).mockImplementation(
+        (_url: string, opts?: RequestInit) =>
+          new Promise((_, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              reject(
+                (opts.signal as AbortSignal).reason ??
+                  new DOMException("aborted", "AbortError"),
+              );
+            });
+          }),
+      );
+
+      const listPromise = sandbox.files.list(".");
+      const settled = listPromise.catch(() => {});
+
+      // Advance just under the override — fetch should still be pending.
+      await vi.advanceTimersByTimeAsync(customTimeoutMs - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      // Cross the override deadline — per-attempt signal fires, first attempt
+      // rejects, loop moves to backoff → attempt #2 starts.
+      await vi.advanceTimersByTimeAsync(2);
+      // Flush backoff so attempt #2 begins.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      // Drain remaining retries to let the promise settle before the test ends.
+      await vi.advanceTimersByTimeAsync(customTimeoutMs * 6 + 60_000);
+      await settled;
+    });
+
+    it("falls back to PER_ATTEMPT_TIMEOUT_MS when perAttemptTimeoutMs is not set", async () => {
+      const sandbox = createReadySandbox();
+
+      (fetch as Mock).mockImplementation(
+        (_url: string, opts?: RequestInit) =>
+          new Promise((_, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              reject(
+                (opts.signal as AbortSignal).reason ??
+                  new DOMException("aborted", "AbortError"),
+              );
+            });
+          }),
+      );
+
+      const listPromise = sandbox.files.list(".");
+      const settled = listPromise.catch(() => {});
+
+      // Just before the default per-attempt timeout — still only one attempt.
+      await vi.advanceTimersByTimeAsync(PER_ATTEMPT_TIMEOUT_MS - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      // Cross the default deadline, then the first backoff.
+      await vi.advanceTimersByTimeAsync(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      // Drain remaining retries to let the promise settle.
+      await vi.advanceTimersByTimeAsync(PER_ATTEMPT_TIMEOUT_MS * 6 + 60_000);
+      await settled;
+    });
+  });
+
+  describe("external AbortSignal cancellation", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("aborts an in-flight request when the caller's signal fires, without retrying", async () => {
+      const sandbox = createReadySandbox();
+
+      (fetch as Mock).mockImplementation(
+        (_url: string, opts?: RequestInit) =>
+          new Promise((_, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              reject(
+                (opts.signal as AbortSignal).reason ??
+                  new DOMException("aborted", "AbortError"),
+              );
+            });
+          }),
+      );
+
+      const controller = new AbortController();
+      const listPromise = sandbox.files.list(".", {
+        signal: controller.signal,
+      });
+      const settled = listPromise.catch((e) => e);
+
+      // Let the fetch start.
+      await Promise.resolve();
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      // Abort — the in-flight attempt should reject and the loop should exit
+      // immediately without a retry.
+      controller.abort(new Error("cancelled by caller"));
+      // Advance generously; the loop must NOT schedule another attempt.
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const err = await settled;
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not affect a request that has already completed", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify([]), { status: 200 }),
+      );
+
+      const controller = new AbortController();
+      const listPromise = sandbox.files.list(".", {
+        signal: controller.signal,
+      });
+      await expect(listPromise).resolves.toEqual([]);
+
+      // Aborting post-completion must not throw or affect the returned value.
+      controller.abort();
+    });
+  });
+
+  describe("X-Request-ID header", () => {
+    it("attaches an X-Request-ID (UUID v4) to every outgoing request", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify([]), { status: 200 }),
+      );
+
+      await sandbox.files.list(".");
+
+      const [[, init]] = (fetch as Mock).mock.calls;
+      const headers = init.headers as Record<string, string>;
+      const requestId = headers[HEADER_REQUEST_ID];
+      expect(requestId).toBeDefined();
+      // UUID v4: 8-4-4-4-12 hex digits, version 4, variant 8/9/a/b
+      expect(requestId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+    });
+
+    it("keeps the same X-Request-ID across retries (matches Go connector)", async () => {
+      vi.useFakeTimers();
+      try {
+        const sandbox = createReadySandbox();
+        (fetch as Mock)
+          .mockResolvedValueOnce(new Response("", { status: 503 }))
+          .mockResolvedValueOnce(new Response("", { status: 503 }))
+          .mockResolvedValueOnce(
+            new Response(JSON.stringify([]), { status: 200 }),
+          );
+
+        const listPromise = sandbox.files.list(".");
+        // Drain backoffs between attempts.
+        await vi.advanceTimersByTimeAsync(5_000);
+        await listPromise;
+
+        expect((fetch as Mock).mock.calls.length).toBe(3);
+        const ids = (fetch as Mock).mock.calls.map(
+          ([, init]) =>
+            (init.headers as Record<string, string>)[HEADER_REQUEST_ID],
+        );
+        expect(ids[0]).toBeDefined();
+        expect(ids[1]).toBe(ids[0]);
+        expect(ids[2]).toBe(ids[0]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

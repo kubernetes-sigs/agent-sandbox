@@ -142,6 +142,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   private readonly defaultSandboxReadyTimeout: number;
   private readonly gatewayReadyTimeout: number;
   private readonly portForwardReadyTimeout: number;
+  private readonly perAttemptTimeoutMs: number | undefined;
   private readonly enableTracing: boolean;
   private readonly traceServiceName: string;
 
@@ -169,6 +170,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       ["sandboxReadyTimeout", options.sandboxReadyTimeout],
       ["gatewayReadyTimeout", options.gatewayReadyTimeout],
       ["portForwardReadyTimeout", options.portForwardReadyTimeout],
+      ["perAttemptTimeoutMs", options.perAttemptTimeoutMs],
     ] as [string, number | undefined][]) {
       if (value !== undefined && value <= 0) {
         throw new SandboxError(
@@ -239,6 +241,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     this.defaultSandboxReadyTimeout = options.sandboxReadyTimeout ?? 180;
     this.gatewayReadyTimeout = options.gatewayReadyTimeout ?? 180;
     this.portForwardReadyTimeout = options.portForwardReadyTimeout ?? 30;
+    this.perAttemptTimeoutMs = options.perAttemptTimeoutMs;
     this.enableTracing = options.enableTracing ?? false;
     this.traceServiceName = options.traceServiceName ?? "sandbox-client";
 
@@ -354,6 +357,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       gatewayNamespace: this.gatewayNamespace,
       gatewayReadyTimeout: this.gatewayReadyTimeout,
       portForwardReadyTimeout: this.portForwardReadyTimeout,
+      perAttemptTimeoutMs: this.perAttemptTimeoutMs,
       kubeConfig: this.kubeConfig,
       customObjectsApi: this.customObjectsApi,
       traceServiceName: this.traceServiceName,
@@ -528,6 +532,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       gatewayNamespace: this.gatewayNamespace,
       gatewayReadyTimeout: this.gatewayReadyTimeout,
       portForwardReadyTimeout: this.portForwardReadyTimeout,
+      perAttemptTimeoutMs: this.perAttemptTimeoutMs,
       kubeConfig: this.kubeConfig,
       customObjectsApi: this.customObjectsApi,
       traceServiceName: this.traceServiceName,

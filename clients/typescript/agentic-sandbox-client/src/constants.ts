@@ -43,8 +43,13 @@ export const MAX_ERROR_BODY_BYTES = 512;
 // Number of port-forward reconnect attempts before giving up
 export const MAX_RECONNECT_ATTEMPTS = 3;
 
-// Per-attempt timeout in milliseconds (independent of the overall request timeout)
-export const PER_ATTEMPT_TIMEOUT_MS = 30_000;
+// Default per-attempt timeout in milliseconds (independent of the overall request timeout).
+// Matches Go client's defaultPerAttemptTimeout = 60s. Overridable via
+// SandboxClientOptions.perAttemptTimeoutMs or per-request options.
+export const PER_ATTEMPT_TIMEOUT_MS = 60_000;
+
+// Header name used to propagate a per-request correlation ID (matches Go client).
+export const HEADER_REQUEST_ID = "X-Request-ID";
 
 // Maximum number of gateway watch reconnects within a single waitForGatewayIp call
 export const MAX_GATEWAY_REWATCH = 10;

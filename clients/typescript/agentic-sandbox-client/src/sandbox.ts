@@ -28,6 +28,7 @@ import {
   GATEWAY_API_GROUP,
   GATEWAY_API_VERSION,
   GATEWAY_PLURAL,
+  HEADER_REQUEST_ID,
   MAX_DRAIN_BYTES,
   MAX_ERROR_BODY_BYTES,
   MAX_GATEWAY_REWATCH,
@@ -84,7 +85,11 @@ async function sleepWithSignal(
  * - maxRetries controls total attempt count (1 = no retry, 5 = up to 4 retries).
  * - overallSignal is an optional AbortSignal that caps the entire operation.
  *   When it fires, the retry loop stops immediately without further attempts.
- * - Each attempt gets its own per-attempt timeout (PER_ATTEMPT_TIMEOUT_MS).
+ * - externalSignal is an optional caller-supplied AbortSignal. When it fires,
+ *   the in-flight attempt is aborted and the loop exits immediately WITHOUT
+ *   retrying, matching Go's context cancellation semantics.
+ * - Each attempt gets its own per-attempt timeout (perAttemptTimeoutMs,
+ *   default PER_ATTEMPT_TIMEOUT_MS).
  * - Before retrying a 5xx response, the response body is drained to allow
  *   the underlying TCP connection to be reused.
  */
@@ -95,11 +100,36 @@ async function fetchWithRetry(
   backoffFactor: number = BACKOFF_FACTOR,
   retryStatusCodes: number[] = RETRY_STATUS_CODES,
   overallSignal?: AbortSignal,
+  externalSignal?: AbortSignal,
+  perAttemptTimeoutMs: number = PER_ATTEMPT_TIMEOUT_MS,
 ): Promise<Response> {
   const attempts = Math.max(1, maxRetries);
   let lastError: Error | null = null;
 
+  const throwExternalAbort = (cause?: unknown): never => {
+    throw new SandboxRequestError("Request aborted by caller.", {
+      cause: cause ?? externalSignal?.reason,
+    });
+  };
+
+  // Composite cancel signal used to interrupt backoff sleeps when either
+  // the overall deadline fires or the caller aborts.
+  const cancelSignals = [overallSignal, externalSignal].filter(
+    (s): s is AbortSignal => s !== undefined,
+  );
+  const cancelSignal =
+    cancelSignals.length === 0
+      ? undefined
+      : cancelSignals.length === 1
+        ? cancelSignals[0]
+        : AbortSignal.any(cancelSignals);
+
   for (let attempt = 0; attempt < attempts; attempt++) {
+    // Check external cancellation first: callers expect immediate exit,
+    // not a retry, when they abort.
+    if (externalSignal?.aborted) {
+      throwExternalAbort();
+    }
     // Check overall deadline before starting (and before sleeping)
     if (overallSignal?.aborted) {
       throw new SandboxTimeoutError(
@@ -114,11 +144,17 @@ async function fetchWithRetry(
         attemptController.abort(
           new DOMException("per-attempt timeout", "TimeoutError"),
         ),
-      PER_ATTEMPT_TIMEOUT_MS,
+      perAttemptTimeoutMs,
     );
-    const attemptSignal = overallSignal
-      ? AbortSignal.any([overallSignal, attemptController.signal])
-      : attemptController.signal;
+    const composedSignals = [
+      overallSignal,
+      externalSignal,
+      attemptController.signal,
+    ].filter((s): s is AbortSignal => s !== undefined);
+    const attemptSignal =
+      composedSignals.length === 1
+        ? composedSignals[0]
+        : AbortSignal.any(composedSignals);
 
     let response: Response;
     try {
@@ -129,6 +165,13 @@ async function fetchWithRetry(
         clearTimeout(attemptTimer);
       }
 
+      // If the external signal fired just as fetch resolved, discard the
+      // response and bail out without retrying.
+      if (externalSignal?.aborted) {
+        response.body?.cancel().catch(() => {});
+        throwExternalAbort();
+      }
+
       // race condition guard: per-attempt timer fired just as fetch resolved
       if (attemptController.signal.aborted && !overallSignal?.aborted) {
         response.body?.cancel().catch(() => {});
@@ -137,7 +180,7 @@ async function fetchWithRetry(
         );
         if (attempt < attempts - 1) {
           const delay = backoffFactor * Math.pow(2, attempt) * 1000;
-          await sleepWithSignal(delay, overallSignal);
+          await sleepWithSignal(delay, cancelSignal);
         }
         continue;
       }
@@ -167,12 +210,17 @@ async function fetchWithRetry(
         } catch {
           // best-effort
         }
-        await sleepWithSignal(delay, overallSignal);
+        await sleepWithSignal(delay, cancelSignal);
         continue;
       }
       return response;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+
+      // Caller-initiated abort: surface as SandboxRequestError without retrying.
+      if (externalSignal?.aborted) {
+        throwExternalAbort(err);
+      }
 
       // If the overall deadline fired, throw SandboxTimeoutError
       if (overallSignal?.aborted) {
@@ -190,8 +238,11 @@ async function fetchWithRetry(
           }/${attempts})...`,
         );
         try {
-          await sleepWithSignal(delay, overallSignal);
+          await sleepWithSignal(delay, cancelSignal);
         } catch (sleepErr) {
+          if (externalSignal?.aborted) {
+            throwExternalAbort(sleepErr);
+          }
           if (overallSignal?.aborted) {
             throw new SandboxTimeoutError(
               "Request timed out (overall deadline exceeded).",
@@ -249,6 +300,7 @@ export interface SandboxInit {
   gatewayNamespace?: string;
   gatewayReadyTimeout?: number;
   portForwardReadyTimeout?: number;
+  perAttemptTimeoutMs?: number;
   kubeConfig: k8s.KubeConfig;
   customObjectsApi: k8s.CustomObjectsApi;
   traceServiceName: string;
@@ -279,6 +331,7 @@ export class Sandbox {
   private readonly gatewayNamespace: string;
   private readonly gatewayReadyTimeout: number;
   private readonly portForwardReadyTimeout: number;
+  private readonly perAttemptTimeoutMs: number;
 
   protected baseUrl: string | undefined;
   protected portForwardProcess: ChildProcess | null = null;
@@ -300,6 +353,8 @@ export class Sandbox {
     this.gatewayNamespace = init.gatewayNamespace ?? "default";
     this.gatewayReadyTimeout = init.gatewayReadyTimeout ?? 180;
     this.portForwardReadyTimeout = init.portForwardReadyTimeout ?? 30;
+    this.perAttemptTimeoutMs =
+      init.perAttemptTimeoutMs ?? PER_ATTEMPT_TIMEOUT_MS;
     this.kubeConfig = init.kubeConfig;
     this.customObjectsApi = init.customObjectsApi;
     this.traceServiceName = init.traceServiceName;
@@ -762,6 +817,8 @@ export class Sandbox {
       headers?: Record<string, string>;
       timeout?: number;
       maxRetries?: number;
+      signal?: AbortSignal;
+      perAttemptTimeoutMs?: number;
     } = {},
   ): Promise<Response> {
     // reject pre-captured references used after close()
@@ -793,11 +850,22 @@ export class Sandbox {
         "",
       )}`;
 
+      // Correlation ID shared across all retry attempts for a single
+      // request cycle (matches Go client's connector.SendRequest).
+      // Respect a caller-supplied X-Request-ID if present (case-insensitive).
+      const existingRequestId = options.headers
+        ? Object.entries(options.headers).find(
+            ([k]) => k.toLowerCase() === HEADER_REQUEST_ID.toLowerCase(),
+          )?.[1]
+        : undefined;
+      const requestId = existingRequestId ?? globalThis.crypto.randomUUID();
+
       const headers: Record<string, string> = {
         ...options.headers,
         "X-Sandbox-ID": this.sandboxName,
         "X-Sandbox-Namespace": this.namespace,
         "X-Sandbox-Port": String(this.serverPort),
+        [HEADER_REQUEST_ID]: requestId,
       };
 
       const fetchOptions: RequestInit = {
@@ -819,6 +887,8 @@ export class Sandbox {
           BACKOFF_FACTOR,
           RETRY_STATUS_CODES,
           overallSignal,
+          options.signal,
+          options.perAttemptTimeoutMs ?? this.perAttemptTimeoutMs,
         );
         if (!response.ok) {
           // Bounded read so a hostile server cannot force arbitrarily large

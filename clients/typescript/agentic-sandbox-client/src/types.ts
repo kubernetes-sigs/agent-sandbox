@@ -23,6 +23,25 @@ export interface SandboxClientOptions {
   portForwardReadyTimeout?: number;
   enableTracing?: boolean;
   traceServiceName?: string;
+  /**
+   * Per-attempt HTTP timeout in milliseconds (independent of the overall
+   * request timeout). Applied to every attempt in the retry loop. When
+   * omitted, the client uses PER_ATTEMPT_TIMEOUT_MS (60_000 ms), matching
+   * the Go client's defaultPerAttemptTimeout.
+   */
+  perAttemptTimeoutMs?: number;
+}
+
+/**
+ * Options accepted by individual sandbox operations (run, read, write, ...).
+ * Used to pass a cancellation signal and/or an overall timeout per call.
+ */
+export interface CallOptions {
+  /** Overall timeout in seconds, capping the full retry loop. */
+  timeout?: number;
+  /** External cancellation signal. When aborted, the in-flight request is
+   *  cancelled immediately without retrying. */
+  signal?: AbortSignal;
 }
 
 export interface CreateSandboxOptions {
@@ -51,5 +70,7 @@ export type RequestFn = (
     headers?: Record<string, string>;
     timeout?: number;
     maxRetries?: number;
+    signal?: AbortSignal;
+    perAttemptTimeoutMs?: number;
   },
 ) => Promise<Response>;

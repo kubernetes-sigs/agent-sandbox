@@ -14,7 +14,7 @@
 
 import * as path from "node:path";
 
-import type { FileEntry, RequestFn } from "../types.js";
+import type { CallOptions, FileEntry, RequestFn } from "../types.js";
 import {
   readBoundedText,
   readBoundedBuffer,
@@ -26,6 +26,22 @@ import {
   MAX_DOWNLOAD_SIZE,
   MAX_UPLOAD_SIZE,
 } from "../constants.js";
+
+function normalizeCallOptions(
+  arg: number | CallOptions | undefined,
+  defaultTimeoutSec: number,
+): { timeout: number; signal?: AbortSignal } {
+  if (typeof arg === "number") {
+    return { timeout: arg };
+  }
+  if (arg === undefined) {
+    return { timeout: defaultTimeoutSec };
+  }
+  return {
+    timeout: arg.timeout ?? defaultTimeoutSec,
+    signal: arg.signal,
+  };
+}
 
 /**
  * Percent-encodes a file path segment so that every character not in the
@@ -64,8 +80,9 @@ export class Filesystem {
   async write(
     filePath: string,
     content: Buffer | string,
-    timeout: number = 60,
+    options?: number | CallOptions,
   ): Promise<void> {
+    const { timeout, signal } = normalizeCallOptions(options, 60);
     await withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -116,6 +133,7 @@ export class Filesystem {
         await this.requestFn("POST", "upload", {
           body: formData,
           timeout,
+          signal,
           maxRetries: 1, // file upload is non-idempotent; never retry
         });
 
@@ -125,7 +143,11 @@ export class Filesystem {
     );
   }
 
-  async read(filePath: string, timeout: number = 60): Promise<Buffer> {
+  async read(
+    filePath: string,
+    options?: number | CallOptions,
+  ): Promise<Buffer> {
+    const { timeout, signal } = normalizeCallOptions(options, 60);
     return withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -145,6 +167,7 @@ export class Filesystem {
           `download/${encodedPath}`,
           {
             timeout,
+            signal,
           },
         );
 
@@ -164,7 +187,11 @@ export class Filesystem {
     );
   }
 
-  async list(dirPath: string, timeout: number = 60): Promise<FileEntry[]> {
+  async list(
+    dirPath: string,
+    options?: number | CallOptions,
+  ): Promise<FileEntry[]> {
+    const { timeout, signal } = normalizeCallOptions(options, 60);
     return withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -181,6 +208,7 @@ export class Filesystem {
         const encodedPath = encodePathSegment(dirPath);
         const response = await this.requestFn("GET", `list/${encodedPath}`, {
           timeout,
+          signal,
         });
 
         const rawText = await readBoundedText(
@@ -209,7 +237,11 @@ export class Filesystem {
     );
   }
 
-  async exists(filePath: string, timeout: number = 60): Promise<boolean> {
+  async exists(
+    filePath: string,
+    options?: number | CallOptions,
+  ): Promise<boolean> {
+    const { timeout, signal } = normalizeCallOptions(options, 60);
     return withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -226,6 +258,7 @@ export class Filesystem {
         const encodedPath = encodePathSegment(filePath);
         const response = await this.requestFn("GET", `exists/${encodedPath}`, {
           timeout,
+          signal,
         });
 
         const rawText = await readBoundedText(

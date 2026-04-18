@@ -28,6 +28,7 @@ export { CommandExecutor } from "./commands/index.js";
 export { Filesystem } from "./files/index.js";
 export * from "./extensions/index.js";
 export type {
+  CallOptions,
   ExecutionResult,
   FileEntry,
   SandboxClientOptions,

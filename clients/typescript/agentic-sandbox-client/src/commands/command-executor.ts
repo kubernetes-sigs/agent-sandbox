@@ -12,12 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import type { ExecutionResult, RequestFn } from "../types.js";
+import type { CallOptions, ExecutionResult, RequestFn } from "../types.js";
 import type { Tracer } from "../trace-manager.js";
 import { withSpan } from "../trace-manager.js";
 import { SandboxRequestError } from "../exceptions.js";
 import { readBoundedText, parseExecutionResult } from "../response-utils.js";
 import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
+
+function normalizeCallOptions(
+  arg: number | CallOptions | undefined,
+  defaultTimeoutSec: number,
+): { timeout: number; signal?: AbortSignal } {
+  if (typeof arg === "number") {
+    return { timeout: arg };
+  }
+  if (arg === undefined) {
+    return { timeout: defaultTimeoutSec };
+  }
+  return {
+    timeout: arg.timeout ?? defaultTimeoutSec,
+    signal: arg.signal,
+  };
+}
 
 export class CommandExecutor {
   private requestFn: RequestFn;
@@ -37,7 +53,11 @@ export class CommandExecutor {
     this.traceServiceName = traceServiceName;
   }
 
-  async run(command: string, timeout: number = 60): Promise<ExecutionResult> {
+  async run(
+    command: string,
+    options?: number | CallOptions,
+  ): Promise<ExecutionResult> {
+    const { timeout, signal } = normalizeCallOptions(options, 60);
     return withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -51,6 +71,7 @@ export class CommandExecutor {
           body: JSON.stringify({ command }),
           headers: { "Content-Type": "application/json" },
           timeout,
+          signal,
           maxRetries: 1, // command execution is non-idempotent; never retry
         });
 

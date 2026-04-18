@@ -86,6 +86,7 @@ import {
   CLAIM_PLURAL_NAME,
   HEADER_REQUEST_ID,
   MAX_DRAIN_BYTES,
+  MAX_RETRIES,
   MAX_UPLOAD_SIZE,
   PER_ATTEMPT_TIMEOUT_MS,
 } from "../constants.js";
@@ -1564,6 +1565,218 @@ describe("Sandbox", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  // ===== 5xx retry coverage — files.read =====
+
+  describe("5xx retry — files.read", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("retries on 502 and succeeds on second attempt", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock)
+        .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+        .mockResolvedValueOnce(new Response("file content", { status: 200 }));
+
+      const readPromise = sandbox.files.read("test.txt");
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await readPromise;
+
+      expect(result.toString()).toBe("file content");
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it(`throws SandboxRequestError after ${MAX_RETRIES} consecutive 503s`, async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const readPromise = sandbox.files.read("test.txt");
+      const settled = readPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      const err = await readPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(MAX_RETRIES);
+    });
+  });
+
+  // ===== 5xx retry coverage — files.list =====
+
+  describe("5xx retry — files.list", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("retries on 504 and succeeds on second attempt", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock)
+        .mockResolvedValueOnce(new Response("gateway timeout", { status: 504 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify([]), { status: 200 }),
+        );
+
+      const listPromise = sandbox.files.list(".");
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await listPromise;
+
+      expect(result).toEqual([]);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it(`throws SandboxRequestError after ${MAX_RETRIES} consecutive 504s`, async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 504 }));
+
+      const listPromise = sandbox.files.list(".");
+      const settled = listPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      const err = await listPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(MAX_RETRIES);
+    });
+  });
+
+  // ===== 5xx retry coverage — files.exists =====
+
+  describe("5xx retry — files.exists", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("retries on 502 then 503 and succeeds on third attempt", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock)
+        .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+        .mockResolvedValueOnce(
+          new Response("service unavailable", { status: 503 }),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ exists: true }), { status: 200 }),
+        );
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      await vi.advanceTimersByTimeAsync(5_000); // drain 500ms + 1000ms backoffs
+      const result = await existsPromise;
+
+      expect(result).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it(`throws SandboxRequestError after ${MAX_RETRIES} consecutive 502s`, async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 502 }));
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      const settled = existsPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      const err = await existsPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(MAX_RETRIES);
+    });
+  });
+
+  // ===== 5xx is not retried — files.write =====
+
+  describe("5xx is not retried — files.write", () => {
+    it("throws SandboxRequestError on 503 without retrying (non-idempotent)", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      await expect(
+        sandbox.files.write("test.txt", "data"),
+      ).rejects.toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== backoff delay behaviour =====
+
+  describe("backoff delays", () => {
+    let setTimeoutSpy: Mock | null = null;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      setTimeoutSpy = vi.spyOn(globalThis, "setTimeout") as unknown as Mock;
+    });
+
+    afterEach(() => {
+      setTimeoutSpy?.mockRestore();
+      setTimeoutSpy = null;
+      vi.useRealTimers();
+    });
+
+    it("exponential backoff sequence is [500, 1000, 2000, 4000, 8000] ms with no upper cap", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const promise = sandbox.files.list(".");
+      const settled = promise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      // Filter per-attempt timeout sleeps (PER_ATTEMPT_TIMEOUT_MS = 60 s)
+      const backoffDelays = setTimeoutSpy!.mock.calls
+        .map(([, delay]) => delay as number)
+        .filter((d) => d !== PER_ATTEMPT_TIMEOUT_MS);
+
+      // 5 backoff sleeps between 6 attempts (MAX_RETRIES = 6)
+      expect(backoffDelays).toEqual([500, 1000, 2000, 4000, 8000]);
+      // 8000ms > Go's 5000ms cap: TS has no upper bound on backoff delay
+      expect(backoffDelays.at(-1)).toBeGreaterThan(5_000);
+    });
+
+    it("first backoff fires at exactly 500ms (confirmed by attempt count at 499ms vs 500ms)", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      sandbox.files.list(".").catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(0); // flush initial microtasks
+      expect(fetch).toHaveBeenCalledTimes(1); // attempt 0 already ran
+
+      await vi.advanceTimersByTimeAsync(499); // still within first backoff window
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1); // 500ms: first backoff fires
+      expect(fetch).toHaveBeenCalledTimes(2); // attempt 1 ran
+
+      await vi.advanceTimersByTimeAsync(20_000); // drain remaining
+    });
+
+    it("overall timeout fires during second backoff: 2 attempts then SandboxTimeoutError", async () => {
+      // Confirms TS does NOT shorten backoff delay to match remaining overall timeout.
+      // The 1000ms second-backoff sleep is started at full duration; the 600ms
+      // overall timeout fires concurrently and throws SandboxTimeoutError instead
+      // of clipping the sleep to ~100ms (the way Go would handle remaining context).
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const promise = sandbox.files.list(".", 0.6); // 600ms overall timeout
+      const settled = promise.catch(() => {});
+      // Advance past the 600ms timeout (first backoff 500ms fires → attempt 1 → second backoff 1000ms starts → timeout at 600ms)
+      await vi.advanceTimersByTimeAsync(700);
+      await settled;
+
+      const err = await promise.catch((e) => e);
+      expect(err.constructor.name).toBe("SandboxTimeoutError");
+      expect(fetch).toHaveBeenCalledTimes(2);
     });
   });
 });

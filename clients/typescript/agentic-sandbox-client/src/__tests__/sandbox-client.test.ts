@@ -78,7 +78,7 @@ vi.mock("node:net", async (importOriginal) => {
 
 import { SandboxClient } from "../sandbox-client.js";
 import { Sandbox } from "../sandbox.js";
-import { SandboxError } from "../exceptions.js";
+import { SandboxError, SandboxNotFoundError } from "../exceptions.js";
 import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
@@ -447,14 +447,19 @@ describe("SandboxClient (registry)", () => {
       // Clear the count so the assertion only covers the getSandbox() call below.
       mockGetNamespacedCustomObject.mockClear();
 
+      // Cache-hit validation: 1) claim re-GET, 2) underlying Sandbox CR re-GET
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         metadata: { name: sandbox1.claimName },
+        status: { sandbox: { name: sandbox1.sandboxName } },
+      });
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: sandbox1.sandboxName },
       });
 
       const sandbox2 = await client.getSandbox(sandbox1.claimName);
 
       expect(sandbox2).toBe(sandbox1);
-      expect(mockGetNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(2);
     });
 
     it("re-attaches when cached handle is inactive (closed)", async () => {
@@ -1138,6 +1143,61 @@ describe("SandboxClient (registry)", () => {
         "SandboxClaim",
       );
       // Registry evicted — no active sandboxes remain
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
+
+    it("evicts cached handle and throws SandboxNotFoundError when underlying Sandbox returns 404 on cache hit", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-underlying");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+
+      // 1st GET: claim verify succeeds with matching sandbox name
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: sandbox1.claimName },
+        status: { sandbox: { name: sandbox1.sandboxName } },
+      });
+      // 2nd GET: Sandbox CR returns 404
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        new Error("HTTP 404"),
+      );
+
+      await expect(client.getSandbox(sandbox1.claimName)).rejects.toThrow(
+        SandboxNotFoundError,
+      );
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
+
+    it("evicts cached handle and throws SandboxError on non-404 Sandbox GET error", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-non404");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+
+      // 1st GET: claim verify succeeds with matching sandbox name
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: sandbox1.claimName },
+        status: { sandbox: { name: sandbox1.sandboxName } },
+      });
+      // 2nd GET: Sandbox CR returns 500 (transient API server error)
+      const apiErr = Object.assign(
+        new Error("HTTP 500 internal server error"),
+        {
+          code: 500,
+        },
+      );
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(apiErr);
+
+      let caught: unknown;
+      try {
+        await client.getSandbox(sandbox1.claimName);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(SandboxError);
+      expect(caught).not.toBeInstanceOf(SandboxNotFoundError);
       expect(client.listActiveSandboxes()).toHaveLength(0);
     });
 

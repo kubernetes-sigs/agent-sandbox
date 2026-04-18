@@ -423,7 +423,33 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       const currentSandboxName = sandboxStatus.name as string | undefined;
 
       if (!currentSandboxName || currentSandboxName === existing.sandboxName) {
-        // Name unchanged (or not yet set) — return the cached handle.
+        // Name unchanged (or not yet set) — additionally verify that the
+        // underlying Sandbox object still exists. The claim and the sandbox
+        // can drift if the Sandbox CR is externally deleted while the claim
+        // status has not yet been reconciled.
+        try {
+          await this.customObjectsApi.getNamespacedCustomObject({
+            group: SANDBOX_API_GROUP,
+            version: SANDBOX_API_VERSION,
+            namespace: ns,
+            plural: SANDBOX_PLURAL_NAME,
+            name: existing.sandboxName,
+          });
+        } catch (err) {
+          this.registry.delete(key);
+          if (isK8s404(err)) {
+            throw new SandboxNotFoundError(
+              `Underlying Sandbox '${existing.sandboxName}' for claim '${claimName}' ` +
+                `not found in namespace '${ns}'.`,
+              { cause: err },
+            );
+          }
+          throw new SandboxError(
+            `Failed to verify Sandbox '${existing.sandboxName}' for claim ` +
+              `'${claimName}' in namespace '${ns}'.`,
+            { cause: err },
+          );
+        }
         return existing;
       }
 

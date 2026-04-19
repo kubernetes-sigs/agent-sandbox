@@ -22,6 +22,7 @@ controller:
   kubeApiQps: -1.0
   kubeApiBurst: 10
   sandboxConcurrentWorkers: 1
+  # The following workers are only active when extensions.enabled=true.
   sandboxClaimConcurrentWorkers: 1
   sandboxWarmPoolConcurrentWorkers: 1
   sandboxTemplateConcurrentWorkers: 1

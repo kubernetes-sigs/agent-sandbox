@@ -83,9 +83,9 @@ The following table lists the configurable parameters and their defaults.
 | `controller.kubeApiQps` | QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |
 | `controller.sandboxConcurrentWorkers` | Max concurrent reconciles for the Sandbox controller | `1` |
-| `controller.sandboxClaimConcurrentWorkers` | Max concurrent reconciles for the SandboxClaim controller | `1` |
-| `controller.sandboxWarmPoolConcurrentWorkers` | Max concurrent reconciles for the SandboxWarmPool controller | `1` |
-| `controller.sandboxTemplateConcurrentWorkers` | Max concurrent reconciles for the SandboxTemplate controller | `1` |
+| `controller.sandboxClaimConcurrentWorkers` | Max concurrent reconciles for the SandboxClaim controller (extensions only) | `1` |
+| `controller.sandboxWarmPoolConcurrentWorkers` | Max concurrent reconciles for the SandboxWarmPool controller (extensions only) | `1` |
+| `controller.sandboxTemplateConcurrentWorkers` | Max concurrent reconciles for the SandboxTemplate controller (extensions only) | `1` |
 | `controller.enableTracing` | Enable OpenTelemetry tracing via OTLP | `false` |
 | `controller.enablePprof` | Enable CPU profiling endpoint on the metrics server | `false` |
 | `controller.enablePprofDebug` | Enable all pprof endpoints (implies enablePprof) | `false` |

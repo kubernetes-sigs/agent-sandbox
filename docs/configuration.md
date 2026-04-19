@@ -7,9 +7,9 @@ All controller configuration is exposed as named values in the Helm chart's `val
 | Value | Default | Description |
 |-------|---------|-------------|
 | `controller.sandboxConcurrentWorkers` | `1` | Max concurrent reconciles for the Sandbox controller |
-| `controller.sandboxClaimConcurrentWorkers` | `1` | Max concurrent reconciles for the SandboxClaim controller |
-| `controller.sandboxWarmPoolConcurrentWorkers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller |
-| `controller.sandboxTemplateConcurrentWorkers` | `1` | Max concurrent reconciles for the SandboxTemplate controller |
+| `controller.sandboxClaimConcurrentWorkers` | `1` | Max concurrent reconciles for the SandboxClaim controller (extensions only) |
+| `controller.sandboxWarmPoolConcurrentWorkers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller (extensions only) |
+| `controller.sandboxTemplateConcurrentWorkers` | `1` | Max concurrent reconciles for the SandboxTemplate controller (extensions only) |
 | `controller.kubeApiQps` | `-1` (unlimited) | QPS limit for the Kubernetes API client |
 | `controller.kubeApiBurst` | `10` | Burst limit for the Kubernetes API client |
 

@@ -89,7 +89,8 @@ async function deployRouter(tc: TestContext, namespace: string): Promise<void> {
 
   const manifest = fs
     .readFileSync(ROUTER_YAML_PATH, "utf-8")
-    .replaceAll("IMAGE_PLACEHOLDER", routerImage);
+    .replaceAll("IMAGE_PLACEHOLDER", routerImage)
+    .replaceAll("${ROUTER_IMAGE}", routerImage);
 
   console.log(`Applying router manifest to namespace: ${namespace}`);
   tc.applyManifestText(manifest, namespace);

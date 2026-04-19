@@ -71,7 +71,7 @@ The following table lists the configurable parameters and their defaults.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.tag` | Controller image tag — **required** | `"v0.3.10"` |
+| `image.tag` | Controller image tag — **required** | `""` |
 | `image.repository` | Controller image repository | `registry.k8s.io/agent-sandbox/agent-sandbox-controller` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `replicaCount` | Number of controller replicas | `1` |

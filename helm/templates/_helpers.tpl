@@ -37,6 +37,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 The controller image reference.
 */}}
 {{- define "agent-sandbox.image" -}}
-{{- $tag := .Values.image.tag }}
+{{- $tag := required "image.tag is required" .Values.image.tag }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}

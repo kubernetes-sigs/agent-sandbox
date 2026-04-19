@@ -5,7 +5,7 @@ namespace:
 
 image:
   repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
-  tag: "v0.3.10"
+  tag: ""  # required — set via --set image.tag=<version>
   pullPolicy: IfNotPresent
 
 replicaCount: 1

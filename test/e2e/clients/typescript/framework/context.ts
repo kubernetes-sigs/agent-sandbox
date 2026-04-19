@@ -155,13 +155,15 @@ export class TestContext {
     const timeoutMs = timeout * 1000;
 
     return new Promise<boolean>((resolve, reject) => {
-      let resolved = false;
+      // Track whether the promise has been settled (resolved or rejected)
+      // to prevent duplicate resolve/reject calls.
+      let settled = false;
+      let timedOut = false;
 
       let abortController: AbortController | undefined;
       let timer: ReturnType<typeof setTimeout>;
 
-      const cleanup = () => {
-        clearTimeout(timer);
+      const abortWatch = () => {
         if (abortController) {
           try {
             abortController.abort();
@@ -171,13 +173,22 @@ export class TestContext {
         }
       };
 
+      const cleanup = () => {
+        clearTimeout(timer);
+        abortWatch();
+      };
+
       timer = setTimeout(() => {
+        timedOut = true;
         cleanup();
-        reject(
-          new Error(
-            `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
-          ),
-        );
+        if (!settled) {
+          settled = true;
+          reject(
+            new Error(
+              `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
+            ),
+          );
+        }
       }, timeoutMs);
 
       watcher
@@ -185,21 +196,22 @@ export class TestContext {
           watchPath,
           { fieldSelector: `metadata.name=${name}` },
           (type: string, obj: T) => {
-            if (predicateFn(obj)) {
+            if (!settled && predicateFn(obj)) {
               console.log(
                 `Object ${name} satisfied predicate on event type ${type}.`,
               );
-              resolved = true;
+              settled = true;
               cleanup();
               resolve(true);
             }
           },
           (err?: unknown) => {
             cleanup();
-            // Only reject if we haven't already resolved successfully.
-            // When we abort the watch after success, the doneCallback
-            // receives an abort error which we should ignore.
-            if (err && !resolved) {
+            // Only reject if we haven't already settled.
+            // When we abort the watch after success or timeout, the
+            // doneCallback receives an abort error which we should ignore.
+            if (err && !settled) {
+              settled = true;
               reject(
                 new Error(
                   `Watch error for ${name}: ${
@@ -212,10 +224,18 @@ export class TestContext {
         )
         .then((ac) => {
           abortController = ac;
+          // If the timeout already fired before the watch was established,
+          // abort immediately so the connection doesn't linger.
+          if (timedOut) {
+            abortWatch();
+          }
         })
         .catch((err) => {
           cleanup();
-          reject(err);
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
         });
     });
   }

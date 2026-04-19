@@ -23,7 +23,7 @@ helm install agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --create-namespace \
   --set image.tag=v0.3.10 \
-  --set extensions.enabled=true
+  --set controller.extensions=true
 ```
 
 ### Install into an existing namespace
@@ -92,7 +92,7 @@ The following table lists the configurable parameters and their defaults.
 | `controller.pprofBlockProfileRate` | Block profile sampling rate when pprof debug is enabled | `1000000` |
 | `controller.pprofMutexProfileFraction` | Mutex contention sampling rate when pprof debug is enabled | `10` |
 | `controller.extraArgs` | Additional flags not listed above (e.g. zap logging flags) | `[]` |
-| `extensions.enabled` | Enable extensions controller (WarmPool, Template, Claim) | `false` |
+| `controller.extensions` | Enable extensions controller (WarmPool, Template, Claim) | `false` |
 | `resources` | CPU/memory resource requests and limits | `{}` |
 | `nodeSelector` | Node selector for the controller pod | `{}` |
 | `tolerations` | Tolerations for the controller pod | `[]` |

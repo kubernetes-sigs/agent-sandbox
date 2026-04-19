@@ -14,6 +14,7 @@ controller:
   clusterDomain: "cluster.local"
   leaderElect: true
   leaderElectionNamespace: ""
+  extensions: false
   enableTracing: false
   enablePprof: false
   enablePprofDebug: false
@@ -22,15 +23,12 @@ controller:
   kubeApiQps: -1.0
   kubeApiBurst: 10
   sandboxConcurrentWorkers: 1
-  # The following workers are only active when extensions.enabled=true.
+  # The following workers are only active when controller.extensions=true.
   sandboxClaimConcurrentWorkers: 1
   sandboxWarmPoolConcurrentWorkers: 1
   sandboxTemplateConcurrentWorkers: 1
   # extraArgs passes additional flags not listed above (e.g. zap logging flags).
   extraArgs: []
-
-extensions:
-  enabled: false
 
 resources: {}
   # limits:

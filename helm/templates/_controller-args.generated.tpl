@@ -1,12 +1,10 @@
 {{- define "agent-sandbox.controllerArgs" -}}
 - --leader-elect={{ .Values.controller.leaderElect }}
-{{- if .Values.extensions.enabled }}
-- --extensions
-{{- end }}
 - --cluster-domain={{ .Values.controller.clusterDomain }}
 {{- if .Values.controller.leaderElectionNamespace }}
 - --leader-election-namespace={{ .Values.controller.leaderElectionNamespace }}
 {{- end }}
+- --extensions={{ .Values.controller.extensions }}
 - --enable-tracing={{ .Values.controller.enableTracing }}
 - --enable-pprof={{ .Values.controller.enablePprof }}
 - --enable-pprof-debug={{ .Values.controller.enablePprofDebug }}

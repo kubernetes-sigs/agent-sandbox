@@ -183,6 +183,30 @@ export class TestContext {
         settled = true;
         timedOut = true;
         cleanup();
+        try {
+          const resourceType = watchPath.split("/").pop() ?? "object";
+          const desc = execFileSync(
+            "kubectl",
+            ["describe", resourceType, name, "-n", namespace],
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+          );
+          const pods = execFileSync(
+            "kubectl",
+            ["get", "pods", "-n", namespace, "-o", "wide"],
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+          );
+          console.error(
+            `[waitForObject timeout ${name}] describe:\n${desc}`,
+          );
+          console.error(
+            `[waitForObject timeout ${name}] pods:\n${pods}`,
+          );
+        } catch (dumpErr) {
+          console.error(
+            `[waitForObject timeout ${name}] dump failed:`,
+            dumpErr,
+          );
+        }
         reject(
           new Error(
             `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
@@ -195,6 +219,9 @@ export class TestContext {
           watchPath,
           { fieldSelector: `metadata.name=${name}` },
           (type: string, obj: T) => {
+            console.log(
+              `[watch ${name}] event=${type} status=${JSON.stringify((obj as { status?: unknown })?.status)}`,
+            );
             if (!settled && predicateFn(obj)) {
               console.log(
                 `Object ${name} satisfied predicate on event type ${type}.`,

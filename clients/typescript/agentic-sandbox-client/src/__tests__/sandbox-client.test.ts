@@ -380,7 +380,7 @@ describe("SandboxClient (registry)", () => {
       expect(active[0].claimName).toBe(sandbox.claimName);
     });
 
-    it("propagates claim deletion failure during rollback instead of swallowing it", async () => {
+    it("re-raises original error even when rollback deletion fails", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
 
       // First watch: claim resolves sandbox name
@@ -414,9 +414,10 @@ describe("SandboxClient (registry)", () => {
       );
 
       const client = new SandboxClient({ apiUrl: "http://api:8080" });
-      await expect(client.createSandbox("tpl")).rejects.toThrow(
-        "K8s API unavailable",
-      );
+      // Original error is re-raised; cleanup error is logged but not surfaced
+      await expect(client.createSandbox("tpl")).rejects.toThrow("watch failed");
+      // Cleanup was still attempted
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
     });
 
     // empty namespace string should be normalized to defaultNamespace

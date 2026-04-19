@@ -337,9 +337,10 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           ),
         ]);
       } catch (cleanupErr) {
-        // Rollback deletion failed — surface it so callers can observe leaked claims
-        console.error(`Original error that triggered rollback: ${err}`);
-        throw cleanupErr;
+        console.error(
+          `Failed to delete orphaned SandboxClaim '${claimName}': ${cleanupErr}`,
+        );
+        // best-effort cleanup; always re-raise the original error
       }
       throw err;
     }

@@ -5,29 +5,30 @@ namespace:
 
 image:
   repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
-  tag: ""  # required — set via --set image.tag=<version>
+  tag: ""  # required, eg. v0.3.10
   pullPolicy: IfNotPresent
 
 replicaCount: 1
 
 controller:
-  clusterDomain: "cluster.local"
+  ##### Unset flags are omitted
+  # clusterDomain: "cluster.local"
   leaderElect: true
-  leaderElectionNamespace: ""
+  # leaderElectionNamespace: ""
   extensions: false
-  enableTracing: false
-  enablePprof: false
-  enablePprofDebug: false
-  pprofBlockProfileRate: 1000000
-  pprofMutexProfileFraction: 10
-  kubeApiQps: -1.0
-  kubeApiBurst: 10
-  sandboxConcurrentWorkers: 1
-  # The following workers are only active when controller.extensions=true.
-  sandboxClaimConcurrentWorkers: 1
-  sandboxWarmPoolConcurrentWorkers: 1
-  sandboxTemplateConcurrentWorkers: 1
-  # extraArgs passes additional flags not listed above (e.g. zap logging flags).
+  # enableTracing: false
+  # enablePprof: false
+  # enablePprofDebug: false
+  # pprofBlockProfileRate: 1000000
+  # pprofMutexProfileFraction: 10
+  # kubeApiQps: -1.0
+  # kubeApiBurst: 10
+  # sandboxConcurrentWorkers: 1
+  ##### The following workers are only active when controller.extensions=true.
+  # sandboxClaimConcurrentWorkers: 1
+  # sandboxWarmPoolConcurrentWorkers: 1
+  # sandboxTemplateConcurrentWorkers: 1
+  ##### extraArgs passes additional flags not listed above (e.g. zap logging flags).
   extraArgs: []
 
 resources: {}

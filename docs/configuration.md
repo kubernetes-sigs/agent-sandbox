@@ -28,7 +28,7 @@ Set values directly with `--set`:
 helm install agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --create-namespace \
-  --set image.tag=v0.3.10 \
+  --set image.tag=<version> \
   --set controller.sandboxConcurrentWorkers=10 \
   --set controller.kubeApiQps=50 \
   --set controller.kubeApiBurst=100
@@ -50,7 +50,7 @@ controller:
 helm install agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --create-namespace \
-  --set image.tag=v0.3.10 \
+  --set image.tag=<version> \
   -f custom-values.yaml
 ```
 

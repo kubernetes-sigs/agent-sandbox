@@ -12,26 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-export { SandboxClient } from "./sandbox-client.js";
-export { Sandbox } from "./sandbox.js";
+export { CommandExecutor } from "./commands/index.js";
 export {
   SandboxError,
-  SandboxNotReadyError,
-  SandboxNotFoundError,
-  SandboxTimeoutError,
-  SandboxPortForwardError,
   SandboxMetadataError,
+  SandboxNotFoundError,
+  SandboxNotReadyError,
+  SandboxPortForwardError,
   SandboxRequestError,
   SandboxResponseTooLargeError,
+  SandboxTimeoutError,
 } from "./exceptions.js";
-export { CommandExecutor } from "./commands/index.js";
-export { Filesystem } from "./files/index.js";
 export * from "./extensions/index.js";
+export { Filesystem } from "./files/index.js";
+export { Sandbox } from "./sandbox.js";
+export { SandboxClient } from "./sandbox-client.js";
 export type {
   CallOptions,
+  CreateSandboxOptions,
   ExecutionResult,
   FileEntry,
-  SandboxClientOptions,
-  CreateSandboxOptions,
   RequestFn,
+  SandboxClientOptions,
 } from "./types.js";

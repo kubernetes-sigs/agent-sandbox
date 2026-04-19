@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import type { ExecutionResult, FileEntry } from "./types.js";
 import {
   SandboxRequestError,
   SandboxResponseTooLargeError,
 } from "./exceptions.js";
+import type { ExecutionResult, FileEntry } from "./types.js";
 
 // --- bounded read helpers ---
 

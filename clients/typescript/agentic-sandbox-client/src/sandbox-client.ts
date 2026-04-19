@@ -14,10 +14,6 @@
 
 import * as crypto from "node:crypto";
 import * as k8s from "@kubernetes/client-node";
-
-import type { CreateSandboxOptions, SandboxClientOptions } from "./types.js";
-import { Sandbox } from "./sandbox.js";
-import type { SandboxInit } from "./sandbox.js";
 import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
@@ -29,19 +25,22 @@ import {
   SANDBOX_PLURAL_NAME,
 } from "./constants.js";
 import {
-  getCurrentSpan,
-  initializeTracer,
-  TracerManager,
-  withSpan,
-} from "./trace-manager.js";
-import type { Tracer } from "./trace-manager.js";
-import {
   isK8s404,
   SandboxError,
   SandboxMetadataError,
   SandboxNotFoundError,
   SandboxTimeoutError,
 } from "./exceptions.js";
+import type { SandboxInit } from "./sandbox.js";
+import { Sandbox } from "./sandbox.js";
+import type { Tracer } from "./trace-manager.js";
+import {
+  getCurrentSpan,
+  initializeTracer,
+  TracerManager,
+  withSpan,
+} from "./trace-manager.js";
+import type { CreateSandboxOptions, SandboxClientOptions } from "./types.js";
 
 // Kubernetes label validation constraints
 // https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set

@@ -108,14 +108,14 @@ export async function initializeTracer(serviceName: string): Promise<void> {
   }
 
   try {
-    // @ts-ignore -- optional peer dependency resolved at runtime
+    // @ts-expect-error -- optional peer dependency resolved at runtime
     const sdkTraceNode = await import("@opentelemetry/sdk-trace-node");
-    // @ts-ignore -- optional peer dependency resolved at runtime
+    // @ts-expect-error -- optional peer dependency resolved at runtime
     const resources = await import("@opentelemetry/resources");
-    // @ts-ignore -- optional peer dependency resolved at runtime
+    // @ts-expect-error -- optional peer dependency resolved at runtime
     const sdkTraceBase = await import("@opentelemetry/sdk-trace-base");
     const exporterOtlpGrpc = await import(
-      // @ts-ignore -- optional peer dependency resolved at runtime
+      // @ts-expect-error -- optional peer dependency resolved at runtime
       "@opentelemetry/exporter-trace-otlp-grpc"
     );
 
@@ -242,5 +242,5 @@ export class TracerManager {
   }
 }
 
-export { NoOpSpan, NoOpTracer };
 export type { Span, Tracer };
+export { NoOpSpan, NoOpTracer };

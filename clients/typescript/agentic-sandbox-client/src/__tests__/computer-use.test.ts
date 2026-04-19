@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------- hoisted mock fns ----------
 
@@ -58,14 +58,14 @@ vi.mock("node:child_process", () => ({
 
 // ---------- import SUT ----------
 
+import { POD_NAME_ANNOTATION } from "../constants.js";
+import { SandboxRequestError } from "../exceptions.js";
 import {
   ComputerUseSandbox,
   ComputerUseSandboxClient,
 } from "../extensions/computer-use.js";
-import { Sandbox } from "../sandbox.js";
 import type { SandboxInit } from "../sandbox.js";
-import { POD_NAME_ANNOTATION } from "../constants.js";
-import { SandboxRequestError } from "../exceptions.js";
+import { Sandbox } from "../sandbox.js";
 
 /**
  * Test helper: exposes protected members for test assertions.

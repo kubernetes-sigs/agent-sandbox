@@ -76,15 +76,15 @@ vi.mock("node:net", async (importOriginal) => {
 
 // ---------- import SUT after mocks ----------
 
-import { SandboxClient } from "../sandbox-client.js";
-import { Sandbox } from "../sandbox.js";
-import { SandboxError, SandboxNotFoundError } from "../exceptions.js";
 import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
   POD_NAME_ANNOTATION,
 } from "../constants.js";
+import { SandboxError, SandboxNotFoundError } from "../exceptions.js";
+import { Sandbox } from "../sandbox.js";
+import { SandboxClient } from "../sandbox-client.js";
 
 // ---------- helpers ----------
 

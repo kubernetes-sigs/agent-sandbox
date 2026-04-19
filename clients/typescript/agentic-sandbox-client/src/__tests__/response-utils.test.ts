@@ -14,16 +14,16 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  readBoundedText,
-  readBoundedBuffer,
-  parseExecutionResult,
-  parseFileEntries,
-  parseExistsResult,
-} from "../response-utils.js";
-import {
   SandboxRequestError,
   SandboxResponseTooLargeError,
 } from "../exceptions.js";
+import {
+  parseExecutionResult,
+  parseExistsResult,
+  parseFileEntries,
+  readBoundedBuffer,
+  readBoundedText,
+} from "../response-utils.js";
 
 // --- helpers ---
 

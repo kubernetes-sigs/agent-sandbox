@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import type { CallOptions, ExecutionResult, RequestFn } from "../types.js";
+import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
+import { SandboxRequestError } from "../exceptions.js";
+import { parseExecutionResult, readBoundedText } from "../response-utils.js";
 import type { Tracer } from "../trace-manager.js";
 import { withSpan } from "../trace-manager.js";
-import { SandboxRequestError } from "../exceptions.js";
-import { readBoundedText, parseExecutionResult } from "../response-utils.js";
-import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
+import type { CallOptions, ExecutionResult, RequestFn } from "../types.js";
 
 function normalizeCallOptions(
   arg: number | CallOptions | undefined,

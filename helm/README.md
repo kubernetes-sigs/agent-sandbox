@@ -11,7 +11,7 @@ CRDs are bundled in the `crds/` directory and are installed automatically by Hel
 helm install agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --create-namespace \
-  --set image.tag=v0.3.10
+  --set image.tag=<version>
 ```
 
 ### Install with extensions enabled
@@ -22,7 +22,7 @@ Extensions add support for `SandboxWarmPool`, `SandboxTemplate`, and `SandboxCla
 helm install agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --create-namespace \
-  --set image.tag=v0.3.10 \
+  --set image.tag=<version> \
   --set controller.extensions=true
 ```
 
@@ -31,7 +31,7 @@ helm install agent-sandbox ./helm/ \
 ```bash
 helm install agent-sandbox ./helm/ \
   --namespace my-namespace \
-  --set image.tag=v0.3.10 \
+  --set image.tag=<version> \
   --set namespace.create=false \
   --set namespace.name=my-namespace
 ```

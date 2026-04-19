@@ -12,24 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Sandbox } from "../sandbox.js";
-import type { SandboxInit } from "../sandbox.js";
-import { SandboxClient } from "../sandbox-client.js";
-import type { ExecutionResult } from "../types.js";
-import { withSpan } from "../trace-manager.js";
-import { SandboxNotReadyError, SandboxRequestError } from "../exceptions.js";
-import { readBoundedText, parseExecutionResult } from "../response-utils.js";
 import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
+import { SandboxNotReadyError, SandboxRequestError } from "../exceptions.js";
+import { parseExecutionResult, readBoundedText } from "../response-utils.js";
+import type { SandboxInit } from "../sandbox.js";
+import { Sandbox } from "../sandbox.js";
+import { SandboxClient } from "../sandbox-client.js";
+import { withSpan } from "../trace-manager.js";
+import type { ExecutionResult } from "../types.js";
 
 /**
  * Sandbox handle with computer-use agent support.
  * Use ComputerUseSandboxClient to create instances.
  */
 export class ComputerUseSandbox extends Sandbox {
-  constructor(init: SandboxInit) {
-    super(init);
-  }
-
   async agent(query: string, timeout: number = 60): Promise<ExecutionResult> {
     return withSpan(
       this.tracer,

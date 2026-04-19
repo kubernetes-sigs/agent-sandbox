@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { type ChildProcess, spawn } from "node:child_process";
 import * as net from "node:net";
-import { ChildProcess, spawn } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
-
-import type { RequestFn } from "./types.js";
 import { CommandExecutor } from "./commands/index.js";
-import { Filesystem } from "./files/index.js";
 import {
   BACKOFF_FACTOR,
   CLAIM_API_GROUP,
@@ -40,8 +37,6 @@ import {
   PER_ATTEMPT_TIMEOUT_MS,
   RETRY_STATUS_CODES,
 } from "./constants.js";
-import { TracerManager, withSpan } from "./trace-manager.js";
-import type { Tracer } from "./trace-manager.js";
 import {
   isK8s404,
   SandboxNotFoundError,
@@ -50,7 +45,11 @@ import {
   SandboxRequestError,
   SandboxTimeoutError,
 } from "./exceptions.js";
+import { Filesystem } from "./files/index.js";
 import { readBoundedErrorBody } from "./response-utils.js";
+import type { Tracer } from "./trace-manager.js";
+import { type TracerManager, withSpan } from "./trace-manager.js";
+import type { RequestFn } from "./types.js";
 
 /**
  * Sleeps for `ms` milliseconds, aborting early if `signal` fires.
@@ -184,7 +183,7 @@ export async function fetchWithRetry(
         );
         if (attempt < attempts - 1) {
           const delay = Math.min(
-            backoffFactor * Math.pow(2, attempt) * 1000,
+            backoffFactor * 2 ** attempt * 1000,
             MAX_BACKOFF_MS,
           );
           await sleepWithSignal(delay, cancelSignal);
@@ -197,7 +196,7 @@ export async function fetchWithRetry(
         retryStatusCodes.includes(response.status)
       ) {
         const delay = Math.min(
-          backoffFactor * Math.pow(2, attempt) * 1000,
+          backoffFactor * 2 ** attempt * 1000,
           MAX_BACKOFF_MS,
         );
         console.debug(
@@ -242,7 +241,7 @@ export async function fetchWithRetry(
       // Any other AbortError (per-attempt timeout) is treated as a transient failure
       if (attempt < attempts - 1) {
         const delay = Math.min(
-          backoffFactor * Math.pow(2, attempt) * 1000,
+          backoffFactor * 2 ** attempt * 1000,
           MAX_BACKOFF_MS,
         );
         console.debug(
@@ -550,6 +549,7 @@ export class Sandbox {
               version: GATEWAY_API_VERSION,
               namespace: this.gatewayNamespace,
               plural: GATEWAY_PLURAL,
+              // biome-ignore lint/style/noNonNullAssertion: gatewayName is always set when this method is called
               name: this.gatewayName!,
             });
           const gatewayObj =
@@ -927,6 +927,7 @@ export class Sandbox {
         );
       }
 
+      // biome-ignore lint/style/noNonNullAssertion: guarded by the throw above
       const url = `${this.baseUrl!.replace(/\/+$/, "")}/${endpoint.replace(
         /^\/+/,
         "",

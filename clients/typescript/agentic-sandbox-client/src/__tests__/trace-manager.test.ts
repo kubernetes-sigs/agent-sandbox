@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
-
-import { TracerManager, withSpan, NoOpSpan } from "../trace-manager.js";
+import { describe, expect, it, vi } from "vitest";
 import type { Span, Tracer } from "../trace-manager.js";
+import { NoOpSpan, TracerManager, withSpan } from "../trace-manager.js";
 
 // ---------- helpers ----------
 
@@ -162,6 +161,7 @@ describe("withSpan", () => {
       });
 
       expect(capturedSpan).toBeInstanceOf(NoOpSpan);
+      // biome-ignore lint/style/noNonNullAssertion: capturedSpan is set by the withSpan callback above
       expect(capturedSpan!.isRecording()).toBe(false);
     });
 

@@ -13,19 +13,18 @@
 // limitations under the License.
 
 import * as path from "node:path";
-
-import type { CallOptions, FileEntry, RequestFn } from "../types.js";
 import {
-  readBoundedText,
-  readBoundedBuffer,
-  parseFileEntries,
-  parseExistsResult,
-} from "../response-utils.js";
-import {
-  MAX_METADATA_RESPONSE_SIZE,
   MAX_DOWNLOAD_SIZE,
+  MAX_METADATA_RESPONSE_SIZE,
   MAX_UPLOAD_SIZE,
 } from "../constants.js";
+import {
+  parseExistsResult,
+  parseFileEntries,
+  readBoundedBuffer,
+  readBoundedText,
+} from "../response-utils.js";
+import type { CallOptions, FileEntry, RequestFn } from "../types.js";
 
 function normalizeCallOptions(
   arg: number | CallOptions | undefined,
@@ -52,12 +51,13 @@ function normalizeCallOptions(
 function encodePathSegment(s: string): string {
   return encodeURIComponent(s).replace(
     /[!'()*]/g,
-    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
   );
 }
+
+import { SandboxRequestError } from "../exceptions.js";
 import type { Tracer } from "../trace-manager.js";
 import { withSpan } from "../trace-manager.js";
-import { SandboxRequestError } from "../exceptions.js";
 
 export class Filesystem {
   private requestFn: RequestFn;

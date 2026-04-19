@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------- hoisted mock fns ----------
 
@@ -78,8 +78,6 @@ vi.mock("node:net", async (importOriginal) => {
 
 // ---------- import SUT after mocks ----------
 
-import { fetchWithRetry, Sandbox } from "../sandbox.js";
-import type { SandboxInit } from "../sandbox.js";
 import {
   BACKOFF_FACTOR,
   CLAIM_API_GROUP,
@@ -98,6 +96,8 @@ import {
   SandboxRequestError,
   SandboxTimeoutError,
 } from "../exceptions.js";
+import type { SandboxInit } from "../sandbox.js";
+import { fetchWithRetry, Sandbox } from "../sandbox.js";
 
 /**
  * Test helper: exposes protected members for test assertions.
@@ -1757,6 +1757,7 @@ describe("Sandbox", () => {
       await settled;
 
       // Filter per-attempt timeout sleeps (PER_ATTEMPT_TIMEOUT_MS = 60 s)
+      // biome-ignore lint/style/noNonNullAssertion: setTimeoutSpy is always set within this test
       const backoffDelays = setTimeoutSpy!.mock.calls
         .map(([, delay]) => delay as number)
         .filter((d) => d !== PER_ATTEMPT_TIMEOUT_MS);
@@ -1784,6 +1785,7 @@ describe("Sandbox", () => {
       await vi.advanceTimersByTimeAsync(200_000);
       await settled;
 
+      // biome-ignore lint/style/noNonNullAssertion: setTimeoutSpy is always set within this test
       const backoffDelays = setTimeoutSpy!.mock.calls
         .map(([, delay]) => delay as number)
         .filter((d) => d !== PER_ATTEMPT_TIMEOUT_MS);

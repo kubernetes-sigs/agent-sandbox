@@ -23,12 +23,19 @@
     "clean": "rm -rf dist",
     "prepare": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "biome lint ./src",
+    "lint:fix": "biome lint --write ./src",
+    "format": "biome format ./src",
+    "format:fix": "biome format --write ./src",
+    "check": "biome check ./src",
+    "check:fix": "biome check --write ./src"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@biomejs/biome": "^2.4.10",
     "@types/node": "^22.0.0",
     "@opentelemetry/api": "^1.9.0",
+    "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
   "dependencies": {

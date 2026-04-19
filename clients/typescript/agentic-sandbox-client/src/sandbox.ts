@@ -31,6 +31,7 @@ import {
   GATEWAY_PROBE_INTERVAL_MS,
   GATEWAY_PROBE_TIMEOUT_MS,
   HEADER_REQUEST_ID,
+  MAX_BACKOFF_MS,
   MAX_DRAIN_BYTES,
   MAX_ERROR_BODY_BYTES,
   MAX_GATEWAY_REWATCH,
@@ -95,7 +96,8 @@ async function sleepWithSignal(
  * - Before retrying a 5xx response, the response body is drained to allow
  *   the underlying TCP connection to be reused.
  */
-async function fetchWithRetry(
+/** @internal — exported for unit testing only; not part of the public API. */
+export async function fetchWithRetry(
   url: string,
   options: RequestInit,
   maxRetries: number = MAX_RETRIES,
@@ -181,7 +183,10 @@ async function fetchWithRetry(
           "per-attempt timer race — discarding response and retrying",
         );
         if (attempt < attempts - 1) {
-          const delay = backoffFactor * Math.pow(2, attempt) * 1000;
+          const delay = Math.min(
+            backoffFactor * Math.pow(2, attempt) * 1000,
+            MAX_BACKOFF_MS,
+          );
           await sleepWithSignal(delay, cancelSignal);
         }
         continue;
@@ -191,7 +196,10 @@ async function fetchWithRetry(
         attempt < attempts - 1 &&
         retryStatusCodes.includes(response.status)
       ) {
-        const delay = backoffFactor * Math.pow(2, attempt) * 1000;
+        const delay = Math.min(
+          backoffFactor * Math.pow(2, attempt) * 1000,
+          MAX_BACKOFF_MS,
+        );
         console.debug(
           `Request to ${url} returned ${response.status}, retrying in ${delay}ms (attempt ${
             attempt + 1
@@ -233,7 +241,10 @@ async function fetchWithRetry(
 
       // Any other AbortError (per-attempt timeout) is treated as a transient failure
       if (attempt < attempts - 1) {
-        const delay = backoffFactor * Math.pow(2, attempt) * 1000;
+        const delay = Math.min(
+          backoffFactor * Math.pow(2, attempt) * 1000,
+          MAX_BACKOFF_MS,
+        );
         console.debug(
           `Request to ${url} failed: ${lastError.message}, retrying in ${delay}ms (attempt ${
             attempt + 1

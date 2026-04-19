@@ -78,17 +78,20 @@ vi.mock("node:net", async (importOriginal) => {
 
 // ---------- import SUT after mocks ----------
 
-import { Sandbox } from "../sandbox.js";
+import { fetchWithRetry, Sandbox } from "../sandbox.js";
 import type { SandboxInit } from "../sandbox.js";
 import {
+  BACKOFF_FACTOR,
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
   HEADER_REQUEST_ID,
+  MAX_BACKOFF_MS,
   MAX_DRAIN_BYTES,
   MAX_RETRIES,
   MAX_UPLOAD_SIZE,
   PER_ATTEMPT_TIMEOUT_MS,
+  RETRY_STATUS_CODES,
 } from "../constants.js";
 import {
   SandboxPortForwardError,
@@ -1744,7 +1747,7 @@ describe("Sandbox", () => {
       vi.useRealTimers();
     });
 
-    it("exponential backoff sequence is [500, 1000, 2000, 4000, 8000] ms with no upper cap", async () => {
+    it("exponential backoff sequence is [500, 1000, 2000, 4000, 8000] ms, clamped at MAX_BACKOFF_MS", async () => {
       const sandbox = createReadySandbox();
       (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
 
@@ -1760,8 +1763,34 @@ describe("Sandbox", () => {
 
       // 5 backoff sleeps between 6 attempts (MAX_RETRIES = 6)
       expect(backoffDelays).toEqual([500, 1000, 2000, 4000, 8000]);
-      // 8000ms > Go's 5000ms cap: TS has no upper bound on backoff delay
-      expect(backoffDelays.at(-1)).toBeGreaterThan(5_000);
+      // All delays must stay at or below the cap (matches Go client's maxBackoff = 8s)
+      expect(backoffDelays.every((d) => d <= MAX_BACKOFF_MS)).toBe(true);
+    });
+
+    it("backoff delay is clamped at MAX_BACKOFF_MS for high attempt counts", async () => {
+      // With maxRetries=10, attempts 0-9 would produce unclamped delays of
+      // [500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000] ms.
+      // After clamping at MAX_BACKOFF_MS (8000), attempts >= 4 must all equal 8000.
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const promise = fetchWithRetry(
+        "http://sandbox/test",
+        {},
+        10,
+        BACKOFF_FACTOR,
+        RETRY_STATUS_CODES,
+      );
+      const settled = promise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(200_000);
+      await settled;
+
+      const backoffDelays = setTimeoutSpy!.mock.calls
+        .map(([, delay]) => delay as number)
+        .filter((d) => d !== PER_ATTEMPT_TIMEOUT_MS);
+
+      expect(backoffDelays).toEqual([
+        500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000,
+      ]);
     });
 
     it("first backoff fires at exactly 500ms (confirmed by attempt count at 499ms vs 500ms)", async () => {

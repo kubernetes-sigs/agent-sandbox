@@ -32,6 +32,14 @@ export const POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name";
 // Non-idempotent callers (POST /execute, /upload, /agent) pass maxRetries: 1 explicitly.
 export const MAX_RETRIES = 6;
 export const BACKOFF_FACTOR = 0.5;
+// Upper cap for per-retry backoff delay. Without this clamp the delay would
+// grow unbounded as attempt increases (0.5s, 1s, 2s, 4s, 8s, 16s, ...).
+// Matches the Go client's maxBackoff (clients/go/sandbox/connector.go).
+// Kept intentionally below the Python client's urllib3 default (120s) because
+// a 60s per-attempt timeout means any single retry delay > ~8s is already
+// comparable in duration to a full attempt, at which point additional waiting
+// rarely helps and exceeds most callers' overall timeout budget.
+export const MAX_BACKOFF_MS = 8000;
 export const RETRY_STATUS_CODES = [500, 502, 503, 504];
 
 // Maximum bytes to drain from a response body before retrying (allows TCP connection reuse)

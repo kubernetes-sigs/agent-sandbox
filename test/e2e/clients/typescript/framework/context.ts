@@ -179,16 +179,15 @@ export class TestContext {
       };
 
       timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         timedOut = true;
         cleanup();
-        if (!settled) {
-          settled = true;
-          reject(
-            new Error(
-              `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
-            ),
-          );
-        }
+        reject(
+          new Error(
+            `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
+          ),
+        );
       }, timeoutMs);
 
       watcher

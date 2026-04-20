@@ -38,8 +38,8 @@ spec:
               app: sandbox-router
       containers:
       - name: router
-        # IMPORTANT: Replace this with the full path to the router image you pushed.
-        image: IMAGE_PLACEHOLDER
+        image: ${ROUTER_IMAGE}
+        # imagePullPolicy: Never  # Uncomment when using a locally loaded image (kind load / minikube image load)
         env:
         - name: PROXY_TIMEOUT_SECONDS
           value: "180"

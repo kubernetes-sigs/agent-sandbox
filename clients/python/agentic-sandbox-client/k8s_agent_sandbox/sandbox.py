@@ -88,6 +88,29 @@ class Sandbox:
         self._pod_name = pod_name if pod_name is not None else self.sandbox_id
         return self._pod_name
 
+    def status(self) -> tuple[str, str]:
+        """
+        Retrieves the current status of the Sandbox by inspecting its Kubernetes conditions.
+        
+        Returns a tuple of (status, message).
+        status can be 'SandboxReady', 'SandboxNotFound', or 'SandboxNotReady'.
+        message contains the Kubernetes condition message if available.
+        """
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace)
+        if not sandbox_object:
+            return "SandboxNotFound", "Sandbox object not found in Kubernetes."
+
+        status_data = sandbox_object.get("status", {})
+        for cond in status_data.get("conditions", []):
+            if cond.get("type") == "Ready":
+                message = cond.get("message", "")
+                if cond.get("status") == "True":
+                    return "SandboxReady", message
+                else:
+                    return "SandboxNotReady", message
+
+        return "SandboxNotReady", "Unknown message"
+
     @property
     def commands(self) -> CommandExecutor | None:
         return self._commands
@@ -104,8 +127,13 @@ class Sandbox:
         """
         return not self._is_closed and self._commands is not None and self._files is not None
 
-    def _close_connection(self):
-        """Closes the client-side connection and disables execution engines."""
+    def close_connection(self):
+        """
+        Closes the client-side connection and disables execution engines locally,
+        but leaves the remote Kubernetes Sandbox infrastructure running.
+        
+        Use this to free up local resources (like port-forwards or HTTP sessions).
+        """
         if self._is_closed:
             return
         # Close client side connection
@@ -128,7 +156,7 @@ class Sandbox:
     def terminate(self):
         """Permanent deletion of all server side infrastructure and client side connection."""
         # Close the client side connection and trace manager lifecycle
-        self._close_connection()
+        self.close_connection()
         
         # Delete this Sandbox
         self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)

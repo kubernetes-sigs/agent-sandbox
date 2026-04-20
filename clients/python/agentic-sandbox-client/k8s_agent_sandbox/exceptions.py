@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import requests
+from typing import Any
 
 
 class SandboxError(RuntimeError):
@@ -25,6 +25,10 @@ class SandboxNotReadyError(SandboxError):
 
 class SandboxNotFoundError(SandboxError):
     """Raised when the sandbox or sandbox claim cannot be found or was deleted."""
+
+
+class SandboxTemplateNotFoundError(SandboxError):
+    """Raised when the requested sandbox template does not exist."""
 
 
 class SandboxPortForwardError(SandboxError):
@@ -40,14 +44,15 @@ class SandboxRequestError(SandboxError):
 
     Attributes:
         status_code: The HTTP status code, if available.
-        response: The raw ``requests.Response``, if available.
+        response: The raw response object (``requests.Response`` or
+            ``httpx.Response``), if available.
     """
 
     def __init__(
         self,
         message: str,
         status_code: int | None = None,
-        response: requests.Response | None = None,
+        response: Any = None,
     ):
         super().__init__(message)
         self.status_code = status_code

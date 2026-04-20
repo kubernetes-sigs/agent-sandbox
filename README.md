@@ -8,6 +8,7 @@
 <p>
   <a href="https://github.com/kubernetes-sigs/agent-sandbox/releases"><img src="https://img.shields.io/github/v/release/kubernetes-sigs/agent-sandbox" alt="GitHub release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/Apache-2-blue.svg" alt="Apache-2.0 license"></a>
+  <a href="https://goreportcard.com/report/sigs.k8s.io/agent-sandbox"><img src="https://goreportcard.com/badge/sigs.k8s.io/agent-sandbox" alt="Go Report Card"></a>
 </p>
 
 [Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
@@ -159,6 +160,18 @@ The current Roadmap can be found at [roadmap.md](roadmap.md).
 ## Community, Discussion, Contribution, and Support
 
 This is a community-driven effort, and we welcome collaboration!
+
+**Note on PR Velocity:** To maintain high velocity and keep our queues clean, this project uses stale PR management (30-day auto-stale and 15-day auto-close for inactive PRs) and allows maintainers to fast-track or take over approved community PRs. Please read our [Contributing Guidelines](CONTRIBUTING.md) for our full code review and PR policies.
+
+### AI-Assisted Code Reviews (Experimental)
+
+To help improve our review velocity, we are currently experimenting with AI-assisted code reviews, starting with GitHub Copilot as our automated first-pass reviewer.
+
+We actively welcome your feedback on the quality, relevance, and helpfulness of these automated reviews! As we iterate on this process, we also plan to evaluate and test different AI review tools to find the best fit for our project's workflow.
+
+**⚠️ Important Contribution Note:** If you receive a code suggestion from Copilot in your PR, please read our [Contributing Guidelines](CONTRIBUTING.md) carefully on how to apply it. Directly committing suggestions via the GitHub UI will break the Kubernetes CLA requirements.
+
+### Contact Us
 
 Learn how to engage with the Kubernetes community on the [community page](http://kubernetes.io/community/).
 

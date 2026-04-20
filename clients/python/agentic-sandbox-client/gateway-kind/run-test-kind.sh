@@ -52,7 +52,7 @@ kubectl apply -f python-sandbox-template.yaml
 
 cd ../sandbox-router
 echo "Applying CRD for router template"
-sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
+sed -i "s|\${ROUTER_IMAGE}|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml
 kubectl rollout status deployment/sandbox-router-deployment --timeout=60s
 

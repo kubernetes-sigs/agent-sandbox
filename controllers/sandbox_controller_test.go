@@ -53,8 +53,8 @@ func sandboxControllerRef(name string) metav1.OwnerReference {
 		Kind:               "Sandbox",
 		Name:               name,
 		UID:                sandboxUID,
-		Controller:         ptr.To(true),
-		BlockOwnerDeletion: ptr.To(true),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
 	}
 }
 
@@ -424,7 +424,9 @@ func TestReconcile(t *testing.T) {
 							"custom-label":                      "label-val",
 						},
 						Annotations: map[string]string{
-							"custom-annotation": "anno-val",
+							"custom-annotation":                      "anno-val",
+							"agents.x-k8s.io/propagated-labels":      "custom-label",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation",
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -585,7 +587,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -637,7 +639,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -686,7 +688,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyDelete),
 				},
 			},
@@ -710,8 +712,8 @@ func TestReconcile(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-deployment",
 								UID:                "other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -731,7 +733,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -779,7 +781,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -810,7 +812,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Lifecycle: sandboxv1alpha1.Lifecycle{
-					ShutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
 					ShutdownPolicy: ptr.To(sandboxv1alpha1.ShutdownPolicyRetain),
 				},
 			},
@@ -840,9 +842,10 @@ func TestReconcile(t *testing.T) {
 				sb.Annotations = tc.sandboxAnnotations
 			}
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sb)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, sb)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			_, err := r.Reconcile(t.Context(), ctrl.Request{
@@ -899,7 +902,7 @@ func TestReconcilePod(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: ptr.To(int32(1)),
+			Replicas: new(int32(1)),
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -956,6 +959,11 @@ func TestReconcilePod(t *testing.T) {
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"custom-label":                      "label-val",
 					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.PodSpec{
@@ -983,7 +991,9 @@ func TestReconcilePod(t *testing.T) {
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
-						"custom-annotation": "anno-val",
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1018,7 +1028,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod: nil,
@@ -1031,7 +1041,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod: nil,
@@ -1064,7 +1074,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1111,8 +1121,8 @@ func TestReconcilePod(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "some-other-controller",
 								UID:                "some-other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1141,7 +1151,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1170,8 +1180,8 @@ func TestReconcilePod(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-deployment",
 								UID:                "other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1190,7 +1200,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
@@ -1222,7 +1232,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
@@ -1256,7 +1266,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
@@ -1277,8 +1287,8 @@ func TestReconcilePod(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-deployment",
 								UID:                "other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1296,7 +1306,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
@@ -1329,13 +1339,90 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: ptr.To(int32(0)),
+					Replicas: new(int32(0)),
 				},
 			},
 			wantPod:                nil,
 			expectErr:              false,
 			wantSandboxAnnotations: map[string]string{"other-annotation": "other-value"},
 			wantPodSurvives:        "annotated-pod-name",
+		},
+		{
+			name: "reconcilePod deletes label and annotation removed from sandbox",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel:                   nameHash,
+							"remove-label":                 "value",
+							"keep-label":                   "value",
+							"agents.x-k8s.io/system-label": "value",
+						},
+						Annotations: map[string]string{
+							"remove-annotation":                      "value",
+							"keep-annotation":                        "value",
+							"kubernetes.io/system-annotation":        "value",
+							"agents.x-k8s.io/propagated-labels":      "remove-label,keep-label",
+							"agents.x-k8s.io/propagated-annotations": "remove-annotation,keep-annotation",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						ObjectMeta: sandboxv1alpha1.PodMetadata{
+							Labels: map[string]string{
+								"keep-label": "value",
+							},
+							Annotations: map[string]string{
+								"keep-annotation": "value",
+							},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					},
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						sandboxLabel:                   nameHash,
+						"keep-label":                   "value",
+						"agents.x-k8s.io/system-label": "value",
+					},
+					Annotations: map[string]string{
+						"keep-annotation":                        "value",
+						"kubernetes.io/system-annotation":        "value",
+						"agents.x-k8s.io/propagated-labels":      "keep-label",
+						"agents.x-k8s.io/propagated-annotations": "keep-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1alpha1.SandboxPodNameAnnotation: sandboxName,
+			},
 		},
 	}
 
@@ -1344,9 +1431,10 @@ func TestReconcilePod(t *testing.T) {
 			sandbox := tc.sandbox.DeepCopy()
 
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, sandbox)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, sandbox)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
@@ -1406,7 +1494,7 @@ func TestReconcileService(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: ptr.To(int32(1)),
+			Replicas: new(int32(1)),
 		},
 	}
 
@@ -1459,8 +1547,52 @@ func TestReconcileService(t *testing.T) {
 			wantStatusService:     sandboxName,
 			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
 		},
+
+		{
+			name: "repairs selector and label drift on service owned by this sandbox",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"keep": "me",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						Selector: map[string]string{
+							"app": "something-else",
+						},
+					},
+				},
+			},
+			sandbox: sandboxObj,
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"keep":       "me",
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+
 		{
 			name: "refuses to use service owned by a different controller",
+
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1473,8 +1605,8 @@ func TestReconcileService(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "some-other-controller",
 								UID:                "some-other-uid",
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1577,9 +1709,10 @@ func TestReconcileService(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := SandboxReconciler{
-				Client: newFakeClient(append(tc.initialObjs, tc.sandbox)...),
-				Scheme: Scheme,
-				Tracer: asmetrics.NewNoOp(),
+				Client:        newFakeClient(append(tc.initialObjs, tc.sandbox)...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
 			}
 
 			svc, err := r.reconcileService(t.Context(), tc.sandbox, nameHash)
@@ -1631,8 +1764,8 @@ func TestCheckOwnership(t *testing.T) {
 		Kind:               "Deployment",
 		Name:               "other-controller",
 		UID:                "other-uid",
-		Controller:         ptr.To(true),
-		BlockOwnerDeletion: ptr.To(true),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
 	}
 
 	sandboxOwnerRef := metav1.OwnerReference{
@@ -1640,8 +1773,8 @@ func TestCheckOwnership(t *testing.T) {
 		Kind:               "Sandbox",
 		Name:               sandboxName,
 		UID:                sandboxUID,
-		Controller:         ptr.To(true),
-		BlockOwnerDeletion: ptr.To(true),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
 	}
 
 	testCases := []struct {
@@ -1779,8 +1912,8 @@ func TestReconcilePVCs(t *testing.T) {
 								Kind:               "Sandbox",
 								Name:               sandboxName,
 								UID:                sandboxUID,
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1801,8 +1934,8 @@ func TestReconcilePVCs(t *testing.T) {
 								Kind:               "Deployment",
 								Name:               "other-controller",
 								UID:                otherUID,
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
 							},
 						},
 					},
@@ -1857,38 +1990,52 @@ func TestReconcilePVCs(t *testing.T) {
 }
 
 func TestSandboxExpiry(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+
 	testCases := []struct {
 		name           string
 		shutdownTime   *metav1.Time
 		deletionPolicy sandboxv1alpha1.ShutdownPolicy
 		wantExpired    bool
-		wantRequeue    bool
+		wantRequeue    time.Duration
 	}{
 		{
 			name:         "nil shutdown time",
 			shutdownTime: nil,
 			wantExpired:  false,
-			wantRequeue:  false,
+			wantRequeue:  0,
 		},
 		{
 			name:         "shutdown time in future",
-			shutdownTime: ptr.To(metav1.NewTime(time.Now().Add(2 * time.Hour))),
+			shutdownTime: new(metav1.NewTime(now.Add(2 * time.Hour))),
 			wantExpired:  false,
-			wantRequeue:  true,
+			wantRequeue:  2 * time.Hour,
+		},
+		{
+			name:         "shutdown time at current time expires immediately",
+			shutdownTime: new(metav1.NewTime(now)),
+			wantExpired:  true,
+			wantRequeue:  0,
+		},
+		{
+			name:         "shutdown time shortly in future uses minimum requeue",
+			shutdownTime: new(metav1.NewTime(now.Add(500 * time.Millisecond))),
+			wantExpired:  false,
+			wantRequeue:  2 * time.Second,
 		},
 		{
 			name:           "shutdown time in past - retain",
-			shutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-10 * time.Second))),
+			shutdownTime:   new(metav1.NewTime(now.Add(-10 * time.Second))),
 			deletionPolicy: sandboxv1alpha1.ShutdownPolicyRetain,
 			wantExpired:    true,
-			wantRequeue:    false,
+			wantRequeue:    0,
 		},
 		{
 			name:           "shutdown time in past - delete",
-			shutdownTime:   ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Minute))),
+			shutdownTime:   new(metav1.NewTime(now.Add(-1 * time.Minute))),
 			deletionPolicy: sandboxv1alpha1.ShutdownPolicyDelete,
 			wantExpired:    true,
-			wantRequeue:    false,
+			wantRequeue:    0,
 		},
 	}
 	for _, tc := range testCases {
@@ -1896,15 +2043,48 @@ func TestSandboxExpiry(t *testing.T) {
 			sandbox := &sandboxv1alpha1.Sandbox{}
 			sandbox.Spec.ShutdownTime = tc.shutdownTime
 			if tc.deletionPolicy != "" {
-				sandbox.Spec.ShutdownPolicy = ptr.To(tc.deletionPolicy)
+				sandbox.Spec.ShutdownPolicy = new(tc.deletionPolicy)
 			}
-			expired, requeueAfter := checkSandboxExpiry(sandbox)
+			expired, requeueAfter := checkSandboxExpiry(sandbox, now)
 			require.Equal(t, tc.wantExpired, expired)
-			if tc.wantRequeue {
-				require.Greater(t, requeueAfter, time.Duration(0))
-			} else {
-				require.Equal(t, time.Duration(0), requeueAfter)
+			require.Equal(t, tc.wantRequeue, requeueAfter)
+
+		})
+	}
+}
+
+func TestSetServiceStatusCustomDomain(t *testing.T) {
+	testCases := []struct {
+		name          string
+		clusterDomain string
+		wantFQDN      string
+	}{
+		{
+			name:          "default cluster.local domain",
+			clusterDomain: "cluster.local",
+			wantFQDN:      "my-svc.my-ns.svc.cluster.local",
+		},
+		{
+			name:          "custom cluster domain",
+			clusterDomain: "custom.domain",
+			wantFQDN:      "my-svc.my-ns.svc.custom.domain",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &SandboxReconciler{
+				ClusterDomain: tc.clusterDomain,
 			}
+			sandbox := &sandboxv1alpha1.Sandbox{}
+			service := &corev1.Service{}
+			service.Name = "my-svc"
+			service.Namespace = "my-ns"
+
+			r.setServiceStatus(sandbox, service)
+
+			require.Equal(t, "my-svc", sandbox.Status.Service)
+			require.Equal(t, tc.wantFQDN, sandbox.Status.ServiceFQDN)
 		})
 	}
 }

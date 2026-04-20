@@ -358,10 +358,7 @@ func (c *connector) backoff(attempt int) time.Duration {
 	if attempt == 0 {
 		return 0
 	}
-	d := time.Duration(float64(baseBackoff) * math.Pow(2, float64(attempt-1)))
-	if d > maxBackoff {
-		d = maxBackoff
-	}
+	d := min(time.Duration(float64(baseBackoff)*math.Pow(2, float64(attempt-1))), maxBackoff)
 	c.mu.Lock()
 	scale := c.backoffScale
 	c.mu.Unlock()

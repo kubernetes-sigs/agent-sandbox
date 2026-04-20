@@ -123,6 +123,53 @@ class TestSandbox(unittest.TestCase):
         self.mock_k8s_helper.get_sandbox.return_value = None
         self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
 
+    def test_status_not_found(self):
+        self.mock_k8s_helper.get_sandbox.return_value = None
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxNotFound")
+        self.assertEqual(message, "Sandbox object not found in Kubernetes.")
+        self.mock_k8s_helper.get_sandbox.assert_called_once_with(self.sandbox_id, self.namespace)
+
+    def test_status_ready(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "True", "message": ""}
+                ]
+            }
+        }
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxReady")
+        self.assertEqual(message, "")
+
+    def test_status_not_ready_with_message(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "False", "message": "Pod is initializing"}
+                ]
+            }
+        }
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxNotReady")
+        self.assertEqual(message, "Pod is initializing")
+
+    def test_status_no_ready_condition(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "conditions": [
+                    {"type": "PodScheduled", "status": "True"}
+                ]
+            }
+        }
+        status, message = self.sandbox.status()
+        
+        self.assertEqual(status, "SandboxNotReady")
+        self.assertEqual(message, "Unknown message")
+
     def test_properties(self):
         """Tests the commands and files properties."""
         self.assertEqual(self.sandbox.commands, self.mock_command_executor)
@@ -135,8 +182,8 @@ class TestSandbox(unittest.TestCase):
         self.assertFalse(self.sandbox.is_active)
 
     def test_close_connection(self):
-        """Tests the internal _close_connection method."""
-        self.sandbox._close_connection()
+        """Tests the public close_connection method."""
+        self.sandbox.close_connection()
 
         self.mock_connector.close.assert_called_once()
         self.assertIsNone(self.sandbox.commands)
@@ -146,14 +193,14 @@ class TestSandbox(unittest.TestCase):
 
         # Test idempotency
         self.mock_connector.close.reset_mock()
-        self.sandbox._close_connection()
+        self.sandbox.close_connection()
         self.mock_connector.close.assert_not_called()
 
     @patch('logging.error')
     def test_close_connection_with_tracing_error(self, mock_logging_error):
-        """Tests _close_connection with an error in tracing."""
+        """Tests close_connection with an error in tracing."""
         self.mock_tracer_manager.end_lifecycle_span.side_effect = Exception("Tracer error")
-        self.sandbox._close_connection()
+        self.sandbox.close_connection()
 
         self.mock_connector.close.assert_called_once()
         self.assertTrue(self.sandbox._is_closed)
@@ -161,7 +208,7 @@ class TestSandbox(unittest.TestCase):
 
     def test_terminate(self):
         """Tests the terminate method."""
-        with patch.object(self.sandbox, '_close_connection') as mock_close:
+        with patch.object(self.sandbox, 'close_connection') as mock_close:
             self.sandbox.terminate()
             mock_close.assert_called_once()
 

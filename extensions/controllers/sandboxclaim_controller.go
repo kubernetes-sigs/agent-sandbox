@@ -18,9 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -28,12 +32,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
@@ -41,8 +50,15 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
+const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
+
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
+
+// ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
+var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
+
+var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
 // getWarmPoolPolicy returns the effective warm pool policy for a claim.
 func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
@@ -52,13 +68,14 @@ func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha
 	return extensionsv1alpha1.WarmPoolPolicyDefault
 }
 
-// SandboxClaimReconciler reconciles a SandboxClaim object
+// SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	Recorder                events.EventRecorder
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
+	observedTimes           sync.Map
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -67,7 +84,9 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -84,6 +103,13 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
 	}
 
+	// Unconditionally clean up legacy per-claim NetworkPolicies.
+	// We log the error but do not block the main reconcile flow so
+	// transient API issues don't prevent Sandbox adoption/creation.
+	if err := r.cleanupLegacyNetworkPolicy(ctx, claim); err != nil {
+		logger.Error(err, "Non-fatal error cleaning up legacy per-claim NetworkPolicy")
+	}
+
 	// Start Tracing Span
 	ctx, end := r.Tracer.StartSpan(ctx, claim, "ReconcileSandboxClaim", nil)
 	defer end()
@@ -92,15 +118,30 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID. Inline patch,
-	// no early return, to avoid forcing a second reconcile cycle.
-	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (claim.Annotations == nil || claim.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	// Initialize trace ID and observation time for active resources missing them.
+	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
+	traceContext := r.Tracer.GetTraceContext(ctx)
+	needObservabilityPatch := claim.Annotations[ObservabilityAnnotation] == ""
+	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
+
+	if needObservabilityPatch || needTraceContextPatch {
 		patch := client.MergeFrom(claim.DeepCopy())
 		if claim.Annotations == nil {
 			claim.Annotations = make(map[string]string)
 		}
-		claim.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if needObservabilityPatch {
+			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+			if val, ok := r.observedTimes.Load(key); ok {
+				claim.Annotations[ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
+			} else {
+				now := time.Now()
+				claim.Annotations[ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+				r.observedTimes.Store(key, now)
+			}
+		}
+		if needTraceContextPatch {
+			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
+		}
 		if err := r.Patch(ctx, claim, patch); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -174,9 +215,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Suppress expected user errors (like missing templates) to avoid crash loops
-	if errors.Is(reconcileErr, ErrTemplateNotFound) {
-		errs := errors.Join(reconcileErr, ErrTemplateNotFound)
-		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "errors", errs, "request", req.NamespacedName)
+	if errors.Is(reconcileErr, ErrTemplateNotFound) || errors.Is(reconcileErr, ErrInvalidMetadata) {
+		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
 	}
 
@@ -205,6 +245,11 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
 
+	// Upfront validation of additional metadata to skip unnecessary processing
+	if err := validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
 	// Fast path: try to find existing or adopt from warm pool before template lookup.
 	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
 	logger.V(1).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
@@ -217,10 +262,37 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {
 			logger.Error(templateErr, "failed to get template for network policy reconciliation (non-fatal)", "claim", claim.Name)
+
+			// If we can't get the template but we have metadata to propagate, we should fail
+			// to ensure consistency and enforce the "No Overrides" rule.
+			if len(claim.Spec.AdditionalPodMetadata.Labels) > 0 || len(claim.Spec.AdditionalPodMetadata.Annotations) > 0 {
+				return nil, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
+			}
 		}
+
 		if template != nil {
-			if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-				logger.Error(npErr, "network policy reconcile failed after adoption (non-fatal)", "claim", claim.Name)
+
+			// Check if metadata needs update
+			var mergedMeta v1alpha1.PodMetadata
+			template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
+
+			// Preserve system-injected labels
+			if mergedMeta.Labels == nil {
+				mergedMeta.Labels = make(map[string]string)
+			}
+			mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+			mergedMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
+
+			if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+				return nil, err
+			}
+
+			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
+				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
+				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
+				if err := r.Update(ctx, sandbox); err != nil {
+					return nil, err
+				}
 			}
 		}
 		return sandbox, nil
@@ -232,13 +304,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr != nil && !k8errors.IsNotFound(templateErr) {
 		return nil, templateErr
-	}
-	if templateErr != nil {
-		return nil, ErrTemplateNotFound
-	}
-
-	if npErr := r.reconcileNetworkPolicy(ctx, claim, template); npErr != nil {
-		return nil, fmt.Errorf("failed to reconcile network policy: %w", npErr)
 	}
 
 	return r.createSandbox(ctx, claim, template)
@@ -307,6 +372,16 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            fmt.Sprintf("SandboxTemplate %q not found", claim.Spec.TemplateRef.Name),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrInvalidMetadata) {
+			reason = "InvalidMetadata"
+			return metav1.Condition{
+				Type:               string(v1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            err.Error(),
 				ObservedGeneration: claim.Generation,
 			}
 		}
@@ -394,7 +469,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			return 1 // b ready, a not ready -> b first
 		}
-		return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
+		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
 	})
 
 	if len(candidates) == 0 {
@@ -415,7 +490,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	startIndex := int(hashValue % uint32(searchWindow))
 
 	// Iterate through the entire list starting from the hashed offset.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		currIndex := (startIndex + i) % n
 		adopted := candidates[currIndex]
 
@@ -430,6 +505,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 		delete(adopted.Labels, warmPoolSandboxLabel)
 		delete(adopted.Labels, sandboxTemplateRefHash)
+		delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
 
 		// Transfer ownership from SandboxWarmPool to SandboxClaim
 		adopted.OwnerReferences = nil
@@ -441,8 +517,15 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		if adopted.Annotations == nil {
 			adopted.Annotations = make(map[string]string)
 		}
-		if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
-			adopted.Annotations[asmetrics.TraceContextAnnotation] = tc
+		// Ensure the adopted sandbox records its pod name before it can be observed Ready.
+		if podName := adopted.Annotations[v1alpha1.SandboxPodNameAnnotation]; podName != adopted.Name {
+			if podName != "" {
+				logger.Info("Correcting adopted sandbox pod-name annotation", "sandbox", adopted.Name, "oldPodName", podName, "newPodName", adopted.Name)
+			}
+			adopted.Annotations[v1alpha1.SandboxPodNameAnnotation] = adopted.Name
+		}
+		if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+			adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 		}
 
 		// Add sandbox ID label to pod template for NetworkPolicy targeting
@@ -450,6 +533,12 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 		}
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+
+		// Merge metadata from claim
+		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+			return nil, err
+		}
 
 		// Update uses optimistic concurrency (resourceVersion) so concurrent
 		// claims racing to adopt the same sandbox will conflict and retry.
@@ -481,7 +570,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	return nil, nil // Return nil, nil to fall completely to cold start
 }
 
-// isSandboxReady checks if a sandbox has Ready=True condition
+// isSandboxReady checks if a sandbox has Ready=True condition.
 func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 	for _, cond := range sb.Status.Conditions {
 		if cond.Type == string(v1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
@@ -489,6 +578,123 @@ func isSandboxReady(sb *v1alpha1.Sandbox) bool {
 		}
 	}
 	return false
+}
+
+func isRestrictedDomain(domain string) bool {
+	for _, d := range restrictedDomains {
+		if domain == d || strings.HasSuffix(domain, "."+d) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
+func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
+	if claimMeta == nil {
+		return nil
+	}
+
+	validate := func(key, value string, isLabel bool) error {
+		// Check restricted domains
+		parts := strings.SplitN(key, "/", 2)
+		domain := ""
+		if len(parts) > 1 {
+			domain = strings.ToLower(parts[0])
+		}
+		if isRestrictedDomain(domain) {
+			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+		}
+
+		// Validate label values (annotations have less restrictions)
+		if isLabel {
+			if errs := validation.IsValidLabelValue(value); len(errs) > 0 {
+				return fmt.Errorf("invalid label value: %q does not match allowed pattern: %s", value, strings.Join(errs, "; "))
+			}
+		}
+		return nil
+	}
+
+	for k, v := range claimMeta.Labels {
+		if err := validate(k, v, true); err != nil {
+			return fmt.Errorf("failed to validate label %q: %w", k, err)
+		}
+	}
+
+	for k, v := range claimMeta.Annotations {
+		if err := validate(k, v, false); err != nil {
+			return fmt.Errorf("failed to validate annotation %q: %w", k, err)
+		}
+	}
+
+	return nil
+}
+
+// mergePodMetadata merges labels and annotations from claimMeta into templateMeta,
+// rejecting overrides with different values.
+func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
+	if err := validateAdditionalPodMetadata(claimMeta); err != nil {
+		return err
+	}
+
+	// Check for overrides in labels
+	for k, v := range claimMeta.Labels {
+		if tv, ok := templateMeta.Labels[k]; ok && tv != v {
+			return fmt.Errorf("metadata override conflict: label %q is defined in template with value %q, but claim requests %q", k, tv, v)
+		}
+	}
+
+	// Check for overrides in annotations
+	for k, v := range claimMeta.Annotations {
+		if tv, ok := templateMeta.Annotations[k]; ok && tv != v {
+			return fmt.Errorf("metadata override conflict: annotation %q is defined in template with value %q, but claim requests %q", k, tv, v)
+		}
+	}
+
+	// Merge labels
+	if len(claimMeta.Labels) > 0 {
+		if templateMeta.Labels == nil {
+			templateMeta.Labels = make(map[string]string)
+		}
+		maps.Copy(templateMeta.Labels, claimMeta.Labels)
+	}
+
+	// Merge annotations
+	if len(claimMeta.Annotations) > 0 {
+		if templateMeta.Annotations == nil {
+			templateMeta.Annotations = make(map[string]string)
+		}
+		maps.Copy(templateMeta.Annotations, claimMeta.Annotations)
+	}
+
+	return nil
+}
+
+// injectEnvs is a helper to inject/override a set of environment variables in a container.
+func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1alpha1.EnvVar, policy extensionsv1alpha1.EnvVarsInjectionPolicy, claimName string) error {
+	for _, claimEnv := range envsToInject {
+		existingIdx := -1
+		for j, env := range container.Env {
+			if env.Name == claimEnv.Name {
+				existingIdx = j
+				break
+			}
+		}
+
+		if existingIdx >= 0 {
+			if policy != extensionsv1alpha1.EnvVarsInjectionPolicyOverrides {
+				err := fmt.Errorf("environment variable override is not allowed by the template policy for variable %q", claimEnv.Name)
+				logger.Error(err, "Environment variable override rejected", "claimName", claimName, "envName", claimEnv.Name)
+				return err
+			}
+			logger.Info("Overriding existing environment variable", "envName", claimEnv.Name, "container", container.Name)
+			container.Env[existingIdx] = corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value}
+		} else {
+			logger.Info("Appending new environment variable", "envName", claimEnv.Name, "container", container.Name)
+			container.Env = append(container.Env, corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value})
+		}
+	}
+	return nil
 }
 
 func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) (*v1alpha1.Sandbox, error) {
@@ -507,49 +713,103 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		},
 	}
 
-	// Determine if we are in "Secure By Default" mode
-	management := template.Spec.NetworkPolicyManagement
-	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
-	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
-
 	// Propagate the trace context annotation to the Sandbox resource
 	if sandbox.Annotations == nil {
 		sandbox.Annotations = make(map[string]string)
 	}
-	if tc, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+	if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 	}
 
 	// Track the sandbox template ref to be used by metrics collector
 	sandbox.Annotations[v1alpha1.SandboxTemplateRefAnnotation] = template.Name
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	// TODO: this is a workaround, remove replica assignment related issue #202
-	replicas := int32(1)
-	sandbox.Spec.Replicas = &replicas
-	// Enforce a secure-by-default policy by disabling the automatic mounting
-	// of the service account token, adhering to security best practices for
-	// sandboxed environments.
-	if sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken == nil {
-		automount := false
-		sandbox.Spec.PodTemplate.Spec.AutomountServiceAccountToken = &automount
-	}
-	// To prevent internal DNS enumeration while still allowing public domain resolution,
-	// we explicitly override the Pod's DNS config to use external public resolvers.
-	// We only inject this if using the strict "Secure by Default" policy. If the user
-	// provides custom rules or is Unmanaged, we leave DNS alone for air-gapped/proxy compatibility.
-	if isSecureByDefault && sandbox.Spec.PodTemplate.Spec.DNSPolicy == "" {
-		sandbox.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSNone
-		sandbox.Spec.PodTemplate.Spec.DNSConfig = &corev1.PodDNSConfig{
-			Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // Google & Cloudflare public DNS
-		}
-	}
 
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
+
+	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		return nil, err
+	}
+
+	// Inject environment variables from the SandboxClaim
+	if len(claim.Spec.Env) > 0 {
+		if template.Spec.EnvVarsInjectionPolicy != extensionsv1alpha1.EnvVarsInjectionPolicyAllowed && template.Spec.EnvVarsInjectionPolicy != extensionsv1alpha1.EnvVarsInjectionPolicyOverrides {
+			err := fmt.Errorf("environment variable injection is not allowed by the template policy")
+			logger.Error(err, "Environment variable injection rejected", "claimName", claim.Name)
+			return nil, err
+		}
+
+		// Group envs by container name for efficient lookup.
+		envsByContainer := make(map[string][]extensionsv1alpha1.EnvVar)
+		defaultEnvs := []extensionsv1alpha1.EnvVar{}
+		for _, env := range claim.Spec.Env {
+			if env.ContainerName == "" {
+				defaultEnvs = append(defaultEnvs, env)
+			} else {
+				envsByContainer[env.ContainerName] = append(envsByContainer[env.ContainerName], env)
+			}
+		}
+
+		// Validate that all targeted containers exist.
+		allContainerNames := make(map[string]struct{})
+		for _, c := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+			allContainerNames[c.Name] = struct{}{}
+		}
+		for _, c := range sandbox.Spec.PodTemplate.Spec.Containers {
+			allContainerNames[c.Name] = struct{}{}
+		}
+		for containerName := range envsByContainer {
+			if _, ok := allContainerNames[containerName]; !ok {
+				err := fmt.Errorf("target container %q not found in template", containerName)
+				// To provide a more helpful error, we find which env var caused it.
+				for _, e := range envsByContainer[containerName] {
+					err = fmt.Errorf("target container %q not found in template for environment variable %q", containerName, e.Name)
+					break
+				}
+				logger.Error(err, "Environment variable injection rejected: container not found", "claimName", claim.Name)
+				return nil, err
+			}
+		}
+
+		// Inject into init containers
+		for i := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+			container := &sandbox.Spec.PodTemplate.Spec.InitContainers[i]
+			if envs, ok := envsByContainer[container.Name]; ok {
+				if err := r.injectEnvs(logger, container, envs, template.Spec.EnvVarsInjectionPolicy, claim.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		// Inject into regular containers
+		for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+			container := &sandbox.Spec.PodTemplate.Spec.Containers[i]
+			var envsToInject []extensionsv1alpha1.EnvVar
+			if envs, ok := envsByContainer[container.Name]; ok {
+				envsToInject = append(envsToInject, envs...)
+			}
+			if i == 0 { // Default envs go to the first main container
+				envsToInject = append(envsToInject, defaultEnvs...)
+			}
+			if len(envsToInject) > 0 {
+				if err := r.injectEnvs(logger, container, envsToInject, template.Spec.EnvVarsInjectionPolicy, claim.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	// TODO: this is a workaround, remove replica assignment related issue #202
+	replicas := int32(1)
+	sandbox.Spec.Replicas = &replicas
+
+	// Apply secure defaults to the sandbox pod spec
+	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
@@ -669,6 +929,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		adoptionCandidates = append(adoptionCandidates, sb)
 	}
 
+	if policy != extensionsv1alpha1.WarmPoolPolicyNone && len(claim.Spec.Env) > 0 {
+		err := fmt.Errorf("custom environment variables are not supported when using a warm pool")
+		logger.Error(err, "Invalid configuration", "claim", claim.Name)
+		return nil, err
+	}
+
 	if policy == extensionsv1alpha1.WarmPoolPolicyNone {
 		logger.Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
 		return nil, nil
@@ -709,76 +975,63 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 	return template, nil
 }
 
+func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
+			r.observedTimes.LoadOrStore(key, time.Now())
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			key := types.NamespacedName{Name: e.ObjectNew.GetName(), Namespace: e.ObjectNew.GetNamespace()}
+			r.observedTimes.LoadOrStore(key, time.Now())
+			return true
+		},
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extensionsv1alpha1.SandboxClaim{}).
+		For(&extensionsv1alpha1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
 		Owns(&v1alpha1.Sandbox{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }
 
-// reconcileNetworkPolicy ensures a NetworkPolicy exists for the claimed Sandbox.
-func (r *SandboxClaimReconciler) reconcileNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, template *extensionsv1alpha1.SandboxTemplate) error {
+// cleanupLegacyNetworkPolicy cleans up any deprecated per-claim NetworkPolicies.
+func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
 	logger := log.FromContext(ctx)
+	npKey := types.NamespacedName{Name: claim.Name + "-network-policy", Namespace: claim.Namespace}
 
-	// Skip if the template opts out of managed network policies
-	if template != nil && template.Spec.NetworkPolicyManagement == extensionsv1alpha1.NetworkPolicyManagementUnmanaged {
-		return nil
-	}
+	existingNP := &networkingv1.NetworkPolicy{}
+	if err := r.Get(ctx, npKey, existingNP); err == nil {
 
-	// Cleanup Check: If missing, delete existing policy
-	if template == nil || template.Spec.NetworkPolicy == nil {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      claim.Name + "-network-policy",
-				Namespace: claim.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, existingNP); err != nil {
-			if !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up disabled NetworkPolicy")
-				return err
-			}
-		} else {
-			logger.Info("Deleted disabled NetworkPolicy", "name", existingNP.Name)
-		}
-		return nil
-	}
+		// Verify this policy was actually created by this controller
+		// before deleting it. We check if the SandboxClaim is the controller.
+		controllerRef := metav1.GetControllerOf(existingNP)
+		isControlledByClaim := controllerRef != nil && controllerRef.UID == claim.UID && controllerRef.Kind == "SandboxClaim"
 
-	np := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      claim.Name + "-network-policy",
-			Namespace: claim.Namespace,
-		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
-		np.Spec.PodSelector = metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				extensionsv1alpha1.SandboxIDLabel: string(claim.UID),
-			},
-		}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress,
-			networkingv1.PolicyTypeEgress,
+		if !isControlledByClaim {
+			// A user manually created a policy with our reserved name. We should not delete it, but log a warning so it can be resolved.
+			logger.V(1).Info("Found NetworkPolicy with reserved name, but it is not controlled by this claim. Skipping deletion.", "name", existingNP.Name)
+			return nil
 		}
 
-		templateNP := template.Spec.NetworkPolicy
-
-		np.Spec.Ingress = templateNP.Ingress
-		np.Spec.Egress = templateNP.Egress
-
-		return controllerutil.SetControllerReference(claim, np, r.Scheme)
-	})
-
-	if err != nil {
-		logger.Error(err, "Failed to create or update NetworkPolicy for claim")
+		// Use client.IgnoreNotFound to prevent benign race conditions
+		// if the object is deleted between our Get and Delete calls.
+		if deleteErr := r.Delete(ctx, existingNP); client.IgnoreNotFound(deleteErr) != nil {
+			logger.Error(deleteErr, "Failed to clean up deprecated per-claim NetworkPolicy")
+			return deleteErr
+		}
+		logger.Info("Cleaned up deprecated per-claim NetworkPolicy in favor of shared Template policy", "name", existingNP.Name)
+	} else if !k8errors.IsNotFound(err) {
+		logger.Error(err, "Failed to check cache for deprecated per-claim NetworkPolicy")
 		return err
 	}
 
-	logger.Info("Successfully reconciled NetworkPolicy for claim", "NetworkPolicy.Name", np.Name)
 	return nil
 }
 
@@ -822,6 +1075,18 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// startup latency when the TemplateRef is updated.
 	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
 
+	// Record controller startup latency
+	if observedTimeString := claim.Annotations[ObservabilityAnnotation]; observedTimeString != "" {
+		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
+		if err != nil {
+			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
+		} else {
+			asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
+			// Clean up map entry after success
+			r.observedTimes.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
+		}
+	}
+
 	// For cold launches, also record the time from Sandbox creation to Ready state to capture controller overhead.
 	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {
 		return
@@ -836,12 +1101,12 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	}
 }
 
-// isSandboxExpired checks the Sandbox status condition set by the Core Controller
+// isSandboxExpired checks the Sandbox status condition set by the Core Controller.
 func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
 	return hasExpiredCondition(sandbox.Status.Conditions)
 }
 
-// hasExpiredCondition Helper to check if conditions list contains the expired reason
+// hasExpiredCondition Helper to check if conditions list contains the expired reason.
 func hasExpiredCondition(conditions []metav1.Condition) bool {
 	for _, cond := range conditions {
 		if cond.Type == string(v1alpha1.SandboxConditionReady) {

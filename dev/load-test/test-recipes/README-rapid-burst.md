@@ -44,12 +44,18 @@ Before running this test, ensure the following prerequisites are met:
         args:
           - --leader-elect=true
           - --extensions
+          - --enable-pprof-debug
+          - --enable-tracing
+          - --zap-log-level=debug
+          - --zap-encoder=json
           - --kube-api-qps=1000
           - --kube-api-burst=1000
           - --sandbox-concurrent-workers=1000
           - --sandbox-claim-concurrent-workers=1000
           - --sandbox-warm-pool-concurrent-workers=1000
     ```
+  - If you are using tracing, see [GKE OTLP Metrics](https://docs.cloud.google.com/stackdriver/docs/otlp-metrics/deploy-collector)
+    for how to deploy the collector.
   - Apply your modified manifests to your cluster to install the agent-sandbox controller.
     ```bash
     cd ~/agent-sandbox

@@ -28,6 +28,32 @@ spec:
             type: object
           spec:
             properties:
+              additionalPodMetadata:
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    type: object
+                type: object
+              env:
+                items:
+                  properties:
+                    containerName:
+                      type: string
+                    name:
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               lifecycle:
                 properties:
                   shutdownPolicy:

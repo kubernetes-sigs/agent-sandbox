@@ -16,7 +16,20 @@ from .sandbox_client import SandboxClient
 from .exceptions import (
     SandboxError,
     SandboxNotFoundError,
+    SandboxTemplateNotFoundError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,
 )
+
+
+try:
+    from .async_sandbox_client import AsyncSandboxClient
+except ImportError:
+    class AsyncSandboxClient:  # type: ignore[no-redef]
+        """Placeholder that raises ImportError when async extras are missing."""
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "AsyncSandboxClient requires the 'async' extras. "
+                "Install with: pip install k8s-agent-sandbox[async]"
+            )

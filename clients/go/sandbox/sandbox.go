@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -411,10 +412,9 @@ func (s *Sandbox) Close(ctx context.Context) error {
 		drainWG.Wait()
 		close(drainDone)
 	}()
-	drainBudget := time.Until(closeDeadline) / 2 // reserve half for claim deletion
-	if drainBudget < 0 {
-		drainBudget = 0
-	}
+	drainBudget := max(
+		// reserve half for claim deletion
+		time.Until(closeDeadline)/2, 0)
 	drainTimer := time.NewTimer(drainBudget)
 	defer drainTimer.Stop()
 	select {
@@ -558,9 +558,7 @@ func (s *Sandbox) Annotations() map[string]string {
 		return nil
 	}
 	cp := make(map[string]string, len(s.annotations))
-	for k, v := range s.annotations {
-		cp[k] = v
-	}
+	maps.Copy(cp, s.annotations)
 	return cp
 }
 

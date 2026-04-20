@@ -12,17 +12,13 @@ build:
 KIND_CLUSTER=agent-sandbox
 
 .PHONY: deploy-kind
+# `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
+# `CONTROLLER_ARGS="--enable-pprof-debug --zap-log-level=debug" make deploy-kind` to deploy with custom controller flags.
+# `CONTROLLER_ONLY=true make deploy-kind` to build and push only the controller image.
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER}
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/
-
-	@if [ "$(EXTENSIONS)" = "true" ]; then \
-		echo "🔧 Patching controller to enable extensions..."; \
-		kubectl patch deployment agent-sandbox-controller \
-			-n agent-sandbox-system \
-			-p '{"spec": {"template": {"spec": {"containers": [{"name": "agent-sandbox-controller", "args": ["--extensions=true"]}]}}}}'; \
-	fi
+	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
+	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
 
 .PHONY: deploy-cloud-provider-kind
 deploy-cloud-provider-kind:
@@ -52,9 +48,17 @@ test-e2e-benchmarks:
 lint-go:
 	./dev/tools/lint-go
 
+.PHONY: fix-go
+fix-go:
+	./dev/tools/lint-go --fix
+
 .PHONY: lint-api
 lint-api:
 	./dev/tools/lint-api
+
+.PHONY: fix-api
+fix-api:
+	./dev/tools/lint-api --fix
 
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
@@ -85,11 +89,10 @@ release-manifests:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-manifests TAG=vX.Y.Z)"; exit 1; fi
 	go mod tidy
 	go generate ./...
-	./dev/tools/release --tag=${TAG} 
+	./dev/tools/release --tag=${TAG}
 
 # Example usage:
-# make release-python-sdk TAG=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
-# make release-python-sdk TAG=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
+# make release-python-sdk TAG=v0.1.1.post1 (for patch release on PyPI)
 .PHONY: release-python-sdk
 release-python-sdk:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-python-sdk TAG=vX.Y.Z.postN)"; exit 1; fi

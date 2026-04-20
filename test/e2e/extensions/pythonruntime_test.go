@@ -435,7 +435,7 @@ func checkExecute(ctx context.Context, url string) error {
 		return fmt.Errorf("error reading response body from execute endpoint: %w", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(body, &result); err != nil {
 		return fmt.Errorf("failed to parse JSON response: %w", err)
 	}

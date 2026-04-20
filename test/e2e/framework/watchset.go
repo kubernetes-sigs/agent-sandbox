@@ -43,6 +43,8 @@ type Subscription struct {
 type ResourceWatch struct {
 	gvr       schema.GroupVersionResource
 	namespace string // empty for cluster-scoped resources
+	owner     *WatchSet
+	key       watchKey
 
 	mu            sync.RWMutex
 	subscriptions map[uint64]*Subscription
@@ -99,12 +101,15 @@ func (ws *WatchSet) getOrCreateWatch(gvr schema.GroupVersionResource, namespace 
 	rw = &ResourceWatch{
 		gvr:           gvr,
 		namespace:     namespace,
+		owner:         ws,
+		key:           key,
 		subscriptions: make(map[uint64]*Subscription),
 		dynamicClient: ws.dynamicClient,
 	}
 
 	// Use context.Background so the watchLoop outlives the caller's context.
-	// The watchLoop is stopped explicitly via WatchSet.Close().
+	// The watchLoop is stopped explicitly via WatchSet.Close() or when the
+	// last subscription is removed.
 	watchCtx, cancel := context.WithCancel(context.Background())
 	rw.cancelWatchLoop = cancel
 
@@ -126,7 +131,7 @@ func (ws *WatchSet) Subscribe(gvr schema.GroupVersionResource, filter WatchFilte
 	return rw.subscribe(filter)
 }
 
-// Close removes a subscription
+// Close removes a subscription.
 func (s *Subscription) Close() {
 	s.resourceWatch.unsubscribe(s)
 }
@@ -169,14 +174,40 @@ func (rw *ResourceWatch) subscribe(filter WatchFilter) *Subscription {
 // unsubscribe removes a subscription.
 func (rw *ResourceWatch) unsubscribe(sub *Subscription) {
 	rw.mu.Lock()
-	defer rw.mu.Unlock()
-
 	if _, ok := rw.subscriptions[sub.id]; ok {
 		delete(rw.subscriptions, sub.id)
 		close(sub.Events)
 	}
+	empty := len(rw.subscriptions) == 0
+	rw.mu.Unlock()
 
-	// TODO: Stop the watch if there are no more subscriptions
+	if empty {
+		rw.owner.removeWatchIfIdle(rw)
+	}
+}
+
+func (ws *WatchSet) removeWatchIfIdle(rw *ResourceWatch) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if ws.watches == nil {
+		return
+	}
+
+	current, ok := ws.watches[rw.key]
+	if !ok || current != rw {
+		return
+	}
+
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
+	if len(rw.subscriptions) != 0 {
+		return
+	}
+
+	delete(ws.watches, rw.key)
+	rw.stopLocked()
 }
 
 // stop cancels the watch and closes all subscriptions.
@@ -184,6 +215,10 @@ func (rw *ResourceWatch) stop() {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 
+	rw.stopLocked()
+}
+
+func (rw *ResourceWatch) stopLocked() {
 	rw.cancelWatchLoop()
 
 	for _, sub := range rw.subscriptions {

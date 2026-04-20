@@ -10,6 +10,12 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 * `--kube-api-qps` (default: -1 ; no rate limiting): The maximum Queries Per Second (QPS) sent to the Kubernetes API server from the controller.
 * `--kube-api-burst` (default: 10): The maximum burst for throttle requests to the Kubernetes API server.
 
+## Cluster Settings
+
+* `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to
+  construct service FQDNs. Only change this if your cluster is configured with a non-default
+  domain (e.g. `my-company.local`).
+
 ## Deployment Example
 
 To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. 

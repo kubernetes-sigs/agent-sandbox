@@ -82,7 +82,9 @@ async def proxy_request(request: Request, full_path: str):
 
     # Construct the K8s internal DNS name
     target_host = f"{sandbox_id}.{namespace}.svc.cluster.local"
-    target_url = f"http://{target_host}:{port}/{full_path}"
+    target_url = str(
+        request.url.replace(scheme="http", hostname=target_host, port=port)
+    )
 
     print(f"Proxying request for sandbox '{sandbox_id}' to URL: {target_url}")
 

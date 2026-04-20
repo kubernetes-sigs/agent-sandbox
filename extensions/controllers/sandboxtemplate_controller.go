@@ -36,7 +36,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-// SandboxTemplateReconciler reconciles a SandboxTemplate object
+// SandboxTemplateReconciler reconciles a SandboxTemplate object.
 type SandboxTemplateReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -46,7 +46,10 @@ type SandboxTemplateReconciler struct {
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
 func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)

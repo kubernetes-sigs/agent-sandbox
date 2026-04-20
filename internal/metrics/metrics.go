@@ -32,13 +32,27 @@ var (
 	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef
+	// - sandbox_template: the SandboxTemplateRef.
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_startup_latency_ms",
-			Help: "End-to-end latency from SandboxClaim creation to Pod Ready state in milliseconds.",
-			// Buckets for latency from 50ms to 4 minutes
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+			Help: "End-to-end latency from SandboxClaim creation to Sandbox Ready state in milliseconds.",
+			// Buckets for latency from 100ms to 4 minutes
+			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+		},
+		[]string{"launch_type", "sandbox_template"},
+	)
+
+	// ClaimControllerStartupLatency measures the time from controller first observed timestamp to SandboxClaim Ready state.
+	// Labels:
+	// - launch_type: "warm", "cold", "unknown"
+	// - sandbox_template: the SandboxTemplateRef.
+	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_claim_controller_startup_latency_ms",
+			Help: "Latency from controller first observed SandboxClaim to Sandbox Ready state in milliseconds.",
+			// Buckets for latency from 100ms to 4 minutes
+			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
@@ -47,7 +61,7 @@ var (
 	// Labels:
 	// - namespace: the namespace of the sandbox
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef
+	// - sandbox_template: the SandboxTemplateRef.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_creation_latency_ms",
@@ -64,7 +78,7 @@ var (
 	// - sandbox_template: the SandboxTemplateRef
 	// - launch_type: "warm", "cold", "unknown"
 	// - warmpool_name: the name of the warm pool (if applicable)
-	// - pod_condition: "ready", "not_ready"
+	// - pod_condition: "ready", "not_ready".
 	SandboxClaimCreationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "agent_sandbox_claim_creation_total",
@@ -79,7 +93,7 @@ var (
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
 	// - launch_type: "warm" | "cold"
-	// - sandbox_template: sandboxTemplateRef
+	// - sandbox_template: sandboxTemplateRef.
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
@@ -91,6 +105,7 @@ var (
 // Init registers custom metrics with the global controller-runtime registry.
 func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
+	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 }
@@ -99,6 +114,12 @@ func init() {
 func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
 	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+}
+
+// RecordClaimControllerStartupLatency records the duration since the provided controller start time.
+func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templateName string) {
+	duration := float64(time.Since(startTime).Milliseconds())
+	ClaimControllerStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
 }
 
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.

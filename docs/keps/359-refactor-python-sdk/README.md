@@ -1,3 +1,15 @@
+<!-- toc -->
+- [1. Summary](#1-summary)
+- [2. Motivation](#2-motivation)
+- [3. API Specification](#3-api-specification)
+  - [3.1 The EntryPoint (<code>SandboxClient</code>)](#31-the-entrypoint-sandboxclient)
+  - [3.2 The Core Handle (Sandbox)](#32-the-core-handle-sandbox)
+  - [3.3 Specialized Engines](#33-specialized-engines)
+  - [3.4 Developer Experience (The &quot;Fluent&quot; API)](#34-developer-experience-the-fluent-api)
+- [4. Proof Of Concept](#4-proof-of-concept)
+- [5. Scalability](#5-scalability)
+<!-- /toc -->
+
 ### 1. Summary
 
 This KEP discusses the idea of a Unified Agent Sandbox SDK that provides AI Agent Orchestrators / Platform Admins with a Fluent API for managing remote execution environments. This design moves away from treating a sandbox as a transient Python script helper (via `ContextManager` i.e `with`/`__enter__`/`__exit__`) and instead treats it as a Persistent Resource Handle. By abstracting the sandbox into specialized engine (Execution, Filesystem etc), the SDK provides a robust interface for long-lived, stateful agentic workflows.

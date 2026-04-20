@@ -17,6 +17,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -417,9 +418,7 @@ func extractState(sb *sandboxv1alpha1.Sandbox) *sandboxState {
 	}
 	if sb.Annotations != nil {
 		state.Annotations = make(map[string]string, len(sb.Annotations))
-		for k, v := range sb.Annotations {
-			state.Annotations[k] = v
-		}
+		maps.Copy(state.Annotations, sb.Annotations)
 	}
 	if name, ok := sb.Annotations[PodNameAnnotation]; ok {
 		state.PodName = name

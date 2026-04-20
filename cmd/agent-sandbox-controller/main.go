@@ -27,6 +27,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/felixge/fgprof"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -51,6 +52,7 @@ func main() {
 	var leaderElectionNamespace string
 	var probeAddr string
 	var extensions bool
+	var clusterDomain string
 	var enableTracing bool
 	var enablePprof bool
 	var enablePprofDebug bool
@@ -63,6 +65,7 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var memlimitRatio float64
+	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -195,6 +198,7 @@ func main() {
 			metricsOpts.ExtraHandlers["/debug/pprof/block"] = pprof.Handler("block")
 			metricsOpts.ExtraHandlers["/debug/pprof/mutex"] = pprof.Handler("mutex")
 			metricsOpts.ExtraHandlers["/debug/pprof/trace"] = http.HandlerFunc(pprof.Trace)
+			metricsOpts.ExtraHandlers["/debug/fgprof"] = fgprof.Handler()
 		}
 	}
 
@@ -219,9 +223,10 @@ func main() {
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
 	if err = (&controllers.SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Tracer: instrumenter,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Tracer:        instrumenter,
+		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

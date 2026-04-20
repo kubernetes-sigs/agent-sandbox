@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,9 +32,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
@@ -123,7 +125,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-claim", Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
 			}},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
@@ -144,13 +146,13 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 
 	controlledSandboxWithDefault := controlledSandbox.DeepCopy()
-	controlledSandboxWithDefault.Spec.PodTemplate.Spec.AutomountServiceAccountToken = ptr.To(false)
+	controlledSandboxWithDefault.Spec.PodTemplate.Spec.AutomountServiceAccountToken = new(false)
 
 	templateWithAutomount := &extensionsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "automount-template", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
 			PodTemplate: sandboxv1alpha1.PodTemplate{
-				Spec: corev1.PodSpec{AutomountServiceAccountToken: ptr.To(true), Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+				Spec: corev1.PodSpec{AutomountServiceAccountToken: new(true), Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
 			},
 		},
 	}
@@ -160,50 +162,136 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "automount-template"}},
 	}
 
-	templateOptOut := &extensionsv1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-template-opt-out",
-			Namespace: "default",
-		},
+	templateWithEnv := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template-env", Namespace: "default"},
 		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image", Env: []corev1.EnvVar{{Name: "EXISTING_VAR", Value: "template-value"}}}},
 				},
 			},
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
-				Egress: []networkingv1.NetworkPolicyEgressRule{{}},
+		},
+	}
+
+	templateWithEnvOverride := templateWithEnv.DeepCopy()
+	templateWithEnvOverride.Name = "test-template-env-override"
+	templateWithEnvOverride.Spec.EnvVarsInjectionPolicy = extensionsv1alpha1.EnvVarsInjectionPolicyOverrides
+
+	templateWithEnvAllowed := templateWithEnv.DeepCopy()
+	templateWithEnvAllowed.Name = "test-template-env-allowed"
+	templateWithEnvAllowed.Spec.EnvVarsInjectionPolicy = extensionsv1alpha1.EnvVarsInjectionPolicyAllowed
+
+	nonePolicy := extensionsv1alpha1.WarmPoolPolicyNone
+
+	claimWithEnv := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-env", Namespace: "default", UID: "claim-env-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-env-override"},
+			WarmPool:    &nonePolicy,
+			Env:         []extensionsv1alpha1.EnvVar{{Name: "NEW_VAR", Value: "claim-value"}},
+		},
+	}
+
+	claimWithNewEnvDisallowed := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-new-env-disallowed", Namespace: "default", UID: "claim-new-env-disallowed-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			WarmPool:    &nonePolicy,
+			Env:         []extensionsv1alpha1.EnvVar{{Name: "NEW_VAR", Value: "claim-value"}},
+		},
+	}
+
+	claimWithEnvConflict := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-env-conflict", Namespace: "default", UID: "claim-env-conflict-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-env"},
+			WarmPool:    &nonePolicy,
+			Env:         []extensionsv1alpha1.EnvVar{{Name: "EXISTING_VAR", Value: "claim-override-value"}},
+		},
+	}
+
+	claimWithEnvOverride := claimWithEnvConflict.DeepCopy()
+	claimWithEnvOverride.Name = "test-claim-env-override"
+	claimWithEnvOverride.UID = "claim-env-override-uid"
+	claimWithEnvOverride.Spec.TemplateRef.Name = "test-template-env-override"
+
+	claimWithEnvAllowedSuccess := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-env-allowed-success", Namespace: "default", UID: "claim-env-allowed-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-env-allowed"},
+			WarmPool:    &nonePolicy,
+			Env:         []extensionsv1alpha1.EnvVar{{Name: "NEW_VAR_ALLOWED", Value: "claim-value"}},
+		},
+	}
+
+	claimWithEnvOverrideNotAllowed := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-env-override-not-allowed", Namespace: "default", UID: "claim-override-not-allowed-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-env-allowed"},
+			WarmPool:    &nonePolicy,
+			Env:         []extensionsv1alpha1.EnvVar{{Name: "EXISTING_VAR", Value: "claim-override-value"}},
+		},
+	}
+
+	templateMultiContainer := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template-multi-container", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			EnvVarsInjectionPolicy: extensionsv1alpha1.EnvVarsInjectionPolicyOverrides,
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "app-container", Image: "app-image"},
+						{Name: "sidecar-container", Image: "sidecar-image"},
+					},
+				},
 			},
 		},
 	}
 
-	existingNPToDelete := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-template-opt-out-network-policy", // Must match the expected generated name
-			Namespace: "default",
-		},
-		Spec: networkingv1.NetworkPolicySpec{}, // The contents don't matter, we just want it to exist
-	}
-
-	// Represents a policy that was created in the past, but the template has since changed
-	outdatedNPToUpdate := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-template-with-np-network-policy", // Matches templateWithNP
-			Namespace: "default",
-		},
-		Spec: networkingv1.NetworkPolicySpec{
-			// Purposely outdated/wrong spec
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{"old-label": "outdated"},
+	claimTargetAppContainer := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-target-app", Namespace: "default", UID: "uid-target-app"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-multi-container"},
+			WarmPool:    &nonePolicy,
+			Env: []extensionsv1alpha1.EnvVar{
+				{Name: "APP_ENV", Value: "injected", ContainerName: "app-container"},
 			},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 		},
 	}
 
-	claimOptOut := &extensionsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-opt-out", Namespace: "default", UID: "claim-uid-opt-out"},
-		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-opt-out"}},
+	claimTargetInvalid := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-target-invalid", Namespace: "default", UID: "uid-target-invalid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-multi-container"},
+			WarmPool:    &nonePolicy,
+			Env: []extensionsv1alpha1.EnvVar{
+				{Name: "INVALID_ENV", Value: "injected", ContainerName: "does-not-exist"},
+			},
+		},
+	}
+
+	templateWithInitContainer := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template-init-container", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			EnvVarsInjectionPolicy: extensionsv1alpha1.EnvVarsInjectionPolicyOverrides,
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{{Name: "init-setup", Image: "init-image"}},
+					Containers:     []corev1.Container{{Name: "app-container", Image: "app-image"}},
+				},
+			},
+		},
+	}
+
+	claimTargetInitContainer := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-target-init", Namespace: "default", UID: "uid-target-init"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-init-container"},
+			WarmPool:    &nonePolicy,
+			Env: []extensionsv1alpha1.EnvVar{
+				{Name: "INIT_ENV", Value: "injected-init", ContainerName: "init-setup"},
+			},
+		},
 	}
 
 	readySandbox := controlledSandboxWithDefault.DeepCopy()
@@ -218,7 +306,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	// Validation Functions
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
 		expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
-		expectedSpec.AutomountServiceAccountToken = ptr.To(false)
+		expectedSpec.AutomountServiceAccountToken = new(false)
 
 		expectedSpec.DNSPolicy = corev1.DNSNone
 		expectedSpec.DNSConfig = &corev1.PodDNSConfig{
@@ -254,6 +342,8 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		expectedCondition metav1.Condition
 		expectedPodIPs    []string
 		validateSandbox   func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate)
+		expectDeletedNP   string // Asserts this NP is completely gone
+		expectRetainedNP  string // Asserts this NP survived the reconcile loop
 	}{
 		{
 			name:             "sandbox is created when a claim is made",
@@ -368,44 +458,73 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
-			name:             "Existing NetworkPolicy is deleted when template opts out and removes custom policy",
-			claimToReconcile: claimOptOut, // Uses the template with disableDefaultNetworkPolicy: true
-			existingObjects:  []client.Object{templateOptOut, existingNPToDelete},
-			expectSandbox:    true,
+			name:             "Existing NetworkPolicy is safely deleted (and controller survives) if SandboxTemplate is suddenly deleted",
+			claimToReconcile: claim,
+			existingObjects: []client.Object{
+				&networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-claim-network-policy", // Matches the claim name
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+						}},
+					},
+				},
+			},
+			expectSandbox: false, // Controller will fail to build sandbox, which is correct
+			expectError:   false, // Controller survives the reconcile loop without crashing
 			expectedCondition: metav1.Condition{
 				Type:    string(sandboxv1alpha1.SandboxConditionReady),
 				Status:  metav1.ConditionFalse,
-				Reason:  "SandboxNotReady",
-				Message: "Sandbox is not ready",
+				Reason:  "TemplateNotFound",
+				Message: `SandboxTemplate "test-template" not found`,
 			},
+			expectDeletedNP: "test-claim-network-policy", // Assert it was deleted
 		},
 		{
-			name: "Existing NetworkPolicy is updated when template spec changes and a new sandboxclaim is created",
-			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-claim-update", Namespace: "default", UID: "claim-update-uid"},
-				Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template-with-np"}},
+			name:             "Deprecated per-claim NetworkPolicy is aggressively deleted by Claim controller",
+			claimToReconcile: claim,
+			existingObjects: []client.Object{
+				template,
+				&networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-claim-network-policy",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+						}},
+					},
+				},
 			},
-			// Seed the cluster with the correct template, but the wrong/outdated network policy
-			existingObjects: []client.Object{templateWithNP, outdatedNPToUpdate},
-			expectSandbox:   true,
+			expectSandbox: true,
 			expectedCondition: metav1.Condition{
 				Type:    string(sandboxv1alpha1.SandboxConditionReady),
 				Status:  metav1.ConditionFalse,
 				Reason:  "SandboxNotReady",
 				Message: "Sandbox is not ready",
 			},
+			expectDeletedNP: "test-claim-network-policy", // Assert it was deleted
 		},
 		{
-			name:             "NetworkPolicy is not created when template has NetworkPolicyManagement set to Unmanaged",
-			claimToReconcile: claimOptOut,
-			existingObjects:  []client.Object{templateOptOut},
-			expectSandbox:    true,
+			name:             "User-created NetworkPolicy with reserved name is PRESERVED because it lacks the claim OwnerReference",
+			claimToReconcile: claim,
+			existingObjects: []client.Object{
+				template,
+				&networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-claim-network-policy",
+						Namespace: "default",
+					},
+				},
+			},
+			expectSandbox: true,
 			expectedCondition: metav1.Condition{
 				Type:    string(sandboxv1alpha1.SandboxConditionReady),
 				Status:  metav1.ConditionFalse,
 				Reason:  "SandboxNotReady",
 				Message: "Sandbox is not ready",
 			},
+			expectRetainedNP: "test-claim-network-policy", // Assert it survived the GC!
 		},
 		{
 			name: "trace context is propagated from claim to sandbox",
@@ -424,6 +543,231 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
 				if val, ok := sandbox.Annotations[asmetrics.TraceContextAnnotation]; !ok || val != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
 					t.Errorf("expected trace context annotation to be propagated, got %q", val)
+				}
+			},
+		},
+		{
+			name: "sandbox is created with additional metadata from claim",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-with-meta", Namespace: "default", UID: "uid-meta"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels:      map[string]string{"user-label": "user-value"},
+						Annotations: map[string]string{"user-annotation": "user-value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels["user-label"]; !ok || val != "user-value" {
+					t.Errorf("expected user-label to be propagated, got %q", val)
+				}
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations["user-annotation"]; !ok || val != "user-value" {
+					t.Errorf("expected user-annotation to be propagated, got %q", val)
+				}
+			},
+		},
+		{
+			name: "claim with too long label value is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-long-label", Namespace: "default", UID: "uid-long-label"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"user-label": "a-very-long-value-that-exceeds-sixty-three-characters-limit-which-is-sixty-four"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+			},
+		},
+		{
+			name: "claim with invalid label pattern is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-invalid-label", Namespace: "default", UID: "uid-invalid-label"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"user-label": "invalid@value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+			},
+		},
+		{
+			name: "claim with restricted domain label is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-restricted-label", Namespace: "default", UID: "uid-restricted-label"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"kubernetes.io/restricted": "value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+			},
+		},
+		{
+			name:             "sandbox is created with injected environment variables from claim",
+			claimToReconcile: claimWithEnv,
+			existingObjects:  []client.Object{templateWithEnvOverride},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				env := sandbox.Spec.PodTemplate.Spec.Containers[0].Env
+				if len(env) != 2 {
+					t.Errorf("Expected 2 environment variables, got %d", len(env))
+				}
+				if env[0].Name != "EXISTING_VAR" || env[0].Value != "template-value" {
+					t.Errorf("Expected EXISTING_VAR=template-value, got %s=%s", env[0].Name, env[0].Value)
+				}
+				if env[1].Name != "NEW_VAR" || env[1].Value != "claim-value" {
+					t.Errorf("Expected NEW_VAR=claim-value, got %s=%s", env[1].Name, env[1].Value)
+				}
+			},
+		},
+		{
+			name:             "sandbox is created with injected new environment variable when policy is Allowed",
+			claimToReconcile: claimWithEnvAllowedSuccess,
+			existingObjects:  []client.Object{templateWithEnvAllowed},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				env := sandbox.Spec.PodTemplate.Spec.Containers[0].Env
+				if len(env) != 2 {
+					t.Errorf("Expected 2 environment variables, got %d", len(env))
+				}
+				if env[0].Name != "EXISTING_VAR" || env[0].Value != "template-value" {
+					t.Errorf("Expected EXISTING_VAR=template-value, got %s=%s", env[0].Name, env[0].Value)
+				}
+				if env[1].Name != "NEW_VAR_ALLOWED" || env[1].Value != "claim-value" {
+					t.Errorf("Expected NEW_VAR_ALLOWED=claim-value, got %s=%s", env[1].Name, env[1].Value)
+				}
+			},
+		},
+		{
+			name:             "sandbox creation fails when claim overrides environment variable and policy is Allowed (not Overrides)",
+			claimToReconcile: claimWithEnvOverrideNotAllowed,
+			existingObjects:  []client.Object{templateWithEnvAllowed},
+			expectSandbox:    false,
+			expectError:      true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: environment variable override is not allowed by the template policy for variable \"EXISTING_VAR\"",
+			},
+		},
+		{
+			name:             "sandbox creation fails when claim environment variable conflicts with template and override is not allowed",
+			claimToReconcile: claimWithEnvConflict,
+			existingObjects:  []client.Object{templateWithEnv},
+			expectSandbox:    false,
+			expectError:      true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: environment variable injection is not allowed by the template policy",
+			},
+		},
+		{
+			name:             "sandbox creation fails when claim injects new environment variable and policy is disallowed",
+			claimToReconcile: claimWithNewEnvDisallowed,
+			existingObjects:  []client.Object{template},
+			expectSandbox:    false,
+			expectError:      true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: environment variable injection is not allowed by the template policy",
+			},
+		},
+		{
+			name:             "sandbox is created with overridden environment variable when template allows override",
+			claimToReconcile: claimWithEnvOverride,
+			existingObjects:  []client.Object{templateWithEnvOverride},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				env := sandbox.Spec.PodTemplate.Spec.Containers[0].Env
+				if len(env) != 1 {
+					t.Errorf("Expected 1 environment variable, got %d", len(env))
+				}
+				if env[0].Name != "EXISTING_VAR" || env[0].Value != "claim-override-value" {
+					t.Errorf("Expected EXISTING_VAR=claim-override-value, got %s=%s", env[0].Name, env[0].Value)
+				}
+			},
+		},
+		{
+			name:             "sandbox is created with env var injected into specific container",
+			claimToReconcile: claimTargetAppContainer,
+			existingObjects:  []client.Object{templateMultiContainer},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				containers := sandbox.Spec.PodTemplate.Spec.Containers
+				if len(containers) != 2 {
+					t.Fatalf("Expected 2 containers, got %d", len(containers))
+				}
+				if len(containers[0].Env) != 1 {
+					t.Fatalf("Expected 1 env var in app-container, got %d", len(containers[0].Env))
+				}
+				if containers[0].Env[0].Name != "APP_ENV" || containers[0].Env[0].Value != "injected" {
+					t.Errorf("Expected APP_ENV=injected, got %s=%s", containers[0].Env[0].Name, containers[0].Env[0].Value)
+				}
+				if len(containers[1].Env) != 0 {
+					t.Errorf("Expected 0 env vars in sidecar-container, got %d", len(containers[1].Env))
+				}
+			},
+		},
+		{
+			name:             "sandbox creation fails when claim targets non-existent container",
+			claimToReconcile: claimTargetInvalid,
+			existingObjects:  []client.Object{templateMultiContainer},
+			expectSandbox:    false,
+			expectError:      true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: target container \"does-not-exist\" not found in template for environment variable \"INVALID_ENV\"",
+			},
+		},
+		{
+			name:             "sandbox is created with env var injected into init container",
+			claimToReconcile: claimTargetInitContainer,
+			existingObjects:  []client.Object{templateWithInitContainer},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				initContainers := sandbox.Spec.PodTemplate.Spec.InitContainers
+				if len(initContainers) != 1 {
+					t.Fatalf("Expected 1 init container, got %d", len(initContainers))
+				}
+				if len(initContainers[0].Env) != 1 {
+					t.Fatalf("Expected 1 env var in init-setup, got %d", len(initContainers[0].Env))
+				}
+				if initContainers[0].Env[0].Name != "INIT_ENV" || initContainers[0].Env[0].Value != "injected-init" {
+					t.Errorf("Expected INIT_ENV=injected-init, got %s=%s", initContainers[0].Env[0].Name, initContainers[0].Env[0].Value)
 				}
 			},
 		},
@@ -489,9 +833,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				t.Fatalf("expected 1 condition, got %d", len(updatedClaim.Status.Conditions))
 			}
 			condition := updatedClaim.Status.Conditions[0]
-			if tc.expectedCondition.Reason == "ReconcilerError" {
-				if condition.Reason != "ReconcilerError" {
-					t.Errorf("expected condition reason %q, got %q", "ReconcilerError", condition.Reason)
+			if tc.expectedCondition.Reason == "ReconcilerError" || tc.expectedCondition.Reason == "InvalidMetadata" {
+				if condition.Reason != tc.expectedCondition.Reason {
+					t.Errorf("expected condition reason %q, got %q", tc.expectedCondition.Reason, condition.Reason)
 				}
 			} else {
 				if len(tc.expectedPodIPs) > 0 {
@@ -501,6 +845,23 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				}
 				if diff := cmp.Diff(tc.expectedCondition, condition, cmp.Comparer(ignoreTimestamp)); diff != "" {
 					t.Errorf("unexpected condition:\n%s", diff)
+				}
+			}
+
+			// Assert NetworkPolicy Cleanup and Preservation
+			if tc.expectDeletedNP != "" {
+				var np networkingv1.NetworkPolicy
+				err := client.Get(context.Background(), types.NamespacedName{Name: tc.expectDeletedNP, Namespace: "default"}, &np)
+				if !k8errors.IsNotFound(err) {
+					t.Errorf("expected NetworkPolicy %q to be DELETED, but it was found or got err: %v", tc.expectDeletedNP, err)
+				}
+			}
+
+			if tc.expectRetainedNP != "" {
+				var np networkingv1.NetworkPolicy
+				err := client.Get(context.Background(), types.NamespacedName{Name: tc.expectRetainedNP, Namespace: "default"}, &np)
+				if err != nil {
+					t.Errorf("expected NetworkPolicy %q to be RETAINED, but it was missing or got err: %v", tc.expectRetainedNP, err)
 				}
 			}
 		})
@@ -543,7 +904,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				Name:      claimName,
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{
-					{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: ptr.To(true)},
+					{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: new(true)},
 				},
 			},
 			Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
@@ -791,7 +1152,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       "test-pool",
 						UID:        warmPoolUID,
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},
@@ -836,7 +1197,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Kind:       "ReplicaSet",
 						Name:       "other-controller",
 						UID:        "other-uid-456",
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},
@@ -869,6 +1230,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		existingObjects         []client.Object
 		expectSandboxAdoption   bool
 		expectedAdoptedSandbox  string
+		expectedAnnotations     map[string]string
 		expectNewSandboxCreated bool
 		simulateConflicts       int
 	}{
@@ -955,6 +1317,46 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
+			name: "corrects stale pod-name annotation when adopting sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Annotations = map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "stale-pod-name",
+					}
+					return sb
+				}(),
+				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "pool-sb-1",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "accepts existing correct pod-name annotation when adopting sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Annotations = map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "pool-sb-1",
+						"test.annotation/preserved":              "true",
+					}
+					return sb
+				}(),
+				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedAnnotations: map[string]string{
+				"test.annotation/preserved": "true",
+			},
+			expectNewSandboxCreated: false,
+		},
+		{
 			name: "retries on conflict when adopting sandbox",
 			existingObjects: []client.Object{
 				template,
@@ -1036,6 +1438,17 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
 				}
 
+				// 4. Verify the adopted sandbox records the adopted pod name
+				if val := adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; val != adoptedSandbox.Name {
+					t.Errorf("expected adopted sandbox to have %q annotation %q, got %q; annotations=%v", sandboxv1alpha1.SandboxPodNameAnnotation, adoptedSandbox.Name, val, adoptedSandbox.Annotations)
+				}
+
+				for key, expected := range tc.expectedAnnotations {
+					if val := adoptedSandbox.Annotations[key]; val != expected {
+						t.Errorf("expected adopted sandbox to preserve annotation %q=%q, got %q; annotations=%v", key, expected, val, adoptedSandbox.Annotations)
+					}
+				}
+
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
 				var sandbox sandboxv1alpha1.Sandbox
@@ -1081,11 +1494,11 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			Name: "adopted-sb", Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim",
-				Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
+				Name: "test-claim", UID: "claim-uid", Controller: new(true),
 			}},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas:    ptr.To(int32(1)),
+			Replicas:    new(int32(1)),
 			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 	}
@@ -1100,7 +1513,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas:    ptr.To(int32(1)),
+			Replicas:    new(int32(1)),
 			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 		Status: sandboxv1alpha1.SandboxStatus{
@@ -1146,11 +1559,13 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
 
 	testCases := []struct {
-		name                 string
-		claim                *extensionsv1alpha1.SandboxClaim
-		oldStatus            *extensionsv1alpha1.SandboxClaimStatus
-		sandbox              *sandboxv1alpha1.Sandbox
-		expectedObservations int
+		name                           string
+		claim                          *extensionsv1alpha1.SandboxClaim
+		oldStatus                      *extensionsv1alpha1.SandboxClaimStatus
+		sandbox                        *sandboxv1alpha1.Sandbox
+		expectedObservations           int
+		expectedControllerObservations int
+		setupReconciler                func(r *SandboxClaimReconciler)
 	}{
 		{
 			name: "records success on first ready transition",
@@ -1202,20 +1617,55 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			sandbox:              nil,
 			expectedObservations: 1,
 		},
+		{
+			name: "records controller latency using stored time",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "stored-time",
+					Namespace:         "default",
+					CreationTimestamp: pastTime,
+					Annotations: map[string]string{
+						ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:                      &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations:           1,
+			expectedControllerObservations: 1,
+			setupReconciler: func(r *SandboxClaimReconciler) {
+				key := types.NamespacedName{Name: "stored-time", Namespace: "default"}
+				r.observedTimes.Store(key, time.Now().Add(-5*time.Second))
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Reset the metrics registry for a clean test
 			asmetrics.ClaimStartupLatency.Reset()
+			asmetrics.ClaimControllerStartupLatency.Reset()
+
 			r := &SandboxClaimReconciler{}
+
+			if tc.setupReconciler != nil {
+				tc.setupReconciler(r)
+			}
 
 			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
 			if count != tc.expectedObservations {
-				t.Errorf("expected %d observations, got %d", tc.expectedObservations, count)
+				t.Errorf("expected %d observations for ClaimStartupLatency, got %d", tc.expectedObservations, count)
+			}
+
+			countController := testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency)
+			if countController != tc.expectedControllerObservations {
+				t.Errorf("expected %d observations for ClaimControllerStartupLatency, got %d", tc.expectedControllerObservations, countController)
 			}
 		})
 	}
@@ -1281,12 +1731,12 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       "test-pool",
 						UID:        "pool-uid",
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},
 			Spec: sandboxv1alpha1.SandboxSpec{
-				Replicas:    ptr.To(int32(1)),
+				Replicas:    new(int32(1)),
 				PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}},
 			},
 			Status: sandboxv1alpha1.SandboxStatus{
@@ -1404,7 +1854,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       poolName,
 						UID:        warmPoolUID,
-						Controller: ptr.To(true),
+						Controller: new(true),
 					},
 				},
 			},
@@ -1691,4 +2141,94 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			t.Error("expected warm pool label to be removed from adopted sandbox")
 		}
 	})
+
+	t.Run("errors when custom environment variables are provided with a warm pool", func(t *testing.T) {
+		scheme := newScheme(t)
+		claimWithEnv := baseClaim.DeepCopy()
+		defaultPolicy := extensionsv1alpha1.WarmPoolPolicyDefault
+		claimWithEnv.Spec.WarmPool = &defaultPolicy
+		claimWithEnv.Spec.Env = []extensionsv1alpha1.EnvVar{{Name: "CUSTOM_ENV", Value: "test-value"}}
+
+		existingObjects := []client.Object{
+			template,
+			claimWithEnv,
+			createWarmPoolSandbox("pool-sb-1", "test-pool", true),
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingObjects...).
+			WithStatusSubresource(claimWithEnv).
+			Build()
+
+		reconciler := &SandboxClaimReconciler{
+			Client:   fakeClient,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		}
+
+		ctx := context.Background()
+		_, err := reconciler.Reconcile(ctx, req)
+		if err == nil {
+			t.Fatalf("expected reconcile to fail with an error, but it succeeded")
+		}
+
+		expectedErr := "custom environment variables are not supported when using a warm pool"
+		if err.Error() != expectedErr {
+			t.Errorf("expected error %q, got %q", expectedErr, err.Error())
+		}
+	})
+}
+
+func TestSandboxClaimPredicates(t *testing.T) {
+	r := &SandboxClaimReconciler{}
+	pred := r.getTimingPredicate()
+
+	testCases := []struct {
+		name        string
+		trigger     func(p predicate.Predicate) bool
+		expectedKey types.NamespacedName
+	}{
+		{
+			name: "CreateFunc stores time",
+			trigger: func(p predicate.Predicate) bool {
+				return p.Create(event.CreateEvent{
+					Object: &extensionsv1alpha1.SandboxClaim{
+						ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default"},
+					},
+				})
+			},
+			expectedKey: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+		},
+		{
+			name: "UpdateFunc stores time",
+			trigger: func(p predicate.Predicate) bool {
+				return p.Update(event.UpdateEvent{
+					ObjectNew: &extensionsv1alpha1.SandboxClaim{
+						ObjectMeta: metav1.ObjectMeta{Name: "test-claim-update", Namespace: "default"},
+					},
+				})
+			},
+			expectedKey: types.NamespacedName{Name: "test-claim-update", Namespace: "default"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r.observedTimes = sync.Map{} // Reset map for each test case
+			res := tc.trigger(pred)
+			if !res {
+				t.Error("expected predicate to return true")
+			}
+
+			if _, ok := r.observedTimes.Load(tc.expectedKey); !ok {
+				t.Errorf("expected time to be stored in observedTimes map for key %v", tc.expectedKey)
+			}
+		})
+	}
 }

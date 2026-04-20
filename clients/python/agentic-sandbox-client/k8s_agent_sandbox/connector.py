@@ -218,6 +218,8 @@ class SandboxConnector:
 
     def close(self):
         self.strategy.close()
+        if self.session:
+            self.session.close()
 
     def send_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         try:

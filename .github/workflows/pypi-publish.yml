@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -87,8 +88,10 @@ jobs:
       contents: read
 
     # Run if it is a push event AND NOT a release candidate
+    # 'workflow_dispatch' (manual trigger) is Dry Run only.
     if: >-
-      (github.event_name == 'push' && !contains(github.ref, 'rc'))
+      (github.event_name == 'push' && !contains(github.ref, 'rc')) ||
+      (github.event_name == 'workflow_dispatch')
 
     steps:
       - name: Download all the dists
@@ -97,5 +100,13 @@ jobs:
           name: python-package-distributions
           path: dist/
 
+      - name: Publish distribution 📦 to PyPI (DRY RUN)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo "DRY RUN: Successfully built distribution packages."
+          echo "Files that would be published:"
+          ls -l dist/
+
       - name: Publish distribution 📦 to PyPI
+        if: ${{ github.event_name == 'push' }}
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

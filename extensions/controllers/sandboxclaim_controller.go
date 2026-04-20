@@ -985,6 +985,11 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 			r.observedTimes.LoadOrStore(key, time.Now())
 			return true
 		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
+			r.observedTimes.Delete(key)
+			return true
+		},
 	}
 }
 
@@ -1064,14 +1069,15 @@ func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, 
 func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, launchType string) {
 	logger := log.FromContext(ctx)
 	if observedTimeString := claim.Annotations[asmetrics.ObservabilityAnnotation]; observedTimeString != "" {
+		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+		defer r.observedTimes.Delete(key)
+
 		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
 		if err != nil {
 			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
 			return
 		}
 		asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
-		// Clean up map entry after success
-		r.observedTimes.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
 	}
 }
 

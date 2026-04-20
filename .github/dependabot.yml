@@ -1,25 +1,113 @@
 version: 2
 updates:
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: daily
-    groups:
-      k8s-libs:
-        patterns:
-          - "k8s.io/api"
-          - "k8s.io/apiextensions-apiserver"
-          - "k8s.io/apimachinery"
-          - "k8s.io/client-go"
-          - "k8s.io/klog/v2"
-          - "k8s.io/utils"
+# TODO: tools.mod in the root directory is NOT tracked by Dependabot because 
+# Dependabot only supports files named exactly 'go.mod'. 
+# Maintainers will need to manually update tools.mod when shared dependencies change.
+# See discussion in PR #629 and #588 for context.
+- package-ecosystem: "gomod"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
 
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
+- package-ecosystem: "gomod"
+  directory: "/dev/tools"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
 
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
+- package-ecosystem: "gomod"
+  directory: "/examples/chrome-sandbox"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "gomod"
+  directory: "/site"
+  schedule:
+    interval: "weekly"
+  groups:
+    gomod-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "pip"
+  directory: "/clients/python/agentic-sandbox-client"
+  schedule:
+    interval: "weekly"
+  groups:
+    python-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "docker"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "docker"
+  directory: "/clients/python/agentic-sandbox-client/sandbox-router"
+  schedule:
+    interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "docker"
+  directory: "/examples/chrome-sandbox"
+  schedule:
+    interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "docker"
+  directory: "/examples/gemini-cu-sandbox"
+  schedule:
+    interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "docker"
+  directory: "/examples/hello-world-sandbox"
+  schedule:
+    interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "docker"
+  directory: "/examples/python-runtime-sandbox"
+  schedule:
+    interval: "weekly"
+  groups:
+    docker-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "github-actions"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  groups:
+    github-actions:
+      patterns:
+      - "*"

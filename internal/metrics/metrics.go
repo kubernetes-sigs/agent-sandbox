@@ -102,7 +102,7 @@ var (
 	// SandboxClaimCreationTotal calculates the total number of SandboxClaims created.
 	// Labels:
 	// - namespace: the namespace of the claim
-	// - sandbox_template: the SandboxTemplateRef
+	// - sandbox_template: the SandboxTemplateRef.
 	// - launch_type: "warm", "cold", "unknown"
 	// - warmpool_name: the name of the warm pool (if applicable)
 	// - pod_condition: "ready", "not_ready".

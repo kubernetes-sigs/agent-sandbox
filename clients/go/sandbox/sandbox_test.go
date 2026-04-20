@@ -568,13 +568,13 @@ func TestModeSelection_Gateway(t *testing.T) {
 	dynCS.PrependWatchReactor("gateways", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		fw := watch.NewFake()
 		go fw.Add(&unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "gateway.networking.k8s.io/v1",
 				"kind":       "Gateway",
-				"metadata":   map[string]interface{}{"name": "test-gateway", "namespace": "default"},
-				"status": map[string]interface{}{
-					"addresses": []interface{}{
-						map[string]interface{}{"type": "IPAddress", "value": "203.0.113.10"},
+				"metadata":   map[string]any{"name": "test-gateway", "namespace": "default"},
+				"status": map[string]any{
+					"addresses": []any{
+						map[string]any{"type": "IPAddress", "value": "203.0.113.10"},
 					},
 				},
 			},
@@ -641,25 +641,25 @@ func TestGatewayDiscovery_Timeout(t *testing.T) {
 func TestExtractGatewayAddress(t *testing.T) {
 	cases := []struct {
 		name     string
-		obj      map[string]interface{}
+		obj      map[string]any
 		expected string
 	}{
-		{"ip address", map[string]interface{}{
-			"status": map[string]interface{}{
-				"addresses": []interface{}{map[string]interface{}{"value": "10.0.0.1"}},
+		{"ip address", map[string]any{
+			"status": map[string]any{
+				"addresses": []any{map[string]any{"value": "10.0.0.1"}},
 			},
 		}, "10.0.0.1"},
-		{"hostname", map[string]interface{}{
-			"status": map[string]interface{}{
-				"addresses": []interface{}{map[string]interface{}{"value": "gateway.example.com"}},
+		{"hostname", map[string]any{
+			"status": map[string]any{
+				"addresses": []any{map[string]any{"value": "gateway.example.com"}},
 			},
 		}, "gateway.example.com"},
-		{"empty value", map[string]interface{}{
-			"status": map[string]interface{}{
-				"addresses": []interface{}{map[string]interface{}{"value": ""}},
+		{"empty value", map[string]any{
+			"status": map[string]any{
+				"addresses": []any{map[string]any{"value": ""}},
 			},
 		}, ""},
-		{"no status", map[string]interface{}{}, ""},
+		{"no status", map[string]any{}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -710,12 +710,12 @@ func TestGatewayDiscovery_WatchUsesCorrectFieldSelector(t *testing.T) {
 		capturedSelector = wa.GetWatchRestrictions().Fields.String()
 		fw := watch.NewFake()
 		go fw.Add(&unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "gateway.networking.k8s.io/v1",
 				"kind":       "Gateway",
-				"metadata":   map[string]interface{}{"name": "test-gateway", "namespace": "default"},
-				"status": map[string]interface{}{
-					"addresses": []interface{}{map[string]interface{}{"value": "203.0.113.10"}},
+				"metadata":   map[string]any{"name": "test-gateway", "namespace": "default"},
+				"status": map[string]any{
+					"addresses": []any{map[string]any{"value": "203.0.113.10"}},
 				},
 			},
 		})
@@ -773,13 +773,13 @@ func TestGatewayDiscovery_ListUsesCorrectFieldSelector(t *testing.T) {
 		la := action.(ktesting.ListAction)
 		capturedSelector = la.GetListRestrictions().Fields.String()
 		return true, &unstructured.UnstructuredList{
-			Object: map[string]interface{}{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayList"},
+			Object: map[string]any{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayList"},
 			Items: []unstructured.Unstructured{{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "gateway.networking.k8s.io/v1",
 					"kind":       "Gateway",
-					"metadata":   map[string]interface{}{"name": "test-gateway", "namespace": "default"},
-					"status":     map[string]interface{}{"addresses": []interface{}{map[string]interface{}{"value": "198.51.100.1"}}},
+					"metadata":   map[string]any{"name": "test-gateway", "namespace": "default"},
+					"status":     map[string]any{"addresses": []any{map[string]any{"value": "198.51.100.1"}}},
 				},
 			}},
 		}, nil
@@ -831,9 +831,9 @@ func TestExtractGatewayAddress_SSRFRejection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gw := &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"addresses": []interface{}{map[string]interface{}{"value": tc.value}},
+			gw := &unstructured.Unstructured{Object: map[string]any{
+				"status": map[string]any{
+					"addresses": []any{map[string]any{"value": tc.value}},
 				},
 			}}
 			if got, _ := extractGatewayAddress(gw); got != "" {
@@ -1464,10 +1464,10 @@ func TestDrainGatewayWatch_Deleted(t *testing.T) {
 	fw := watch.NewFake()
 	go func() {
 		fw.Delete(&unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "gateway.networking.k8s.io/v1",
 				"kind":       "Gateway",
-				"metadata":   map[string]interface{}{"name": "test-gw"},
+				"metadata":   map[string]any{"name": "test-gw"},
 			},
 		})
 	}()
@@ -1944,11 +1944,11 @@ func TestOpen_ReconnectsAfterTransportDeath_GatewayMode(t *testing.T) {
 		ip := fmt.Sprintf("203.0.113.%d", gwCallCount)
 		gwMu.Unlock()
 		go fw.Add(&unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "gateway.networking.k8s.io/v1",
 				"kind":       "Gateway",
-				"metadata":   map[string]interface{}{"name": "test-gateway", "namespace": "default"},
-				"status":     map[string]interface{}{"addresses": []interface{}{map[string]interface{}{"value": ip}}},
+				"metadata":   map[string]any{"name": "test-gateway", "namespace": "default"},
+				"status":     map[string]any{"addresses": []any{map[string]any{"value": ip}}},
 			},
 		})
 		return true, fw, nil
@@ -2013,13 +2013,13 @@ func TestGatewayDiscovery_ListPath_AlreadyReady(t *testing.T) {
 
 	dynCS.PrependReactor("list", "gateways", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, &unstructured.UnstructuredList{
-			Object: map[string]interface{}{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayList"},
+			Object: map[string]any{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayList"},
 			Items: []unstructured.Unstructured{{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "gateway.networking.k8s.io/v1",
 					"kind":       "Gateway",
-					"metadata":   map[string]interface{}{"name": "test-gateway", "namespace": "default"},
-					"status":     map[string]interface{}{"addresses": []interface{}{map[string]interface{}{"value": "198.51.100.1"}}},
+					"metadata":   map[string]any{"name": "test-gateway", "namespace": "default"},
+					"status":     map[string]any{"addresses": []any{map[string]any{"value": "198.51.100.1"}}},
 				},
 			}},
 		}, nil
@@ -2690,7 +2690,7 @@ func TestOpen_ReconnectTransportFailure(t *testing.T) {
 	})
 	dynCS.PrependReactor("list", "gateways", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, &unstructured.UnstructuredList{
-			Object: map[string]interface{}{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayList"},
+			Object: map[string]any{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayList"},
 		}, nil
 	})
 	dynCS.PrependWatchReactor("gateways", ktesting.DefaultWatchReactor(watch.NewFake(), nil))

@@ -15,6 +15,9 @@ spec:
     external:
       metric:
         name: "prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"
+        selector:
+          matchLabels:
+            metric.labels.warmpool_name: "python-sdk-warmpool"
       target:
         type: Value 
         value: 0.5

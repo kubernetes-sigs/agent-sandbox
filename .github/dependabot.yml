@@ -1,5 +1,9 @@
 version: 2
 updates:
+# TODO: tools.mod in the root directory is NOT tracked by Dependabot because 
+# Dependabot only supports files named exactly 'go.mod'. 
+# Maintainers will need to manually update tools.mod when shared dependencies change.
+# See discussion in PR #629 and #588 for context.
 - package-ecosystem: "gomod"
   directory: "/"
   schedule:

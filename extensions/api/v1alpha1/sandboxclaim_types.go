@@ -83,6 +83,12 @@ type Lifecycle struct {
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
+	// ttlSecondsAfterFinished limits how long a finished claim is retained.
+	// The timer starts from the mirrored Finished condition's LastTransitionTime.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
+
 	// shutdownPolicy determines the behavior when the SandboxClaim expires.
 	// +kubebuilder:default=Retain
 	// +optional

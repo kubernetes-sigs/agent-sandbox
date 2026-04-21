@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -51,8 +52,14 @@ check_copilot_resolved() {
 
 echo "--- Scanning for Copilot-Active PRs: $(date) ---"
 
-ACTIVE_PRS=$(gh pr list --limit "$LIMIT" --json number,reviews \
-  --jq ".[] | select(.reviews[] | .author.login == \"$BOT_NAME\") | .number")
+ACTIVE_PRS=$(gh pr list --limit "$LIMIT" --json number,labels,reviews,reviewRequests \
+  --jq '.[] | select(
+    # 1. Bot has actually performed a review (Approved, Commented, or Changes Requested)
+    (.reviews[] | .author.login == "copilot-pull-request-reviewer")
+    and
+    # 2. Skip if already marked as ready-for-review
+    (any(.labels[].name; . == "ready-for-review") | not)
+    ) | .number')
 
 for PR in $ACTIVE_PRS; do
   UNRESOLVED=$(check_copilot_resolved "$PR")

@@ -1,0 +1,73 @@
+#!/bin/bash
+set -euo pipefail
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Running this requires both gh and jq to be installed.
+
+# To run this script in a crontab, provide absolute paths
+# Use `env -i bash -c "/absolute/path/to/script"` to simulate a clean environment before running it in crontab.
+# export HOME="/your/path/"
+# export PATH="/your/path/"
+# REPO_PATH="/your/path/to/script/working/dir"
+# cd "$REPO_PATH" || exit
+
+BOT_NAME="copilot-pull-request-reviewer"
+LIMIT=${LIMIT:-20}
+
+check_copilot_resolved() {
+  local pr_num=$1
+  # Get internal ID
+  local pr_id=$(gh pr view "$pr_num" --json id -q .id)
+  
+  # Count unresolved threads started by the bot
+  gh api graphql -f id="$pr_id" -f query='
+    query($id: ID!) {
+      node(id: $id) {
+        ... on PullRequest {
+          reviewThreads(last: 100) {
+            nodes {
+              isResolved
+              comments(first: 1) {
+                nodes { author { login } }
+              }
+            }
+          }
+        }
+      }
+    }' | jq "[.data.node.reviewThreads.nodes[] | select(.comments.nodes[0].author.login == \"$BOT_NAME\" and .isResolved == false)] | length"
+}
+
+echo "--- Scanning for Copilot-Active PRs: $(date) ---"
+
+ACTIVE_PRS=$(gh pr list --limit "$LIMIT" --json number,labels,reviews,reviewRequests \
+  --jq '.[] | select(
+    # 1. Bot has actually performed a review (Approved, Commented, or Changes Requested)
+    (.reviews[] | .author.login == "copilot-pull-request-reviewer")
+    and
+    # 2. Skip if already marked as ready-for-review
+    (any(.labels[].name; . == "ready-for-review") | not)
+    ) | .number')
+
+for PR in $ACTIVE_PRS; do
+  UNRESOLVED=$(check_copilot_resolved "$PR")
+  
+  if [ "$UNRESOLVED" -eq 0 ]; then
+    echo "✅ PR #$PR: All Copilot comments resolved. Ready for Human Review. Adding label..."
+    gh pr edit "$PR" --add-label "ready-for-review"
+  else
+    echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Skipping."
+  fi
+done

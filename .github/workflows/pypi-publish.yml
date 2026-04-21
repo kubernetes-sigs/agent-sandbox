@@ -101,12 +101,12 @@ jobs:
           path: dist/
 
       - name: Publish distribution 📦 to PyPI (DRY RUN)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        if: github.event_name == 'workflow_dispatch'
         run: |
           echo "DRY RUN: Successfully built distribution packages."
           echo "Files that would be published:"
           ls -l dist/
 
       - name: Publish distribution 📦 to PyPI
-        if: ${{ github.event_name == 'push' }}
+        if: github.event_name == 'push'
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

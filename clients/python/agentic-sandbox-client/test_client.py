@@ -286,8 +286,6 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
     print(f"Terminating sandbox {sandbox.claim_name}...")
     sandbox.terminate()
 
-    client.delete_sandbox(sandbox.claim_name, namespace=namespace)
-
     print(f"Attempting to get terminated sandbox {sandbox.claim_name}...")
     # Wait for K8s to fully delete the resource
     start_time = time.monotonic()

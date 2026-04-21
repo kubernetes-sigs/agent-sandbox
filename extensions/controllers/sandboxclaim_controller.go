@@ -234,8 +234,8 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 
 			// Use the cached timestamp if the claim UID matches.
 			if ok {
-				entry := actualObservedTimeEntry.(observedTimeEntry)
-				if entry.uid == claim.UID {
+				entry, typeOk := actualObservedTimeEntry.(observedTimeEntry)
+				if typeOk && entry.uid == claim.UID {
 					timestamp = entry.timestamp
 				}
 			}
@@ -1054,8 +1054,8 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 			actualObservedTimeEntry, loaded := r.observedTimes.LoadOrStore(key, observedTimeEntry{timestamp: time.Now(), uid: e.Object.GetUID()})
 			if loaded {
 				// sync.Map returns any, so we need to type assert to observedTimeEntry
-				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
-				if observedEntry.uid != e.Object.GetUID() {
+				observedEntry, typeOk := actualObservedTimeEntry.(observedTimeEntry)
+				if !typeOk || observedEntry.uid != e.Object.GetUID() {
 					r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: e.Object.GetUID()})
 				}
 			}
@@ -1065,8 +1065,8 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 			key := types.NamespacedName{Name: e.ObjectNew.GetName(), Namespace: e.ObjectNew.GetNamespace()}
 			actualObservedTimeEntry, loaded := r.observedTimes.LoadOrStore(key, observedTimeEntry{timestamp: time.Now(), uid: e.ObjectNew.GetUID()})
 			if loaded {
-				observedEntry := actualObservedTimeEntry.(observedTimeEntry)
-				if observedEntry.uid != e.ObjectNew.GetUID() {
+				observedEntry, typeOk := actualObservedTimeEntry.(observedTimeEntry)
+				if !typeOk || observedEntry.uid != e.ObjectNew.GetUID() {
 					r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: e.ObjectNew.GetUID()})
 				}
 			}

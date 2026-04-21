@@ -2408,7 +2408,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 	})
 }
 
-func TestSandboxClaimPredicates(t *testing.T) {
+func TestSandboxClaimTimingPredicates(t *testing.T) {
 	r := &SandboxClaimReconciler{}
 	pred := r.getTimingPredicate()
 
@@ -2419,6 +2419,7 @@ func TestSandboxClaimPredicates(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-2"},
 	}
 	key := types.NamespacedName{Name: "test-claim", Namespace: "default"}
+	pastTime := time.Now().Add(-10 * time.Second)
 
 	testCases := []struct {
 		name    string
@@ -2464,7 +2465,7 @@ func TestSandboxClaimPredicates(t *testing.T) {
 		{
 			name: "Update with different UID overwrites",
 			setup: func(r *SandboxClaimReconciler) {
-				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-1"})
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: pastTime, uid: "uid-1"})
 			},
 			trigger: func(p predicate.Predicate) bool {
 				return p.Update(event.UpdateEvent{ObjectNew: claim2, ObjectOld: claim1})
@@ -2477,6 +2478,9 @@ func TestSandboxClaimPredicates(t *testing.T) {
 				entry := val.(observedTimeEntry)
 				if entry.uid != "uid-2" {
 					t.Errorf("Expected UID uid-2 after update, got %s", entry.uid)
+				}
+				if !entry.timestamp.After(pastTime) {
+					t.Error("Expected timestamp to be updated to a newer value")
 				}
 			},
 		},
@@ -2523,6 +2527,94 @@ func TestSandboxClaimPredicates(t *testing.T) {
 				t.Error("expected predicate to return true")
 			}
 			tc.verify(t, r)
+		})
+	}
+}
+
+func TestGetOrRecordObservedTime(t *testing.T) {
+	claim1 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	}
+	claim2 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-2"},
+	}
+	pastTime := time.Now().Add(-10 * time.Second)
+
+	testCases := []struct {
+		name               string
+		claimToRecord      *extensionsv1alpha1.SandboxClaim
+		initialKey         types.NamespacedName
+		initialEntry       *observedTimeEntry
+		expectedUID        types.UID
+		expectNewTimestamp bool
+		expectedReturnTime time.Time
+	}{
+		{
+			name:               "New Entry stores time and returns it",
+			claimToRecord:      claim1,
+			expectedUID:        "uid-1",
+			expectNewTimestamp: true,
+		},
+		{
+			name:               "Existing Entry with same UID returns loaded timestamp",
+			claimToRecord:      claim1,
+			initialKey:         types.NamespacedName{Name: claim1.Name, Namespace: claim1.Namespace},
+			initialEntry:       &observedTimeEntry{timestamp: pastTime, uid: "uid-1"},
+			expectedUID:        "uid-1",
+			expectNewTimestamp: false,
+			expectedReturnTime: pastTime,
+		},
+		{
+			name:               "Existing Entry with different UID overwrites and returns new timestamp",
+			claimToRecord:      claim2,
+			initialKey:         types.NamespacedName{Name: claim1.Name, Namespace: claim1.Namespace},
+			initialEntry:       &observedTimeEntry{timestamp: pastTime, uid: claim1.UID},
+			expectedUID:        "uid-2",
+			expectNewTimestamp: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &SandboxClaimReconciler{}
+			if tc.initialEntry != nil {
+				r.observedTimes.Store(tc.initialKey, *tc.initialEntry)
+			}
+
+			res := r.getOrRecordObservedTime(tc.claimToRecord)
+
+			// Verify map state for the recorded claim
+			recordedKey := types.NamespacedName{Name: tc.claimToRecord.Name, Namespace: tc.claimToRecord.Namespace}
+			val, ok := r.observedTimes.Load(recordedKey)
+			if !ok {
+				t.Fatal("Expected entry in map")
+			}
+			entry := val.(observedTimeEntry)
+
+			if entry.uid != tc.expectedUID {
+				t.Errorf("Expected UID %s, got %s", tc.expectedUID, entry.uid)
+			}
+
+			if tc.expectNewTimestamp {
+				// Expect a new timestamp
+				if entry.timestamp.IsZero() {
+					t.Error("Expected timestamp to be set")
+				}
+				if tc.initialEntry != nil && entry.timestamp.Equal(tc.initialEntry.timestamp) {
+					t.Error("Expected a different timestamp than the initial one")
+				}
+				if !res.Equal(entry.timestamp) {
+					t.Error("Expected returned time to match stored time")
+				}
+			} else {
+				// Expect specific timestamp
+				if !entry.timestamp.Equal(tc.expectedReturnTime) {
+					t.Errorf("Expected timestamp %v, got %v", tc.expectedReturnTime, entry.timestamp)
+				}
+				if !res.Equal(tc.expectedReturnTime) {
+					t.Errorf("Expected returned time %v, got %v", tc.expectedReturnTime, res)
+				}
+			}
 		})
 	}
 }

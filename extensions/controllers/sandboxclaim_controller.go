@@ -227,24 +227,7 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 			claim.Annotations = make(map[string]string)
 		}
 		if needObservabilityPatch {
-			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-			actualObservedTimeEntry, ok := r.observedTimes.Load(key)
-
-			var timestamp time.Time
-
-			// Use the cached timestamp if the claim UID matches.
-			if ok {
-				entry, typeOk := actualObservedTimeEntry.(observedTimeEntry)
-				if typeOk && entry.uid == claim.UID {
-					timestamp = entry.timestamp
-				}
-			}
-
-			// If entry not found or UID mismatch, create a new timestamp and cache it
-			if timestamp.IsZero() {
-				timestamp = time.Now()
-				r.observedTimes.Store(key, observedTimeEntry{timestamp: timestamp, uid: claim.UID})
-			}
+			timestamp := r.getOrRecordObservedTime(claim)
 			claim.Annotations[asmetrics.ObservabilityAnnotation] = timestamp.Format(time.RFC3339Nano)
 		}
 		if needTraceContextPatch {
@@ -1047,29 +1030,44 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 	return template, nil
 }
 
+// getOrRecordObservedTime stores the first time an object is seen by the controller in an in-memory
+// map observedTimes for latency tracking. It returns the resolved timestamp for the object.
+func (r *SandboxClaimReconciler) getOrRecordObservedTime(obj client.Object) time.Time {
+	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+
+	// Fast path: Entry already exists and UID matches
+	if val, ok := r.observedTimes.Load(key); ok {
+		if entry, typeOk := val.(observedTimeEntry); typeOk && entry.uid == obj.GetUID() {
+			return entry.timestamp
+		}
+	}
+
+	// Slow path: Entry missing or UID mismatched
+	newEntry := observedTimeEntry{timestamp: time.Now(), uid: obj.GetUID()}
+	actual, loaded := r.observedTimes.LoadOrStore(key, newEntry)
+	if loaded {
+		// Handle concurrent insertion: check if we need to overwrite due to UID mismatch
+		entry, typeOk := actual.(observedTimeEntry)
+		if !typeOk || entry.uid != obj.GetUID() {
+			r.observedTimes.Store(key, newEntry)
+			return newEntry.timestamp
+		}
+		// UID matches, return the loaded timestamp
+		return entry.timestamp
+	}
+	return newEntry.timestamp
+}
+
+// getTimingPredicate returns a predicate that stores the first time an object is seen by the
+// controller, and cleans up the in-memory map entry when the object is deleted.
 func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
-			actualObservedTimeEntry, loaded := r.observedTimes.LoadOrStore(key, observedTimeEntry{timestamp: time.Now(), uid: e.Object.GetUID()})
-			if loaded {
-				// sync.Map returns any, so we need to type assert to observedTimeEntry
-				observedEntry, typeOk := actualObservedTimeEntry.(observedTimeEntry)
-				if !typeOk || observedEntry.uid != e.Object.GetUID() {
-					r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: e.Object.GetUID()})
-				}
-			}
+			r.getOrRecordObservedTime(e.Object)
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			key := types.NamespacedName{Name: e.ObjectNew.GetName(), Namespace: e.ObjectNew.GetNamespace()}
-			actualObservedTimeEntry, loaded := r.observedTimes.LoadOrStore(key, observedTimeEntry{timestamp: time.Now(), uid: e.ObjectNew.GetUID()})
-			if loaded {
-				observedEntry, typeOk := actualObservedTimeEntry.(observedTimeEntry)
-				if !typeOk || observedEntry.uid != e.ObjectNew.GetUID() {
-					r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: e.ObjectNew.GetUID()})
-				}
-			}
+			r.getOrRecordObservedTime(e.ObjectNew)
 			return true
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {

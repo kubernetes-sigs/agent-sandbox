@@ -73,7 +73,8 @@ def deploy_router(tc, temp_namespace):
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
 
     print("Waiting for router deployment to be ready...")
-    tc.wait_for_deployment_ready("sandbox-router-deployment", namespace=temp_namespace)
+    tc.wait_for_deployment_ready(
+        "sandbox-router-deployment", namespace=temp_namespace)
 
 
 @pytest.fixture(scope="function")

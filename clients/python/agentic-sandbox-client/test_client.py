@@ -27,21 +27,15 @@ from k8s_agent_sandbox.models import (
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
     ExecutionResult,
-    FileEntry
 )
 from k8s_agent_sandbox.sandbox import Sandbox
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 
-def run_sandbox_tests(sandbox: Sandbox):
-    """Tests methods on the Sandbox object (execution, files, etc)."""
 
-    print("\n--- Testing Sandbox Status ---")
-    status, message = sandbox.status()
-    print(f"Status: {status}, Message: '{message}'")
-    assert status == "SandboxReady", f"Expected 'SandboxReady', got '{status}'"
-    print("--- Sandbox Status Test Passed! ---")
-
+def test_command_execution(sandbox: Sandbox):
+    """Tests command execution and pod introspection."""
     print("\n--- Testing Command Execution ---")
     command_to_run = "echo 'Hello from the sandbox shruti!'"
     print(f"Executing command: '{command_to_run}'")
@@ -69,6 +63,7 @@ def run_sandbox_tests(sandbox: Sandbox):
     print(env_result.stdout)
 
     print("--- Introspection Tests Finished ---")
+
 
 def test_file_operations(sandbox: Sandbox):
     """Tests file write, read, list, and existence checks."""
@@ -105,7 +100,8 @@ def test_file_operations(sandbox: Sandbox):
     assert found is True, f"Expected '{file_path}' to be in the file list"
 
     file_entry = next(f for f in files if f.name == file_path)
-    assert file_entry.size == len(file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
+    assert file_entry.size == len(
+        file_content), f"Expected size {len(file_content)}, got {file_entry.size}"
     print("--- List and Exists Test Passed! ---")
 
     # Test introspection commands
@@ -127,7 +123,7 @@ def test_file_operations(sandbox: Sandbox):
     original_send_request = sandbox.connector.send_request
 
     mock_response = MagicMock()
-    mock_response.json.return_value = {} # Empty response
+    mock_response.json.return_value = {}  # Empty response
     sandbox.connector.send_request = MagicMock(return_value=mock_response)
 
     print("Testing ExecutionResult defaults with empty response...")
@@ -142,14 +138,15 @@ def test_file_operations(sandbox: Sandbox):
     mock_response.json.return_value = [{
         "name": "bad_file",
         "size": 100,
-        "type": "invalid_type", # Invalid literal
+        "type": "invalid_type",  # Invalid literal
         "mod_time": 12345.6
     }]
 
     print("Testing FileEntry validation with invalid type...")
     try:
         sandbox.files.list(".")
-        raise AssertionError("RuntimeError not raised for invalid FileEntry type")
+        raise AssertionError(
+            "RuntimeError not raised for invalid FileEntry type")
     except RuntimeError as e:
         print(f"Caught expected RuntimeError: {e}")
         assert "Server returned invalid file entry format" in str(e)
@@ -194,13 +191,15 @@ def test_claim_annotation(client: SandboxClient, template_name: str, namespace: 
             assert dt.tzname() == 'UTC', "Timestamp should be in UTC"
             print(f"Parsed datetime: {dt}")
         except ValueError as e:
-            raise AssertionError(f"Failed to parse timestamp '{timestamp_str}': {e}")
+            raise AssertionError(
+                f"Failed to parse timestamp '{timestamp_str}': {e}")
 
         print("--- SandboxClaim Annotation Test Passed! ---")
 
     finally:
         print(f"Cleaning up claim {claim_name}...")
         client._delete_claim(claim_name, namespace)
+
 
 def run_sandbox_tests(sandbox: Sandbox):
     """Tests methods on the Sandbox object (execution, files, etc)."""
@@ -239,10 +238,12 @@ def test_explicit_close_connection_and_persistence(client: SandboxClient, warmpo
     active_list = client.list_active_sandboxes()
     assert (namespace, persist_claim) not in active_list, "Sandbox with closed connection should be removed from active list"
 
-    print(f"Re-attaching to sandbox '{persist_claim}' with closed connection...")
+    print(
+        f"Re-attaching to sandbox '{persist_claim}' with closed connection...")
     reattached_sandbox = client.get_sandbox(persist_claim, namespace=namespace)
     assert reattached_sandbox.is_active, "Reattached sandbox should be active"
-    assert (namespace, persist_claim) in client.list_active_sandboxes(), "Restored sandbox should be back in active list"
+    assert (namespace, persist_claim) in client.list_active_sandboxes(
+    ), "Restored sandbox should be back in active list"
     assert persist_sandbox is not reattached_sandbox, "Expected different sandbox objects after close_connection and re-attach"
     assert persist_sandbox.connector.session is not reattached_sandbox.connector.session, "Expected different requests.Session objects after close_connection and re-attach"
 
@@ -267,7 +268,8 @@ def test_creation_get_and_list_sandboxes(client: SandboxClient, warmpool_name: s
 
     # Test get_sandbox
     print("\n--- Testing get_sandbox ---")
-    reattached_sandbox = client.get_sandbox(sandbox.claim_name, namespace=namespace)
+    reattached_sandbox = client.get_sandbox(
+        sandbox.claim_name, namespace=namespace)
     print(f"Re-attached to sandbox: {reattached_sandbox.claim_name}")
 
     # Verify it is the same sandbox
@@ -282,6 +284,7 @@ def test_creation_get_and_list_sandboxes(client: SandboxClient, warmpool_name: s
 
     return sandbox, sandbox2
 
+
 def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandbox2: Sandbox, namespace: str):
     print("\n--- Testing Termination and Get ---")
     print(f"Terminating sandbox {sandbox.claim_name}...")
@@ -294,7 +297,8 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
         try:
             client.get_sandbox(sandbox.claim_name, namespace=namespace)
             if time.monotonic() - start_time > 60:
-                raise AssertionError(f"Sandbox {sandbox.claim_name} was not deleted within timeout")
+                raise AssertionError(
+                    f"Sandbox {sandbox.claim_name} was not deleted within timeout")
             print("Sandbox still exists, waiting...")
             time.sleep(2)
         except RuntimeError as e:
@@ -310,14 +314,16 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
 
     print("\n--- Testing delete_all ---")
     # Ensure sandbox2 is still active
-    assert (sandbox2.namespace, sandbox2.claim_name) in client.list_active_sandboxes()
+    assert (sandbox2.namespace,
+            sandbox2.claim_name) in client.list_active_sandboxes()
 
     print("Calling client.delete_all()...")
     client.delete_all()
 
     # Verify client registry is empty
     active_sandboxes_after = client.list_active_sandboxes()
-    assert len(active_sandboxes_after) == 0, f"Expected 0 active sandboxes, got {active_sandboxes_after}"
+    assert len(
+        active_sandboxes_after) == 0, f"Expected 0 active sandboxes, got {active_sandboxes_after}"
 
     # Verify sandbox2 state
     assert not sandbox2.is_active, "Sandbox 2 should be marked inactive"
@@ -339,7 +345,8 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
         try:
             client.get_sandbox(sandbox2.claim_name, namespace=namespace)
             if time.monotonic() - start_time > 60:
-                raise AssertionError(f"Sandbox {sandbox2.claim_name} was not deleted within timeout")
+                raise AssertionError(
+                    f"Sandbox {sandbox2.claim_name} was not deleted within timeout")
             print("Sandbox still exists, waiting...")
             time.sleep(2)
         except RuntimeError as e:
@@ -433,7 +440,8 @@ def test_volume_claim_templates(client: SandboxClient, warmpool_name: str, names
 
 def run_client_tests(client: SandboxClient, warmpool_name: str, namespace: str):
     # Test Create, Get and List sandboxes
-    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, warmpool_name, namespace)
+    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(
+        client, warmpool_name, namespace)
 
     # Test wrong warmpool name
     test_wrong_warmpool_name(client, namespace)
@@ -445,7 +453,8 @@ def run_client_tests(client: SandboxClient, warmpool_name: str, namespace: str):
     run_sandbox_tests(sandbox)
 
     # Test persistence of Sandbox in Kubernetes cluster after client side disconnection
-    test_explicit_close_connection_and_persistence(client, warmpool_name, namespace)
+    test_explicit_close_connection_and_persistence(
+        client, warmpool_name, namespace)
 
     # Test Sandbox deletion at Kubernetes cluster
     test_termination_and_deletion(client, sandbox, sandbox2, namespace)
@@ -476,15 +485,20 @@ print(f"CLAIM_NAME:{{sb.claim_name}}")
 """
 
     print("Simulating script exit with cleanup=True...")
-    res_true = subprocess.run([sys.executable, "-c", script, "True"], capture_output=True, text=True)
+    res_true = subprocess.run(
+        [sys.executable, "-c", script, "True"], capture_output=True, text=True)
     if res_true.returncode != 0:
-        raise RuntimeError(f"Subprocess failed:\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
+        raise RuntimeError(
+            f"Subprocess failed:\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
 
-    claim_true = next((line.split("CLAIM_NAME:")[1].strip() for line in res_true.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
+    claim_true = next((line.split("CLAIM_NAME:")[1].strip(
+    ) for line in res_true.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
     if not claim_true:
-        raise RuntimeError(f"Could not parse claim name.\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
+        raise RuntimeError(
+            f"Could not parse claim name.\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}")
 
-    print(f"Created sandbox '{claim_true}' in subprocess. Verifying deletion...")
+    print(
+        f"Created sandbox '{claim_true}' in subprocess. Verifying deletion...")
 
     # Verify the claim was successfully deleted by the OS closing the subprocess
     start_time = time.monotonic()
@@ -500,19 +514,25 @@ print(f"CLAIM_NAME:{{sb.claim_name}}")
             time.sleep(2)
 
     if not deleted:
-        raise AssertionError(f"Sandbox {claim_true} should have been deleted by atexit!")
+        raise AssertionError(
+            f"Sandbox {claim_true} should have been deleted by atexit!")
     print("Verified: Sandbox was successfully deleted on script exit.")
 
     print("Simulating script exit with cleanup=False...")
-    res_false = subprocess.run([sys.executable, "-c", script, "False"], capture_output=True, text=True)
+    res_false = subprocess.run(
+        [sys.executable, "-c", script, "False"], capture_output=True, text=True)
     if res_false.returncode != 0:
-        raise RuntimeError(f"Subprocess failed:\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
+        raise RuntimeError(
+            f"Subprocess failed:\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
 
-    claim_false = next((line.split("CLAIM_NAME:")[1].strip() for line in res_false.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
+    claim_false = next((line.split("CLAIM_NAME:")[1].strip(
+    ) for line in res_false.stdout.splitlines() if line.startswith("CLAIM_NAME:")), None)
     if not claim_false:
-        raise RuntimeError(f"Could not parse claim name.\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
+        raise RuntimeError(
+            f"Could not parse claim name.\nSTDOUT: {res_false.stdout}\nSTDERR: {res_false.stderr}")
 
-    print(f"Created sandbox '{claim_false}' in subprocess. Verifying persistence...")
+    print(
+        f"Created sandbox '{claim_false}' in subprocess. Verifying persistence...")
 
     # Verify the claim was NOT deleted by verifying we can cleanly reconnect to it
     sb_false = client.get_sandbox(claim_false, namespace=namespace)
@@ -578,6 +598,7 @@ def main(warmpool_name: str, gateway_name: str | None, api_url: str | None, name
         print("Cleaning up all sandboxes...")
         client.delete_all()
         print("\n--- Sandbox Client Test Finished ---")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test the Sandbox client.")

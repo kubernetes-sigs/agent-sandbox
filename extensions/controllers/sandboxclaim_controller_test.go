@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -2482,17 +2481,32 @@ func TestSandboxClaimTimingPredicates(t *testing.T) {
 			},
 		},
 		{
-			name: "Delete removes entry by key",
+			name: "Delete with mismatch UID does not delete",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-2"})
+			},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Delete(event.DeleteEvent{Object: claim1}) // claim1 has uid-1
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				_, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Error("Entry should NOT be deleted when UID mismatches")
+				}
+			},
+		},
+		{
+			name: "Delete with matching UID deletes",
 			setup: func(r *SandboxClaimReconciler) {
 				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-1"})
 			},
 			trigger: func(p predicate.Predicate) bool {
-				return p.Delete(event.DeleteEvent{Object: claim1})
+				return p.Delete(event.DeleteEvent{Object: claim1}) // claim1 has uid-1
 			},
 			verify: func(t *testing.T, r *SandboxClaimReconciler) {
 				_, ok := r.observedTimes.Load(key)
 				if ok {
-					t.Error("Entry should be deleted on delete event")
+					t.Error("Entry should be deleted when UID matches")
 				}
 			},
 		},

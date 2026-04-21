@@ -1097,8 +1097,10 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
-			// Remove SandboxClaims from in memory map when SandboxClaims are deleted. No-op if key is not in map.
-			r.observedTimes.Delete(key)
+			entry, ok := r.observedTimes.Load(key)
+			if ok && entry.uid == e.Object.GetUID() {
+				r.observedTimes.Delete(key)
+			}
 			return true
 		},
 	}

@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -2465,5 +2466,89 @@ func seedQueueForTest(q queue.SandboxQueue, objects []client.Object) {
 				q.Add(hash, key)
 			}
 		}
+	}
+}
+
+func TestSandboxClaimRecoveryWhenTemplateCreated(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "recovery-claim"
+	templateName := "recovery-template"
+
+	nonePolicy := extensionsv1alpha1.WarmPoolPolicyNone
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			UID:       "claim-uid",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName},
+			WarmPool:    &nonePolicy,
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	// Step 1: Reconcile without template
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	// Should return no error but RequeueAfter because template is missing
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error when template is missing, but got %v", err)
+	}
+	if result.RequeueAfter != 1*time.Minute {
+		t.Errorf("expected RequeueAfter to be 1 minute, got %v", result.RequeueAfter)
+	}
+
+	// Verify status is set to TemplateNotFound
+	var updatedClaim extensionsv1alpha1.SandboxClaim
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+	cond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	if cond == nil || cond.Reason != "TemplateNotFound" {
+		t.Errorf("expected status reason 'TemplateNotFound', got %v", cond)
+	}
+
+	// Step 2: Create template and reconcile again
+	if err := fakeClient.Create(context.Background(), template); err != nil {
+		t.Fatalf("failed to create template: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error when template exists, but got %v", err)
+	}
+
+	// Verify sandbox is created
+	var sandbox sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); err != nil {
+		t.Fatalf("expected sandbox to be created, but got error: %v", err)
 	}
 }

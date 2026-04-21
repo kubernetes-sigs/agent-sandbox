@@ -50,8 +50,6 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
@@ -121,7 +119,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Initialize trace ID and observation time for active resources missing them.
 	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
 	traceContext := r.Tracer.GetTraceContext(ctx)
-	needObservabilityPatch := claim.Annotations[ObservabilityAnnotation] == ""
+	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
 	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
 
 	if needObservabilityPatch || needTraceContextPatch {
@@ -132,10 +130,10 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if needObservabilityPatch {
 			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
 			if val, ok := r.observedTimes.Load(key); ok {
-				claim.Annotations[ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
+				claim.Annotations[asmetrics.ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
 			} else {
 				now := time.Now()
-				claim.Annotations[ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+				claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
 				r.observedTimes.Store(key, now)
 			}
 		}
@@ -987,6 +985,11 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 			r.observedTimes.LoadOrStore(key, time.Now())
 			return true
 		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
+			r.observedTimes.Delete(key)
+			return true
+		},
 	}
 }
 
@@ -1035,6 +1038,69 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 	return nil
 }
 
+// getLaunchType determines the launch type based on the sandbox state.
+func getLaunchType(sandbox *v1alpha1.Sandbox) string {
+	if sandbox == nil {
+		return asmetrics.LaunchTypeUnknown
+	}
+	if sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] != "" {
+		return asmetrics.LaunchTypeWarm
+	}
+	return asmetrics.LaunchTypeCold
+}
+
+// recordClaimStartupLatency records the startup latency based on webhook annotation.
+func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, launchType string) {
+	logger := log.FromContext(ctx)
+	webhookSeenTimeStr := claim.Annotations[asmetrics.WebhookAnnotation]
+	if webhookSeenTimeStr == "" {
+		logger.V(1).Info("Webhook first seen annotation missing, skipping ClaimStartupLatency metric", "claim", claim.Name)
+		return
+	}
+	webhookSeenTime, err := time.Parse(time.RFC3339Nano, webhookSeenTimeStr)
+	if err != nil {
+		logger.Error(err, "Failed to parse webhook first seen time", "value", webhookSeenTimeStr)
+		return
+	}
+	duration := time.Since(webhookSeenTime)
+	if duration < 0 {
+		logger.Error(errors.New("negative duration"), "Webhook seen time is in the future", "duration", duration, "webhookSeenTime", webhookSeenTime)
+		return
+	}
+	asmetrics.RecordClaimStartupLatency(webhookSeenTime, launchType, claim.Spec.TemplateRef.Name)
+}
+
+// recordControllerStartupLatency records the controller startup latency based on observed time.
+func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, launchType string) {
+	logger := log.FromContext(ctx)
+	if observedTimeString := claim.Annotations[asmetrics.ObservabilityAnnotation]; observedTimeString != "" {
+		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+		defer r.observedTimes.Delete(key)
+
+		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
+		if err != nil {
+			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
+			return
+		}
+		asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
+	}
+}
+
+// recordSandboxCreationLatency records the sandbox creation latency.
+func (r *SandboxClaimReconciler) recordSandboxCreationLatency(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, launchType string) {
+	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {
+		return
+	}
+	sandboxReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1alpha1.SandboxConditionReady))
+	if sandboxReady == nil || sandboxReady.Status != metav1.ConditionTrue || sandboxReady.LastTransitionTime.IsZero() {
+		return
+	}
+	latency := sandboxReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+	if latency >= 0 {
+		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, claim.Spec.TemplateRef.Name)
+	}
+}
+
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	ctx context.Context,
@@ -1056,14 +1122,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		return
 	}
 
-	launchType := asmetrics.LaunchTypeCold
-	// This is unlikely to happen; here for completeness only.
-	if sandbox == nil {
-		launchType = asmetrics.LaunchTypeUnknown
-	} else if sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] != "" {
-		// Existence of the SandboxPodNameAnnotation implies the pod was adopted from a warm pool.
-		launchType = asmetrics.LaunchTypeWarm
-	}
+	launchType := getLaunchType(sandbox)
 
 	sandboxName := "none"
 	if sandbox != nil {
@@ -1071,34 +1130,9 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	}
 	logger.V(1).Info("SandboxClaim is marked as Ready", "claim", claim.Name, "sandbox", sandboxName, "duration", time.Since(claim.CreationTimestamp.Time))
 
-	// SandboxClaim doesn't react to TemplateRef updates currently, so we don't need to handle the
-	// startup latency when the TemplateRef is updated.
-	asmetrics.RecordClaimStartupLatency(claim.CreationTimestamp.Time, launchType, claim.Spec.TemplateRef.Name)
-
-	// Record controller startup latency
-	if observedTimeString := claim.Annotations[ObservabilityAnnotation]; observedTimeString != "" {
-		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
-		if err != nil {
-			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
-		} else {
-			asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, claim.Spec.TemplateRef.Name)
-			// Clean up map entry after success
-			r.observedTimes.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
-		}
-	}
-
-	// For cold launches, also record the time from Sandbox creation to Ready state to capture controller overhead.
-	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {
-		return
-	}
-	sandboxReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1alpha1.SandboxConditionReady))
-	if sandboxReady == nil || sandboxReady.Status != metav1.ConditionTrue || sandboxReady.LastTransitionTime.IsZero() {
-		return
-	}
-	latency := sandboxReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-	if latency >= 0 {
-		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, claim.Spec.TemplateRef.Name)
-	}
+	r.recordClaimStartupLatency(ctx, claim, launchType)
+	r.recordControllerStartupLatency(ctx, claim, launchType)
+	r.recordSandboxCreationLatency(claim, sandbox, launchType)
 }
 
 // isSandboxExpired checks the Sandbox status condition set by the Core Controller.

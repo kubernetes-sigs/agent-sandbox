@@ -26,7 +26,7 @@ import (
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
-	"sigs.k8s.io/agent-sandbox/extensions/controllers"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -82,8 +82,8 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check for the annotation
-	annoValue, found := updatedClaim.Annotations[controllers.ObservabilityAnnotation]
-	require.True(t, found, "expected annotation %q to be present", controllers.ObservabilityAnnotation)
+	annoValue, found := updatedClaim.Annotations[asmetrics.ObservabilityAnnotation]
+	require.True(t, found, "expected annotation %q to be present", asmetrics.ObservabilityAnnotation)
 
 	// Verify it's a valid RFC3339 timestamp
 	parsedTime, err := time.Parse(time.RFC3339Nano, annoValue)

@@ -26,6 +26,12 @@ const (
 	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+
+	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
+	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
+
+	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
+	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )
 
 var (

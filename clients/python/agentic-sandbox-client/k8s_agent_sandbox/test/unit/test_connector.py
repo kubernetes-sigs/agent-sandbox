@@ -137,7 +137,7 @@ class TestSandboxConnectorStrategySelection(unittest.TestCase):
         self.assertIsInstance(connector.strategy, DirectConnectionStrategy)
 
     def test_raises_on_unknown_config_type(self):
-        with self.assertRaises((ValueError, Exception)):
+        with self.assertRaises(ValueError):
             SandboxConnector(
                 sandbox_id="sb",
                 namespace="ns",

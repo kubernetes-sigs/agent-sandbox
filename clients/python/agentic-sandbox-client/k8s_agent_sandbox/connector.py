@@ -212,9 +212,9 @@ class InClusterConnectionStrategy(ConnectionStrategy):
             if self._resolved:
                 return self._cached_pod_ip_url or self._dns_url
             pod_ip = self._get_pod_ip()
-            self._resolved = True
             if pod_ip:
                 self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                self._resolved = True
                 return self._cached_pod_ip_url
         return self._dns_url
 

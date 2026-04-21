@@ -55,7 +55,8 @@ class AsyncSandboxConnector:
         if isinstance(connection_config, SandboxLocalTunnelConnectionConfig):
             raise ValueError(
                 "AsyncSandboxConnector does not support SandboxLocalTunnelConnectionConfig. "
-                "Use SandboxDirectConnectionConfig or SandboxGatewayConnectionConfig instead. "
+                "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
+                "or SandboxInClusterConnectionConfig instead. "
                 "For local development, use the synchronous SandboxClient."
             )
 
@@ -93,9 +94,9 @@ class AsyncSandboxConnector:
                 if self._pod_ip_resolved:
                     return self._cached_pod_ip_url or self._dns_url
                 pod_ip = await self._get_pod_ip()
-                self._pod_ip_resolved = True
                 if pod_ip:
                     self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                    self._pod_ip_resolved = True
                     return self._cached_pod_ip_url
             return self._dns_url
 

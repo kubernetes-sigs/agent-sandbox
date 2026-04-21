@@ -19,7 +19,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 
 
@@ -45,12 +45,12 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
-        use_pod_ip: bool = False,
     ):
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandbox. "
-                "Use SandboxDirectConnectionConfig or SandboxGatewayConnectionConfig."
+                "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
+                "or SandboxInClusterConnectionConfig."
             )
 
         self.claim_name = claim_name
@@ -60,6 +60,10 @@ class AsyncSandbox:
 
         self.k8s_helper = k8s_helper or AsyncK8sHelper()
 
+        use_pod_ip = (
+            isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+            and self.connection_config.use_pod_ip
+        )
         self.connector = AsyncSandboxConnector(
             sandbox_id=self.sandbox_id,
             namespace=self.namespace,

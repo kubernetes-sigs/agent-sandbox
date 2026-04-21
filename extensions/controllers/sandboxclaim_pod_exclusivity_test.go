@@ -34,6 +34,7 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -123,10 +124,15 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	}
 	fc := builder.Build()
 
+	testQueue := queue.NewSimpleSandboxQueue()
+	testQueue.Add(templateHash, queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
+	testQueue.Add(templateHash, queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
+
 	reconciler := &SandboxClaimReconciler{
 		Client: fc, Scheme: scheme,
-		Recorder: events.NewFakeRecorder(10),
-		Tracer:   asmetrics.NewNoOp(), MaxConcurrentReconciles: 1,
+		WarmSandboxQueue: testQueue,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(), MaxConcurrentReconciles: 1,
 	}
 
 	// Reconcile all 3 claims sequentially

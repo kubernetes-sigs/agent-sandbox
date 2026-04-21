@@ -41,6 +41,7 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -787,12 +788,24 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
 
 			reconciler := &SandboxClaimReconciler{
-				Client:   client,
-				Scheme:   scheme,
-				Recorder: events.NewFakeRecorder(10),
-				Tracer:   asmetrics.NewNoOp(),
+				Client:           client,
+				Scheme:           scheme,
+				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+				Recorder:         events.NewFakeRecorder(10),
+				Tracer:           asmetrics.NewNoOp(),
 			}
 
+			// Pre-populate PodQueue with any existing pods
+			for _, obj := range allObjects {
+				if sb, ok := obj.(*sandboxv1alpha1.Sandbox); ok {
+					if isAdoptable(sb) != nil {
+						continue
+					}
+					hash := sb.Labels[sandboxTemplateRefHash]
+					key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
+					reconciler.WarmSandboxQueue.Add(hash, key)
+				}
+			}
 			req := reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: claimToUse.Name, Namespace: "default"},
 			}
@@ -1062,10 +1075,11 @@ func TestSandboxProvisionEvent(t *testing.T) {
 		WithStatusSubresource(claim).Build()
 
 	reconciler := &SandboxClaimReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: fakeRecorder,
-		Tracer:   asmetrics.NewNoOp(),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         fakeRecorder,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
@@ -1292,7 +1306,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: true,
 		},
 		{
-			name: "prioritizes ready sandboxes over not-ready ones",
+			name: "adopts sandboxes from queue regardless of ready state",
 			existingObjects: []client.Object{
 				template,
 				claim,
@@ -1301,11 +1315,11 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				createWarmPoolSandbox("young-ready", metav1.Now(), true),
 			},
 			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "middle-ready",
+			expectedAdoptedSandbox:  "not-ready",
 			expectNewSandboxCreated: false,
 		},
 		{
-			name: "adopts oldest non-ready sandbox when no ready sandboxes exist",
+			name: "adopts first available non-ready sandbox from queue",
 			existingObjects: []client.Object{
 				template,
 				claim,
@@ -1387,11 +1401,28 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 			}
 
+			// 1. Initialize the Queue
+			warmSandboxQueue := queue.NewSimpleSandboxQueue()
+
+			// 2. Seed the Queue with the existing objects from the test case
+			for _, obj := range tc.existingObjects {
+				if sb, ok := obj.(*sandboxv1alpha1.Sandbox); ok {
+					// Only add valid, adoptable sandboxes to the queue
+					if isAdoptable(sb) == nil {
+						hash := sb.Labels[sandboxTemplateRefHash]
+						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
+						warmSandboxQueue.Add(hash, key)
+					}
+				}
+			}
+
+			// 3. Inject the seeded Queue into the Reconciler
 			reconciler := &SandboxClaimReconciler{
-				Client:   fakeClient,
-				Scheme:   scheme,
-				Recorder: events.NewFakeRecorder(10),
-				Tracer:   asmetrics.NewNoOp(),
+				Client:           fakeClient,
+				Scheme:           scheme,
+				Recorder:         events.NewFakeRecorder(10),
+				WarmSandboxQueue: warmSandboxQueue,
+				Tracer:           asmetrics.NewNoOp(),
 			}
 
 			req := reconcile.Request{
@@ -1403,6 +1434,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 
 			ctx := context.Background()
 			_, err := reconciler.Reconcile(ctx, req)
+
 			if err != nil {
 				t.Fatalf("reconcile failed: %v", err)
 			}
@@ -1458,6 +1490,65 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
+	q := queue.NewSimpleSandboxQueue()
+	handler := &sandboxEventHandler{sandboxQueue: q}
+
+	hash := "test-hash-123"
+	key := queue.SandboxKey{Namespace: "default", Name: "ghost-pod"}
+
+	// 1. Add the pod to the queue
+	q.Add(hash, key)
+
+	// 2. Create the mock Sandbox object that is being deleted
+	sb := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ghost-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				sandboxTemplateRefHash: hash,
+			},
+		},
+	}
+
+	// 3. Fire the Delete event
+	handler.Delete(context.Background(), event.DeleteEvent{Object: sb}, nil)
+
+	// 4. Verify the Ghost Pod was removed from the queue
+	_, ok := q.Get(hash)
+	if ok {
+		t.Errorf("Expected the deleted sandbox to be removed from the queue")
+	}
+}
+
+func TestTemplateEventHandler_Delete_RemovesEntireQueue(t *testing.T) {
+	q := queue.NewSimpleSandboxQueue()
+	handler := &templateEventHandler{sandboxQueue: q}
+
+	templateName := "old-template"
+	hash := sandboxcontrollers.NameHash(templateName)
+	key := queue.SandboxKey{Namespace: "default", Name: "abandoned-pod"}
+
+	// 1. Add a pod to this template's queue
+	q.Add(hash, key)
+
+	// 2. Create the mock SandboxTemplate object that is being deleted
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "default",
+		},
+	}
+
+	// 3. Fire the Delete event
+	handler.Delete(context.Background(), event.DeleteEvent{Object: template}, nil)
+
+	// 4. Verify the entire queue was wiped out
+	_, ok := q.Get(hash)
+	if ok {
+		t.Errorf("Expected the entire queue to be removed when the template was deleted")
 	}
 }
 
@@ -1738,10 +1829,11 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		scheme := newScheme(t)
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim).WithStatusSubresource(claim).Build()
 		reconciler := &SandboxClaimReconciler{
-			Client:   client,
-			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
-			Tracer:   asmetrics.NewNoOp(),
+			Client:           client,
+			Scheme:           scheme,
+			Recorder:         events.NewFakeRecorder(10),
+			WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+			Tracer:           asmetrics.NewNoOp(),
 		}
 
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
@@ -1793,13 +1885,20 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 
 		scheme := newScheme(t)
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, claim, warmSandbox).WithStatusSubresource(claim).Build()
-		reconciler := &SandboxClaimReconciler{
-			Client:   client,
-			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
-			Tracer:   asmetrics.NewNoOp(),
+		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+		if isAdoptable(warmSandbox) == nil {
+			hash := warmSandbox.Labels[sandboxTemplateRefHash]
+			key := queue.SandboxKey{Namespace: warmSandbox.Namespace, Name: warmSandbox.Name}
+			warmSandboxQueue.Add(hash, key)
 		}
 
+		reconciler := &SandboxClaimReconciler{
+			Client:           client,
+			Scheme:           scheme,
+			Recorder:         events.NewFakeRecorder(10),
+			WarmSandboxQueue: warmSandboxQueue,
+			Tracer:           asmetrics.NewNoOp(),
+		}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
 		_, err := reconciler.Reconcile(context.Background(), req)
 		if err != nil {
@@ -1849,6 +1948,16 @@ func (c *conflictClient) Update(ctx context.Context, obj client.Object, opts ...
 		}
 	}
 	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *conflictClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if sandbox, ok := obj.(*sandboxv1alpha1.Sandbox); ok {
+		if c.conflictCount < c.maxConflicts {
+			c.conflictCount++
+			return k8errors.NewConflict(sandboxv1alpha1.Resource("sandboxes"), sandbox.Name, fmt.Errorf("simulated conflict"))
+		}
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
 func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
@@ -1941,11 +2050,15 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			WithStatusSubresource(claimWithNone).
 			Build()
 
+		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+		seedQueueForTest(warmSandboxQueue, existingObjects)
+
 		reconciler := &SandboxClaimReconciler{
-			Client:   fakeClient,
-			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
-			Tracer:   asmetrics.NewNoOp(),
+			Client:           fakeClient,
+			Scheme:           scheme,
+			Recorder:         events.NewFakeRecorder(10),
+			Tracer:           asmetrics.NewNoOp(),
+			WarmSandboxQueue: warmSandboxQueue,
 		}
 
 		req := reconcile.Request{
@@ -1997,11 +2110,15 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			WithStatusSubresource(claimWithSpecificPool).
 			Build()
 
+		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+		seedQueueForTest(warmSandboxQueue, existingObjects)
+
 		reconciler := &SandboxClaimReconciler{
-			Client:   fakeClient,
-			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
-			Tracer:   asmetrics.NewNoOp(),
+			Client:           fakeClient,
+			Scheme:           scheme,
+			Recorder:         events.NewFakeRecorder(10),
+			Tracer:           asmetrics.NewNoOp(),
+			WarmSandboxQueue: warmSandboxQueue,
 		}
 
 		req := reconcile.Request{
@@ -2058,11 +2175,15 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			WithStatusSubresource(claimWithSpecificPool).
 			Build()
 
+		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+		seedQueueForTest(warmSandboxQueue, existingObjects)
+
 		reconciler := &SandboxClaimReconciler{
-			Client:   fakeClient,
-			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
-			Tracer:   asmetrics.NewNoOp(),
+			Client:           fakeClient,
+			Scheme:           scheme,
+			Recorder:         events.NewFakeRecorder(10),
+			Tracer:           asmetrics.NewNoOp(),
+			WarmSandboxQueue: warmSandboxQueue,
 		}
 
 		req := reconcile.Request{
@@ -2109,11 +2230,15 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			WithStatusSubresource(claimWithDefault).
 			Build()
 
+		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+		seedQueueForTest(warmSandboxQueue, existingObjects)
+
 		reconciler := &SandboxClaimReconciler{
-			Client:   fakeClient,
-			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
-			Tracer:   asmetrics.NewNoOp(),
+			Client:           fakeClient,
+			Scheme:           scheme,
+			Recorder:         events.NewFakeRecorder(10),
+			Tracer:           asmetrics.NewNoOp(),
+			WarmSandboxQueue: warmSandboxQueue,
 		}
 
 		req := reconcile.Request{
@@ -2159,11 +2284,15 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			WithStatusSubresource(claimWithNil).
 			Build()
 
+		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+		seedQueueForTest(warmSandboxQueue, existingObjects)
+
 		reconciler := &SandboxClaimReconciler{
-			Client:   fakeClient,
-			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
-			Tracer:   asmetrics.NewNoOp(),
+			Client:           fakeClient,
+			Scheme:           scheme,
+			Recorder:         events.NewFakeRecorder(10),
+			Tracer:           asmetrics.NewNoOp(),
+			WarmSandboxQueue: warmSandboxQueue,
 		}
 
 		req := reconcile.Request{
@@ -2275,5 +2404,18 @@ func TestSandboxClaimPredicates(t *testing.T) {
 				t.Errorf("expected time to be stored in observedTimes map for key %v", tc.expectedKey)
 			}
 		})
+	}
+}
+
+// seedQueueForTest acts as a mock Informer, pre-loading the test queue with adoptable sandboxes.
+func seedQueueForTest(q queue.SandboxQueue, objects []client.Object) {
+	for _, obj := range objects {
+		if sb, ok := obj.(*sandboxv1alpha1.Sandbox); ok {
+			if isAdoptable(sb) == nil {
+				hash := sb.Labels[sandboxTemplateRefHash]
+				key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
+				q.Add(hash, key)
+			}
+		}
 	}
 }

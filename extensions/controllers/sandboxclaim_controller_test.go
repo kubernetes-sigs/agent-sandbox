@@ -1666,6 +1666,26 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 				r.observedTimes.Store(key, time.Now().Add(-5*time.Second))
 			},
 		},
+		{
+			name: "skips claim startup latency if webhook duration is negative but records controller latency",
+			claim: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "future-webhook",
+					CreationTimestamp: pastTime,
+					Annotations: map[string]string{
+						asmetrics.WebhookAnnotation:       time.Now().Add(5 * time.Second).Format(time.RFC3339Nano),
+						asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
+				Status: extensionsv1alpha1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			oldStatus:                      &extensionsv1alpha1.SandboxClaimStatus{},
+			expectedObservations:           0,
+			expectedControllerObservations: 1,
+		},
 	}
 
 	for _, tc := range testCases {

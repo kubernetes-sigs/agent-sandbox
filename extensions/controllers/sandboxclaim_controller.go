@@ -1062,6 +1062,11 @@ func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, 
 		logger.Error(err, "Failed to parse webhook first seen time", "value", webhookSeenTimeStr)
 		return
 	}
+	duration := time.Since(webhookSeenTime)
+	if duration < 0 {
+		logger.Error(errors.New("negative duration"), "Webhook seen time is in the future", "duration", duration, "webhookSeenTime", webhookSeenTime)
+		return
+	}
 	asmetrics.RecordClaimStartupLatency(webhookSeenTime, launchType, claim.Spec.TemplateRef.Name)
 }
 
@@ -1081,7 +1086,7 @@ func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Cont
 	}
 }
 
-// recordSandboxCreationLatency records the sandbox creation latency for cold launches.
+// recordSandboxCreationLatency records the sandbox creation latency.
 func (r *SandboxClaimReconciler) recordSandboxCreationLatency(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, launchType string) {
 	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {
 		return

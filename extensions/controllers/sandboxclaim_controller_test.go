@@ -1901,7 +1901,7 @@ func TestClientClaimLatencyMetric(t *testing.T) {
 			expectedObservations: 0,
 		},
 		{
-			name: "ignores client latency if annotation is not in parsible format",
+			name: "ignores client latency if annotation is not in parsable format",
 			claim: &extensionsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "invalid-client-time",

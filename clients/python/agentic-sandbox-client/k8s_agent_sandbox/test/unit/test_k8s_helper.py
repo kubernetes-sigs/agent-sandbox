@@ -38,9 +38,12 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
         mock_api.create_namespaced_custom_object.assert_called_once()
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
-        self.assertEqual(body["metadata"]["annotations"]["opentelemetry.io/trace-context"], "trace-data")
-        self.assertIn(CLIENT_REQUEST_TIME_ANNOTATION, body["metadata"]["annotations"])
-        self.assertEqual(body["metadata"]["labels"], {"agent": "code-agent", "team": "platform"})
+        self.assertEqual(body["metadata"]["annotations"]
+                         ["opentelemetry.io/trace-context"], "trace-data")
+        self.assertIn(CLIENT_REQUEST_TIME_ANNOTATION,
+                      body["metadata"]["annotations"])
+        self.assertEqual(body["metadata"]["labels"], {
+                         "agent": "code-agent", "team": "platform"})
 
     def test_labels_only_no_annotations(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
@@ -53,7 +56,8 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         )
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
-        self.assertEqual(list(body["metadata"]["annotations"].keys()), [CLIENT_REQUEST_TIME_ANNOTATION])
+        self.assertEqual(set(body["metadata"]["annotations"].keys()), {
+                         CLIENT_REQUEST_TIME_ANNOTATION})
         self.assertEqual(body["metadata"]["labels"], {"agent": "code-agent"})
 
     def test_no_labels_no_annotations(self, mock_config, mock_api_cls, mock_core_cls):
@@ -61,10 +65,12 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         mock_api_cls.return_value = mock_api
 
         helper = K8sHelper()
-        helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
+        helper.create_sandbox_claim(
+            "test-claim", "test-template", "test-namespace")
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
-        self.assertEqual(list(body["metadata"]["annotations"].keys()), [CLIENT_REQUEST_TIME_ANNOTATION])
+        self.assertEqual(set(body["metadata"]["annotations"].keys()), {
+                         CLIENT_REQUEST_TIME_ANNOTATION})
         self.assertNotIn("labels", body["metadata"])
 
     def test_lifecycle_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
@@ -82,14 +88,16 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertEqual(body["spec"]["lifecycle"], lifecycle)
-        self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "test-template")
+        self.assertEqual(body["spec"]["sandboxTemplateRef"]
+                         ["name"], "test-template")
 
     def test_no_lifecycle_omits_key(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
         helper = K8sHelper()
-        helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
+        helper.create_sandbox_claim(
+            "test-claim", "test-template", "test-namespace")
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertNotIn("lifecycle", body["spec"])
@@ -127,7 +135,8 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         with self.assertRaises(SandboxTemplateNotFoundError) as context:
             helper.resolve_sandbox_name("test-claim", "default", timeout=5)
 
-        self.assertIn("Template 'non-existent-template' not found", str(context.exception))
+        self.assertIn("Template 'non-existent-template' not found",
+                      str(context.exception))
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_resolve_sandbox_name_deleted_event(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
@@ -147,7 +156,8 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         with self.assertRaises(SandboxMetadataError) as context:
             helper.resolve_sandbox_name("test-claim", "default", timeout=5)
 
-        self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+        self.assertIn(
+            "SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
 
 
 if __name__ == '__main__':

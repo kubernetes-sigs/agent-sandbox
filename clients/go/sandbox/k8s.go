@@ -38,8 +38,9 @@ import (
 	extensionsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
-	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
+
+const clientAnnotation = "agents.x-k8s.io/client-first-requested-at"
 
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
 type sandboxState struct {
@@ -135,7 +136,7 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	annotations[asmetrics.ClientAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	annotations[clientAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 
 	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{

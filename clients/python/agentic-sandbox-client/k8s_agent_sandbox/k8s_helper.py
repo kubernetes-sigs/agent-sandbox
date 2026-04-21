@@ -31,6 +31,7 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
 )
 
+
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
@@ -130,7 +131,8 @@ class K8sHelper:
 
                     sandbox_status = status.get('sandbox', {})
                     # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
-                    name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
+                    name = sandbox_status.get(
+                        'name', '') or sandbox_status.get('Name', '')
                     if name:
                         logging.info(
                             f"Resolved sandbox name '{name}' from claim status")
@@ -148,7 +150,8 @@ class K8sHelper:
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
+                raise TimeoutError(
+                    f"Sandbox {name} did not become ready within {timeout} seconds.")
             w = watch.Watch()
             for event in w.stream(
                 func=self.custom_objects_api.list_namespaced_custom_object,
@@ -172,9 +175,11 @@ class K8sHelper:
                             pod_ips = status.get('podIPs', [])
                             return pod_ips[0] if pod_ips else None
                 elif event["type"] == "DELETED":
-                    logging.error(f"Sandbox {name} was deleted before becoming ready.")
+                    logging.error(
+                        f"Sandbox {name} was deleted before becoming ready.")
                     w.stop()
-                    raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
+                    raise SandboxNotFoundError(
+                        f"Sandbox {name} was deleted before becoming ready.")
 
     def delete_sandbox_claim(self, name: str, namespace: str):
         """Deletes a SandboxClaim custom resource."""
@@ -247,17 +252,20 @@ class K8sHelper:
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:
-            logging.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
+            logging.error(
+                f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         deadline = time.monotonic() + timeout
-        logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
+        logging.info(
+            f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
+                raise TimeoutError(
+                    f"Gateway '{gateway_name}' did not get an IP.")
             w = watch.Watch()
             for event in w.stream(
                 func=self.custom_objects_api.list_namespaced_custom_object,

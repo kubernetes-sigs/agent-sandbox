@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# Running this requires both gh and jq to be installed.
+
+# To run this script in a crontab, provide absolute paths
+# Use `env -i bash -c "/absolute/path/to/script"` to simulate a clean environment before running it in crontab.
+# export HOME="/your/path/"
+# export PATH="/your/path/"
+# REPO_PATH="/your/path/to/script/working/dir"
+# cd "$REPO_PATH" || exit
+
+# Limit the total number of open PRs we list (newest first)
+LIMIT=${LIMIT:-10}
+REPO=${REPO:-"kubernetes-sigs/agent-sandbox"}
+echo "Processing the last $LIMIT open PRs in $REPO..."
+
+# Request for Copilot PR reviews (skip PRs that have been assigned to Copilot previously)
+gh pr list --repo $REPO --limit $LIMIT --json number,labels,reviews,reviewRequests \
+  --jq '.[] | select(
+    # 1. Skip if CLA is not signed
+    (any(.labels[].name; . == "cncf-cla: no") | not) 
+    and 
+    # 2. Skip if already human-approved (has both lgtm AND approved)
+    ([.labels[].name] | (contains(["lgtm"]) and contains(["approved"])) | not)
+    and
+    # 3. Skip if Copilot is already involved
+    ([.reviews[].author.login, .reviewRequests[].login] | contains(["copilot-pull-request-reviewer"]) | not)
+  ) | .number' \
+  | xargs -I {} gh pr edit --repo $REPO {} --add-reviewer @copilot

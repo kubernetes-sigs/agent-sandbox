@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# Running this requires both gh and jq to be installed.
+
+# To run this script in a crontab, provide absolute paths
+# Use `env -i bash -c "/absolute/path/to/script"` to simulate a clean environment before running it in crontab.
+# export HOME="/your/path/"
+# export PATH="/your/path/"
+# REPO_PATH="/your/path/to/script/working/dir"
+# cd "$REPO_PATH" || exit
+
+BOT_NAME="copilot-pull-request-reviewer"
+LIMIT=${LIMIT:-20}
+
+check_copilot_resolved() {
+  local pr_num=$1
+  # Get internal ID
+  local pr_id=$(gh pr view "$pr_num" --json id -q .id)
+  
+  # Count unresolved threads started by the bot
+  gh api graphql -f id="$pr_id" -f query='
+    query($id: ID!) {
+      node(id: $id) {
+        ... on PullRequest {
+          reviewThreads(last: 100) {
+            nodes {
+              isResolved
+              comments(first: 1) {
+                nodes { author { login } }
+              }
+            }
+          }
+        }
+      }
+    }' | jq "[.data.node.reviewThreads.nodes[] | select(.comments.nodes[0].author.login == \"$BOT_NAME\" and .isResolved == false)] | length"
+}
+
+echo "--- Scanning for Copilot-Active PRs: $(date) ---"
+
+ACTIVE_PRS=$(gh pr list --limit "$LIMIT" --json number,reviews \
+  --jq ".[] | select(.reviews[] | .author.login == \"$BOT_NAME\") | .number")
+
+for PR in $ACTIVE_PRS; do
+  UNRESOLVED=$(check_copilot_resolved "$PR")
+  
+  if [ "$UNRESOLVED" -eq 0 ]; then
+    echo "✅ PR #$PR: All Copilot comments resolved. Ready for Human Review. Adding label..."
+    gh pr edit "$PR" --add-label "ready-for-review"
+  else
+    echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Skipping."
+  fi
+done

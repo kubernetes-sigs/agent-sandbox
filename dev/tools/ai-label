@@ -50,7 +50,9 @@ check_copilot_resolved() {
     }' | jq "[.data.node.reviewThreads.nodes[] | select(.comments.nodes[0].author.login == \"$BOT_NAME\" and .isResolved == false)] | length"
 }
 
-echo "--- Scanning for Copilot-Active PRs: $(date) ---"
+echo "--- Scanning for $LIMIT Copilot-Active PRs: $(date) ---"
+
+PENDING_LABEL="action-required: resolve-copilot-comments"
 
 ACTIVE_PRS=$(gh pr list --limit "$LIMIT" --json number,labels,reviews,reviewRequests \
   --jq '.[] | select(
@@ -65,9 +67,16 @@ for PR in $ACTIVE_PRS; do
   UNRESOLVED=$(check_copilot_resolved "$PR")
   
   if [ "$UNRESOLVED" -eq 0 ]; then
-    echo "✅ PR #$PR: All Copilot comments resolved. Ready for Human Review. Adding label..."
-    gh pr edit "$PR" --add-label "ready-for-review"
+    echo "✅ PR #$PR: All Copilot comments resolved. Ready for Human Review. Updating label..."
+    gh pr edit "$PR" --add-label "ready-for-review" --remove-label "$PENDING_LABEL"
   else
-    echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Skipping."
+    # Check current labels to avoid repeatedly applying the pending label on every cron run
+    CURRENT_LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name')
+    if ! echo "$CURRENT_LABELS" | grep -q "^${PENDING_LABEL}$"; then
+      echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Adding pending label..."
+      gh pr edit "$PR" --add-label "$PENDING_LABEL"
+    else
+      echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Skipping."
+    fi
   fi
 done

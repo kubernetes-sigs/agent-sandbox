@@ -80,6 +80,32 @@ type observedTimeEntry struct {
 	uid       types.UID
 }
 
+// observedTimeMap is a type-safe wrapper around sync.Map that only stores observedTimeEntry values.
+type observedTimeMap struct {
+	inner sync.Map
+}
+
+func (m *observedTimeMap) Load(key types.NamespacedName) (observedTimeEntry, bool) {
+	val, ok := m.inner.Load(key)
+	if !ok {
+		return observedTimeEntry{}, false
+	}
+	return val.(observedTimeEntry), true
+}
+
+func (m *observedTimeMap) Store(key types.NamespacedName, entry observedTimeEntry) {
+	m.inner.Store(key, entry)
+}
+
+func (m *observedTimeMap) Delete(key types.NamespacedName) {
+	m.inner.Delete(key)
+}
+
+func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTimeEntry) (observedTimeEntry, bool) {
+	actual, loaded := m.inner.LoadOrStore(key, entry)
+	return actual.(observedTimeEntry), loaded
+}
+
 // SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
@@ -88,7 +114,7 @@ type SandboxClaimReconciler struct {
 	Recorder                events.EventRecorder
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
-	observedTimes           sync.Map
+	observedTimes           observedTimeMap
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -1036,8 +1062,8 @@ func (r *SandboxClaimReconciler) getOrRecordObservedTime(obj client.Object) time
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 
 	// Fast path: Entry already exists and UID matches
-	if val, ok := r.observedTimes.Load(key); ok {
-		if entry, typeOk := val.(observedTimeEntry); typeOk && entry.uid == obj.GetUID() {
+	if entry, ok := r.observedTimes.Load(key); ok {
+		if entry.uid == obj.GetUID() {
 			return entry.timestamp
 		}
 	}
@@ -1047,13 +1073,12 @@ func (r *SandboxClaimReconciler) getOrRecordObservedTime(obj client.Object) time
 	actual, loaded := r.observedTimes.LoadOrStore(key, newEntry)
 	if loaded {
 		// Handle concurrent insertion: check if we need to overwrite due to UID mismatch
-		entry, typeOk := actual.(observedTimeEntry)
-		if !typeOk || entry.uid != obj.GetUID() {
+		if actual.uid != obj.GetUID() {
 			r.observedTimes.Store(key, newEntry)
 			return newEntry.timestamp
 		}
 		// UID matches, return the loaded timestamp
-		return entry.timestamp
+		return actual.timestamp
 	}
 	return newEntry.timestamp
 }

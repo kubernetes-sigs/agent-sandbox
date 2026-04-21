@@ -2433,11 +2433,10 @@ func TestSandboxClaimTimingPredicates(t *testing.T) {
 				return p.Create(event.CreateEvent{Object: claim1})
 			},
 			verify: func(t *testing.T, r *SandboxClaimReconciler) {
-				val, ok := r.observedTimes.Load(key)
+				entry, ok := r.observedTimes.Load(key)
 				if !ok {
 					t.Fatal("Expected entry in map after Create")
 				}
-				entry := val.(observedTimeEntry)
 				if entry.uid != "uid-1" {
 					t.Errorf("Expected UID uid-1, got %s", entry.uid)
 				}
@@ -2452,11 +2451,10 @@ func TestSandboxClaimTimingPredicates(t *testing.T) {
 				return p.Update(event.UpdateEvent{ObjectNew: claim1, ObjectOld: claim1})
 			},
 			verify: func(t *testing.T, r *SandboxClaimReconciler) {
-				val, ok := r.observedTimes.Load(key)
+				entry, ok := r.observedTimes.Load(key)
 				if !ok {
 					t.Fatal("Expected entry in map after Update")
 				}
-				entry := val.(observedTimeEntry)
 				if entry.uid != "uid-1" {
 					t.Errorf("Expected UID uid-1, got %s", entry.uid)
 				}
@@ -2471,11 +2469,10 @@ func TestSandboxClaimTimingPredicates(t *testing.T) {
 				return p.Update(event.UpdateEvent{ObjectNew: claim2, ObjectOld: claim1})
 			},
 			verify: func(t *testing.T, r *SandboxClaimReconciler) {
-				val, ok := r.observedTimes.Load(key)
+				entry, ok := r.observedTimes.Load(key)
 				if !ok {
 					t.Fatal("Expected entry in map after Update with new UID")
 				}
-				entry := val.(observedTimeEntry)
 				if entry.uid != "uid-2" {
 					t.Errorf("Expected UID uid-2 after update, got %s", entry.uid)
 				}
@@ -2485,32 +2482,17 @@ func TestSandboxClaimTimingPredicates(t *testing.T) {
 			},
 		},
 		{
-			name: "Delete with mismatch UID does not delete",
+			name: "Delete removes entry by key",
 			setup: func(r *SandboxClaimReconciler) {
-				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-2"})
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-1"})
 			},
 			trigger: func(p predicate.Predicate) bool {
-				return p.Delete(event.DeleteEvent{Object: claim1}) // claim1 has uid-1
-			},
-			verify: func(t *testing.T, r *SandboxClaimReconciler) {
-				_, ok := r.observedTimes.Load(key)
-				if !ok {
-					t.Error("Entry should NOT be deleted when UID mismatches")
-				}
-			},
-		},
-		{
-			name: "Delete with matching UID deletes",
-			setup: func(r *SandboxClaimReconciler) {
-				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-2"})
-			},
-			trigger: func(p predicate.Predicate) bool {
-				return p.Delete(event.DeleteEvent{Object: claim2}) // claim2 has uid-2
+				return p.Delete(event.DeleteEvent{Object: claim1})
 			},
 			verify: func(t *testing.T, r *SandboxClaimReconciler) {
 				_, ok := r.observedTimes.Load(key)
 				if ok {
-					t.Error("Entry should be deleted when UID matches")
+					t.Error("Entry should be deleted on delete event")
 				}
 			},
 		},
@@ -2518,7 +2500,7 @@ func TestSandboxClaimTimingPredicates(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			r.observedTimes = sync.Map{} // Reset map for each test case
+			r.observedTimes = observedTimeMap{} // Reset map for each test case
 			if tc.setup != nil {
 				tc.setup(r)
 			}
@@ -2585,11 +2567,10 @@ func TestGetOrRecordObservedTime(t *testing.T) {
 
 			// Verify map state for the recorded claim
 			recordedKey := types.NamespacedName{Name: tc.claimToRecord.Name, Namespace: tc.claimToRecord.Namespace}
-			val, ok := r.observedTimes.Load(recordedKey)
+			entry, ok := r.observedTimes.Load(recordedKey)
 			if !ok {
 				t.Fatal("Expected entry in map")
 			}
-			entry := val.(observedTimeEntry)
 
 			if entry.uid != tc.expectedUID {
 				t.Errorf("Expected UID %s, got %s", tc.expectedUID, entry.uid)

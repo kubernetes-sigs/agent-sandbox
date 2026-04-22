@@ -398,12 +398,13 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	if statusName != "" {
 		candidate := &v1beta1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, candidate); err != nil {
-			if k8errors.IsNotFound(err) {
-				return nil, nil
+			if !k8errors.IsNotFound(err) {
+				return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
 			}
-			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
 		} else if metav1.IsControlledBy(candidate, claim) {
 			sandbox = candidate
+		} else {
+			logger.Info("Status-recorded sandbox is not controlled by claim", "claim.Status.SandboxStatus.Name", statusName, "sandbox", candidate.Name, "claim", claim.Name)
 		}
 	}
 
@@ -420,7 +421,8 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 		}
 	}
 
-	// Fallback to ownership lookup in case status has not been populated yet.
+	// Fall back to a namespace-wide ownership lookup if status is empty, stale, or
+	// references a sandbox that is not controlled by this claim.
 	if sandbox == nil {
 		allSandboxes := &v1beta1.SandboxList{}
 		if err := r.List(ctx, allSandboxes, client.InNamespace(claim.Namespace)); err != nil {

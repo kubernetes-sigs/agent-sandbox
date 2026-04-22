@@ -85,7 +85,7 @@ flowchart LR
     Pod --> Runtime
 
     %% Warm pool
-    WarmPool -->|pre-warmed pods| Pod
+    WarmPool -->|pre-warm sandboxes| Sandbox
 ```
 
 ## Installation

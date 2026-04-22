@@ -44,7 +44,7 @@ agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox 
 ### Architecture Diagram
 
 ```mermaid
-flowchart TB
+flowchart LR
 
     User[User]
 
@@ -59,6 +59,13 @@ flowchart TB
     Runtime[Sandbox Runtime Environment]
 
     WarmPool[SandboxWarmPool]
+
+    subgraph Extensions[Extensions]
+      Claim
+      Template
+      ClaimController
+      WarmPool
+    end
 
     %% User paths
     User -->|creates| Sandbox

@@ -36,14 +36,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var (
+// GetKubeconfig returns the path to the kubeconfig file used by the tests.
+func GetKubeconfig() string {
+	kubeconfig := os.Getenv("KUBECONFIG")
+	if kubeconfig != "" {
+		return kubeconfig
+	}
+
 	// root directory of the agent-sandbox repository.
-	repoRoot = getRepoRoot()
+	repoRoot := getRepoRoot()
 	// The e2e tests use the context specified in the local KUBECONFIG file.
 	// A localized KUBECONFIG is used to create an explicit cluster contract with
 	// the tests.
 	kubeconfig = filepath.Join(repoRoot, "bin", "KUBECONFIG")
-)
+
+	return kubeconfig
+}
 
 func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(controllers.Scheme))
@@ -100,6 +108,7 @@ func NewTestContext(t T) *TestContext {
 		T:            wrappedT,
 		artifactsDir: artifactsDir,
 	}
+	kubeconfig := GetKubeconfig()
 	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},
 		&clientcmd.ConfigOverrides{},

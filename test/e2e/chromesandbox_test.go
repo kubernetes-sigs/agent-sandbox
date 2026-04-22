@@ -44,12 +44,31 @@ type ChromeSandboxMetrics struct {
 	Total        AtomicTimeDuration // Total time from start to chrome ready
 }
 
-func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
+func getImageTag() string {
 	imageTag := os.Getenv("IMAGE_TAG")
 	if imageTag == "" {
 		imageTag = "latest"
 	}
+	return imageTag
+}
 
+func getImagePrefix() string {
+	imagePrefix := os.Getenv("IMAGE_PREFIX")
+	if imagePrefix == "" {
+		imagePrefix = "kind.local/"
+	}
+	return imagePrefix
+}
+
+func chromeSandboxImageName() string {
+	imageTag := getImageTag()
+	imagePrefix := getImagePrefix()
+
+	return fmt.Sprintf("%schrome-sandbox:%s", imagePrefix, imageTag)
+}
+
+func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
+	imageName := chromeSandboxImageName()
 	sandbox := &sandboxv1alpha1.Sandbox{}
 	sandbox.Name = "chrome-sandbox"
 	sandbox.Namespace = namespace
@@ -57,9 +76,8 @@ func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
-					Name: "chrome-sandbox",
-					// might be nice to remove the IMAGE_TAG env var so this is easier to run from IDE
-					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", imageTag),
+					Name:            "chrome-sandbox",
+					Image:           imageName,
 					ImagePullPolicy: corev1.PullIfNotPresent,
 				},
 			},

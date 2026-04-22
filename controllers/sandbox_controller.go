@@ -98,7 +98,7 @@ func init() {
 	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
 }
 
-// SandboxReconciler reconciles a Sandbox object
+// SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
@@ -181,7 +181,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var err error
 	sandboxDeleted := false
 
-	expired, requeueAfter := checkSandboxExpiry(sandbox)
+	expired, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
 
 	// Check if sandbox has expired
 	if expired {
@@ -389,7 +389,31 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			}
 
 		case resourceOwnedBySandbox:
-			// Already owned by this sandbox — no action needed.
+			desiredSelector := map[string]string{
+				sandboxLabel: nameHash,
+			}
+			patch := client.MergeFrom(service.DeepCopy())
+			needsUpdate := false
+
+			if service.Labels == nil {
+				service.Labels = make(map[string]string)
+			}
+			if service.Labels[sandboxLabel] != nameHash {
+				service.Labels[sandboxLabel] = nameHash
+				needsUpdate = true
+			}
+			if !reflect.DeepEqual(service.Spec.Selector, desiredSelector) {
+				service.Spec.Selector = desiredSelector
+				needsUpdate = true
+			}
+
+			if needsUpdate {
+				log.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
+				if err := r.Patch(ctx, service, patch); err != nil {
+					return nil, fmt.Errorf("failed to patch owned service: %w", err)
+				}
+			}
+
 		}
 
 		r.setServiceStatus(sandbox, service)
@@ -426,6 +450,21 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 	r.setServiceStatus(sandbox, service)
 	return service, nil
+}
+
+// clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
+func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+	if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; !exists {
+		return nil
+	}
+	log := log.FromContext(ctx)
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return fmt.Errorf("failed to clear pod name annotation: %w", err)
+	}
+	log.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
+	return nil
 }
 
 // setServiceStatus updates the sandbox status with the service name and FQDN.
@@ -474,8 +513,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
-			log.Error(err, "Pod not found")
-			return nil, fmt.Errorf("pod in annotation get failed: %w", err)
+			log.Info("Pod referenced by annotation not found, clearing annotation to recover state", "podName", podName)
+			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				return nil, err
+			}
 		}
 		pod = nil
 	}
@@ -504,14 +545,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 
 		// Remove the pod name annotation from the sandbox if it exists
-		if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
-			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-			patch := client.MergeFrom(sandbox.DeepCopy())
-			delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
-
-			if err := r.Patch(ctx, sandbox, patch); err != nil {
-				return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
-			}
+		if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+			return nil, err
 		}
 
 		return nil, nil
@@ -562,13 +597,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
-			if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
-				log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-				patch := client.MergeFrom(sandbox.DeepCopy())
-				delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
-				if err := r.Patch(ctx, sandbox, patch); err != nil {
-					return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
-				}
+			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				return nil, err
 			}
 
 			return nil, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
@@ -604,6 +634,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	labels := map[string]string{
 		sandboxLabel: nameHash,
 	}
+
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		labels[k] = v
@@ -690,8 +721,8 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Handle deletion of labels
 	propagatedLabelsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
-		propagatedLabels := strings.Split(propagatedLabelsStr, ",")
-		for _, k := range propagatedLabels {
+		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
+		for k := range propagatedLabels {
 			if k == "" {
 				continue
 			}
@@ -718,8 +749,8 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Handle deletion of annotations
 	propagatedAnnotationsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation]
 	if propagatedAnnotationsStr != "" {
-		propagatedAnnotations := strings.Split(propagatedAnnotationsStr, ",")
-		for _, k := range propagatedAnnotations {
+		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
+		for k := range propagatedAnnotations {
 			if k == "" {
 				continue
 			}
@@ -816,7 +847,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 	return nil
 }
 
-// handles sandbox expiry by deleting child resources and the sandbox itself if needed
+// handles sandbox expiry by deleting child resources and the sandbox itself if needed.
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
 	log := log.FromContext(ctx)
 	var allErrors error
@@ -896,19 +927,19 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 
 // checks if the sandbox has expired
 // returns true if expired, false otherwise
-// if not expired, also returns the duration to requeue after
-func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) {
+// if not expired, also returns the duration to requeue after.
+func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox, now time.Time) (bool, time.Duration) {
 	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0
 	}
 
 	expiryTime := sandbox.Spec.ShutdownTime.Time
-	if time.Now().After(expiryTime) {
+	if !now.Before(expiryTime) {
 		return true, 0
 	}
 
 	// Calculate remaining time
-	remainingTime := time.Until(expiryTime)
+	remainingTime := expiryTime.Sub(now)
 
 	// TODO(barney-s): Do we need a inverse exponential backoff here ?
 	//requeueAfter := max(remainingTime/2, 2*time.Second)
@@ -918,7 +949,7 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox) (bool, time.Duration) 
 	return false, requeueAfter
 }
 
-// sandboxMarkedExpired checks if the sandbox is already marked as expired
+// sandboxMarkedExpired checks if the sandbox is already marked as expired.
 func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
 	return cond != nil && cond.Reason == sandboxv1alpha1.SandboxReasonExpired

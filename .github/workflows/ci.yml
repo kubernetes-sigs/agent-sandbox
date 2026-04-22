@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
     paths:
-      - '.github/workflows/**'
+      - ".github/workflows/**"
 
 jobs:
   lint-workflows:
@@ -12,6 +12,5 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # ratchet:actions/checkout@v4
-
-      - uses: devops-actions/actionlint@467e2ce19b2310e93c9ffa0b50fe31f86b5a7f23 # ratchet:devops-actions/actionlint@v0.1.10
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: devops-actions/actionlint@469810fd82c015d3c43815cd2b0e4d02eecc4819 # v0.1.11

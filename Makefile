@@ -48,9 +48,17 @@ test-e2e-benchmarks:
 lint-go:
 	./dev/tools/lint-go
 
+.PHONY: fix-go
+fix-go:
+	./dev/tools/lint-go --fix
+
 .PHONY: lint-api
 lint-api:
 	./dev/tools/lint-api
+
+.PHONY: fix-api
+fix-api:
+	./dev/tools/lint-api --fix
 
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
@@ -84,8 +92,7 @@ release-manifests:
 	./dev/tools/release --tag=${TAG}
 
 # Example usage:
-# make release-python-sdk TAG=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
-# make release-python-sdk TAG=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
+# make release-python-sdk TAG=v0.1.1.post1 (for patch release on PyPI)
 .PHONY: release-python-sdk
 release-python-sdk:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-python-sdk TAG=vX.Y.Z.postN)"; exit 1; fi

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -47,7 +48,7 @@ const (
 	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
 )
 
-// SandboxWarmPoolReconciler reconciles a SandboxWarmPool object
+// SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
 type SandboxWarmPoolReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -59,7 +60,7 @@ type SandboxWarmPoolReconciler struct {
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile implements the reconciliation loop for SandboxWarmPool
+// Reconcile implements the reconciliation loop for SandboxWarmPool.
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
@@ -97,7 +98,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, nil
 }
 
-// reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool
+// reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
 func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) error {
 	log := log.FromContext(ctx)
 
@@ -169,7 +170,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		sandboxesToCreate := desiredReplicas - currentReplicas
 		log.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 
-		for i := int32(0); i < sandboxesToCreate; i++ {
+		for range sandboxesToCreate {
 			if err := r.createPoolSandbox(ctx, warmPool, poolNameHash, template, currentPodTemplateHash); err != nil {
 				log.Error(err, "Failed to create pool sandbox")
 				allErrors = errors.Join(allErrors, err)
@@ -193,7 +194,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				}
 				return -1 // b ready, a not ready -> a first
 			}
-			return b.CreationTimestamp.Time.Compare(a.CreationTimestamp.Time) // newest first
+			return b.CreationTimestamp.Compare(a.CreationTimestamp.Time) // newest first
 		})
 
 		for i := int32(0); i < sandboxesToDelete && i < int32(len(activeSandboxes)); i++ {
@@ -212,7 +213,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	return allErrors
 }
 
-// adoptSandbox sets this warmpool as the owner of an orphaned sandbox
+// adoptSandbox sets this warmpool as the owner of an orphaned sandbox.
 func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, sb *sandboxv1alpha1.Sandbox) error {
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
 		return err
@@ -220,7 +221,7 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 	return r.Update(ctx, sb)
 }
 
-// filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans
+// filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
 func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, sandboxes []sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string, tmplErr error) ([]sandboxv1alpha1.Sandbox, error) {
 	log := log.FromContext(ctx)
 	var activeSandboxes []sandboxv1alpha1.Sandbox
@@ -308,7 +309,7 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	return template, currentPodTemplateHash, tmplErr
 }
 
-// createPoolSandbox creates a full Sandbox CR (with pod template, service, etc.) for the warm pool
+// createPoolSandbox creates a full Sandbox CR (with pod template, service, etc.) for the warm pool.
 func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string) error {
 	log := log.FromContext(ctx)
 
@@ -326,18 +327,14 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 
 	// Copy template pod labels into sandbox pod template
 	podLabels := make(map[string]string)
-	for k, v := range template.Spec.PodTemplate.ObjectMeta.Labels {
-		podLabels[k] = v
-	}
+	maps.Copy(podLabels, template.Spec.PodTemplate.ObjectMeta.Labels)
 	// Propagate pool and template labels to pod template for consistency and targeting
 	podLabels[warmPoolSandboxLabel] = poolNameHash
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
 	podLabels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = currentPodTemplateHash
 
 	podAnnotations := make(map[string]string)
-	for k, v := range template.Spec.PodTemplate.ObjectMeta.Annotations {
-		podAnnotations[k] = v
-	}
+	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
 
 	replicas := int32(1)
 
@@ -377,7 +374,7 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	return nil
 }
 
-// updateStatus updates the status of the SandboxWarmPool if it has changed
+// updateStatus updates the status of the SandboxWarmPool if it has changed.
 func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1alpha1.SandboxWarmPoolStatus, warmPool *extensionsv1alpha1.SandboxWarmPool) error {
 	log := log.FromContext(ctx)
 
@@ -487,7 +484,7 @@ func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1alpha1
 	return equality.Semantic.DeepEqual(expectedSpec, actualSandboxSpec)
 }
 
-// SetupWithManager sets up the controller with the Manager
+// SetupWithManager sets up the controller with the Manager.
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxWarmPool{}, extensionsv1alpha1.TemplateRefField, func(rawObj client.Object) []string {
 		wp := rawObj.(*extensionsv1alpha1.SandboxWarmPool)

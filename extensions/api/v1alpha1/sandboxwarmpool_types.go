@@ -28,7 +28,7 @@ const (
 	TemplateRefField = ".spec.sandboxTemplateRef.name"
 )
 
-// SandboxWarmPoolSpec defines the desired state of SandboxWarmPool
+// SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpec struct {
 	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
@@ -68,7 +68,7 @@ type SandboxWarmPoolUpdateStrategy struct {
 	Type SandboxWarmPoolUpdateStrategyType `json:"type,omitempty"`
 }
 
-// SandboxWarmPoolStatus defines the observed state of SandboxWarmPool
+// SandboxWarmPoolStatus defines the observed state of SandboxWarmPool.
 type SandboxWarmPoolStatus struct {
 	// replicas is the total number of sandboxes in the pool.
 	// +optional
@@ -90,7 +90,7 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// SandboxWarmPool is the Schema for the sandboxwarmpools API
+// SandboxWarmPool is the Schema for the sandboxwarmpools API.
 type SandboxWarmPool struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -109,7 +109,7 @@ type SandboxWarmPool struct {
 
 // +kubebuilder:object:root=true
 
-// SandboxWarmPoolList contains a list of SandboxWarmPool
+// SandboxWarmPoolList contains a list of SandboxWarmPool.
 type SandboxWarmPoolList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

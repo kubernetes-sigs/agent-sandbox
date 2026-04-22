@@ -24,44 +24,33 @@ Before running this test, ensure the following prerequisites are met:
   machine, typically in your `$HOME` directory:
   - `perf-tests`: The official Kubernetes performance testing repository containing ClusterLoader2.
   - `agent-sandbox`: The main project repository.
-- **`agent-sandbox-controller`**: The agent-sandbox controller extensions and manifests should be
+- **`agent-sandbox-controller`**: The agent-sandbox controller with extensions enabled should be
   installed in the target cluster.
   - If you have made local changes to the controller, you can build the image using
     ```bash
     cd ~/agent-sandbox
     ./dev/tools/push-images --image-prefix=path/to/your/repo --controller-only
     ```
-  - Generate the manifests using `cd ~/agent-sandbox && make release-manifests TAG=123`. The
-    manifests will be generated in `~/agent-sandbox/release_assets`. Search for the
-    `image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:123` line in the generated
-    extensions and manifest files and replace the image with your image:tag.
-  - We recommend adding and adjusting the below configurations in the `extensions.yaml` generated
-    manifest to whatever values are appropriate for your cluster size:
-    ```yaml
-    containers:
-      - name: agent-sandbox-controller
-        image: path/to/your/image:your-tag
-        args:
-          - --leader-elect=true
-          - --extensions
-          - --enable-pprof-debug
-          - --enable-tracing
-          - --zap-log-level=debug
-          - --zap-encoder=json
-          - --kube-api-qps=1000
-          - --kube-api-burst=1000
-          - --sandbox-concurrent-workers=1000
-          - --sandbox-claim-concurrent-workers=1000
-          - --sandbox-warm-pool-concurrent-workers=1000
-    ```
-  - If you are using tracing, see [GKE OTLP Metrics](https://docs.cloud.google.com/stackdriver/docs/otlp-metrics/deploy-collector)
-    for how to deploy the collector.
-  - Apply your modified manifests to your cluster to install the agent-sandbox controller.
+  - Install the controller using Helm from the local chart, setting your custom image and any
+    tuning values appropriate for your cluster size:
     ```bash
     cd ~/agent-sandbox
-    kubectl apply -f release_assets/manifest.yaml
-    kubectl apply -f release_assets/extensions.yaml
+    helm upgrade --install agent-sandbox ./helm \
+        --set image.tag=your-tag \
+        --set image.repository=path/to/your/image \
+        --set controller.extensions=true \
+        --set controller.leaderElect=true \
+        --set controller.kubeApiQps=1000 \
+        --set controller.kubeApiBurst=1000 \
+        --set controller.sandboxConcurrentWorkers=1000 \
+        --set controller.sandboxClaimConcurrentWorkers=1000 \
+        --set controller.sandboxWarmPoolConcurrentWorkers=1000 \
+        --create-namespace \
+        --namespace agent-sandbox-system
     ```
+  - If you are using tracing, see [GKE OTLP Metrics](https://docs.cloud.google.com/stackdriver/docs/otlp-metrics/deploy-collector)
+    for how to deploy the collector. Pass `--set controller.extraArgs='{--enable-tracing}'` to
+    enable it via Helm.
 
 ## Running the Test
 

@@ -191,7 +191,7 @@ You can reach the maintainers of this project at:
 - [#agent-sandbox Slack channel](https://kubernetes.slack.com/messages/agent-sandbox)
   - If it's your first time joining the Kubernetes Slack, visit https://slack.k8s.io/ to get an invitation.
   - Log in to [Kubernetes Slack](https://kubernetes.slack.com/) first before joining the channel.
-  - [#sig-apps Slack channel](https://kubernetes.slack.com/messages/sig-apps) for general sig-apps discussions
+- [#sig-apps Slack channel](https://kubernetes.slack.com/messages/sig-apps) for general sig-apps discussions
 - [SIG Apps Mailing List](https://groups.google.com/a/kubernetes.io/g/sig-apps)
 
 Please feel free to open issues, suggest features, and contribute code!

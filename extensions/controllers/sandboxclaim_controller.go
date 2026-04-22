@@ -54,8 +54,11 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-const immediateRequeueDelay = time.Millisecond
+const (
+	ObservabilityAnnotation   = "agents.x-k8s.io/controller-first-observed-at"
+	immediateRequeueDelay     = time.Millisecond
+	sandboxControllerUIDField = ".metadata.controllerUID"
+)
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")

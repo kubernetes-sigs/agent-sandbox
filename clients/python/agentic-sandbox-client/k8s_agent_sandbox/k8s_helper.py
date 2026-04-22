@@ -196,15 +196,40 @@ class K8sHelper:
                 return None
             raise
 
-    def list_sandbox_claims(self, namespace: str) -> List[str]:
-        """Lists all SandboxClaim custom resources in a namespace."""
+    def get_sandbox_claim(self, name: str, namespace: str):
+        """Gets a SandboxClaim custom resource (or ``None`` if it doesn't exist)."""
         try:
-            response = self.custom_objects_api.list_namespaced_custom_object(
+            return self.custom_objects_api.get_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
-                plural=CLAIM_PLURAL_NAME
+                plural=CLAIM_PLURAL_NAME,
+                name=name
             )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def list_sandbox_claims(self, namespace: str, label_selector: str | None = None) -> List[str]:
+        """Lists all SandboxClaim custom resources in a namespace.
+
+        Args:
+            namespace: Kubernetes namespace to list claims in.
+            label_selector: Optional Kubernetes label selector string
+                (e.g. ``"app=myapp,env=prod"``). When set, only claims
+                matching the selector are returned.
+        """
+        try:
+            kwargs: dict = dict(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME,
+            )
+            if label_selector is not None:
+                kwargs["label_selector"] = label_selector
+            response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
             return [
                 item.get("metadata", {}).get("name") 
                 for item in response.get("items", []) 

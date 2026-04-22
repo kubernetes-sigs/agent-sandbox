@@ -66,18 +66,22 @@ async function sleepWithSignal(
     );
   }
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(
-          signal.reason ??
-            new DOMException("The operation was aborted.", "AbortError"),
-        );
-      },
-      { once: true },
-    );
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(
+        signal?.reason ??
+          new DOMException("The operation was aborted.", "AbortError"),
+      );
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

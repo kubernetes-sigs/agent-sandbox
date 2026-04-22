@@ -385,9 +385,10 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	if statusName != "" {
 		candidate := &v1alpha1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, candidate); err != nil {
-			if !k8errors.IsNotFound(err) {
-				return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
+			if k8errors.IsNotFound(err) {
+				return nil, nil
 			}
+			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
 		} else if metav1.IsControlledBy(candidate, claim) {
 			sandbox = candidate
 		}

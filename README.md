@@ -55,8 +55,8 @@ flowchart LR
     ClaimController[Claim Controller]
     Controller[Sandbox Controller]
 
-    Pod[Sandbox Pod]
-    Runtime[Sandbox Runtime Environment]
+    Pod[Pod]
+    Runtime[Sandbox Runtime]
 
     WarmPool[SandboxWarmPool]
 
@@ -79,7 +79,7 @@ flowchart LR
     %% Pod handling
     ClaimController -->|adopts pod from| WarmPool
     Sandbox -->|reconciled by| Controller
-    Controller -->|creates Pod if needed| Pod
+    Controller -->|creates Pod| Pod
 
     %% Runtime
     Pod --> Runtime

@@ -59,7 +59,6 @@ const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
 const PodSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
-
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
@@ -634,10 +633,10 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 				// Ignore it and instantly pop the next one.
 				continue
 			}
+			// For real errors, put the key back in line and error out
+			r.WarmSandboxQueue.Add(templateHash, adoptedKey)
 			return nil, queue.SandboxKey{}, err
 		}
-
-
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted for template", "sandbox", adopted.Name, "templateHash", templateHash, "reason", err.Error())

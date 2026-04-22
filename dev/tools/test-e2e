@@ -193,7 +193,7 @@ def ensure_extensions_enabled():
         [
             "kubectl", "get", "deployment", "agent-sandbox-controller",
             "-n", "agent-sandbox-system",
-            "-o", "jsonpath={.spec.template.spec.containers[0].args}",
+            "-o", "json",
         ],
         capture_output=True, text=True, check=False,
     )
@@ -201,7 +201,8 @@ def ensure_extensions_enabled():
         print(f"Warning: could not read controller deployment args: {result.stderr.strip()}")
         return False
 
-    current_args = json.loads(result.stdout) if result.stdout else []
+    deployment = json.loads(result.stdout)
+    current_args = deployment["spec"]["template"]["spec"]["containers"][0].get("args", [])
     if "--extensions" in current_args or "--extensions=true" in current_args:
         print("Controller already running with --extensions. Nothing to do.")
         return True

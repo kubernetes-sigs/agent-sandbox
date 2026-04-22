@@ -1415,7 +1415,7 @@ func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T
 			Name:      "adopted-sandbox",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{
-				{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)},
+				{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claim.Name, UID: claim.UID, Controller: new(true)},
 			},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
@@ -1442,9 +1442,12 @@ func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
-	_, err := reconciler.Reconcile(context.Background(), req)
+	result, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Fatalf("reconcile failed: %v", err)
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected first reconcile to requeue after marking claim expired, got %#v", result)
 	}
 
 	var fetchedClaim extensionsv1alpha1.SandboxClaim
@@ -1460,6 +1463,14 @@ func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T
 	}
 	if !foundReason {
 		t.Fatalf("expected status reason %q, but not found", extensionsv1alpha1.ClaimExpiredReason)
+	}
+
+	result, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected second reconcile to finish without requeue, got %#v", result)
 	}
 
 	sandboxKey := types.NamespacedName{Name: "adopted-sandbox", Namespace: "default"}

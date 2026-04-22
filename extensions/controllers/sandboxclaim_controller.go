@@ -371,7 +371,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	return r.createSandbox(ctx, claim, template)
 }
 
-
 // reconcileExpired ensures the Sandbox is deleted for Retained claims.
 func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
@@ -385,29 +384,18 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	if statusName != "" {
 		candidate := &v1alpha1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, candidate); err != nil {
-			if k8errors.IsNotFound(err) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
-		} else if metav1.IsControlledBy(candidate, claim) {
-			sandbox = candidate
-		}
-	}
-
-	// If status has not been populated yet, try the default cold-start name before
-	// falling back to a namespace-wide ownership lookup.
-	if sandbox == nil && statusName == "" {
-		candidate := &v1alpha1.Sandbox{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Name}, candidate); err != nil {
 			if !k8errors.IsNotFound(err) {
-				return nil, fmt.Errorf("failed to get sandbox %q by claim name: %w", claim.Name, err)
+				return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
 			}
 		} else if metav1.IsControlledBy(candidate, claim) {
 			sandbox = candidate
+		} else {
+			logger.Info("Status-recorded sandbox is not controlled by claim", "claim.Status.SandboxStatus.Name", statusName, "sandbox", candidate.Name, "claim", claim.Name)
 		}
 	}
 
-	// Fallback to ownership lookup in case status has not been populated yet.
+	// Fall back to a namespace-wide ownership lookup if status is empty, stale, or
+	// references a sandbox that is not controlled by this claim.
 	if sandbox == nil {
 		allSandboxes := &v1alpha1.SandboxList{}
 		if err := r.List(ctx, allSandboxes, client.InNamespace(claim.Namespace)); err != nil {

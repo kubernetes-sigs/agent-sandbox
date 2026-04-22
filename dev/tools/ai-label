@@ -70,13 +70,8 @@ for PR in $ACTIVE_PRS; do
     echo "✅ PR #$PR: All Copilot comments resolved. Ready for Human Review. Updating label..."
     gh pr edit "$PR" --add-label "ready-for-review" --remove-label "$PENDING_LABEL"
   else
-    # Check current labels to avoid repeatedly applying the pending label on every cron run
-    CURRENT_LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name')
-    if ! echo "$CURRENT_LABELS" | grep -q "^${PENDING_LABEL}$"; then
-      echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Adding pending label..."
-      gh pr edit "$PR" --add-label "$PENDING_LABEL"
-    else
-      echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Skipping."
-    fi
+    echo "⏳ PR #$PR: Still has $UNRESOLVED unresolved Copilot comments. Ensuring pending label is set..."
+    # 'gh pr edit' is idempotent; it's safe to run even if the label is already present
+    gh pr edit "$PR" --add-label "$PENDING_LABEL"
   fi
 done

@@ -173,9 +173,26 @@ class AsyncSandboxClient(Generic[T]):
         return sandbox
 
     async def get_sandbox(
-        self, claim_name: str, namespace: str = "default", resolve_timeout: int = 30
+        self,
+        claim_name: str,
+        namespace: str = "default",
+        resolve_timeout: int = 30,
+        template_name: str | None = None,
     ) -> T:
         """Retrieves an existing sandbox handle given a sandbox claim name.
+
+        Args:
+            claim_name: Name of the SandboxClaim to attach to.
+            namespace: Kubernetes namespace the claim lives in.
+            resolve_timeout: Seconds to wait while resolving the sandbox
+                name from the claim status.
+            template_name: Optional SandboxTemplate name to validate against
+                the existing claim's ``spec.sandboxTemplateRef.name``.
+                When supplied and the claim references a different
+                template, ``ValueError`` is raised before returning a
+                handle. Mirrors the sync ``SandboxClient.get_sandbox``
+                guard so async session-reattach callers get the same
+                refuse-on-mismatch semantics.
 
         Example::
 
@@ -188,12 +205,36 @@ class AsyncSandboxClient(Generic[T]):
             existing = self._active_connection_sandboxes.get(key)
 
         try:
+            if template_name is not None:
+                claim_object = await self.k8s_helper.get_sandbox_claim(
+                    claim_name, namespace
+                )
+                if not claim_object:
+                    raise SandboxNotFoundError(
+                        f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'."
+                    )
+                existing_template = (
+                    claim_object.get("spec", {})
+                    .get("sandboxTemplateRef", {})
+                    .get("name")
+                )
+                if existing_template != template_name:
+                    raise ValueError(
+                        f"SandboxClaim '{claim_name}' in namespace '{namespace}' references "
+                        f"template '{existing_template}', not '{template_name}'. Refusing "
+                        f"to reattach."
+                    )
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, timeout=resolve_timeout
             )
             sandbox_object = await self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
+        except ValueError:
+            # Template mismatch is a signed-off refusal — propagate
+            # untouched so the caller sees the security-relevant reason
+            # rather than a generic "not found" wrap.
+            raise
         except Exception as e:
             if existing:
                 await existing.terminate()
@@ -232,9 +273,16 @@ class AsyncSandboxClient(Generic[T]):
                     self._active_connection_sandboxes.pop(key, None)
             return list(self._active_connection_sandboxes.keys())
 
-    async def list_all_sandboxes(self, namespace: str = "default") -> list[str]:
-        """Lists all SandboxClaim names in the Kubernetes cluster for a namespace."""
-        return await self.k8s_helper.list_sandbox_claims(namespace)
+    async def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> list[str]:
+        """Lists all SandboxClaim names in the Kubernetes cluster for a namespace.
+
+        Args:
+            namespace: Kubernetes namespace to list claims in.
+            label_selector: Optional Kubernetes label selector string
+                (e.g. ``"app=myapp"``). When set, only claims matching
+                the selector are returned.
+        """
+        return await self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
 
     async def delete_sandbox(self, claim_name: str, namespace: str = "default"):
         """Stops the client side connection and deletes the Kubernetes resources."""

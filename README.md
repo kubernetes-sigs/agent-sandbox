@@ -167,7 +167,7 @@ This is a community-driven effort, and we welcome collaboration!
 
 To help improve our review velocity, we are currently experimenting with AI-assisted code reviews, starting with GitHub Copilot as our automated first-pass reviewer. Here is the workflow:
 
-1. Copilot will be assigned as the first reviewer of all open PRs (skipping the ones without CLA signed)
+1. Copilot will be assigned as the first reviewer of all open PRs (skipping PRs without a signed CLA)
 1. After Copilot reviews are posted, the PR will be labeled `action-required: resolve-copilot-comments`
    * **⚠️ Important Contribution Note:** If you receive a code suggestion from Copilot in your PR, please don't directly apply suggestions via the GitHub UI. It will set Copilot as co-author and break the Kubernetes CLA requirements. For more information, read our [Contributing Guidelines](CONTRIBUTING.md). 
 1. After all of Copilot reviews are marked resolved, the PR will be labeled `ready-for-review`

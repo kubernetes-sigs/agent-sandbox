@@ -452,6 +452,21 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	return service, nil
 }
 
+// clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
+func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+	if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; !exists {
+		return nil
+	}
+	log := log.FromContext(ctx)
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return fmt.Errorf("failed to clear pod name annotation: %w", err)
+	}
+	log.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
+	return nil
+}
+
 // setServiceStatus updates the sandbox status with the service name and FQDN.
 func (r *SandboxReconciler) setServiceStatus(sandbox *sandboxv1alpha1.Sandbox, service *corev1.Service) {
 	sandbox.Status.Service = service.Name
@@ -498,8 +513,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
-			log.Error(err, "Pod not found")
-			return nil, fmt.Errorf("pod in annotation get failed: %w", err)
+			log.Info("Pod referenced by annotation not found, clearing annotation to recover state", "podName", podName)
+			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				return nil, err
+			}
 		}
 		pod = nil
 	}
@@ -528,14 +545,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 
 		// Remove the pod name annotation from the sandbox if it exists
-		if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
-			log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-			patch := client.MergeFrom(sandbox.DeepCopy())
-			delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
-
-			if err := r.Patch(ctx, sandbox, patch); err != nil {
-				return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
-			}
+		if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+			return nil, err
 		}
 
 		return nil, nil
@@ -586,13 +597,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
-			if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; exists {
-				log.Info("Removing pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-				patch := client.MergeFrom(sandbox.DeepCopy())
-				delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
-				if err := r.Patch(ctx, sandbox, patch); err != nil {
-					return nil, fmt.Errorf("failed to remove pod name annotation: %w", err)
-				}
+			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				return nil, err
 			}
 
 			return nil, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",

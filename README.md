@@ -61,10 +61,10 @@ flowchart LR
     WarmPool[SandboxWarmPool]
 
     subgraph Extensions[Extensions]
-        Claim[SandboxClaim]
-        Template[SandboxTemplate]
-        ClaimController[Claim Controller]
-        WarmPool[SandboxWarmPool]
+      Claim
+      Template
+      ClaimController
+      WarmPool
     end
 
     %% User paths

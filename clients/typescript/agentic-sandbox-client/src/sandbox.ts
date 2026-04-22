@@ -752,11 +752,11 @@ export class Sandbox {
     const host = formatGatewayAddress(address);
     // Derive port from the base URL (defaults to 80 for http).
     const port = 80;
-    const deadline = Date.now() + Math.max(remainingMs, 0);
     const probeTimeoutMs = Math.min(
       GATEWAY_PROBE_TIMEOUT_MS,
       Math.max(remainingMs, 0),
     );
+    const deadline = Date.now() + probeTimeoutMs;
 
     console.info(
       `Probing gateway connectivity at ${host}:${port} (timeout ${probeTimeoutMs}ms)...`,

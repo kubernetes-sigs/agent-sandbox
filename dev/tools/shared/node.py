@@ -21,6 +21,51 @@ import tarfile
 import urllib.request
 
 
+def _safe_extractall(tar, install_dir):
+    # tarfile filter='data' requires Python 3.11.4+; validate manually instead.
+    resolved_root = os.path.realpath(install_dir)
+    members = tar.getmembers()
+
+    for member in members:
+        if os.path.isabs(member.name):
+            raise ValueError(f"Unsafe tar member with absolute path: {member.name!r}")
+
+        if member.isdev():
+            raise ValueError(f"Unsafe tar member is a device/FIFO: {member.name!r}")
+
+        resolved_target = os.path.realpath(os.path.join(install_dir, member.name))
+        if resolved_target != resolved_root and \
+                not resolved_target.startswith(resolved_root + os.sep):
+            raise ValueError(f"Unsafe tar member escapes install directory: {member.name!r}")
+
+        if member.issym():
+            if os.path.isabs(member.linkname):
+                raise ValueError(
+                    f"Unsafe symlink with absolute target in {member.name!r}: {member.linkname!r}"
+                )
+            symlink_dir = os.path.dirname(resolved_target)
+            resolved_link = os.path.realpath(os.path.join(symlink_dir, member.linkname))
+            if resolved_link != resolved_root and \
+                    not resolved_link.startswith(resolved_root + os.sep):
+                raise ValueError(
+                    f"Unsafe symlink escapes install directory in {member.name!r}: {member.linkname!r}"
+                )
+
+        if member.islnk():
+            if os.path.isabs(member.linkname):
+                raise ValueError(
+                    f"Unsafe hardlink with absolute target in {member.name!r}: {member.linkname!r}"
+                )
+            resolved_link = os.path.realpath(os.path.join(install_dir, member.linkname))
+            if resolved_link != resolved_root and \
+                    not resolved_link.startswith(resolved_root + os.sep):
+                raise ValueError(
+                    f"Unsafe hardlink escapes install directory in {member.name!r}: {member.linkname!r}"
+                )
+
+        tar.extract(member, path=install_dir)
+
+
 def install_node(install_dir):
     """Downloads and installs Node.js to the specified directory."""
     print(f"Installing Node.js to {install_dir}...")
@@ -62,7 +107,7 @@ def install_node(install_dir):
     print(f"Extracting {tar_path}...")
     try:
         with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=install_dir)
+            _safe_extractall(tar, install_dir)
     except Exception as e:
         print(f"Failed to extract Node.js: {e}")
         return None

@@ -19,6 +19,17 @@ To run only e2e benchmarks:
 ```shell
 make test-e2e --suite=benchmarks
 ```
+
+## Race detection
+Both `test-unit` and `test-e2e` invoke `go test -race`, so data races in
+the concurrently-running reconcilers (`SandboxReconciler`,
+`SandboxClaimReconciler`, `SandboxWarmPoolReconciler`) fail the build
+instead of silently corrupting state. The race-detector binary has a
+non-trivial memory and CPU overhead, so test runs are somewhat slower
+and use more RAM than without it — see
+[go.dev/doc/articles/race_detector](https://go.dev/doc/articles/race_detector)
+for details.
+
 ## Remove the kind cluster
 ```shell
 make delete-kind

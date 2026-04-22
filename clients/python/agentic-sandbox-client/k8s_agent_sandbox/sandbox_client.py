@@ -91,7 +91,7 @@ class SandboxClient(Generic[T]):
         if cleanup:
             atexit.register(self.delete_all)
 
-    def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None, *, shutdown_after_seconds: int | None = None) -> T:
+    def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None, *, shutdown_after_seconds: int | None = None, **kwargs) -> T:
         """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
            the underlying infrastructure.
 
@@ -142,7 +142,8 @@ class SandboxClient(Generic[T]):
                 namespace=namespace,
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
-                k8s_helper=self.k8s_helper
+                k8s_helper=self.k8s_helper,
+                **kwargs
             )
         except Exception:
             # If creation or waiting fails, ensure we don't leave an orphaned claim
@@ -152,7 +153,7 @@ class SandboxClient(Generic[T]):
         self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
         return sandbox
 
-    def get_sandbox(self, claim_name: str, namespace: str = "default", resolve_timeout: int = 30) -> T:
+    def get_sandbox(self, claim_name: str, namespace: str = "default", resolve_timeout: int = 30, **kwargs) -> T:
         """
         Retrieves an existing sandbox handle given a sandbox claim name. 
         If the handle is closed or missing, it re-attaches to the infrastructure.
@@ -193,7 +194,8 @@ class SandboxClient(Generic[T]):
             namespace=namespace,
             connection_config=self.connection_config,
             tracer_config=self.tracer_config,
-            k8s_helper=self.k8s_helper
+            k8s_helper=self.k8s_helper,
+            **kwargs
         )
         
         self._active_connection_sandboxes[key] = new_handle

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 # Constants for API Groups and Resources
 GATEWAY_API_GROUP = "gateway.networking.k8s.io"
 GATEWAY_API_VERSION = "v1"
@@ -29,7 +31,7 @@ POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 PODSNAPSHOT_POD_NAME_LABEL = "podsnapshot.gke.io/pod-name"
 
 PODSNAPSHOT_API_GROUP = "podsnapshot.gke.io"
-PODSNAPSHOT_API_VERSION = "v1alpha1"
+PODSNAPSHOT_API_VERSION = os.environ.get("PODSNAPSHOT_API_VERSION", "v1alpha1")
 PODSNAPSHOT_PLURAL = "podsnapshots"
 PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
 PODSNAPSHOTMANUALTRIGGER_API_KIND = "PodSnapshotManualTrigger"

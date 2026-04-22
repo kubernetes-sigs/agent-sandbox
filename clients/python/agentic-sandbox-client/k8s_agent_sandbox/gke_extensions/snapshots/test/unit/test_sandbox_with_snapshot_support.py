@@ -668,6 +668,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             snapshot_uid="target-snap",
             resource_version=None,
             timeout=180,
+            api_version=PODSNAPSHOT_API_VERSION,
         )
 
     def test_snapshots_delete_all_invalid_strategy(self):
@@ -725,6 +726,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 snapshot_uid="snap-a",
                 resource_version=None,
                 timeout=180,
+                api_version=PODSNAPSHOT_API_VERSION,
             )
 
     @patch(
@@ -806,6 +808,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         snapshot_uid="snap-1",
                         resource_version=None,
                         timeout=180,
+                        api_version=PODSNAPSHOT_API_VERSION,
                     ),
                     call(
                         k8s_helper=self.mock_k8s_helper,
@@ -813,6 +816,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         snapshot_uid="snap-3",
                         resource_version=None,
                         timeout=180,
+                        api_version=PODSNAPSHOT_API_VERSION,
                     ),
                 ],
                 any_order=True,

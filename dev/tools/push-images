@@ -107,6 +107,9 @@ def main(args):
             if service_name == ".":
                 service_name = "agent-sandbox-controller"
 
+            if args.images and service_name not in args.images:
+                continue
+
             print(f"--- Found Dockerfile at: {dockerfile_path}")
             print(f"--- Service Name: {service_name}")
             print(f"--- Context Dir: {context_dir}")
@@ -146,6 +149,11 @@ if __name__ == "__main__":
                         help="Image tag for this build. If not set, a default tag is generated based on date and git commit",
                         type=str,
                         default=os.getenv("IMAGE_TAG"))
+    parser.add_argument("--images",
+                        dest="images",
+                        help="List of images to build and push. If not set, all images will be built and pushed",
+                        nargs="+",
+                        default=[])
     args = parser.parse_args()
 
     if args.kind_cluster_name:

@@ -1,0 +1,130 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# benchmark-kops-gcp runs benchmarks against a kOps cluster on GCP.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# Start in the root of the repository.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+export WORKDIR="${REPO_ROOT}/.build"
+rm -rf "${WORKDIR}"
+mkdir -p "${WORKDIR}/bin"
+
+export BINDIR="${WORKDIR}/bin"
+export PATH="${BINDIR}:${PATH}"
+
+export KUBECONFIG="${WORKDIR}/kubeconfig"
+
+# Install kOps to bin dir
+echo "Installing kOps to ${BINDIR}..."
+GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.35.0
+
+# Get project info
+PROJECT_ID=$(gcloud config get-value project)
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+echo "Using project: ${PROJECT_ID}"
+
+UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
+
+IMAGE_PREFIX="gcr.io/${PROJECT_ID}/"
+export IMAGE_PREFIX
+echo "Using image prefix: ${IMAGE_PREFIX}"
+
+IMAGE_TAG="${UNIQUE_SUFFIX}"
+export IMAGE_TAG
+echo "Using image tag: ${IMAGE_TAG}"
+
+BUCKET_NAME="kops-state-${PROJECT_NUMBER}"
+echo "Using bucket: ${BUCKET_NAME}"
+
+# Create bucket if not exists
+if ! gcloud storage buckets describe "gs://${BUCKET_NAME}" >/dev/null 2>&1; then
+  echo "Creating bucket gs://${BUCKET_NAME}..."
+  gcloud storage buckets create "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --location=us-central1
+else
+  echo "Bucket gs://${BUCKET_NAME} already exists."
+fi
+
+export KOPS_STATE_STORE="gs://${BUCKET_NAME}"
+
+# Compute a relatively unique identifier for this run to allow concurrent runs
+CLUSTER_NAME="sandbox-${UNIQUE_SUFFIX}"
+ZONE="us-central1-a"
+
+cleanup() {
+  echo "Cleaning up..."
+  kops delete cluster --name="${CLUSTER_NAME}" --yes || true
+  # By default we don't delete the bucket, so that we can run parallel tests.
+  if [[ "${CLEANUP_BUCKET:-false}" == "true" ]]; then
+    echo "Deleting bucket gs://${BUCKET_NAME}..."
+    gcloud storage buckets delete "gs://${BUCKET_NAME}" --quiet || true
+  fi
+  rm -rf "${WORKDIR}"
+  echo "DONE"
+}
+
+trap cleanup EXIT
+
+echo "Creating kOps cluster configuration..."
+kops create cluster \
+  --cloud=gce \
+  --name="${CLUSTER_NAME}" \
+  --zones="${ZONE}" \
+  --project="${PROJECT_ID}" \
+  --control-plane-count=1 \
+  --control-plane-size=n2-standard-8 \
+  --node-count=3 \
+  --node-size=n2-standard-8
+
+echo "Applying cluster configuration..."
+kops update cluster --name "${CLUSTER_NAME}" --yes
+
+echo "Exporting kubeconfig..."
+kops export kubeconfig --name "${CLUSTER_NAME}" --admin
+
+echo "Waiting for cluster to be ready..."
+kops validate cluster --wait 10m
+
+# Grant permissions to pull images
+NODE_SA="node-${CLUSTER_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+# Legacy gcr.io
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member="serviceAccount:${NODE_SA}" --role="roles/storage.objectViewer"
+# gcr.io transparently redirecting to artifact registry (but still needs a different IAM permission)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member="serviceAccount:${NODE_SA}" --role="roles/artifactregistry.reader"
+
+# Push images
+for image in "agent-sandbox-controller" "chrome-sandbox"; do
+  echo "Pushing ${image} to ${IMAGE_PREFIX}..."
+  dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
+done
+
+# Deploy to cluster
+echo "Deploying to cluster..."
+dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions
+
+# Wait for controller to be ready
+echo "Waiting for controller to be ready..."
+kubectl rollout status deployment agent-sandbox-controller --namespace agent-sandbox-system --timeout=10m
+
+# Run the benchmarks
+echo "Running benchmarks..."
+dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
+
+echo "Benchmark completed successfully."

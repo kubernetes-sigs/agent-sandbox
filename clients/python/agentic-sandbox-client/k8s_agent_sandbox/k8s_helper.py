@@ -16,7 +16,7 @@ import logging
 import time
 from typing import List
 from kubernetes import client, config, watch
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxClaimFailedError
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -104,18 +104,19 @@ class K8sHelper:
                         f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     claim_object = event['object']
-                    status = claim_object.get('status') or {}
+                    status = claim_object.get('status', {})
                     
                     for cond in status.get('conditions', []):
-                        if (
-                            cond.get('type') == 'Ready'
-                            and cond.get('status') == 'False'
-                            and cond.get('reason') == 'TemplateNotFound'
-                        ):
-                            w.stop()
-                            raise SandboxTemplateNotFoundError(
-                                f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
-                            )
+                        if cond.get('type') == 'Ready' and cond.get('status') == 'False':
+                            reason = cond.get('reason')
+                            if reason == "TemplateNotFound":
+                                w.stop()
+                                raise SandboxTemplateNotFoundError(
+                                    f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                                )
+                            elif reason == "ReconcilerError":
+                                w.stop()
+                                raise SandboxClaimFailedError(f"SandboxClaim failed with reason '{reason}': {cond.get('message', 'Unknown error')}")
 
                     sandbox_status = status.get('sandbox', {})
                     # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
@@ -148,7 +149,7 @@ class K8sHelper:
                     continue
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     sandbox_object = event['object']
-                    status = sandbox_object.get('status') or {}
+                    status = sandbox_object.get('status', {})
                     conditions = status.get('conditions', [])
                     for cond in conditions:
                         if cond.get('type') == 'Ready' and cond.get('status') == 'True':
@@ -231,7 +232,7 @@ class K8sHelper:
                     continue
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     gateway_object = event['object']
-                    status = gateway_object.get('status') or {}
+                    status = gateway_object.get('status', {})
                     addresses = status.get('addresses', [])
                     if addresses:
                         ip_address = addresses[0].get('value')

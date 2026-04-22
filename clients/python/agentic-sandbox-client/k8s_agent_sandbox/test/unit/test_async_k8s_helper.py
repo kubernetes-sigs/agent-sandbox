@@ -20,7 +20,7 @@ import pytest
 pytest.importorskip("kubernetes_asyncio")
 
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
-from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError, SandboxClaimFailedError
 
 
 class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
@@ -135,6 +135,38 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
             await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
             
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_resolve_sandbox_name_fast_fail(self, mock_watch_class):
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "False",
+                            "reason": "ReconcilerError",
+                            "message": "Reconciliation failed"
+                        }
+                    ]
+                }
+            }
+        }
+        
+        async def mock_stream(*args, **kwargs):
+            yield mock_event
+            
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+        
+        with self.assertRaises(SandboxClaimFailedError) as context:
+            await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
+            
+        self.assertIn("SandboxClaim failed with reason 'ReconcilerError': Reconciliation failed", str(context.exception))
 
 if __name__ == "__main__":
     unittest.main()

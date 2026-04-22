@@ -37,7 +37,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxNotFoundError, SandboxClaimFailedError
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -120,30 +120,45 @@ class SandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
+        deadline = time.monotonic() + sandbox_ready_timeout
+        sandbox = None
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
-        
+
         try:
             self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle)
-            # Resolve the sandbox id from the sandbox claim object.
-            # In case of warmpool, sandbox id is not the same as claim name.
-            start_time = time.monotonic()
-            sandbox_id = self.k8s_helper.resolve_sandbox_name(
-                claim_name, namespace, sandbox_ready_timeout
-            )
-            elapsed_time = time.monotonic() - start_time
-            remaining_timeout = max(0, int(sandbox_ready_timeout - elapsed_time))
-            if remaining_timeout <= 0:
-                raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
-            self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
             
-            sandbox = self.sandbox_class(
-                claim_name=claim_name,
-                sandbox_id=sandbox_id,
-                namespace=namespace,
-                connection_config=self.connection_config,
-                tracer_config=self.tracer_config,
-                k8s_helper=self.k8s_helper
-            )
+            attempt = 1
+            while True:
+                try:
+                    remaining_timeout = max(0, int(deadline - time.monotonic()))
+                    if remaining_timeout <= 0:
+                        raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
+                        
+                    sandbox_id = self.k8s_helper.resolve_sandbox_name(
+                        claim_name, namespace, remaining_timeout
+                    )
+                    
+                    remaining_timeout = max(0, int(deadline - time.monotonic()))
+                    if remaining_timeout <= 0:
+                        raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
+                        
+                    self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
+                    
+                    sandbox = self.sandbox_class(
+                        claim_name=claim_name,
+                        sandbox_id=sandbox_id,
+                        namespace=namespace,
+                        connection_config=self.connection_config,
+                        tracer_config=self.tracer_config,
+                        k8s_helper=self.k8s_helper
+                    )
+                    break
+                except SandboxClaimFailedError as e:
+                    if attempt >= 3:
+                        raise
+                    logging.warning(f"SandboxClaim {claim_name} failed: {e}. Retrying resolution (attempt {attempt})...")
+                    attempt += 1
+                    time.sleep(2)
         except Exception:
             # If creation or waiting fails, ensure we don't leave an orphaned claim
             self._delete_claim(claim_name, namespace)

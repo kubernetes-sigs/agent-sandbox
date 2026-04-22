@@ -217,7 +217,12 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	if nodeName == "" {
 		t.Fatalf("pod not scheduled to a node, cannot get node logs")
 	}
-	t.MustGetNodeLogs(nodeName, logOptions)
+	if !t.IsKindCluster() {
+		// TODO: Support fetch node logs on kOps / other clusters
+		t.Logf("not collecting node logs; not running on a kind cluster")
+	} else {
+		t.MustGetNodeLogs(nodeName, logOptions)
+	}
 
 	return metrics
 }

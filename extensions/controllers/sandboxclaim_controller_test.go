@@ -107,9 +107,20 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	templateWithNPDisabled.Name = "test-template-np-disabled"
 	templateWithNPDisabled.Spec.NetworkPolicy = nil
 
+	enableSafeToEvict := true
 	claim := &extensionsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
-		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef:       extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			EnableSafeToEvict: &enableSafeToEvict,
+		},
+	}
+
+	claimWithoutEvict := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-no-evict", Namespace: "default", UID: "claim-no-evict-uid"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
 	}
 
 	uncontrolledSandbox := &sandboxv1alpha1.Sandbox{
@@ -362,6 +373,21 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				validateSandboxHasDefaultAutomountToken(t, sandbox, template)
 				if sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] != "on-completion" {
 					t.Errorf("expected safe-to-evict annotation to be 'on-completion', got %q", sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation])
+				}
+			},
+		},
+		{
+			name:             "sandbox is created without safe-to-evict when not requested",
+			claimToReconcile: claimWithoutEvict,
+			existingObjects:  []client.Object{template},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate) {
+				validateSandboxHasDefaultAutomountToken(t, sandbox, template)
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; ok {
+					t.Errorf("expected safe-to-evict annotation to be absent, got %q", val)
 				}
 			},
 		},
@@ -1550,6 +1576,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		},
 	}
 
+	enableSafeToEvict := true
 	claim := &extensionsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim",
@@ -1560,6 +1587,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
 				Name: "test-template",
 			},
+			EnableSafeToEvict: &enableSafeToEvict,
 		},
 	}
 

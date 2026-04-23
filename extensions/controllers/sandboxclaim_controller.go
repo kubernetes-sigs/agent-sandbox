@@ -59,6 +59,9 @@ var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 // ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
 var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
 
+// ErrSandboxNotOwned indicates the Sandbox exists but is not controlled by this claim.
+var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
+
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
 // getWarmPoolPolicy returns the effective warm pool policy for a claim.
@@ -217,7 +220,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Suppress expected user errors (like missing templates) to avoid crash loops
-	if errors.Is(reconcileErr, ErrTemplateNotFound) || errors.Is(reconcileErr, ErrInvalidMetadata) {
+	if errors.Is(reconcileErr, ErrTemplateNotFound) || errors.Is(reconcileErr, ErrInvalidMetadata) || errors.Is(reconcileErr, ErrSandboxNotOwned) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
 	}
@@ -315,24 +318,33 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Expired claim", "claim", claim.Name)
-	sandbox := &v1alpha1.Sandbox{}
 
-	// Check if Sandbox exists
-	if err := r.Get(ctx, client.ObjectKeyFromObject(claim), sandbox); err != nil {
+	// Fall back to claim.Name when status is unset.
+	statusName := claim.Name
+	if claim.Status.SandboxStatus.Name != "" {
+		statusName = claim.Status.SandboxStatus.Name
+	}
+
+	sandbox := &v1alpha1.Sandbox{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err != nil {
 		if k8errors.IsNotFound(err) {
 			return nil, nil // Sandbox is gone, life is good.
 		}
 		return nil, err
 	}
 
+	// Verify ownership before delete action
+	if !metav1.IsControlledBy(sandbox, claim) {
+		logger.Info("Skipping deletion: Sandbox is not controlled by this claim", "sandbox", sandbox.Name, "claim", claim.Name)
+		return nil, fmt.Errorf("%w: sandbox %q is not owned by claim %q", ErrSandboxNotOwned, sandbox.Name, claim.Name)
+	}
 	// Sandbox exists, delete it.
 	if sandbox.DeletionTimestamp.IsZero() {
-		logger.Info("Deleting Sandbox because Claim expired (Policy=Retain)", "Sandbox", sandbox.Name, "claim", claim.Name)
+		logger.Info("Deleting Sandbox because Claim expired (Policy=Retain)", "sandbox", sandbox.Name, "claim", claim.Name)
 		if err := r.Delete(ctx, sandbox); err != nil {
 			return sandbox, fmt.Errorf("failed to delete expired sandbox: %w", err)
 		}
 	}
-
 	return sandbox, nil
 }
 
@@ -384,6 +396,15 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            err.Error(),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrSandboxNotOwned) {
+			return metav1.Condition{
+				Type:               string(v1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             extensionsv1alpha1.ClaimExpiredReason,
+				Message:            fmt.Sprintf("Claim expired. %v; deletion skipped.", err),
 				ObservedGeneration: claim.Generation,
 			}
 		}

@@ -19,6 +19,16 @@ To run only e2e benchmarks:
 ```shell
 make test-e2e --suite=benchmarks
 ```
+## Running Tests with Race Detector
+
+Go unit tests run with Go’s race detector (`-race`) enabled.
+E2e tests do not run with -race by default, since the race detector significantly increases memory usage (5-10×) and execution time (2-20×), which would slow down PR presubmits.
+
+To run e2e tests with race detection:
+
+```shell
+make test-e2e-race
+```
 ## Remove the kind cluster
 ```shell
 make delete-kind

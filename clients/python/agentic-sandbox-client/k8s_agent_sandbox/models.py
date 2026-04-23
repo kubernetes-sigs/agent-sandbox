@@ -45,7 +45,24 @@ class SandboxLocalTunnelConnectionConfig(BaseModel):
     port_forward_ready_timeout: int = 30  # Timeout in seconds to wait for port-forward to be ready.
     server_port: int = 8888  # Port the sandbox container listens on.
 
-SandboxConnectionConfig = Union[SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, SandboxLocalTunnelConnectionConfig]
+class SandboxInClusterConnectionConfig(BaseModel):
+    """Configuration for direct in-cluster connection to the sandbox pod, bypassing the router.
+
+    By default, connects via stable K8s DNS:
+        http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}
+
+    When use_pod_ip=True, connects directly to the pod IP from the Sandbox status,
+    avoiding DNS resolution at the cost of needing a K8s API call to retrieve the IP.
+    """
+    server_port: int = 8888  # Port the sandbox container listens on.
+    use_pod_ip: bool = False  # If True, connect via pod IP instead of cluster DNS.
+
+SandboxConnectionConfig = Union[
+    SandboxDirectConnectionConfig,
+    SandboxGatewayConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+    SandboxInClusterConnectionConfig,
+]
 
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""

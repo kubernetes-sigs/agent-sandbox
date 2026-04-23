@@ -64,16 +64,13 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	template := &extensionsv1alpha1.SandboxTemplate{}
 	template.Name = "chrome-template"
 	template.Namespace = ns.Name
-	imageTag := os.Getenv("IMAGE_TAG")
-	if imageTag == "" {
-		imageTag = "latest"
-	}
+	imageName := chromeSandboxImageName()
 	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
 					Name:            "chrome-sandbox",
-					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", imageTag),
+					Image:           imageName,
 					ImagePullPolicy: corev1.PullIfNotPresent,
 				},
 			},

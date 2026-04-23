@@ -19,7 +19,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 
 
@@ -49,7 +49,8 @@ class AsyncSandbox:
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandbox. "
-                "Use SandboxDirectConnectionConfig or SandboxGatewayConnectionConfig."
+                "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
+                "or SandboxInClusterConnectionConfig."
             )
 
         self.claim_name = claim_name
@@ -59,11 +60,16 @@ class AsyncSandbox:
 
         self.k8s_helper = k8s_helper or AsyncK8sHelper()
 
+        use_pod_ip = (
+            isinstance(self.connection_config, SandboxInClusterConnectionConfig)
+            and self.connection_config.use_pod_ip
+        )
         self.connector = AsyncSandboxConnector(
             sandbox_id=self.sandbox_id,
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
+            get_pod_ip=self.get_pod_ip if use_pod_ip else None,
         )
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
@@ -91,6 +97,17 @@ class AsyncSandbox:
         pod_name = annotations.get(POD_NAME_ANNOTATION)
         self._pod_name = pod_name if pod_name is not None else self.sandbox_id
         return self._pod_name
+
+    async def get_pod_ip(self) -> str | None:
+        """Fetches the first pod IP from the Sandbox status.
+
+        Always queries the K8s API for the latest IP — the pod IP can change
+        after a pod restart (e.g. when spec.replicas is scaled to 0 and back).
+        Returns None if the controller does not populate podIPs.
+        """
+        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        pod_ips = sandbox_object.get("status", {}).get("podIPs", [])
+        return pod_ips[0] if pod_ips else None
 
     @property
     def commands(self) -> AsyncCommandExecutor | None:

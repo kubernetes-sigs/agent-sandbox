@@ -113,12 +113,12 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template-with-np"}},
 	}
 
-	enableSafeToEvict := true
+	onCompletion := extensionsv1beta1.SafeToEvictPolicyOnCompletion
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef:       extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
-			EnableSafeToEvict: &enableSafeToEvict,
+			SafeToEvict:       &onCompletion,
 		},
 	}
 
@@ -1794,7 +1794,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		},
 	}
 
-	enableSafeToEvict := true
+	onCompletion := extensionsv1beta1.SafeToEvictPolicyOnCompletion
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim",
@@ -1805,7 +1805,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{
 				Name: "test-pool",
 			},
-			EnableSafeToEvict: &enableSafeToEvict,
+			SafeToEvict: &onCompletion,
 		},
 	}
 

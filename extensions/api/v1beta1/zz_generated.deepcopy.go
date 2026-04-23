@@ -148,9 +148,9 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 		(*in).DeepCopyInto(*out)
 	}
 	in.AdditionalPodMetadata.DeepCopyInto(&out.AdditionalPodMetadata)
-	if in.EnableSafeToEvict != nil {
-		in, out := &in.EnableSafeToEvict, &out.EnableSafeToEvict
-		*out = new(bool)
+	if in.SafeToEvict != nil {
+		in, out := &in.SafeToEvict, &out.SafeToEvict
+		*out = new(SafeToEvictPolicy)
 		**out = **in
 	}
 	if in.Env != nil {

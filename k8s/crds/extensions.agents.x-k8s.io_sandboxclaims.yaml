@@ -39,6 +39,8 @@ spec:
                       type: string
                     type: object
                 type: object
+              enableSafeToEvict:
+                type: boolean
               env:
                 items:
                   properties:

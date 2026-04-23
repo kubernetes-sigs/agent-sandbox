@@ -14,8 +14,9 @@
 
 from prometheus_client import Histogram
 
-sandbox_client_discovery_latency_seconds = Histogram(
-    'sandbox_client_discovery_latency_seconds',
-    'Latency of establishing connection to the sandbox in seconds',
-    ['mode', 'status']
+sandbox_client_discovery_latency_ms = Histogram(
+    'sandbox_client_discovery_latency_ms',
+    'Latency of establishing connection to the sandbox in milliseconds',
+    ['mode', 'status'],
+    buckets=(100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000)
 )

@@ -27,7 +27,7 @@ from .models import (
     SandboxLocalTunnelConnectionConfig
 )
 from .k8s_helper import K8sHelper
-from .metrics import sandbox_client_discovery_latency_seconds
+from .metrics import sandbox_client_discovery_latency_ms
 from .exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
@@ -87,11 +87,11 @@ class GatewayConnectionStrategy(ConnectionStrategy):
             self.base_url = f"http://{ip_address}"
             return self.base_url
         except Exception:
-            status = "error"
+            status = "failure"
             raise
         finally:
-            latency = time.monotonic() - start_time
-            sandbox_client_discovery_latency_seconds.labels(mode="gateway", status=status).observe(latency)
+            latency = (time.monotonic() - start_time) * 1000
+            sandbox_client_discovery_latency_ms.labels(mode="gateway", status=status).observe(latency)
 
     def close(self):
         self.base_url = None
@@ -150,7 +150,6 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
                         self.base_url = f"http://127.0.0.1:{local_port}"
                         logging.info(f"Tunnel ready at {self.base_url}")
-                        time.sleep(0.5)
                         return self.base_url
                 except (socket.timeout, ConnectionRefusedError):
                     time.sleep(0.5)
@@ -158,11 +157,11 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             self.close()
             raise TimeoutError("Failed to establish tunnel to Router Service.")
         except Exception:
-            status = "error"
+            status = "failure"
             raise
         finally:
-            latency = time.monotonic() - start_time
-            sandbox_client_discovery_latency_seconds.labels(mode="port_forward", status=status).observe(latency)
+            latency = (time.monotonic() - start_time) * 1000
+            sandbox_client_discovery_latency_ms.labels(mode="port_forward", status=status).observe(latency)
 
     def close(self):
         if self.port_forward_process:

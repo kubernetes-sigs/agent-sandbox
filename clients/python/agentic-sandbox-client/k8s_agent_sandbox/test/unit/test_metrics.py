@@ -20,7 +20,7 @@ import subprocess
 import prometheus_client
 from k8s_agent_sandbox.connector import GatewayConnectionStrategy, LocalTunnelConnectionStrategy, DirectConnectionStrategy
 from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig, SandboxLocalTunnelConnectionConfig, SandboxDirectConnectionConfig
-from k8s_agent_sandbox.metrics import sandbox_client_discovery_latency_seconds
+from k8s_agent_sandbox.metrics import sandbox_client_discovery_latency_ms
 
 class TestMetrics(unittest.TestCase):
     def setUp(self):
@@ -34,11 +34,11 @@ class TestMetrics(unittest.TestCase):
         
         strategy = GatewayConnectionStrategy(config, helper)
         
-        before_count = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
+        before_count = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
         
         url = strategy.connect()
         
-        after_count = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
+        after_count = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
         
         self.assertEqual(url, "http://1.2.3.4")
         self.assertEqual(after_count, before_count + 1.0)
@@ -51,12 +51,12 @@ class TestMetrics(unittest.TestCase):
         
         strategy = GatewayConnectionStrategy(config, helper)
         
-        before_count = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'gateway', 'status': 'error'}) or 0.0
+        before_count = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'gateway', 'status': 'failure'}) or 0.0
         
         with self.assertRaises(Exception):
             strategy.connect()
             
-        after_count = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'gateway', 'status': 'error'}) or 0.0
+        after_count = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'gateway', 'status': 'failure'}) or 0.0
         
         self.assertEqual(after_count, before_count + 1.0)
 
@@ -78,11 +78,11 @@ class TestMetrics(unittest.TestCase):
         
         strategy = LocalTunnelConnectionStrategy(sandbox_id="test", namespace="default", config=config)
         
-        before_count = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
+        before_count = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
         
         url = strategy.connect()
         
-        after_count = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
+        after_count = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
         
         self.assertEqual(url, "http://127.0.0.1:12345")
         self.assertEqual(after_count, before_count + 1.0)
@@ -91,13 +91,13 @@ class TestMetrics(unittest.TestCase):
         config = SandboxDirectConnectionConfig(api_url="http://preconfigured.com")
         strategy = DirectConnectionStrategy(config)
         
-        before_count_port_forward = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
-        before_count_gateway = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
+        before_count_port_forward = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
+        before_count_gateway = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
         
         url = strategy.connect()
         
-        after_count_port_forward = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
-        after_count_gateway = self.registry.get_sample_value('sandbox_client_discovery_latency_seconds_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
+        after_count_port_forward = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'port_forward', 'status': 'success'}) or 0.0
+        after_count_gateway = self.registry.get_sample_value('sandbox_client_discovery_latency_ms_count', labels={'mode': 'gateway', 'status': 'success'}) or 0.0
         
         self.assertEqual(url, "http://preconfigured.com")
         self.assertEqual(after_count_port_forward, before_count_port_forward)

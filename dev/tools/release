@@ -19,8 +19,6 @@ import re
 import argparse
 import subprocess
 import sys
-import json
-import urllib.request
 
 def run_command(cmd):
     """Helper to run shell commands."""
@@ -121,11 +119,10 @@ def main():
         
         if notes_file:
             cmd.extend(["--notes-file", notes_file])
-        else:
-            cmd.append("--generate-notes")
             
         cmd.extend([
             "--title", tag,
+            "--generate-notes",
             "--verify-tag",
             "--draft",
             "--repo", "kubernetes-sigs/agent-sandbox"

@@ -19,60 +19,165 @@ import json
 import urllib.request
 import subprocess
 import argparse
+import re
+
 
 def get_previous_tag(current_tag):
     try:
         tags_out = subprocess.run(
             ["git", "tag", "--list", "v*", "--sort=-v:refname"],
-            check=True, text=True, stdout=subprocess.PIPE
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
         ).stdout.splitlines()
-        
+
         if current_tag in tags_out:
             idx = tags_out.index(current_tag)
             if idx + 1 < len(tags_out):
                 return tags_out[idx + 1]
-        if len(tags_out) > 1:
-            return tags_out[1]
+        if len(tags_out) > 0:
+            return tags_out[0]
         return None
     except subprocess.CalledProcessError:
         return None
 
-def get_commit_titles(prev_tag, current_tag):
+
+def get_commits(prev_tag, current_tag):
     range_str = f"{prev_tag}..{current_tag}" if prev_tag else current_tag
     try:
-        titles = subprocess.run(
-            ["git", "log", range_str, "--pretty=format:%s"],
-            check=True, text=True, stdout=subprocess.PIPE
+        raw_log = subprocess.run(
+            ["git", "log", range_str, "--pretty=format:---COMMIT---%n%s%n%b"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
         ).stdout.strip()
-        return titles
-    except subprocess.CalledProcessError:
-        return ""
 
-def generate_highlights(titles):
-    api_key = os.environ.get("GEMINI_API_KEY")
+        commits = []
+        if raw_log:
+            chunks = raw_log.split("---COMMIT---\n")
+            for chunk in chunks:
+                if not chunk.strip():
+                    continue
+                lines = chunk.splitlines()
+                title = lines[0]
+                body = "\n".join(lines[1:])
+                commits.append({"title": title, "body": body})
+        return commits
+    except subprocess.CalledProcessError:
+        return []
+
+
+def get_pr_numbers(commits):
+    """Extracts PR numbers from commits."""
+    pr_numbers = []
+    patterns = [r"\(#(\d+)\)$", r"Merge pull request #(\d+)"]
+
+    for commit in commits:
+        title = commit["title"]
+        for pattern in patterns:
+            match = re.search(pattern, title)
+            if match:
+                pr_numbers.append(int(match.group(1)))
+                break
+    return list(set(pr_numbers))
+
+
+def get_breaking_changes(pr_numbers):
+    """Fetches breaking changes from PRs with specific label."""
+    breaking_changes = []
+    for pr in pr_numbers:
+        try:
+            out = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    str(pr),
+                    "--json",
+                    "labels,body",
+                    "--repo",
+                    "kubernetes-sigs/agent-sandbox",
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            data = json.loads(out)
+            labels = [l["name"] for l in data.get("labels", [])]
+
+            if "release-note-action-required" in labels:
+                body = data.get("body", "").strip()
+                if body:
+                    breaking_changes.append(f"PR #{pr}: {body}")
+        except subprocess.CalledProcessError:
+            print(f"⚠️ Warning: Failed to fetch PR #{pr} details.")
+            continue
+    return breaking_changes
+
+
+def get_pr_descriptions(pr_numbers):
+    """Fetches PR descriptions for given PR numbers."""
+    pr_descriptions = []
+    for pr in pr_numbers:
+        try:
+            out = subprocess.run(
+                ["gh", "pr", "view", str(pr), "--json", "body", "--repo", "kubernetes-sigs/agent-sandbox"],
+                check=True, text=True, stdout=subprocess.PIPE
+            ).stdout
+            data = json.loads(out)
+            body = data.get("body", "").strip()
+            if body:
+                pr_descriptions.append(f"PR #{pr}: {body}")
+        except subprocess.CalledProcessError:
+            print(f"⚠️ Warning: Failed to fetch PR #{pr} description.")
+            continue
+    return pr_descriptions
+
+
+def generate_highlights(commits, breaking_changes, pr_descriptions, tag):
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         print("⚠️ GEMINI_API_KEY not set. Skipping Gemini highlights.")
         return None
-        
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    
-    prompt = f"You are a release assistant. Please summarize the following commit titles into a professional release note. Include an introductory paragraph highlighting the main achievements of this release, followed by a section called '### Key Highlights' with a bulleted list grouped logically. Keep it concise and focused on user-visible changes.\n\n{titles}"
-    
-    data = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-    
+
+    commit_titles = "\n".join([c["title"] for c in commits])
+    commit_messages = "\n".join([f"- {c['title']}\n  {c['body']}" for c in commits])
+    pr_desc_str = "\n".join([f"- {desc}" for desc in pr_descriptions])
+
+    prompt = f"""**Task:** Generate curated release notes for **Agent Sandbox release draft** {tag} from the provided information, following the structure and tone of the ideal example below.
+
+**Instructions:**
+- Generate only the **Key Highlights**, **Contributors**, and **New Contributors** sections.
+- Summarize the highlights into a few key areas with bold titles describing the feature area (e.g., **Python SDK Advancements**, **Core Stability**).
+- Synthesize information from full commit messages and PR descriptions to describe changes accurately.
+- List contributors as handles (e.g., @handle), extracting them from the provided data.
+
+Input Commit Titles:
+{commit_titles}
+
+Input Full Commit Messages:
+{commit_messages}
+
+Input PR Descriptions:
+{pr_desc_str}
+
+Breaking Changes:
+{breaking_changes}
+"""
+
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
+
     req = urllib.request.Request(
         url,
         data=json.dumps(data).encode("utf-8"),
         headers={"Content-Type": "application/json"},
-        method="POST"
+        method="POST",
     )
-    
+
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             resp_data = json.loads(response.read().decode("utf-8"))
             candidates = resp_data.get("candidates", [])
             if candidates:
@@ -81,35 +186,36 @@ def generate_highlights(titles):
                     return parts[0].get("text")
             return None
     except Exception as e:
-        print(f"⚠️ Error calling Gemini API: {e}")
+        print(f"⚠️ Error calling Gemini API ({type(e).__name__}). Skipping Gemini highlights.")
         return None
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Generate and preview release notes.')
-    parser.add_argument('--tag', required=True, help='The target git tag for the release.')
-    parser.add_argument('--output', default='release_notes_preview.md', help='File to save notes to.')
+    parser = argparse.ArgumentParser(description="Generate and preview release notes.")
+    parser.add_argument(
+        "--tag", required=True, help="The target git tag for the release."
+    )
+    parser.add_argument(
+        "--output", default="release_notes_preview.md", help="File to save notes to."
+    )
     args = parser.parse_args()
 
     tag = args.tag
 
-    # Get Gemini highlights
     prev_tag = get_previous_tag(tag)
     print(f"INFO: Found previous tag: {prev_tag}")
-    titles = get_commit_titles(prev_tag, tag)
-    
-    highlights = generate_highlights(titles)
-    
-    # Get default GitHub notes
-    print("INFO: Fetching default GitHub release notes...")
-    default_notes = ""
-    try:
-        default_notes = subprocess.run(
-            ["gh", "release", "generate-notes", "--tag", tag, "--repo", "kubernetes-sigs/agent-sandbox"],
-            check=True, text=True, stdout=subprocess.PIPE
-        ).stdout.strip()
-    except Exception as e:
-        print(f"⚠️ Error generating default notes: {e}")
-        
+    commits = get_commits(prev_tag, tag)
+
+    # Extract PR numbers and breaking changes
+    pr_numbers = get_pr_numbers(commits)
+    breaking_changes = get_breaking_changes(pr_numbers)
+    pr_descriptions = get_pr_descriptions(pr_numbers)
+
+    # Generate highlights using breaking changes and PR descriptions
+    highlights = generate_highlights(
+        commits, "\n".join(breaking_changes), pr_descriptions, tag
+    )
+
     installation_notes = f"""
 ### Installation
 
@@ -128,23 +234,22 @@ pip install k8s-agent-sandbox=={tag.lstrip('v')}
 ```
 """
 
-    combined_content = f"# 🚀 Announcing Agent Sandbox {tag}!\nWe are excited to announce the release of Agent Sandbox {tag}!\n\n"
+    combined_content = f"# 🚀 Announcing Agent Sandbox {tag}!\n"
     if highlights:
         combined_content += highlights + "\n\n"
-        
-    combined_content += installation_notes + "\n\n"
-        
-    if default_notes:
-        combined_content += default_notes
-        
+        combined_content += installation_notes + "\n\n"
+    else:
+        combined_content += installation_notes + "\n\n"
+
     if combined_content:
         print(f"INFO: Saving release notes to {args.output}...")
-        with open(args.output, 'w') as f:
+        with open(args.output, "w") as f:
             f.write(combined_content)
         print("\n--- Preview ---\n")
         print(combined_content)
     else:
         print("❌ No notes could be generated.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

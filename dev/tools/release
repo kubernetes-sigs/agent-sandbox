@@ -30,13 +30,37 @@ def run_command(cmd):
 
 def release_exists(tag):
     """Returns true when the GitHub release already exists."""
-    result = subprocess.run(
-        ["gh", "release", "view", tag, "--repo", "kubernetes-sigs/agent-sandbox"],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    cmd = ["gh", "release", "view", tag, "--repo", "kubernetes-sigs/agent-sandbox"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        print("Error: GitHub CLI 'gh' was not found in PATH.")
+        sys.exit(1)
+
+    if result.returncode == 0:
+        return True
+
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    combined_output = "\n".join(part for part in [stderr, stdout] if part)
+    normalized_output = combined_output.lower()
+    if "release not found" in normalized_output or "http 404" in normalized_output:
+        return False
+
+    print(
+        "Error checking whether GitHub release exists for "
+        f"{tag}: {' '.join(cmd)} failed with exit code {result.returncode}."
     )
-    return result.returncode == 0
+    if combined_output:
+        print(combined_output)
+    sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description='Generate release manifests.')
@@ -45,14 +69,12 @@ def main():
     args = parser.parse_args()
     tag = args.tag
 
-    # Create the release_assets directory if it doesn't exist
     if not os.path.exists('release_assets'):
         os.makedirs('release_assets')
 
     all_yaml_files = glob.glob('k8s/**/*.yaml', recursive=True)
     image_url = f'registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}'
 
-    # --- Generate manifest.yaml ---
     print('INFO: Preparing core manifest.yaml')
     manifest_files = [f for f in all_yaml_files if 'extensions' not in os.path.basename(f)]
     with open('release_assets/manifest.yaml', 'w') as outfile:
@@ -61,8 +83,6 @@ def main():
                 outfile.write(infile.read())
                 outfile.write('---\n')
 
-
-    # Replace image placeholder in manifest.yaml
     print(f'INFO: Replacing image placeholder in core manifest.yaml with: {image_url}')
     with open('release_assets/manifest.yaml', 'r') as file:
         filedata = file.read()
@@ -73,7 +93,6 @@ def main():
         file.write(filedata)
     print('INFO: Successfully created release_assets/manifest.yaml')
 
-    # --- Generate extensions.yaml ---
     print('INFO: Preparing extensions.yaml')
     extension_files = [f for f in all_yaml_files if 'extensions' in os.path.basename(f)]
     with open('release_assets/extensions.yaml', 'w') as outfile:
@@ -82,7 +101,6 @@ def main():
                 outfile.write(infile.read())
                 outfile.write('---\n')
 
-    # Replace image placeholder in extensions.yaml
     print(f'INFO: Replacing image placeholder in extensions.yaml with: {image_url}')
     with open('release_assets/extensions.yaml', 'r') as file:
         filedata = file.read()
@@ -93,15 +111,14 @@ def main():
         file.write(filedata)
     print('INFO: Successfully created release_assets/extensions.yaml')
 
-    # --- Publish Draft Release ---
     if args.publish:
         print(f"INFO: Publishing draft release {tag} to GitHub...")
         manifest_path = "release_assets/manifest.yaml"
         extensions_path = "release_assets/extensions.yaml"
 
         if not os.path.exists(manifest_path) or not os.path.exists(extensions_path):
-             print("❌ Release assets missing. Cannot publish.")
-             sys.exit(1)
+            print("❌ Release assets missing. Cannot publish.")
+            sys.exit(1)
 
         if release_exists(tag):
             print(f"INFO: Release {tag} already exists; updating assets...")
@@ -113,7 +130,6 @@ def main():
                 "--repo", "kubernetes-sigs/agent-sandbox",
             ])
         else:
-
             run_command([
                 "gh", "release", "create", tag,
                 manifest_path,
@@ -125,7 +141,7 @@ def main():
                 "--repo", "kubernetes-sigs/agent-sandbox",
             ])
         print(f"🎉 Draft release {tag} published successfully!")
-        print(f"👉 Go to https://github.com/kubernetes-sigs/agent-sandbox/releases to review and publish.")
+        print("👉 Go to https://github.com/kubernetes-sigs/agent-sandbox/releases to review and publish.")
 
 if __name__ == '__main__':
     main()

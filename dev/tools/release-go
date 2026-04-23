@@ -14,8 +14,21 @@
 # limitations under the License.
 
 import argparse
+import re
+import sys
 
-from shared.git_ops import validate_tag, check_tag_exists, check_local_repo_state, create_and_push_tag
+from shared.git_ops import check_tag_exists, check_local_repo_state, create_and_push_tag
+
+
+def validate_go_tag(tag):
+    """Strictly validates the version against Go module SemVer requirements."""
+    pattern = r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-][0-9A-Za-z-]*))*)?$"
+
+    if not re.match(pattern, tag):
+        print(f"❌ Error: Tag {tag} is invalid for Go module releases.")
+        print("   Allowed examples: v0.1.0, v1.2.3, v1.2.3-rc.1")
+        sys.exit(1)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Release Go Client.")
@@ -33,7 +46,7 @@ def main():
     remote = args.remote
     tag = args.tag
 
-    validate_tag(tag)
+    validate_go_tag(tag)
     check_local_repo_state(remote)
     check_tag_exists(tag, remote)
     create_and_push_tag(tag, remote=remote)

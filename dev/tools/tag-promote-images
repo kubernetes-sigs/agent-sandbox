@@ -43,7 +43,6 @@ def check_environment():
     print("🔍 Checking environment...")
 
     # Check GitHub CLI (gh)
-    # Explicitly check for None because run_command returns None on error when allow_error=True
     if run_command(["gh", "--version"], capture_output=True, allow_error=True) is None:
         print("❌ 'gh' CLI not found. Please install it")
         sys.exit(1)

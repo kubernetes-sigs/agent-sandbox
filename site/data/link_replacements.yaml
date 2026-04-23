@@ -58,7 +58,13 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/GCP.md$1)'
     description: "GCP.md to GitHub"
 
+  # Go client source links - redirect to GitHub
+  - pattern: '\]\(sandbox/options\.go\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go)'
+    description: "Go client options.go to GitHub"
+
   # Generic relative README.md links (must come after specific rules)
+
   - pattern: '\]\(README\.md(#[^)]+)?\)'
     replacement: null  # Will be dynamically replaced with current section path
     description: "Generic README links to current section"

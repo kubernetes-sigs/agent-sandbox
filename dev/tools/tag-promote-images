@@ -151,7 +151,7 @@ def main():
         sys.exit(1)
 
     print("🛡️  Checking for uncommitted changes...")
-    status = run_command(["git", "status", "--porcelain", "--untracked-files=no"], cwd=k8s_io_dir, capture_output=True)
+    status = run_command(["git", "status", "--porcelain"], cwd=k8s_io_dir, capture_output=True)
     if status:
         print(f"❌ Your k8s.io repo at {k8s_io_dir} has uncommitted changes.")
         print("   Please stash or commit them before running the release script.")

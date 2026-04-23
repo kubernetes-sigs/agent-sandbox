@@ -47,7 +47,7 @@ def check_local_repo_state(remote):
     print(f"🛡️  Verifying local repository state...")
 
     # 1. Check for uncommitted changes
-    if run_command(["git", "status", "--porcelain", "--untracked-files=no"], capture_output=True):
+    if run_command(["git", "status", "--porcelain"], capture_output=True):
         print(
             "❌ You have uncommitted changes in agent-sandbox. Please commit or stash them."
         )

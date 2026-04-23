@@ -32,7 +32,46 @@ description = "Agent Sandbox is a cloud native controller for sandboxes"
 <a id="description"></a>
 {{% blocks/lead color="black"%}}
 <h1 class="text-center">Agent Sandbox provides a secure, and isolated execution layer to safely deploy autonomous AI agents on Kubernetes that generate and run untrusted code at scale.</h1>
-<!-- <div class="video-card">Placeholder</div> -->
+
+<h2 class="use-cases-heading">Use Cases</h2>
+<div class="use-cases-grid">
+  <a class="use-case-card" href="/docs/use-cases/code-execution/">
+    <p class="label">Short-lived sandbox</p>
+    <p class="title">Code Execution</p>
+    <p class="description">Run untrusted code in fully isolated sandboxes. Ideal for code interpreters, analytics tools, and on-demand computation.</p>
+  </a>
+  <a class="use-case-card" href="/docs/use-cases/coding-agents/">
+    <p class="label">Medium-lived sandbox</p>
+    <p class="title">Coding Agents</p>
+    <p class="description">Autonomous agents that write, debug, and refactor code inside secure sandboxes with full dev tooling.</p>
+  </a>
+  <a class="use-case-card" href="/docs/use-cases/computer-use/">
+    <p class="label">Medium-lived sandbox</p>
+    <p class="title">Computer Use</p>
+    <p class="description">AI agents that interact with graphical desktops, browsers, and GUI applications inside isolated sandboxes.</p>
+  </a>
+  <a class="use-case-card" href="/docs/use-cases/ci-cd/">
+    <p class="label">Short to medium-lived sandbox</p>
+    <p class="title">CI/CD</p>
+    <p class="description">Integrate Agent Sandbox into CI/CD pipelines for isolated testing, validation, and automated workflows.</p>
+  </a>
+  <a class="use-case-card" href="/docs/use-cases/openclaw/">
+    <p class="label">Always-lived sandbox</p>
+    <p class="title">Agents in Sandbox — OpenClaw</p>
+    <p class="description">Run always-on agent environments with OpenClaw inside Agent Sandbox for persistent, long-running workloads.</p>
+  </a>
+  <a class="use-case-card" href="/docs/use-cases/gvisor-isolation/">
+    <p class="label">Isolation runtime</p>
+    <p class="title">gVisor Isolation</p>
+    <p class="description">Harden sandbox isolation with gVisor — a userspace kernel that intercepts system calls to protect the host.</p>
+  </a>
+  <a class="use-case-card" href="/docs/use-cases/kata-containers-isolation/">
+    <p class="label">Isolation runtime</p>
+    <p class="title">Kata Containers Isolation</p>
+    <p class="description">Hardware virtualization with a dedicated kernel per sandbox via Kata Containers and QEMU.</p>
+  </a>
+</div>
+
 <div class="info-container">
   <div class="info-card">
     <p class="title">Enable Complex Agentic Workloads</p>

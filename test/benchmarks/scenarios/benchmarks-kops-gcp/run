@@ -36,8 +36,23 @@ export KUBECONFIG="${WORKDIR}/kubeconfig"
 echo "Installing kOps to ${BINDIR}..."
 GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.35.0
 
+# Install resourcectl to bin dir
+echo "Installing resourcectl to ${BINDIR}..."
+pushd dev/tools
+GOBIN="${BINDIR}" go install ./resourcectl
+popd
+
 # Get project info
-PROJECT_ID=$(gcloud config get-value project)
+if [[ -n "${BOSKOS_HOST:-}" ]]; then
+  PROJECT_ID=$(resourcectl get gcp-project)
+  if [[ $? -ne 0 ]]; then
+    echo "Failed to acquire project from Boskos"
+    exit 1
+  fi
+else
+  PROJECT_ID=$(gcloud config get-value project)
+fi
+
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
 echo "Using project: ${PROJECT_ID}"
 
@@ -70,12 +85,17 @@ ZONE="us-central1-a"
 
 cleanup() {
   echo "Cleaning up..."
+
   kops delete cluster --name="${CLUSTER_NAME}" --yes || true
   # By default we don't delete the bucket, so that we can run parallel tests.
   if [[ "${CLEANUP_BUCKET:-false}" == "true" ]]; then
     echo "Deleting bucket gs://${BUCKET_NAME}..."
     gcloud storage buckets delete "gs://${BUCKET_NAME}" --quiet || true
   fi
+
+  echo "Cleaning up resources via resourcectl..."
+  resourcectl cleanup || true
+
   rm -rf "${WORKDIR}"
   echo "DONE"
 }

@@ -39,8 +39,6 @@ spec:
                       type: string
                     type: object
                 type: object
-              enableSafeToEvict:
-                type: boolean
               env:
                 items:
                   properties:
@@ -73,6 +71,12 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+              safeToEvict:
+                enum:
+                - on-completion
+                - true
+                - false
+                type: string
               sandboxTemplateRef:
                 properties:
                   name:

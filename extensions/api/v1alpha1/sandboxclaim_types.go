@@ -74,6 +74,21 @@ const (
 	ShutdownPolicyRetain ShutdownPolicy = "Retain"
 )
 
+// SafeToEvictPolicy describes the policy for cluster-autoscaler.kubernetes.io/safe-to-evict annotation.
+// +kubebuilder:validation:Enum=on-completion;true;false
+type SafeToEvictPolicy string
+
+const (
+	// SafeToEvictPolicyOnCompletion indicates that the pod should be safe to evict only on completion.
+	SafeToEvictPolicyOnCompletion SafeToEvictPolicy = "on-completion"
+
+	// SafeToEvictPolicyTrue indicates that the pod should be safe to evict always.
+	SafeToEvictPolicyTrue SafeToEvictPolicy = "true"
+
+	// SafeToEvictPolicyFalse indicates that the pod should not be safe to evict.
+	SafeToEvictPolicyFalse SafeToEvictPolicy = "false"
+)
+
 // Lifecycle defines the lifecycle management for the SandboxClaim.
 type Lifecycle struct {
 	// shutdownTime is the absolute time when the SandboxClaim expires.
@@ -144,10 +159,9 @@ type SandboxClaimSpec struct {
 	// +optional
 	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
-	// enableSafeToEvict specifies whether to enable the smart eviction policy.
-	// If true, the claimed sandbox pod will be annotated with safe-to-evict="on-completion".
+	// safeToEvict specifies the policy for cluster-autoscaler.kubernetes.io/safe-to-evict annotation.
 	// +optional
-	EnableSafeToEvict *bool `json:"enableSafeToEvict,omitempty"`
+	SafeToEvict *SafeToEvictPolicy `json:"safeToEvict,omitempty"`
 
 	// env is a list of environment variables to inject into the sandbox
 	// +listType=atomic

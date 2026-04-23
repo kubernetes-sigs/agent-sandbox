@@ -35,9 +35,9 @@ The Sandbox controller handles the full lifecycle out of the box: creation, sche
 
 Agent Sandbox builds on standard Kubernetes primitives and integrates cleanly with existing cluster tooling — RBAC, namespaces, network policies, and resource quotas all apply as usual. The extension CRDs let platform teams define reusable `SandboxTemplate`s so developers can claim sandboxes without needing to know the underlying configuration details.
 
-### Python SDK for programmatic access
+### Client SDKs for programmatic access
 
-A first-class [Python client](./python-client/) lets agents and applications create, query, and manage sandboxes programmatically, enabling fully automated sandbox lifecycles within LLM orchestration frameworks.
+Agent Sandbox provides first-class clients for both [Python](./python-client/) and [Go](./go-client/), so agents and applications can create, query, and manage sandboxes programmatically in the language that best fits their runtime and platform.
 
 ## Core capabilities
 
@@ -49,7 +49,8 @@ A first-class [Python client](./python-client/) lets agents and applications cre
 | **SandboxWarmPool** | Pre-warmed pod pools for near-instant sandbox allocation |
 | **Hibernation & resume** | Pause sandboxes to free compute resources; resume automatically on network activity |
 | **Runtime flexibility** | Works with standard containers, gVisor, Kata Containers, and other OCI-compatible runtimes |
-| **Python SDK** | High-level client library for programmatic sandbox management |
+| **Python SDK** | High-level client library for programmatic sandbox management in Python-based agent runtimes |
+| **Go SDK** | High-level client library for programmatic sandbox management in Go services and controllers |
 | **Scheduled deletion** | Automatic cleanup of sandboxes after a configurable TTL |
 
 ## Where to go next

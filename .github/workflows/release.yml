@@ -75,8 +75,8 @@ jobs:
         if: github.event.inputs.tag != ''
         id: set-tag
         run: |
-          echo "run_release=true" >> $GITHUB_OUTPUT
-          echo "new_tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          echo "run_release=true" >> "$GITHUB_OUTPUT"
+          echo "new_tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Auto Tag if New Commits
         if: github.event.inputs.tag == ''

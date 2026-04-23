@@ -52,9 +52,6 @@ flowchart LR
     Template[SandboxTemplate]
     Sandbox[Sandbox]
 
-    ClaimController[Claim Controller]
-    Controller[Sandbox Controller]
-
     Pod[Pod]
     Runtime[Sandbox Runtime]
 
@@ -63,7 +60,6 @@ flowchart LR
     subgraph Extensions[Extensions]
       Claim
       Template
-      ClaimController
       WarmPool
     end
 
@@ -73,13 +69,11 @@ flowchart LR
 
     %% Claim workflow
     Claim -->|references| Template
-    Claim -->|reconciled by| ClaimController
-    ClaimController -->|creates| Sandbox
+    Claim -->|adopts| Sandbox
 
     %% Pod handling
-    ClaimController -->|adopts pod from| WarmPool
-    Sandbox -->|reconciled by| Controller
-    Controller -->|creates Pod| Pod
+    Claim -->|adopts sandboxes from| WarmPool
+    Sandbox -->|creates Pod| Pod
 
     %% Runtime
     Pod --> Runtime

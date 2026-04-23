@@ -52,13 +52,13 @@ def check_environment():
         sys.exit(1)
 
     # Check Google Cloud CLI (gcloud)
-    test_image = f"{STAGING_REPO_BASE}/{IMAGES_TO_PROMOTE[0]}"
     # Attempt to list tags for one of our staging images to verify authentication/scopes
+    test_image = f"{STAGING_REPO_BASE}/{IMAGES_TO_PROMOTE[0]}"
     if run_command(["gcloud", "container", "images", "list-tags", test_image, "--limit=1"], 
                   capture_output=True, allow_error=True) is None:
         print(f"❌ Failed to access staging registry: {test_image}")
         print("   Your current gcloud identity may not have the required permissions or scopes.")
-        print("   If you are on CloudTop, please run 'gcloud auth login' to authenticate as yourself.")
+        print("   Run 'gcloud auth login' to authenticate.")
         sys.exit(1)
 
 def get_gh_username():

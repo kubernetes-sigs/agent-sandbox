@@ -1225,6 +1225,10 @@ func verifySandboxCandidate(candidate *v1alpha1.Sandbox, claim *extensionsv1alph
 		return err
 	}
 
+	if !isSandboxReady(candidate) {
+		return fmt.Errorf("sandbox is not ready")
+	}
+
 	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
 	if candidate.Labels[sandboxTemplateRefHash] != templateHash {
 		return fmt.Errorf("incorrect template hash, expected %v, got %v", templateHash, candidate.Labels[sandboxTemplateRefHash])

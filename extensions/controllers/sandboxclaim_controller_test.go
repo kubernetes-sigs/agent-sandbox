@@ -1306,7 +1306,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: true,
 		},
 		{
-			name: "adopts sandboxes from queue regardless of ready state",
+			name: "skips not-ready sandboxes in queue, adopts first ready candidate",
 			existingObjects: []client.Object{
 				template,
 				claim,
@@ -1315,20 +1315,19 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				createWarmPoolSandbox("young-ready", metav1.Now(), true),
 			},
 			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "not-ready",
+			expectedAdoptedSandbox:  "middle-ready",
 			expectNewSandboxCreated: false,
 		},
 		{
-			name: "adopts first available non-ready sandbox from queue",
+			name: "skips all not-ready sandboxes and falls through to cold creation",
 			existingObjects: []client.Object{
 				template,
 				claim,
 				createWarmPoolSandbox("not-ready-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
 				createWarmPoolSandbox("not-ready-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
 			},
-			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "not-ready-1",
-			expectNewSandboxCreated: false,
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
 		},
 		{
 			name: "corrects stale pod-name annotation when adopting sandbox",

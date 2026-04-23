@@ -20,6 +20,19 @@ import subprocess
 from shared import utils
 
 
+def _get_version_build_args():
+    """Returns build args for version info injection into Go binaries."""
+    import datetime
+    git_version = utils.git_describe()
+    git_sha = utils.git_sha()
+    build_date = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return [
+        f"--build-arg=GIT_VERSION={git_version}",
+        f"--build-arg=GIT_SHA={git_sha}",
+        f"--build-arg=BUILD_DATE={build_date}",
+    ]
+
+
 def create_buildx_builder_if_not_exists():
     builder_name = "agent-sandbox-builder"
     try:
@@ -59,6 +72,8 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
         os.path.basename(dockerfile_path),
         ".",
     ])
+    # Inject version info into Go binaries
+    build_cmd.extend(_get_version_build_args())
     subprocess.run(build_cmd, cwd=srcdir, check=True)
     print(f"pushed image {image_name}")
 

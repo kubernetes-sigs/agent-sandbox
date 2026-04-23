@@ -934,12 +934,15 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name                 string
-		claim                *extensionsv1alpha1.SandboxClaim
-		sandboxIsExpired     bool
-		expectClaimDeleted   bool
-		expectSandboxDeleted bool
-		expectStatus         string
+		name                       string
+		claim                      *extensionsv1alpha1.SandboxClaim
+		sandboxIsExpired           bool
+		isWarmPool                 bool
+		sandboxNotOwned            bool // sandbox exists at statusName but belongs to a different owner
+		expectClaimDeleted         bool
+		expectSandboxDeleted       bool
+		expectSandboxStatusCleared bool // SandboxStatus.Name and PodIPs must be empty
+		expectStatus               string
 	}{
 		{
 			name:                 "Policy=Retain -> Should Retain Claim but DELETE Sandbox",
@@ -948,6 +951,24 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			expectClaimDeleted:   false,
 			expectSandboxDeleted: true, // Controller explicitly deletes Sandbox here.
 			expectStatus:         extensionsv1alpha1.ClaimExpiredReason,
+		},
+		{
+			name:                 "Policy=Retain (Sandbox from Warm Pool) -> Should Retain Claim but DELETE Sandbox",
+			claim:                createClaim("retain-claim-warm-pool", extensionsv1alpha1.ShutdownPolicyRetain),
+			sandboxIsExpired:     false,
+			isWarmPool:           true,
+			expectClaimDeleted:   false,
+			expectSandboxDeleted: true, // Controller explicitly deletes Sandbox here.
+			expectStatus:         extensionsv1alpha1.ClaimExpiredReason,
+		},
+		{
+			name:                       "Policy=Retain, Sandbox not owned by claim -> skip deletion, SandboxStatus cleared",
+			claim:                      createClaim("retain-claim-unowned", extensionsv1alpha1.ShutdownPolicyRetain),
+			sandboxNotOwned:            true,
+			expectClaimDeleted:         false,
+			expectSandboxDeleted:       false,
+			expectSandboxStatusCleared: true,
+			expectStatus:               extensionsv1alpha1.ClaimExpiredReason,
 		},
 		{
 			name:               "Policy=Delete && Sandbox Expired -> Should Delete Claim",
@@ -992,6 +1013,22 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
 			sandbox := createSandbox(tc.claim.Name, tc.sandboxIsExpired)
+
+			// Hack: Simulate warmPool adopted sandbox
+			if tc.isWarmPool {
+				sandbox.Name = "warm-pool-sandbox-adopted"
+				tc.claim.Status.SandboxStatus.Name = sandbox.Name
+			}
+
+			// Simulate a sandbox that exists at statusName but belongs to a different owner.
+			if tc.sandboxNotOwned {
+				sandbox.Name = "foreign-sandbox"
+				sandbox.OwnerReferences = []metav1.OwnerReference{
+					{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: "other-claim", UID: "other-uid", Controller: func() *bool { b := true; return &b }()},
+				}
+				tc.claim.Status.SandboxStatus.Name = sandbox.Name
+			}
+
 			client := fake.NewClientBuilder().WithScheme(scheme).
 				WithObjects(template, tc.claim, sandbox).
 				WithStatusSubresource(tc.claim).Build()
@@ -1031,11 +1068,22 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				if !foundReason {
 					t.Errorf("Expected status reason %q, but not found", tc.expectStatus)
 				}
+
+				if tc.expectSandboxStatusCleared {
+					if fetchedClaim.Status.SandboxStatus.Name != "" {
+						t.Errorf("expected SandboxStatus.Name to be empty, got %q", fetchedClaim.Status.SandboxStatus.Name)
+					}
+					if fetchedClaim.Status.SandboxStatus.PodIPs != nil {
+						t.Errorf("expected SandboxStatus.PodIPs to be nil, got %v", fetchedClaim.Status.SandboxStatus.PodIPs)
+					}
+				}
 			}
 
 			// 2. Verify Sandbox
 			var fetchedSandbox sandboxv1alpha1.Sandbox
-			err = client.Get(context.Background(), req.NamespacedName, &fetchedSandbox)
+
+			// The Sandbox might now have different name than the claim!
+			err = client.Get(context.Background(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, &fetchedSandbox)
 
 			if tc.expectSandboxDeleted {
 				if !k8errors.IsNotFound(err) {

@@ -590,6 +590,60 @@ h1.text-center {
     border-radius: 0.375rem;
 }
 
+// --------------------------------------------------
+// dark-themed tables matching site design
+// Override Docsy's Bootstrap table styles which use
+// .td-content table:not(.td-initial) > :not(caption) > * > *
+// --------------------------------------------------
+.td-content table:not(.td-initial) {
+  border-collapse: collapse !important;
+  border-spacing: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  overflow: visible !important;
+  margin: 1.5rem 0 !important;
+
+  > thead {
+    background-color: rgba(255, 255, 255, 0.08) !important;
+
+    > tr > th {
+      color: #fff !important;
+      background-color: transparent !important;
+      font-weight: 600 !important;
+      padding: 0.75rem 1rem !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.15) !important;
+      border-top: none !important;
+    }
+  }
+
+  > tbody {
+    > tr {
+      &:hover {
+        background-color: rgba(255, 255, 255, 0.04) !important;
+      }
+
+      &:last-child > td {
+        border-bottom: none !important;
+      }
+
+      > td {
+        color: rgba(255, 255, 255, 0.85) !important;
+        background-color: transparent !important;
+        padding: 0.75rem 1rem !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-top: none !important;
+      }
+    }
+  }
+
+  // Remove Docsy's striped row coloring
+  &.table-striped > tbody > tr:nth-of-type(2n+1) > * {
+    color: rgba(255, 255, 255, 0.85) !important;
+    background-color: transparent !important;
+    --bs-table-accent-bg: transparent !important;
+  }
+}
+
 .td-page-meta__lastmod {
   color: #fff !important;
   padding-bottom: 2rem;

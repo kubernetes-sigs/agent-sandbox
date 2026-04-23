@@ -31,9 +31,9 @@ from .trace_manager import (
 )
 from .sandbox import Sandbox
 from .models import (
-    SandboxConnectionConfig, 
-    SandboxLocalTunnelConnectionConfig, 
-    SandboxTracerConfig
+    SandboxConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+    SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
 from .utils import construct_sandbox_claim_lifecycle_spec
@@ -135,14 +135,14 @@ class SandboxClient(Generic[T]):
             if remaining_timeout <= 0:
                 raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
             self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
-            
+
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
                 sandbox_id=sandbox_id,
                 namespace=namespace,
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
-                k8s_helper=self.k8s_helper
+                k8s_helper=self.k8s_helper,
             )
         except Exception:
             # If creation or waiting fails, ensure we don't leave an orphaned claim

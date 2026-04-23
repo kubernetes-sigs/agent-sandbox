@@ -30,7 +30,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,8 @@ class AsyncSandboxClient(Generic[T]):
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
-                "Use SandboxDirectConnectionConfig or SandboxGatewayConnectionConfig. "
+                "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, or "
+                "SandboxInClusterConnectionConfig. "
                 "For local development with kubectl port-forward, use the synchronous SandboxClient."
             )
 

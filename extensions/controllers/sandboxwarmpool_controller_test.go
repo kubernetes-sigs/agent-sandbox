@@ -989,6 +989,92 @@ func TestFindWarmPoolsForTemplate(t *testing.T) {
 	require.Equal(t, namespace, requests[0].Namespace)
 }
 
+func TestReconcilePoolReadyToEvictLabel(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(1)
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	template := createTemplate(poolNamespace)
+
+	trueVal := true
+	falseVal := false
+
+	testCases := []struct {
+		name                 string
+		markPodsReadyToEvict *bool
+		expectedLabelPresent bool
+	}{
+		{
+			name:                 "label present when markPodsReadyToEvict is nil (default)",
+			markPodsReadyToEvict: nil,
+			expectedLabelPresent: true,
+		},
+		{
+			name:                 "label present when markPodsReadyToEvict is true",
+			markPodsReadyToEvict: &trueVal,
+			expectedLabelPresent: true,
+		},
+		{
+			name:                 "label absent when markPodsReadyToEvict is false",
+			markPodsReadyToEvict: &falseVal,
+			expectedLabelPresent: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			warmPool := &extensionsv1alpha1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName + "-" + sandboxcontrollers.NameHash(tc.name),
+					Namespace: poolNamespace,
+					UID:       types.UID("uid-" + sandboxcontrollers.NameHash(tc.name)),
+				},
+				Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+					Replicas: replicas,
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+						Name: templateName,
+					},
+					MarkPodsReadyToEvict: tc.markPodsReadyToEvict,
+				},
+			}
+
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithRuntimeObjects(template).
+					Build(),
+				Scheme: scheme,
+			}
+
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			list := &sandboxv1alpha1.SandboxList{}
+			err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+			require.NoError(t, err)
+
+			found := false
+			for _, sb := range list.Items {
+				if metav1.IsControlledBy(&sb, warmPool) {
+					found = true
+					val, ok := sb.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1alpha1.SandboxReadyToEvictLabel]
+					if tc.expectedLabelPresent {
+						require.True(t, ok, "Sandbox %s should have ready-to-evict label", sb.Name)
+						require.Equal(t, "true", val)
+					} else {
+						require.False(t, ok, "Sandbox %s should NOT have ready-to-evict label", sb.Name)
+					}
+				}
+			}
+			require.True(t, found, "Should have created a sandbox for the pool")
+		})
+	}
+}
+
 func TestComparePodSpecsNormalization(t *testing.T) {
 	falseVal := false
 	trueVal := true

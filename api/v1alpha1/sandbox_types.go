@@ -41,6 +41,8 @@ const (
 	SandboxPropagatedLabelsAnnotation = "agents.x-k8s.io/propagated-labels"
 	// SandboxPropagatedAnnotationsAnnotation is the annotation used to track the annotations explicitly propagated from sandbox spec to pod.
 	SandboxPropagatedAnnotationsAnnotation = "agents.x-k8s.io/propagated-annotations"
+	// SandboxReadyToEvictLabel is the label used to mark pods as ready to evict.
+	SandboxReadyToEvictLabel = "ready-to-evict"
 )
 
 type PodMetadata struct {

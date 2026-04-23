@@ -541,6 +541,9 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			delete(adopted.Labels, sandboxTemplateRefHash)
 			delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
 
+			// Remove ready-to-evict label from pod template if present
+			delete(adopted.Spec.PodTemplate.ObjectMeta.Labels, v1alpha1.SandboxReadyToEvictLabel)
+
 			// Transfer ownership from SandboxWarmPool to SandboxClaim
 			adopted.OwnerReferences = nil
 			if err := controllerutil.SetControllerReference(claim, adopted, r.Scheme); err != nil {

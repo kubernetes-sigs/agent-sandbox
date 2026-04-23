@@ -1371,6 +1371,23 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
+			name: "removes ready-to-evict label from adopted sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-evict", metav1.Now(), true)
+					if sb.Spec.PodTemplate.ObjectMeta.Labels == nil {
+						sb.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+					}
+					sb.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1alpha1.SandboxReadyToEvictLabel] = "true"
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-evict",
+		},
+		{
 			name: "retries on conflict when adopting sandbox",
 			existingObjects: []client.Object{
 				template,
@@ -1473,6 +1490,11 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				// 4. Verify the adopted sandbox records the adopted pod name
 				if val := adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; val != adoptedSandbox.Name {
 					t.Errorf("expected adopted sandbox to have %q annotation %q, got %q; annotations=%v", sandboxv1alpha1.SandboxPodNameAnnotation, adoptedSandbox.Name, val, adoptedSandbox.Annotations)
+				}
+
+				// Verify ready-to-evict label is removed
+				if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1alpha1.SandboxReadyToEvictLabel]; exists {
+					t.Errorf("expected ready-to-evict label to be removed from adopted sandbox pod template")
 				}
 
 				for key, expected := range tc.expectedAnnotations {

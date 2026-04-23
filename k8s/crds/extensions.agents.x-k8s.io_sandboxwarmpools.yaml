@@ -35,6 +35,9 @@ spec:
             type: object
           spec:
             properties:
+              markPodsReadyToEvict:
+                default: true
+                type: boolean
               replicas:
                 format: int32
                 minimum: 0

@@ -333,6 +333,10 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	podLabels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name)
 	podLabels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = currentPodTemplateHash
 
+	if warmPool.Spec.MarkPodsReadyToEvict == nil || *warmPool.Spec.MarkPodsReadyToEvict {
+		podLabels[sandboxv1alpha1.SandboxReadyToEvictLabel] = "true"
+	}
+
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
 

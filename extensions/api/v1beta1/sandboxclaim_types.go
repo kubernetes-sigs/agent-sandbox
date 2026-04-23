@@ -119,6 +119,11 @@ type SandboxClaimSpec struct {
 	// +optional
 	AdditionalPodMetadata sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
+	// enableSafeToEvict specifies whether to enable the smart eviction policy.
+	// If true, the claimed sandbox pod will be annotated with safe-to-evict="on-completion".
+	// +optional
+	EnableSafeToEvict *bool `json:"enableSafeToEvict,omitempty"`
+
 	// env is a list of environment variables to inject into the sandbox.
 	// Please note adding this field means the Sandbox will always be cold-started from the
 	// template of the warmpool.

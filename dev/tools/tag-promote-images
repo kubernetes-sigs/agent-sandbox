@@ -129,7 +129,6 @@ def main():
 
     # --- Pre-flight Check ---
     check_local_repo_state(REMOTE_UPSTREAM)
-    sys.exit(0)
     check_tag_exists(tag, remote=REMOTE_UPSTREAM)
 
     # --- Step 1: Create and Push Tag ---

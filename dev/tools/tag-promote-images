@@ -44,29 +44,29 @@ def check_environment():
 
     # Check GitHub CLI (gh)
     try:
-        run_command(["gh", "--version"], capture_output=True)
+        run_command(["gh", "--version", allow_error=True], capture_output=True)
     except Exception:
         print("❌ 'gh' CLI not found. Please install it: https://cli.github.com/")
         sys.exit(1)
 
     try:
-        run_command(["gh", "auth", "status"], capture_output=True)
+        run_command(["gh", "auth", "status", allow_error=True], capture_output=True)
     except Exception:
         print("❌ Not logged in to GitHub. Please run 'gh auth login'.")
         sys.exit(1)
 
     # Check Google Cloud CLI (gcloud)
     try:
-        run_command(["gcloud", "--version"], capture_output=True)
+        run_command(["gcloud", "--version", allow_error=True], capture_output=True)
     except Exception:
         print("❌ 'gcloud' CLI not found. Please install it.")
         sys.exit(1)
 
     try:
-        auth_list = run_command(["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"], capture_output=True)
+        auth_list = run_command(["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"], capture_output=True, allow_error=True)
         if not auth_list:
-             print("❌ Not logged in to gcloud. Please run 'gcloud auth login'.")
-             sys.exit(1)
+            print("❌ Not logged in to gcloud. Please run 'gcloud auth login'.")
+            sys.exit(1)
     except Exception:
         print("❌ Error checking gcloud auth status. You might need to upgrade gcloud or run 'gcloud auth login'.")
         sys.exit(1)

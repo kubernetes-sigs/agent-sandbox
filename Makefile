@@ -38,7 +38,11 @@ test-unit:
 
 .PHONY: test-e2e
 test-e2e:
-	./dev/ci/presubmits/test-e2e
+	RACE=$(RACE) ./dev/ci/presubmits/test-e2e
+
+.PHONY: test-e2e-race
+test-e2e-race:
+	RACE=1 ./dev/ci/presubmits/test-e2e
 
 .PHONY: test-e2e-benchmarks
 test-e2e-benchmarks:

@@ -39,8 +39,6 @@ spec:
                       type: string
                     type: object
                 type: object
-              enableSafeToEvict:
-                type: boolean
               env:
                 items:
                   properties:
@@ -69,6 +67,12 @@ spec:
                     format: date-time
                     type: string
                 type: object
+              safeToEvict:
+                enum:
+                - on-completion
+                - true
+                - false
+                type: string
               sandboxTemplateRef:
                 properties:
                   name:

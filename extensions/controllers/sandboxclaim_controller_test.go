@@ -103,12 +103,12 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	templateWithNPDisabled.Name = "test-template-np-disabled"
 	templateWithNPDisabled.Spec.NetworkPolicy = nil
 
-	enableSafeToEvict := true
+	onCompletion := extensionsv1alpha1.SafeToEvictPolicyOnCompletion
 	claim := &extensionsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef:       extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
-			EnableSafeToEvict: &enableSafeToEvict,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			SafeToEvict: &onCompletion,
 		},
 	}
 
@@ -1165,7 +1165,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		},
 	}
 
-	enableSafeToEvict := true
+	onCompletion := extensionsv1alpha1.SafeToEvictPolicyOnCompletion
 	claim := &extensionsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim",
@@ -1176,7 +1176,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
 				Name: "test-template",
 			},
-			EnableSafeToEvict: &enableSafeToEvict,
+			SafeToEvict: &onCompletion,
 		},
 	}
 

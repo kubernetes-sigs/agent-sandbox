@@ -442,7 +442,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             extensionsv1alpha1.ClaimExpiredReason,
-			Message:            "Claim expired. Sandbox resources deleted.",
+			Message:            "Claim expired. Sandbox cleanup initiated.",
 			ObservedGeneration: claim.Generation,
 		}
 	}

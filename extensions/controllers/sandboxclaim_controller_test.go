@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -1045,7 +1044,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: "default"}}
 			var err error
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				_, err = reconciler.Reconcile(context.Background(), req)
 				if err != nil {
 					t.Fatalf("reconcile failed: %v", err)
@@ -1124,6 +1123,7 @@ func TestSandboxClaimMirrorsFinishedConditionAndSchedulesTTL(t *testing.T) {
 		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
 	}
 
+	controller := true
 	sandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claim.Name,
@@ -1133,7 +1133,7 @@ func TestSandboxClaimMirrorsFinishedConditionAndSchedulesTTL(t *testing.T) {
 				Kind:       "SandboxClaim",
 				Name:       claim.Name,
 				UID:        claim.UID,
-				Controller: ptr.To(true),
+				Controller: &controller,
 			}},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
@@ -1196,6 +1196,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 		}
 	}
 
+	controller := true
 	createSandbox := func(claim *extensionsv1alpha1.SandboxClaim) *sandboxv1alpha1.Sandbox {
 		return &sandboxv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1206,7 +1207,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 					Kind:       "SandboxClaim",
 					Name:       claim.Name,
 					UID:        claim.UID,
-					Controller: ptr.To(true),
+					Controller: &controller,
 				}},
 			},
 			Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
@@ -1329,6 +1330,7 @@ func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
 		}},
 	}
 
+	controller := true
 	sandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claim.Name,
@@ -1338,7 +1340,7 @@ func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
 				Kind:       "SandboxClaim",
 				Name:       claim.Name,
 				UID:        claim.UID,
-				Controller: ptr.To(true),
+				Controller: &controller,
 			}},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},

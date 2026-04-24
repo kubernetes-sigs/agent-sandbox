@@ -29,6 +29,8 @@ func TestTimeLeft(t *testing.T) {
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second)),
 	}
+	shutdownInFiveSeconds := metav1.NewTime(now.Add(5 * time.Second))
+	shutdownInFiveMinutes := metav1.NewTime(now.Add(5 * time.Minute))
 	zero := int32(0)
 	twoMinutes := int32(120)
 
@@ -66,7 +68,7 @@ func TestTimeLeft(t *testing.T) {
 		},
 		{
 			name:                    "earlier shutdown time wins",
-			shutdownTime:            ptrToTime(metav1.NewTime(now.Add(5 * time.Second))),
+			shutdownTime:            &shutdownInFiveSeconds,
 			ttlSecondsAfterFinished: &twoMinutes,
 			finishedCondition:       finishedCondition,
 			wantExpired:             false,
@@ -74,7 +76,7 @@ func TestTimeLeft(t *testing.T) {
 		},
 		{
 			name:                    "later shutdown time loses to ttl",
-			shutdownTime:            ptrToTime(metav1.NewTime(now.Add(5 * time.Minute))),
+			shutdownTime:            &shutdownInFiveMinutes,
 			ttlSecondsAfterFinished: &twoMinutes,
 			finishedCondition:       finishedCondition,
 			wantExpired:             false,
@@ -89,8 +91,4 @@ func TestTimeLeft(t *testing.T) {
 			require.Equal(t, tc.wantRequeue, requeueAfter)
 		})
 	}
-}
-
-func ptrToTime(t metav1.Time) *metav1.Time {
-	return &t
 }

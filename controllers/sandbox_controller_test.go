@@ -2203,7 +2203,8 @@ func TestSandboxShutdownExpiryUsesTwoPassAndPreservesFinishedCondition(t *testin
 			require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &corev1.Pod{}))
 			require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, &corev1.Service{}))
 
-			updatedSandbox.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(-1 * time.Minute)))
+			expiredShutdownTime := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+			updatedSandbox.Spec.ShutdownTime = &expiredShutdownTime
 			require.NoError(t, r.Update(t.Context(), updatedSandbox))
 
 			result, err = r.Reconcile(t.Context(), req)

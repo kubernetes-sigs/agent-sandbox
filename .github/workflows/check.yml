@@ -1,13 +1,6 @@
 name: checks
 on:
   pull_request:
-  push:
-    branches:
-      - 'release-*'
-      - 'master'
-      - 'main'
-    tags:
-      - 'v*'
     # Only run workflow on file changes related to this check
     paths:
       - 'docs/keps/**/*.md'
@@ -16,6 +9,13 @@ on:
       - 'dev/tools/.notableofcontents'
       - 'Makefile'
       - '.github/workflows/check.yml'
+  push:
+    branches:
+      - 'release-*'
+      - 'master'
+      - 'main'
+    tags:
+      - 'v*'
 # To cancel running workflow when new commits pushed in a pull request
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

@@ -223,7 +223,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Requeue if template is missing, but don't return error to avoid log spam
 	if errors.Is(reconcileErr, ErrTemplateNotFound) {
 		logger.V(1).Info("SandboxTemplate not found yet, will retry", "template", claim.Spec.TemplateRef.Name)
-		
+
 		requeueDelay := 1 * time.Minute
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter

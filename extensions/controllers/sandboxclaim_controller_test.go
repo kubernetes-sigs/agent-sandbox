@@ -2577,7 +2577,7 @@ func TestMapTemplateToClaims(t *testing.T) {
 	// We need to manually set up the indexer on the fake client's indexer if it supports it,
 	// or we can mock the List behavior. Fake client from controller-runtime does NOT use indexers by default
 	// unless configured with WithIndex.
-	
+
 	// Let's use the WithIndex option on the fake client builder to support the matchingFields query!
 	fakeClientWithIndex := fake.NewClientBuilder().
 		WithScheme(scheme).

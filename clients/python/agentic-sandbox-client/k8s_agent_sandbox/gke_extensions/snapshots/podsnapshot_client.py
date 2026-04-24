@@ -21,6 +21,7 @@ from k8s_agent_sandbox.constants import (
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from .sandbox_with_snapshot_support import SandboxWithSnapshotSupport
 
+
 class PodSnapshotSandboxClient(SandboxClient[SandboxWithSnapshotSupport]):
     """
     A specialized Sandbox client for managing Sandboxes with Pod Snapshot feature.
@@ -32,7 +33,8 @@ class PodSnapshotSandboxClient(SandboxClient[SandboxWithSnapshotSupport]):
 
     def __init__(
         self,
-        *args, **kwargs,
+        *args,
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
 

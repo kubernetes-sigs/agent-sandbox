@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
-from kubernetes.client import ApiException
-from kubernetes import watch
+
+from kubernetes_asyncio.client import ApiException
+from kubernetes_asyncio import watch
 from pydantic import BaseModel
+
 from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
@@ -78,7 +82,7 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
     raise ValueError("Snapshot is not yet complete.")
 
 
-def wait_for_snapshot_to_be_completed(
+async def async_wait_for_snapshot_to_be_completed(
     k8s_helper,
     namespace: str,
     trigger_name: str,
@@ -88,6 +92,7 @@ def wait_for_snapshot_to_be_completed(
     """
     Waits for the PodSnapshotManualTrigger to be processed and returns SnapshotResult.
     """
+    await k8s_helper._ensure_initialized()
     w = watch.Watch()
     logger.info(
         f"Waiting for snapshot manual trigger '{trigger_name}' to be processed..."
@@ -98,7 +103,7 @@ def wait_for_snapshot_to_be_completed(
         kwargs["resource_version"] = resource_version
 
     try:
-        for event in w.stream(
+        async for event in w.stream(
             func=k8s_helper.custom_objects_api.list_namespaced_custom_object,
             namespace=namespace,
             group=PODSNAPSHOT_API_GROUP,
@@ -119,7 +124,6 @@ def wait_for_snapshot_to_be_completed(
                     )
                     return result
                 except ValueError:
-                    # Continue watching if snapshot is not yet complete
                     continue
             elif event["type"] == "ERROR":
                 logger.error(f"Snapshot watch received error event: {event['object']}")
@@ -135,22 +139,23 @@ def wait_for_snapshot_to_be_completed(
         logger.error(f"Error watching snapshot: {e}")
         raise
     finally:
-        w.stop()
+        await w.close()
 
     raise TimeoutError(
         f"Snapshot manual trigger '{trigger_name}' was not processed within {podsnapshot_timeout} seconds."
     )
 
 
-def check_pod_restored_from_snapshot(
+async def async_check_pod_restored_from_snapshot(
     k8s_helper,
     namespace: str,
     pod_name: str,
     snapshot_uid: str,
 ) -> RestoreCheckResult:
     """Checks if a pod was restored from the provided snapshot."""
+    await k8s_helper._ensure_initialized()
     try:
-        pod = k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
+        pod = await k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
 
         if not pod.status or not pod.status.conditions:
             return RestoreCheckResult(
@@ -162,7 +167,6 @@ def check_pod_restored_from_snapshot(
         for condition in pod.status.conditions:
             if condition.type == "PodRestored":
                 if condition.status == "True":
-                    # Check if Snapshot UID is present in the condition.message
                     if condition.message and snapshot_uid in condition.message:
                         return RestoreCheckResult(
                             success=True,
@@ -210,7 +214,7 @@ def check_pod_restored_from_snapshot(
         )
 
 
-def wait_for_snapshot_deletion(
+async def async_wait_for_snapshot_deletion(
     k8s_helper,
     namespace: str,
     snapshot_uid: str,
@@ -218,9 +222,9 @@ def wait_for_snapshot_deletion(
     resource_version: str | None = None,
 ) -> bool:
     """Waits for the PodSnapshot to be deleted from the cluster."""
-    # Check if already deleted
+    await k8s_helper._ensure_initialized()
     try:
-        k8s_helper.custom_objects_api.get_namespaced_custom_object(
+        await k8s_helper.custom_objects_api.get_namespaced_custom_object(
             group=PODSNAPSHOT_API_GROUP,
             version=PODSNAPSHOT_API_VERSION,
             namespace=namespace,
@@ -241,7 +245,7 @@ def wait_for_snapshot_deletion(
         kwargs["resource_version"] = resource_version
 
     try:
-        for event in w.stream(
+        async for event in w.stream(
             func=k8s_helper.custom_objects_api.list_namespaced_custom_object,
             namespace=namespace,
             group=PODSNAPSHOT_API_GROUP,
@@ -263,13 +267,13 @@ def wait_for_snapshot_deletion(
         logger.error(f"Error watching snapshot deletion: {e}")
         raise
     finally:
-        w.stop()
+        await w.close()
 
     logger.warning(f"Timed out waiting for PodSnapshot '{snapshot_uid}' to be deleted.")
     return False
 
 
-def wait_for_pod_termination(
+async def async_wait_for_pod_termination(
     k8s_helper,
     namespace: str,
     pod_name: str,
@@ -277,39 +281,42 @@ def wait_for_pod_termination(
     timeout: int = 180,
 ) -> bool:
     """Waits until the specified pod is terminated."""
+    await k8s_helper._ensure_initialized()
     logger.info(
         f"Waiting up to {timeout}s for pod '{pod_name}' (UID: {pod_uid}) to terminate..."
     )
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            pod = k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
-            if pod.metadata.uid != pod_uid:
-                # A new pod has taken this name; the old one has terminated.
+            pod = await k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
+            if pod_uid is not None and pod.metadata.uid != pod_uid:
                 return True
         except ApiException as e:
             if e.status == 404:
                 return True
             else:
                 logger.error(f"Error checking pod status: {e}")
-        time.sleep(2)
+        await asyncio.sleep(2)
     return False
 
 
-def wait_for_pod_ready(
+async def async_wait_for_pod_ready(
     k8s_helper,
     namespace: str,
-    get_pod_name_func,
+    get_pod_name_func: Callable[[], Awaitable[str | None]],
     timeout: int = 180,
 ) -> bool:
     """Waits until a newly created pod is ready."""
+    await k8s_helper._ensure_initialized()
     logger.info(f"Waiting up to {timeout}s for pod to become ready...")
     start_time = time.time()
     while time.time() - start_time < timeout:
-        pod_name = get_pod_name_func()
+        pod_name = await get_pod_name_func()
         if pod_name:
             try:
-                pod = k8s_helper.core_v1_api.read_namespaced_pod(pod_name, namespace)
+                pod = await k8s_helper.core_v1_api.read_namespaced_pod(
+                    pod_name, namespace
+                )
                 if pod.metadata and not pod.metadata.deletion_timestamp:
                     if pod.status and pod.status.conditions:
                         for condition in pod.status.conditions:
@@ -318,5 +325,5 @@ def wait_for_pod_ready(
             except ApiException as e:
                 if e.status != 404:
                     logger.error(f"Error checking pod status: {e}")
-        time.sleep(2)
+        await asyncio.sleep(2)
     return False

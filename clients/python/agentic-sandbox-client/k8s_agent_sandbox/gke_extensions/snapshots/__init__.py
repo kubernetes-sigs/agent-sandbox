@@ -12,4 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .podsnapshot_client import PodSnapshotSandboxClient
+from .podsnapshot_client import PodSnapshotSandboxClient as PodSnapshotSandboxClient
+
+try:
+    from .async_podsnapshot_client import AsyncPodSnapshotSandboxClient
+except ImportError:
+
+    class AsyncPodSnapshotSandboxClient:  # type: ignore[no-redef]
+        """Placeholder that raises ImportError when async extras are missing."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "AsyncPodSnapshotSandboxClient requires the 'async' extras. "
+                "Install with: pip install k8s-agent-sandbox[async]"
+            )

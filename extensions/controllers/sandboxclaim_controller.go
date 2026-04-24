@@ -1051,12 +1051,35 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	}
 }
 
+// mapTemplateToClaims maps a SandboxTemplate to a list of SandboxClaims that reference it.
+func (r *SandboxClaimReconciler) mapTemplateToClaims(ctx context.Context, obj client.Object) []ctrl.Request {
+	template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
+	if !ok {
+		log.FromContext(ctx).Error(fmt.Errorf("unexpected object type %T", obj), "expected SandboxTemplate in watch map function")
+		return nil
+	}
+	var claims extensionsv1alpha1.SandboxClaimList
+	if err := r.List(ctx, &claims, client.InNamespace(template.Namespace), client.MatchingFields{extensionsv1alpha1.TemplateRefField: template.Name}); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list SandboxClaims for SandboxTemplate", "namespace", template.Namespace, "name", template.Name)
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(claims.Items))
+	for i := range claims.Items {
+		claim := &claims.Items[i]
+		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
 
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxClaim{}, extensionsv1alpha1.TemplateRefField, func(rawObj client.Object) []string {
-		claim := rawObj.(*extensionsv1alpha1.SandboxClaim)
+		claim, ok := rawObj.(*extensionsv1alpha1.SandboxClaim)
+		if !ok {
+			return nil
+		}
 		if claim.Spec.TemplateRef.Name == "" {
 			return nil
 		}
@@ -1072,23 +1095,8 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		Watches(&extensionsv1alpha1.SandboxTemplate{}, &templateEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(
 			&extensionsv1alpha1.SandboxTemplate{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
-				template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
-				if !ok {
-					log.FromContext(ctx).Error(fmt.Errorf("unexpected object type %T", obj), "expected SandboxTemplate in watch map function")
-					return nil
-				}
-				var claims extensionsv1alpha1.SandboxClaimList
-				if err := r.List(ctx, &claims, client.InNamespace(template.Namespace), client.MatchingFields{extensionsv1alpha1.TemplateRefField: template.Name}); err != nil {
-					log.FromContext(ctx).Error(err, "failed to list SandboxClaims for SandboxTemplate", "namespace", template.Namespace, "name", template.Name)
-					return nil
-				}
-				requests := make([]ctrl.Request, 0, len(claims.Items))
-				for _, claim := range claims.Items {
-					requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
-				}
-				return requests
-			}),
+			handler.EnqueueRequestsFromMapFunc(r.mapTemplateToClaims),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)

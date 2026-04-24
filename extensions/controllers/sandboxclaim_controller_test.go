@@ -2552,3 +2552,63 @@ func TestSandboxClaimRecoveryWhenTemplateCreated(t *testing.T) {
 		t.Fatalf("expected sandbox to be created, but got error: %v", err)
 	}
 }
+
+func TestMapTemplateToClaims(t *testing.T) {
+	scheme := newScheme(t)
+	templateName := "test-template"
+
+	claim1 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName}},
+	}
+	claim2 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-2", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName}},
+	}
+	claimOther := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-other", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "other-template"}},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+	}
+
+	// We need to manually set up the indexer on the fake client's indexer if it supports it,
+	// or we can mock the List behavior. Fake client from controller-runtime does NOT use indexers by default
+	// unless configured with WithIndex.
+	
+	// Let's use the WithIndex option on the fake client builder to support the matchingFields query!
+	fakeClientWithIndex := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim1, claim2, claimOther, template).
+		WithIndex(&extensionsv1alpha1.SandboxClaim{}, extensionsv1alpha1.TemplateRefField, func(obj client.Object) []string {
+			c := obj.(*extensionsv1alpha1.SandboxClaim)
+			if c.Spec.TemplateRef.Name == "" {
+				return nil
+			}
+			return []string{c.Spec.TemplateRef.Name}
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client: fakeClientWithIndex,
+		Scheme: scheme,
+	}
+
+	requests := reconciler.mapTemplateToClaims(context.Background(), template)
+
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	expectedNames := map[string]bool{"claim-1": true, "claim-2": true}
+	for _, req := range requests {
+		if !expectedNames[req.Name] {
+			t.Errorf("unexpected claim name in requests: %s", req.Name)
+		}
+		if req.Namespace != "default" {
+			t.Errorf("expected namespace 'default', got %s", req.Namespace)
+		}
+	}
+}

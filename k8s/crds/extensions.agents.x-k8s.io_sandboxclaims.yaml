@@ -67,6 +67,12 @@ spec:
                     format: date-time
                     type: string
                 type: object
+              safeToEvict:
+                enum:
+                - on-completion
+                - true
+                - false
+                type: string
               sandboxTemplateRef:
                 properties:
                   name:

@@ -1381,6 +1381,20 @@ func isAdoptable(candidate *v1alpha1.Sandbox) error {
 	if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 		return fmt.Errorf("sandbox is not managed by warm pool. Controller: %v", controllerRef)
 	}
+
+	// A sandbox without any Pod IPs is not yet useful to adopt: either the
+	// backing Pod has been deleted (warm-pool rotation: the Sandbox CR is still
+	// in the queue but its pod is mid-recreate), or the Pod has been created
+	// but not yet scheduled / networked. In either case adopting now would
+	// leave reconcilePod with no usable Pod, ending in a ReconcilerError on
+	// the claim. PodIPs becomes non-empty only once the kubelet reports IPs
+	// to the apiserver, so it's a reliable proxy for "Pod exists and is on
+	// the network". A not-Ready-yet sandbox whose Pod *has* IPs is still
+	// adoptable — the claim just waits for Ready=True the same way it would
+	// on a cold start, without the rotation-induced error.
+	if len(candidate.Status.PodIPs) == 0 {
+		return fmt.Errorf("sandbox is not yet networked (Status.PodIPs is empty)")
+	}
 	return nil
 }
 

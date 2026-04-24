@@ -478,6 +478,19 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 	}
 }
 
+// ensureClaimIdentityLabels sets SandboxIDLabel (= claim.UID) on the given label map,
+// initializing it if nil. Used on both Sandbox.metadata.labels and
+// Sandbox.spec.podTemplate.ObjectMeta.Labels so the platform informer can resolve
+// sandbox→claim identity from top-level Sandbox events (KEP-0174 only propagates to
+// pod template labels, not top-level Sandbox labels).
+func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1alpha1.SandboxClaim) map[string]string {
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	return labels
+}
+
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, templateHash string) (*v1alpha1.Sandbox, queue.SandboxKey, error) {
 	logger := log.FromContext(ctx)
 	policy := getWarmPoolPolicy(claim)
@@ -586,11 +599,12 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 			}
 
-			// Add sandbox ID label to pod template for NetworkPolicy targeting
-			if adopted.Spec.PodTemplate.ObjectMeta.Labels == nil {
-				adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
-			}
-			adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+			// Propagate claim identity labels for discovery and NetworkPolicy targeting.
+			// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
+			// (KEP-0174 only propagates to pod template labels; platform's informer reads
+			// Sandbox.metadata.labels).
+			adopted.Labels = ensureClaimIdentityLabels(adopted.Labels, claim)
+			adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 
 			// Fetch the template to construct the mergedMeta that reconcileActive will build.
 			template, templateErr := r.getTemplate(ctx, claim)
@@ -824,10 +838,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 
-	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
-		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
-	}
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// Propagate claim identity labels for discovery and NetworkPolicy targeting.
+	// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
+	// (KEP-0174 only propagates to pod template labels; platform's informer reads
+	// Sandbox.metadata.labels).
+	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
 
 	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {

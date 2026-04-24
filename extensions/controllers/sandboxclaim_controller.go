@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -219,8 +220,19 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		result = ctrl.Result{RequeueAfter: timeLeft}
 	}
 
-	// Suppress expected user errors (like missing templates) to avoid crash loops
-	if errors.Is(reconcileErr, ErrTemplateNotFound) || errors.Is(reconcileErr, ErrInvalidMetadata) || errors.Is(reconcileErr, ErrSandboxNotOwned) {
+	// Requeue if template is missing, but don't return error to avoid log spam
+	if errors.Is(reconcileErr, ErrTemplateNotFound) {
+		logger.V(1).Info("SandboxTemplate not found yet, will retry", "template", claim.Spec.TemplateRef.Name)
+
+		requeueDelay := 1 * time.Minute
+		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
+			requeueDelay = result.RequeueAfter
+		}
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil
+	}
+
+	// Suppress invalid metadata and ownership errors to avoid crash loops
+	if errors.Is(reconcileErr, ErrInvalidMetadata) || errors.Is(reconcileErr, ErrSandboxNotOwned) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
 	}
@@ -1039,15 +1051,53 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	}
 }
 
+// mapTemplateToClaims maps a SandboxTemplate to a list of SandboxClaims that reference it.
+func (r *SandboxClaimReconciler) mapTemplateToClaims(ctx context.Context, obj client.Object) []ctrl.Request {
+	template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
+	if !ok {
+		log.FromContext(ctx).Error(fmt.Errorf("unexpected object type %T", obj), "expected SandboxTemplate in watch map function")
+		return nil
+	}
+	var claims extensionsv1alpha1.SandboxClaimList
+	if err := r.List(ctx, &claims, client.InNamespace(template.Namespace), client.MatchingFields{extensionsv1alpha1.TemplateRefField: template.Name}); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list SandboxClaims for SandboxTemplate", "namespace", template.Namespace, "name", template.Name)
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(claims.Items))
+	for i := range claims.Items {
+		claim := &claims.Items[i]
+		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
+
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxClaim{}, extensionsv1alpha1.TemplateRefField, func(rawObj client.Object) []string {
+		claim, ok := rawObj.(*extensionsv1alpha1.SandboxClaim)
+		if !ok {
+			return nil
+		}
+		if claim.Spec.TemplateRef.Name == "" {
+			return nil
+		}
+		return []string{claim.Spec.TemplateRef.Name}
+	}); err != nil {
+		return err
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
 		Owns(&v1alpha1.Sandbox{}).
 		Watches(&v1alpha1.Sandbox{}, &sandboxEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(&extensionsv1alpha1.SandboxTemplate{}, &templateEventHandler{sandboxQueue: r.WarmSandboxQueue}).
+		Watches(
+			&extensionsv1alpha1.SandboxTemplate{},
+			handler.EnqueueRequestsFromMapFunc(r.mapTemplateToClaims),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }

@@ -1,0 +1,19 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: kueue-sandbox-example
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: sandbox-local-queue
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: hello
+        image: busybox
+        command: ["sh", "-c", "echo 'Hello from Kueue sandbox' && sleep 3600"]
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "200Mi"

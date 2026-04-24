@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -955,6 +956,16 @@ func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 	return cond != nil && cond.Reason == sandboxv1alpha1.SandboxReasonExpired
 }
 
+// Helper to check if a pod is Ready
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
@@ -970,9 +981,34 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		return err
 	}
 
+	podStatusChangedPredicate := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldPod, ok1 := e.ObjectOld.(*corev1.Pod)
+			newPod, ok2 := e.ObjectNew.(*corev1.Pod)
+			if !ok1 || !ok2 {
+				return true
+			}
+
+			if oldPod.Status.Phase != newPod.Status.Phase {
+				return true
+			}
+
+			if isPodReady(oldPod) != isPodReady(newPod) {
+				return true
+			}
+
+			return false
+		},
+	}
+
+	// Combine the label check with the debounce shield
+	podPredicates := predicate.And(labelSelectorPredicate, podStatusChangedPredicate)
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&sandboxv1alpha1.Sandbox{}).
-		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
+		For(&sandboxv1alpha1.Sandbox{}, builder.WithPredicates(
+			predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}),
+		)).
+		Owns(&corev1.Pod{}, builder.WithPredicates(podPredicates)).
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)

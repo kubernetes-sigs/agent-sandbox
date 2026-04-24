@@ -8,6 +8,8 @@ spec:
       labels:
         sandbox: openclaw-sandbox
     spec:
+      # This example is verified with gVisor; switch to a different runtime class here
+      runtimeClassName: gvisor
       automountServiceAccountToken: false
       securityContext:
         runAsUser: 1000

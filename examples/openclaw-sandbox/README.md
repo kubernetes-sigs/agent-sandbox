@@ -5,6 +5,7 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
 ## Prerequisites
 
 -   A Kubernetes cluster (e.g., Kind).
+-   Create nodes with gVisor or Kata Containers runtime class enabled in the cluster. This example is verified using gVisor, see the [gVisor documentation](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/).
 -   `agent-sandbox` controller installed.
 
 ## Usage

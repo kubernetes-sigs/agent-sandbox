@@ -916,6 +916,16 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			existing := &v1alpha1.Sandbox{}
+			if getErr := r.Get(ctx, client.ObjectKeyFromObject(sandbox), existing); getErr != nil {
+				return nil, fmt.Errorf("sandbox create raced with existing object and fetch failed: %w", getErr)
+			}
+			if !metav1.IsControlledBy(existing, claim) {
+				return nil, fmt.Errorf("sandbox %q already exists but is not controlled by claim %q", existing.Name, claim.Name)
+			}
+			return existing, nil
+		}
 		err = fmt.Errorf("sandbox create error: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
 		return nil, err

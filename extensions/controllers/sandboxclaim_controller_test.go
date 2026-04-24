@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -1154,6 +1155,55 @@ Loop:
 	}
 	if !foundProvisionEvent {
 		t.Errorf("Expected event %q not found", expectedMsg)
+	}
+}
+
+func TestCreateSandboxReturnsExistingOnAlreadyExists(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "existing-sandbox-claim"
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+	}
+
+	existingSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default"},
+	}
+	if err := controllerutil.SetControllerReference(claim, existingSandbox, scheme); err != nil {
+		t.Fatalf("failed to set owner reference: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, template, existingSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+
+	sandbox, err := reconciler.createSandbox(context.Background(), claim, template)
+	if err != nil {
+		t.Fatalf("createSandbox returned error: %v", err)
+	}
+	if sandbox == nil {
+		t.Fatal("expected existing sandbox to be returned")
+	}
+	if sandbox.Name != claimName {
+		t.Fatalf("expected sandbox %q, got %q", claimName, sandbox.Name)
+	}
+	if !metav1.IsControlledBy(sandbox, claim) {
+		t.Fatalf("expected returned sandbox %q to be controlled by claim %q", sandbox.Name, claim.Name)
 	}
 }
 

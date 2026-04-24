@@ -1,0 +1,58 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: prevent-sandbox-sa-binding
+spec:
+  template: false
+  steps:
+  - name: step-01
+    try:
+    - apply:
+        file: setup-rbac.yaml
+    - apply:
+        file: ../prevent-sandbox-sa-binding.yaml
+    - assert:
+        resource:
+            apiVersion: policies.kyverno.io/v1
+            kind: ValidatingPolicy
+            metadata:
+              name: prevent-sandbox-sa-binding
+            status:
+              conditionStatus:
+                (conditions[?type == 'WebhookConfigured']):
+                - message: Webhook configured.
+                  reason: Succeeded
+                  status: "True"
+                  type: WebhookConfigured
+                (conditions[?type == 'RBACPermissionsGranted']):
+                - message: Policy is ready for reporting.
+                  reason: Succeeded
+                  status: "True"
+                  type: RBACPermissionsGranted
+                ready: true
+        timeout: 10s
+  - name: step-02
+    try:
+    - apply:
+        file: setup-sa.yaml
+    - apply:
+        file: setup-sandbox.yaml
+    - apply:
+        file: bad-rolebinding.yaml
+        expect:
+        - check:
+            ($error != null): true
+  - name: step-03
+    try:
+    - apply:
+        file: setup-other-sa.yaml
+    - apply:
+        file: good-rolebinding.yaml
+  - name: step-04
+    try:
+    - delete:
+        file: setup-sandbox.yaml
+    - apply:
+        file: barepod.yaml
+    - apply:
+        file: bad-rolebinding.yaml

@@ -60,14 +60,11 @@ export KUBECONFIG="${SCRIPT_DIR}/kubeconfig"
 # install agent sandbox
 export VERSION="v0.1.0"
 
-# install CRDs and the controller with extensions enabled via Helm
-pushd "${SCRIPT_DIR}/../../../helm"
-helm upgrade --install agent-sandbox . \
-    --namespace agent-sandbox-system \
-    --create-namespace \
-    --set image.tag="${VERSION}" \
-    --set controller.extensions=true
-popd
+# install only the core components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+
+# install the extensions components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 
 # install sandbox-router
 pushd ../../../clients/python/agentic-sandbox-client/sandbox-router

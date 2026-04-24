@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+import glob
+import re
 import argparse
 import subprocess
 import sys
@@ -27,7 +29,7 @@ def run_command(cmd):
         sys.exit(1)
 
 def main():
-    parser = argparse.ArgumentParser(description='Package the Helm chart for release.')
+    parser = argparse.ArgumentParser(description='Generate release manifests.')
     parser.add_argument('--tag', required=True, help='The git tag for the release.')
     parser.add_argument('--publish', action='store_true', help='Publish the release to GitHub.')
     args = parser.parse_args()
@@ -37,26 +39,66 @@ def main():
     if not os.path.exists('release_assets'):
         os.makedirs('release_assets')
 
-    # --- Package Helm chart ---
-    print(f'INFO: Packaging Helm chart with appVersion {tag}')
-    run_command([
-        'helm', 'package', './helm',
-        '--app-version', tag,
-        '--version', tag,
-        '--destination', 'release_assets',
-    ])
-    chart_package = f'release_assets/agent-sandbox-{tag}.tgz'
-    if not os.path.exists(chart_package):
-        print(f"❌ Expected chart package not found: {chart_package}")
-        sys.exit(1)
-    print(f'INFO: Successfully created {chart_package}')
+    all_yaml_files = glob.glob('k8s/**/*.yaml', recursive=True)
+    image_url = f'registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}'
+
+    # --- Generate manifest.yaml ---
+    print('INFO: Preparing core manifest.yaml')
+    manifest_files = [f for f in all_yaml_files if 'extensions' not in os.path.basename(f)]
+    with open('release_assets/manifest.yaml', 'w') as outfile:
+        for fname in sorted(manifest_files):
+            with open(fname) as infile:
+                outfile.write(infile.read())
+                outfile.write('---\n')
+
+
+    # Replace image placeholder in manifest.yaml
+    print(f'INFO: Replacing image placeholder in core manifest.yaml with: {image_url}')
+    with open('release_assets/manifest.yaml', 'r') as file:
+        filedata = file.read()
+
+    filedata = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata)
+
+    with open('release_assets/manifest.yaml', 'w') as file:
+        file.write(filedata)
+    print('INFO: Successfully created release_assets/manifest.yaml')
+
+    # --- Generate extensions.yaml ---
+    print('INFO: Preparing extensions.yaml')
+    extension_files = [f for f in all_yaml_files if 'extensions' in os.path.basename(f)]
+    with open('release_assets/extensions.yaml', 'w') as outfile:
+        for fname in sorted(extension_files):
+            with open(fname) as infile:
+                outfile.write(infile.read())
+                outfile.write('---\n')
+
+    # Replace image placeholder in extensions.yaml
+    print(f'INFO: Replacing image placeholder in extensions.yaml with: {image_url}')
+    with open('release_assets/extensions.yaml', 'r') as file:
+        filedata = file.read()
+
+    filedata = re.sub(r'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*', image_url, filedata)
+
+    with open('release_assets/extensions.yaml', 'w') as file:
+        file.write(filedata)
+    print('INFO: Successfully created release_assets/extensions.yaml')
 
     # --- Publish Draft Release ---
     if args.publish:
         print(f"INFO: Publishing draft release {tag} to GitHub...")
+        manifest_path = "release_assets/manifest.yaml"
+        extensions_path = "release_assets/extensions.yaml"
+        
+        if not os.path.exists(manifest_path) or not os.path.exists(extensions_path):
+             print("❌ Release assets missing. Cannot publish.")
+             sys.exit(1)
+             
+        # Check if release exists, if so, we might want to fail or edit. 
+        # Here we assume creating a new one.
         cmd = [
             "gh", "release", "create", tag,
-            chart_package,
+            manifest_path,
+            extensions_path,
             "--generate-notes",
             "--title", tag,
             "--verify-tag",

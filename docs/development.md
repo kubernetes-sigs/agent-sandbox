@@ -65,17 +65,11 @@ kubectl get pods -n agent-sandbox-system
 
 #### Deploying to a remote cluster
 
-Make sure your kubectl context is set to the cluster you want to deploy to. Then install via Helm:
+Make sure your kubectl context is set to the cluster you want to deploy to.
 
 ```sh
-helm install agent-sandbox ./helm/ \
-  --namespace agent-sandbox-system \
-  --create-namespace \
-  --set image.tag=<version> \
-  --set image.repository=<registry-url>/agent-sandbox-controller
+./dev/tools/deploy-to-kube --image-prefix=<registry-url-with-trailing-slash>
 ```
-
-See the [Helm chart README](../helm/README.md) for the full configuration reference.
 
 ## Debugging the Controller
 
@@ -119,10 +113,10 @@ For a faster feedback loop, you can run the controller directly on your host mac
     export KUBECONFIG=/tmp/kubeconfig
     ```
 
-3.  **Apply the CRDs:**
+3.  **Apply the CRD:**
 
     ```sh
-    kubectl apply -f ./helm/crds/
+    kubectl apply -f ./k8s/crds/
     ```
 4.  **Run the controller:**
 

@@ -96,7 +96,7 @@ release-publish:
 	go generate ./...
 	./dev/tools/release --tag=${TAG} --publish
 
-# Generate release assets (Helm chart package) via helm package
+# Generate release manifests only
 # Usage: make release-manifests TAG=vX.Y.Z
 .PHONY: release-manifests
 release-manifests:

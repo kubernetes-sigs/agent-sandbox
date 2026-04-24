@@ -86,7 +86,19 @@ flowchart LR
 
 ### Core Components & Extensions
 
-The controller can be installed via Helm. See the [Helm chart README](helm/README.md) for installation instructions and configuration reference.
+You can install the agent-sandbox controller and its CRDs with the following command.
+
+```sh
+# Replace "vX.Y.Z" with a specific version tag (e.g., "v0.1.0") from
+# https://github.com/kubernetes-sigs/agent-sandbox/releases
+export VERSION="vX.Y.Z"
+
+# To install only the core components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+
+# To install the extensions components:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+```
 
 ### Python SDK
 

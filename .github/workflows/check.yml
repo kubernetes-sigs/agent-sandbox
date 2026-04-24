@@ -8,6 +8,14 @@ on:
       - 'main'
     tags:
       - 'v*'
+    # Only run workflow on file changes related to this check
+    paths:
+      - 'docs/keps/**/*.md'
+      - 'dev/tools/update-toc'
+      - 'dev/tools/verify-toc'
+      - 'dev/tools/.notableofcontents'
+      - 'Makefile'
+      - '.github/workflows/check.yml'
 # To cancel running workflow when new commits pushed in a pull request
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

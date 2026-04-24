@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -2074,6 +2073,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "stored-time",
 					Namespace:         "default",
+					UID:               "uid-stored-time",
 					CreationTimestamp: pastTime,
 					Annotations: map[string]string{
 						asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
@@ -2090,7 +2090,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			expectedControllerObservations: 1,
 			setupReconciler: func(r *SandboxClaimReconciler) {
 				key := types.NamespacedName{Name: "stored-time", Namespace: "default"}
-				r.observedTimes.Store(key, time.Now().Add(-5*time.Second))
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-stored-time"})
 			},
 		},
 		{
@@ -2695,51 +2695,243 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 	})
 }
 
-func TestSandboxClaimPredicates(t *testing.T) {
+func TestSandboxClaimTimingPredicates(t *testing.T) {
 	r := &SandboxClaimReconciler{}
 	pred := r.getTimingPredicate()
 
+	claim1 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	}
+	claim2 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-2"},
+	}
+	key := types.NamespacedName{Name: "test-claim", Namespace: "default"}
+	pastTime := time.Now().Add(-10 * time.Second)
+
 	testCases := []struct {
-		name        string
-		trigger     func(p predicate.Predicate) bool
-		expectedKey types.NamespacedName
+		name    string
+		setup   func(r *SandboxClaimReconciler)
+		trigger func(p predicate.Predicate) bool
+		verify  func(t *testing.T, r *SandboxClaimReconciler)
 	}{
 		{
-			name: "CreateFunc stores time",
+			name: "Create stores time and UID",
 			trigger: func(p predicate.Predicate) bool {
-				return p.Create(event.CreateEvent{
-					Object: &extensionsv1alpha1.SandboxClaim{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default"},
-					},
-				})
+				return p.Create(event.CreateEvent{Object: claim1})
 			},
-			expectedKey: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				entry, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Fatal("Expected entry in map after Create")
+				}
+				if entry.uid != "uid-1" {
+					t.Errorf("Expected UID uid-1, got %s", entry.uid)
+				}
+			},
 		},
 		{
-			name: "UpdateFunc stores time",
-			trigger: func(p predicate.Predicate) bool {
-				return p.Update(event.UpdateEvent{
-					ObjectNew: &extensionsv1alpha1.SandboxClaim{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-claim-update", Namespace: "default"},
-					},
-				})
+			name: "Update with same UID preserves",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-1"})
 			},
-			expectedKey: types.NamespacedName{Name: "test-claim-update", Namespace: "default"},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Update(event.UpdateEvent{ObjectNew: claim1, ObjectOld: claim1})
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				entry, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Fatal("Expected entry in map after Update")
+				}
+				if entry.uid != "uid-1" {
+					t.Errorf("Expected UID uid-1, got %s", entry.uid)
+				}
+			},
+		},
+		{
+			name: "Update with different UID overwrites",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: pastTime, uid: "uid-1"})
+			},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Update(event.UpdateEvent{ObjectNew: claim2, ObjectOld: claim1})
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				entry, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Fatal("Expected entry in map after Update with new UID")
+				}
+				if entry.uid != "uid-2" {
+					t.Errorf("Expected UID uid-2 after update, got %s", entry.uid)
+				}
+				if !entry.timestamp.After(pastTime) {
+					t.Error("Expected timestamp to be updated to a newer value")
+				}
+			},
+		},
+		{
+			name: "Delete with mismatch UID does not delete",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-2"})
+			},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Delete(event.DeleteEvent{Object: claim1}) // claim1 has uid-1
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				_, ok := r.observedTimes.Load(key)
+				if !ok {
+					t.Error("Entry should NOT be deleted when UID mismatches")
+				}
+			},
+		},
+		{
+			name: "Delete with matching UID deletes",
+			setup: func(r *SandboxClaimReconciler) {
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: "uid-1"})
+			},
+			trigger: func(p predicate.Predicate) bool {
+				return p.Delete(event.DeleteEvent{Object: claim1}) // claim1 has uid-1
+			},
+			verify: func(t *testing.T, r *SandboxClaimReconciler) {
+				_, ok := r.observedTimes.Load(key)
+				if ok {
+					t.Error("Entry should be deleted when UID matches")
+				}
+			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			r.observedTimes = sync.Map{} // Reset map for each test case
+			r.observedTimes = observedTimeMap{} // Reset map for each test case
+			if tc.setup != nil {
+				tc.setup(r)
+			}
 			res := tc.trigger(pred)
 			if !res {
 				t.Error("expected predicate to return true")
 			}
+			tc.verify(t, r)
+		})
+	}
+}
 
-			if _, ok := r.observedTimes.Load(tc.expectedKey); !ok {
-				t.Errorf("expected time to be stored in observedTimes map for key %v", tc.expectedKey)
+func TestGetOrRecordObservedTime(t *testing.T) {
+	claim1 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	}
+	claim2 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-2"},
+	}
+	pastTime := time.Now().Add(-10 * time.Second)
+
+	testCases := []struct {
+		name               string
+		claimToRecord      *extensionsv1alpha1.SandboxClaim
+		initialKey         types.NamespacedName
+		initialEntry       *observedTimeEntry
+		expectedUID        types.UID
+		expectNewTimestamp bool
+		expectedReturnTime time.Time
+	}{
+		{
+			name:               "New Entry stores time and returns it",
+			claimToRecord:      claim1,
+			expectedUID:        "uid-1",
+			expectNewTimestamp: true,
+		},
+		{
+			name:               "Existing Entry with same UID returns loaded timestamp",
+			claimToRecord:      claim1,
+			initialKey:         types.NamespacedName{Name: claim1.Name, Namespace: claim1.Namespace},
+			initialEntry:       &observedTimeEntry{timestamp: pastTime, uid: "uid-1"},
+			expectedUID:        "uid-1",
+			expectNewTimestamp: false,
+			expectedReturnTime: pastTime,
+		},
+		{
+			name:               "Existing Entry with different UID overwrites and returns new timestamp",
+			claimToRecord:      claim2,
+			initialKey:         types.NamespacedName{Name: claim1.Name, Namespace: claim1.Namespace},
+			initialEntry:       &observedTimeEntry{timestamp: pastTime, uid: claim1.UID},
+			expectedUID:        "uid-2",
+			expectNewTimestamp: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &SandboxClaimReconciler{}
+			if tc.initialEntry != nil {
+				r.observedTimes.Store(tc.initialKey, *tc.initialEntry)
+			}
+
+			res := r.getOrRecordObservedTime(tc.claimToRecord)
+
+			// Verify map state for the recorded claim
+			recordedKey := types.NamespacedName{Name: tc.claimToRecord.Name, Namespace: tc.claimToRecord.Namespace}
+			entry, ok := r.observedTimes.Load(recordedKey)
+			if !ok {
+				t.Fatal("Expected entry in map")
+			}
+
+			if entry.uid != tc.expectedUID {
+				t.Errorf("Expected UID %s, got %s", tc.expectedUID, entry.uid)
+			}
+
+			if tc.expectNewTimestamp {
+				// Expect a new timestamp
+				if entry.timestamp.IsZero() {
+					t.Error("Expected timestamp to be set")
+				}
+				if tc.initialEntry != nil && entry.timestamp.Equal(tc.initialEntry.timestamp) {
+					t.Error("Expected a different timestamp than the initial one")
+				}
+				if !res.Equal(entry.timestamp) {
+					t.Error("Expected returned time to match stored time")
+				}
+			} else {
+				// Expect specific timestamp
+				if !entry.timestamp.Equal(tc.expectedReturnTime) {
+					t.Errorf("Expected timestamp %v, got %v", tc.expectedReturnTime, entry.timestamp)
+				}
+				if !res.Equal(tc.expectedReturnTime) {
+					t.Errorf("Expected returned time %v, got %v", tc.expectedReturnTime, res)
+				}
 			}
 		})
+	}
+}
+
+func TestSandboxClaimReconcileCleanup(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	}
+
+	// Create a fake client without the claim, so it returns NotFound
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	// Pre-populate map
+	reconciler.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: claim.UID})
+
+	req := reconcile.Request{
+		NamespacedName: key,
+	}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	_, ok := reconciler.observedTimes.Load(key)
+	if ok {
+		t.Error("Entry should be deleted by Reconcile when object is not found")
 	}
 }
 

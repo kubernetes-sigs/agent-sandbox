@@ -76,6 +76,40 @@ func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha
 	return extensionsv1alpha1.WarmPoolPolicyDefault
 }
 
+// observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
+// We store the UID to protect against stale data when a claim is deleted and a new one
+// is created with the same name.
+type observedTimeEntry struct {
+	timestamp time.Time
+	uid       types.UID
+}
+
+// observedTimeMap is a type-safe wrapper around sync.Map that only stores observedTimeEntry values.
+type observedTimeMap struct {
+	inner sync.Map
+}
+
+func (m *observedTimeMap) Load(key types.NamespacedName) (observedTimeEntry, bool) {
+	val, ok := m.inner.Load(key)
+	if !ok {
+		return observedTimeEntry{}, false
+	}
+	return val.(observedTimeEntry), true
+}
+
+func (m *observedTimeMap) Store(key types.NamespacedName, entry observedTimeEntry) {
+	m.inner.Store(key, entry)
+}
+
+func (m *observedTimeMap) Delete(key types.NamespacedName) {
+	m.inner.Delete(key)
+}
+
+func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTimeEntry) (observedTimeEntry, bool) {
+	actual, loaded := m.inner.LoadOrStore(key, entry)
+	return actual.(observedTimeEntry), loaded
+}
+
 // SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
@@ -84,7 +118,7 @@ type SandboxClaimReconciler struct {
 	Recorder                events.EventRecorder
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
-	observedTimes           sync.Map
+	observedTimes           observedTimeMap
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -106,6 +140,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
+			// Fallback cleanup to prevent memory leaks if the delete predicate was missed or a stale request is processed.
+			r.observedTimes.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
@@ -128,32 +164,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Initialize trace ID and observation time for active resources missing them.
-	// Inline patch, no early return, to avoid forcing a second reconcile cycle.
-	traceContext := r.Tracer.GetTraceContext(ctx)
-	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
-	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
-
-	if needObservabilityPatch || needTraceContextPatch {
-		patch := client.MergeFrom(claim.DeepCopy())
-		if claim.Annotations == nil {
-			claim.Annotations = make(map[string]string)
-		}
-		if needObservabilityPatch {
-			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-			if val, ok := r.observedTimes.Load(key); ok {
-				claim.Annotations[asmetrics.ObservabilityAnnotation] = val.(time.Time).Format(time.RFC3339Nano)
-			} else {
-				now := time.Now()
-				claim.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
-				r.observedTimes.Store(key, now)
-			}
-		}
-		if needTraceContextPatch {
-			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
-		}
-		if err := r.Patch(ctx, claim, patch); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.initializeAnnotations(ctx, claim); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	originalClaimStatus := claim.Status.DeepCopy()
@@ -253,6 +265,31 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", reconcileErr, "request", req.NamespacedName)
 	return result, reconcileErr
+}
+
+// initializeAnnotations initializes trace ID and observation time for active resources missing them.
+func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) error {
+	traceContext := r.Tracer.GetTraceContext(ctx)
+	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
+	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
+
+	if needObservabilityPatch || needTraceContextPatch {
+		patch := client.MergeFrom(claim.DeepCopy())
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		if needObservabilityPatch {
+			timestamp := r.getOrRecordObservedTime(claim)
+			claim.Annotations[asmetrics.ObservabilityAnnotation] = timestamp.Format(time.RFC3339Nano)
+		}
+		if needTraceContextPatch {
+			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
+		}
+		if err := r.Patch(ctx, claim, patch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
@@ -515,6 +552,19 @@ func (r *SandboxClaimReconciler) syncFinishedCondition(claim *extensionsv1alpha1
 	}
 }
 
+// ensureClaimIdentityLabels sets SandboxIDLabel (= claim.UID) on the given label map,
+// initializing it if nil. Used on both Sandbox.metadata.labels and
+// Sandbox.spec.podTemplate.ObjectMeta.Labels so the platform informer can resolve
+// sandbox→claim identity from top-level Sandbox events (KEP-0174 only propagates to
+// pod template labels, not top-level Sandbox labels).
+func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1alpha1.SandboxClaim) map[string]string {
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	return labels
+}
+
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, templateHash string) (*v1alpha1.Sandbox, queue.SandboxKey, error) {
 	logger := log.FromContext(ctx)
 	policy := getWarmPoolPolicy(claim)
@@ -623,11 +673,12 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 			}
 
-			// Add sandbox ID label to pod template for NetworkPolicy targeting
-			if adopted.Spec.PodTemplate.ObjectMeta.Labels == nil {
-				adopted.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
-			}
-			adopted.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+			// Propagate claim identity labels for discovery and NetworkPolicy targeting.
+			// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
+			// (KEP-0174 only propagates to pod template labels; platform's informer reads
+			// Sandbox.metadata.labels).
+			adopted.Labels = ensureClaimIdentityLabels(adopted.Labels, claim)
+			adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 
 			// Fetch the template to construct the mergedMeta that reconcileActive will build.
 			template, templateErr := r.getTemplate(ctx, claim)
@@ -861,10 +912,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 
-	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
-		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
-	}
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+	// Propagate claim identity labels for discovery and NetworkPolicy targeting.
+	// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
+	// (KEP-0174 only propagates to pod template labels; platform's informer reads
+	// Sandbox.metadata.labels).
+	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
 
 	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
@@ -1056,21 +1109,51 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 	return template, nil
 }
 
+// getOrRecordObservedTime stores the first time an object is seen by the controller in an in-memory
+// map observedTimes for latency tracking. It returns the resolved timestamp for the object.
+func (r *SandboxClaimReconciler) getOrRecordObservedTime(obj client.Object) time.Time {
+	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+
+	// Fast path: Entry already exists and UID matches
+	if entry, ok := r.observedTimes.Load(key); ok {
+		if entry.uid == obj.GetUID() {
+			return entry.timestamp
+		}
+	}
+
+	// Slow path: Entry missing or UID mismatched
+	newEntry := observedTimeEntry{timestamp: time.Now(), uid: obj.GetUID()}
+	actual, loaded := r.observedTimes.LoadOrStore(key, newEntry)
+	if loaded {
+		// Handle concurrent insertion: check if we need to overwrite due to UID mismatch
+		if actual.uid != obj.GetUID() {
+			r.observedTimes.Store(key, newEntry)
+			return newEntry.timestamp
+		}
+		// UID matches, return the loaded timestamp
+		return actual.timestamp
+	}
+	return newEntry.timestamp
+}
+
+// getTimingPredicate returns a predicate that stores the first time an object is seen by the
+// controller, and cleans up the in-memory map entry when the object is deleted.
 func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
-			r.observedTimes.LoadOrStore(key, time.Now())
+			r.getOrRecordObservedTime(e.Object)
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			key := types.NamespacedName{Name: e.ObjectNew.GetName(), Namespace: e.ObjectNew.GetNamespace()}
-			r.observedTimes.LoadOrStore(key, time.Now())
+			r.getOrRecordObservedTime(e.ObjectNew)
 			return true
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
-			r.observedTimes.Delete(key)
+			entry, ok := r.observedTimes.Load(key)
+			if ok && entry.uid == e.Object.GetUID() {
+				r.observedTimes.Delete(key)
+			}
 			return true
 		},
 	}

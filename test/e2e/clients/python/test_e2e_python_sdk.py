@@ -14,11 +14,13 @@
 
 import os
 from test.e2e.clients.python.framework.context import TestContext
+from unittest import mock
 
 import pytest
 import yaml
-from k8s_agent_sandbox import SandboxClient
-from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig
+
+from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig, SandboxTracerConfig
+from k8s_agent_sandbox import SandboxClient, trace_manager
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
 TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
@@ -168,6 +170,61 @@ def test_python_sdk_router_mode_warmpool(
         pytest.fail(f"SDK test with warmpool failed: {e}")
     finally:
         client.delete_all()
+
+
+def test_python_sdk_tracing_mode(tc, temp_namespace, sandbox_template, deploy_router):
+    """Tests the Python SDK tracing functionality by verifying span creation."""
+    if not getattr(trace_manager, "OPENTELEMETRY_AVAILABLE", False):
+        pytest.skip("OpenTelemetry not installed")
+        
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    
+    memory_exporter = InMemorySpanExporter()
+    
+    # Reset the global provider to ensure our mock exporter is used
+    original_provider = trace_manager._TRACER_PROVIDER
+    trace_manager._TRACER_PROVIDER = None
+    
+    try:
+        with mock.patch('k8s_agent_sandbox.trace_manager.OTLPSpanExporter', return_value=memory_exporter):
+            client = SandboxClient(
+                tracer_config=SandboxTracerConfig(enable_tracing=True)
+            )
+            sandbox = client.create_sandbox(
+                template=sandbox_template,
+                namespace=temp_namespace,
+            )
+            print("\n--- Running SDK tests with tracing ---")
+            sandbox.commands.run("echo 'Hello Tracing'")
+            sandbox.files.write("trace_test.txt", "tracing test")
+            sandbox.files.read("trace_test.txt")
+            sandbox.files.exists("trace_test.txt")
+            sandbox.files.list(".")
+            print("SDK test with tracing passed!")
+                
+            # Force flush to ensure spans are processed
+            if trace_manager._TRACER_PROVIDER:
+                trace_manager._TRACER_PROVIDER.force_flush()
+            
+            # Verify spans
+            spans = memory_exporter.get_finished_spans()
+            assert len(spans) > 0, "No spans were generated"
+            
+            span_names = [span.name for span in spans]
+            print(f"Generated spans: {span_names}")
+            
+            expected_spans = [
+                "sandbox-client.create_claim", "sandbox-client.wait_for_sandbox_ready",
+                "sandbox-client.run", "sandbox-client.write", "sandbox-client.read",
+                "sandbox-client.exists", "sandbox-client.list"
+            ]
+            for expected in expected_spans:
+                assert expected in span_names, f"Expected span '{expected}' not found in {span_names}"
+    finally:
+        if 'client' in locals():
+            client.delete_all()
+        # Restore the global provider for subsequent tests in the session
+        trace_manager._TRACER_PROVIDER = original_provider
 
 
 def test_python_sdk_gateway_mode(

@@ -37,6 +37,17 @@ spec:
         file: setup-sa.yaml
     - apply:
         file: setup-sandbox.yaml
+    - assert:
+        resource:
+            apiVersion: v1
+            kind: Pod
+            metadata:
+              namespace: sandbox-ns
+              ownerReferences:
+              - kind: Sandbox
+            spec:
+              serviceAccountName: sandbox-sa
+        timeout: 30s
     - apply:
         file: bad-rolebinding.yaml
         expect:
@@ -50,8 +61,24 @@ spec:
         file: good-rolebinding.yaml
   - name: step-04
     try:
-    - delete:
-        file: setup-sandbox.yaml
+    - script:
+        timeout: 30s
+        content: |
+          kubectl delete --force --grace-period=0 -f setup-sandbox.yaml --ignore-not-found=true
+          kubectl delete --force --grace-period=0 pod --all -n sandbox-ns --ignore-not-found=true
+    - script:
+        timeout: 30s
+        content: |
+          set -euo pipefail
+          end=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$end" ]; do
+            if ! kubectl get pods -n sandbox-ns -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.serviceAccountName}{"|"}{range .metadata.ownerReferences[*]}{.kind}{","}{end}{"\n"}{end}' | grep -qE '\|sandbox-sa\|.*Sandbox'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Timed out waiting for Sandbox-owned pods using sandbox-sa to be deleted" >&2
+          exit 1
     - apply:
         file: barepod.yaml
     - apply:

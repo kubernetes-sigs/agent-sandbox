@@ -8,9 +8,9 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
     description: "Python SDK README to GitHub"
 
-  # Examples link - redirect to /docs/examples/
+  # Examples link - redirect to /docs/use-cases/examples/
   - pattern: '\]\(examples/\)'
-    replacement: '](/docs/examples/)'
+    replacement: '](/docs/use-cases/examples/)'
     description: "Examples directory to docs/examples"
 
   # Extensions examples - redirect to GitHub
@@ -25,7 +25,7 @@ replacements:
 
   # JupyterLab installation guide - specific to experiment.md
   - pattern: '\]\(\./README\.md\)'
-    replacement: '](/docs/examples/jupyterlab/)'
+    replacement: '](/docs/use-cases/examples/jupyterlab/)'
     description: "JupyterLab README to docs page"
 
   # Installation section from getting started
@@ -48,17 +48,33 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/test_client.py)'
     description: "test_client.py to GitHub"
 
-  # Python-runtime-sandbox - redirect to /docs/runtime-templates/python/
+  # Python-runtime-sandbox README (absolute repo path) - redirect to /docs/runtime-templates/python/
+  - pattern: '\]\(/examples/python-runtime-sandbox/README\.md\)'
+    replacement: '](/docs/runtime-templates/python/)'
+    description: "Python runtime sandbox README absolute path to docs page"
+
+  # Python-runtime-sandbox (relative path 3 levels up) - redirect to /docs/runtime-templates/python/
   - pattern: '\]\(\.\./\.\./\.\./examples/python-runtime-sandbox/\)'
     replacement: '](/docs/runtime-templates/python/)'
     description: "Python runtime sandbox to docs page"
+
+  # Python SDK README (absolute repo path, no anchor) - redirect to /docs/python-client/
+  - pattern: '\]\(/clients/python/agentic-sandbox-client/README\.md\)'
+    replacement: '](/docs/python-client/)'
+    description: "Python SDK README absolute path (no anchor) to docs page"
 
   # Tracing with GCP - redirect to GitHub
   - pattern: '\]\(GCP\.md(#[^)]+)\)'
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/GCP.md$1)'
     description: "GCP.md to GitHub"
 
+  # Go client source links - redirect to GitHub
+  - pattern: '\]\(sandbox/options\.go\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go)'
+    description: "Go client options.go to GitHub"
+
   # Generic relative README.md links (must come after specific rules)
+
   - pattern: '\]\(README\.md(#[^)]+)?\)'
     replacement: null  # Will be dynamically replaced with current section path
     description: "Generic README links to current section"

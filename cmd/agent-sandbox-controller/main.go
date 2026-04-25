@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -29,15 +30,16 @@ import (
 
 	"github.com/felixge/fgprof"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"sigs.k8s.io/agent-sandbox/controllers"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
+	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	"sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
-	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
-	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -63,6 +65,8 @@ func main() {
 	var sandboxClaimConcurrentWorkers int
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
+	var printVersion bool
+	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -94,6 +98,11 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if printVersion {
+		fmt.Println(version.Print("agent-sandbox-controller"))
+		os.Exit(0)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -227,11 +236,13 @@ func main() {
 	}
 
 	if extensions {
+		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorder("sandboxclaim-controller"),
-			Tracer:   instrumenter,
+			Client:           mgr.GetClient(),
+			Scheme:           mgr.GetScheme(),
+			WarmSandboxQueue: warmSandboxQueue,
+			Recorder:         mgr.GetEventRecorder("sandboxclaim-controller"),
+			Tracer:           instrumenter,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)

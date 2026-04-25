@@ -15,6 +15,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes
@@ -39,13 +48,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
   - extensions.agents.x-k8s.io
   resources:
   - sandboxclaims
@@ -64,6 +66,7 @@ rules:
   resources:
   - sandboxclaims/finalizers
   - sandboxclaims/status
+  - sandboxtemplates/finalizers
   - sandboxtemplates/status
   - sandboxwarmpools/finalizers
   - sandboxwarmpools/status

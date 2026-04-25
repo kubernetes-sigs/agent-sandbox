@@ -66,6 +66,10 @@ spec:
                   shutdownTime:
                     format: date-time
                     type: string
+                  ttlSecondsAfterFinished:
+                    format: int32
+                    minimum: 0
+                    type: integer
                 type: object
               sandboxTemplateRef:
                 properties:

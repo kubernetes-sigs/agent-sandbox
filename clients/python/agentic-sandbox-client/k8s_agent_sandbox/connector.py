@@ -16,6 +16,7 @@ import logging
 import socket
 import subprocess
 import time
+from typing import Callable
 import requests
 from abc import ABC, abstractmethod
 from requests.adapters import HTTPAdapter
@@ -24,7 +25,8 @@ from .models import (
     SandboxConnectionConfig,
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
-    SandboxLocalTunnelConnectionConfig
+    SandboxInClusterConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
 )
 from .k8s_helper import K8sHelper
 from .exceptions import (
@@ -52,6 +54,11 @@ class ConnectionStrategy(ABC):
         """Checks if the connection is healthy. Raises SandboxPortForwardError if not."""
         pass
 
+    @abstractmethod
+    def should_inject_router_headers(self) -> bool:
+        """Returns True if X-Sandbox-* router headers should be injected into requests."""
+        pass
+
 class DirectConnectionStrategy(ConnectionStrategy):
     def __init__(self, config: SandboxDirectConnectionConfig):
         self.config = config
@@ -64,6 +71,9 @@ class DirectConnectionStrategy(ConnectionStrategy):
 
     def verify_connection(self):
         pass
+
+    def should_inject_router_headers(self) -> bool:
+        return True
 
 class GatewayConnectionStrategy(ConnectionStrategy):
     def __init__(self, config: SandboxGatewayConnectionConfig, k8s_helper: K8sHelper):
@@ -88,6 +98,9 @@ class GatewayConnectionStrategy(ConnectionStrategy):
 
     def verify_connection(self):
         pass
+
+    def should_inject_router_headers(self) -> bool:
+        return True
 
 class LocalTunnelConnectionStrategy(ConnectionStrategy):
     def __init__(self, sandbox_id: str, namespace: str, config: SandboxLocalTunnelConnectionConfig):
@@ -168,6 +181,53 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                 f"Stderr: {stderr.decode(errors='replace')}"
             )
 
+    def should_inject_router_headers(self) -> bool:
+        return True
+
+class InClusterConnectionStrategy(ConnectionStrategy):
+    """Provides direct in-cluster connectivity to a sandbox pod, bypassing the router.
+
+    Requires the SDK to run inside the same Kubernetes cluster as the sandbox.
+    Router-specific request headers are not injected.
+    """
+
+    def __init__(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        config: SandboxInClusterConnectionConfig,
+        get_pod_ip: Callable[[], str | None] | None = None,
+    ):
+        self._dns_url = (
+            f"http://{sandbox_id}.{namespace}"
+            f".svc.cluster.local:{config.server_port}"
+        )
+        self._get_pod_ip = get_pod_ip
+        self._server_port = config.server_port
+        self._resolved = False
+        self._cached_pod_ip_url: str | None = None
+
+    def connect(self) -> str:
+        if self._get_pod_ip:
+            if self._resolved:
+                return self._cached_pod_ip_url or self._dns_url
+            pod_ip = self._get_pod_ip()
+            if pod_ip:
+                self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                self._resolved = True
+                return self._cached_pod_ip_url
+        return self._dns_url
+
+    def verify_connection(self):
+        pass
+
+    def close(self):
+        self._resolved = False
+        self._cached_pod_ip_url = None
+
+    def should_inject_router_headers(self) -> bool:
+        return False
+
 class SandboxConnector:
     """
     Manages the connection to the Sandbox, including auto-discovery and port-forwarding.
@@ -178,13 +238,15 @@ class SandboxConnector:
         namespace: str,
         connection_config: SandboxConnectionConfig,
         k8s_helper: K8sHelper,
+        get_pod_ip: Callable[[], str | None] | None = None,
     ):
         # Parameter initialization
         self.id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
-        
+        self._get_pod_ip = get_pod_ip
+
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
         
@@ -207,6 +269,8 @@ class SandboxConnector:
             return GatewayConnectionStrategy(self.connection_config, self.k8s_helper)
         elif isinstance(self.connection_config, SandboxLocalTunnelConnectionConfig):
             return LocalTunnelConnectionStrategy(self.id, self.namespace, self.connection_config)
+        elif isinstance(self.connection_config, SandboxInClusterConnectionConfig):
+            return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self._get_pod_ip)
         else:
             raise ValueError("Unknown connection configuration type")
 
@@ -233,9 +297,10 @@ class SandboxConnector:
             url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
             headers = kwargs.get("headers", {}).copy()
-            headers["X-Sandbox-ID"] = self.id
-            headers["X-Sandbox-Namespace"] = self.namespace
-            headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+            if self.strategy.should_inject_router_headers():
+                headers["X-Sandbox-ID"] = self.id
+                headers["X-Sandbox-Namespace"] = self.namespace
+                headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
             kwargs["headers"] = headers
 
             # Send the request

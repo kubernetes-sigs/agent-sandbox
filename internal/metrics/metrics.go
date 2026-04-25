@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/agent-sandbox/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -26,6 +27,12 @@ const (
 	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+
+	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
+	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
+
+	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
+	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )
 
 var (
@@ -100,6 +107,25 @@ var (
 		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template"},
 		nil,
 	)
+
+	buildVersionInfo = version.Get()
+
+	// BuildInfo exposes agent-sandbox-controller build metadata as a constant gauge.
+	BuildInfo = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "agent_sandbox_build_info",
+			Help: "Agent sandbox controller build metadata exposed as labels with a constant value of 1.",
+			ConstLabels: prometheus.Labels{
+				"git_version": buildVersionInfo.GitVersion,
+				"git_commit":  buildVersionInfo.GitSHA,
+				"build_date":  buildVersionInfo.BuildDate,
+				"go_version":  buildVersionInfo.GoVersion,
+				"compiler":    buildVersionInfo.Compiler,
+				"platform":    buildVersionInfo.Platform,
+			},
+		},
+		func() float64 { return 1 },
+	)
 )
 
 // Init registers custom metrics with the global controller-runtime registry.
@@ -108,6 +134,7 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
+	metrics.Registry.MustRegister(BuildInfo)
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.

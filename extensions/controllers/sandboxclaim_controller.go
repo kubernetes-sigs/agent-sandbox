@@ -50,8 +50,12 @@ import (
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
+	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
+
+const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
+const immediateRequeueDelay = time.Millisecond
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -169,6 +173,17 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Check Expiration
 	// We calculate this upfront to decide the flow.
 	claimExpired, timeLeft := r.checkExpiration(claim)
+	if claimExpired && !hasClaimExpiredCondition(claim.Status.Conditions) {
+		meta.SetStatusCondition(&claim.Status.Conditions, r.computeReadyCondition(claim, nil, nil, true))
+		if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+			logger.V(1).Info("Sandboxclaim UpdateStatus error encountered", "errors", updateErr, "request", req.NamespacedName)
+			return ctrl.Result{}, updateErr
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Claim Expired", "Claim expired")
+		}
+		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+	}
 	logger.V(1).Info("Expiration check", "isExpired", claimExpired, "timeLeft", timeLeft, "request", req.NamespacedName)
 
 	// Handle "Delete" and "DeleteForeground" policies immediately.
@@ -210,11 +225,18 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Update Status & Events
 	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
-
-	if !hasExpiredCondition(originalClaimStatus.Conditions) && hasExpiredCondition(claim.Status.Conditions) {
+	postExpiration, postTimeLeft := r.checkExpiration(claim)
+	if postExpiration && !hasClaimExpiredCondition(claim.Status.Conditions) {
+		meta.SetStatusCondition(&claim.Status.Conditions, r.computeReadyCondition(claim, sandbox, reconcileErr, true))
+		if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+			errs := errors.Join(reconcileErr, updateErr)
+			logger.V(1).Info("Sandboxclaim UpdateStatus error encountered", "errors", errs, "request", req.NamespacedName)
+			return ctrl.Result{}, errs
+		}
 		if r.Recorder != nil {
 			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1alpha1.ClaimExpiredReason, "Claim Expired", "Claim expired")
 		}
+		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 	}
 
 	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
@@ -227,8 +249,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Determine Result
 	var result ctrl.Result
-	if !claimExpired && timeLeft > 0 {
-		result = ctrl.Result{RequeueAfter: timeLeft}
+	if !claimExpired {
+		if postExpiration {
+			result = ctrl.Result{RequeueAfter: immediateRequeueDelay}
+		} else if postTimeLeft > 0 {
+			result = ctrl.Result{RequeueAfter: postTimeLeft}
+		}
 	}
 
 	// Suppress expected user errors (like missing templates) to avoid crash loops
@@ -268,18 +294,12 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 
 // checkExpiration calculates if the claim is expired and how much time is left.
 func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1alpha1.SandboxClaim) (bool, time.Duration) {
-	if claim.Spec.Lifecycle == nil || claim.Spec.Lifecycle.ShutdownTime == nil {
+	if claim.Spec.Lifecycle == nil {
 		return false, 0
 	}
 
-	now := time.Now()
-	expiry := claim.Spec.Lifecycle.ShutdownTime.Time
-
-	if now.After(expiry) {
-		return true, 0
-	}
-
-	return false, expiry.Sub(now)
+	finishedCondition := lifecycle.FinishedCondition(claim.Status.Conditions, string(v1alpha1.SandboxConditionFinished))
+	return lifecycle.TimeLeft(time.Now(), claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
 }
 
 // reconcileActive handles the creation and updates of running sandboxes.
@@ -459,7 +479,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             extensionsv1alpha1.ClaimExpiredReason,
-			Message:            "Claim expired. Sandbox resources deleted.",
+			Message:            "Claim expired. Sandbox cleanup initiated.",
 			ObservedGeneration: claim.Generation,
 		}
 	}
@@ -476,7 +496,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 	}
 
 	// Check if Core Controller marked it as Expired
-	if isSandboxExpired(sandbox) {
+	if hasSandboxExpiredCondition(sandbox.Status.Conditions) {
 		return metav1.Condition{
 			Type:               string(v1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
@@ -505,6 +525,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1alpha1
 func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, err error, isClaimExpired bool) {
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
+	r.syncFinishedCondition(claim, sandbox, isClaimExpired)
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
@@ -512,6 +533,22 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1alpha1.S
 	} else {
 		claim.Status.SandboxStatus.Name = ""
 		claim.Status.SandboxStatus.PodIPs = nil
+	}
+}
+
+func (r *SandboxClaimReconciler) syncFinishedCondition(claim *extensionsv1alpha1.SandboxClaim, sandbox *v1alpha1.Sandbox, isClaimExpired bool) {
+	if sandbox != nil {
+		finishedCondition := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1alpha1.SandboxConditionFinished))
+		if finishedCondition != nil {
+			meta.SetStatusCondition(&claim.Status.Conditions, *finishedCondition)
+		} else {
+			meta.RemoveStatusCondition(&claim.Status.Conditions, string(v1alpha1.SandboxConditionFinished))
+		}
+		return
+	}
+
+	if !isClaimExpired {
+		meta.RemoveStatusCondition(&claim.Status.Conditions, string(v1alpha1.SandboxConditionFinished))
 	}
 }
 
@@ -1266,21 +1303,14 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordSandboxCreationLatency(claim, sandbox, launchType)
 }
 
-// isSandboxExpired checks the Sandbox status condition set by the Core Controller.
-func isSandboxExpired(sandbox *v1alpha1.Sandbox) bool {
-	return hasExpiredCondition(sandbox.Status.Conditions)
+func hasSandboxExpiredCondition(conditions []metav1.Condition) bool {
+	readyCondition := meta.FindStatusCondition(conditions, string(v1alpha1.SandboxConditionReady))
+	return readyCondition != nil && readyCondition.Reason == v1alpha1.SandboxReasonExpired
 }
 
-// hasExpiredCondition Helper to check if conditions list contains the expired reason.
-func hasExpiredCondition(conditions []metav1.Condition) bool {
-	for _, cond := range conditions {
-		if cond.Type == string(v1alpha1.SandboxConditionReady) {
-			if cond.Reason == extensionsv1alpha1.ClaimExpiredReason || cond.Reason == v1alpha1.SandboxReasonExpired {
-				return true
-			}
-		}
-	}
-	return false
+func hasClaimExpiredCondition(conditions []metav1.Condition) bool {
+	readyCondition := meta.FindStatusCondition(conditions, string(v1alpha1.SandboxConditionReady))
+	return readyCondition != nil && readyCondition.Reason == extensionsv1alpha1.ClaimExpiredReason
 }
 
 // sandboxEventHandler implements handler.EventHandler for the SandboxClaimReconciler.

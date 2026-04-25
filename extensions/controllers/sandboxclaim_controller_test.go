@@ -24,9 +24,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1040,9 +1042,12 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			}
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.claim.Name, Namespace: "default"}}
-			_, err := reconciler.Reconcile(context.Background(), req)
-			if err != nil {
-				t.Fatalf("reconcile failed: %v", err)
+			var err error
+			for range 2 {
+				_, err = reconciler.Reconcile(context.Background(), req)
+				if err != nil {
+					t.Fatalf("reconcile failed: %v", err)
+				}
 			}
 
 			// 1. Verify Claim
@@ -1097,6 +1102,289 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxClaimMirrorsFinishedConditionAndSchedulesTTL(t *testing.T) {
+	scheme := newScheme(t)
+	ttl := int32(120)
+	finishedAt := metav1.NewTime(time.Now().Add(-30 * time.Second))
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-mirror-claim", Namespace: "default", UID: "ttl-mirror-claim"},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "ttl-mirror-template"},
+			Lifecycle:   &extensionsv1alpha1.Lifecycle{TTLSecondsAfterFinished: &ttl},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-mirror-template", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+	}
+
+	controller := true
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claim.Name,
+			Namespace: claim.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxClaim",
+				Name:       claim.Name,
+				UID:        claim.UID,
+				Controller: &controller,
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+		Status: sandboxv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:               string(sandboxv1alpha1.SandboxConditionFinished),
+			Status:             metav1.ConditionTrue,
+			Reason:             sandboxv1alpha1.SandboxReasonPodSucceeded,
+			LastTransitionTime: finishedAt,
+		}}},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, template, sandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   client,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+
+	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedClaim))
+	finishedCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionFinished))
+	require.NotNil(t, finishedCondition)
+	require.Equal(t, sandboxv1alpha1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+	readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	require.NotNil(t, readyCondition)
+	require.Equal(t, "SandboxNotReady", readyCondition.Reason)
+}
+
+func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
+	scheme := newScheme(t)
+	ttlZero := int32(0)
+	finishedAt := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+
+	createClaim := func(name string, policy extensionsv1alpha1.ShutdownPolicy) *extensionsv1alpha1.SandboxClaim {
+		return &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name)},
+			Spec: extensionsv1alpha1.SandboxClaimSpec{
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "cleanup-template"},
+				Lifecycle: &extensionsv1alpha1.Lifecycle{
+					ShutdownPolicy:          policy,
+					TTLSecondsAfterFinished: &ttlZero,
+				},
+			},
+			Status: extensionsv1alpha1.SandboxClaimStatus{Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1alpha1.SandboxConditionFinished),
+				Status:             metav1.ConditionTrue,
+				Reason:             sandboxv1alpha1.SandboxReasonPodSucceeded,
+				LastTransitionTime: finishedAt,
+			}}},
+		}
+	}
+
+	controller := true
+	createSandbox := func(claim *extensionsv1alpha1.SandboxClaim) *sandboxv1alpha1.Sandbox {
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claim.Name,
+				Namespace: claim.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxClaim",
+					Name:       claim.Name,
+					UID:        claim.UID,
+					Controller: &controller,
+				}},
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+			Status: sandboxv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1alpha1.SandboxConditionFinished),
+				Status:             metav1.ConditionTrue,
+				Reason:             sandboxv1alpha1.SandboxReasonPodSucceeded,
+				LastTransitionTime: finishedAt,
+			}}},
+		}
+	}
+
+	testCases := []struct {
+		name                 string
+		policy               extensionsv1alpha1.ShutdownPolicy
+		expectClaimDeleted   bool
+		expectSandboxDeleted bool
+	}{
+		{
+			name:                 "retain deletes sandbox and preserves finished condition",
+			policy:               extensionsv1alpha1.ShutdownPolicyRetain,
+			expectClaimDeleted:   false,
+			expectSandboxDeleted: true,
+		},
+		{
+			name:                 "delete foreground deletes claim",
+			policy:               extensionsv1alpha1.ShutdownPolicyDeleteForeground,
+			expectClaimDeleted:   true,
+			expectSandboxDeleted: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := createClaim(tc.name, tc.policy)
+			sandbox := createSandbox(claim)
+			client := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(claim, sandbox).
+				WithStatusSubresource(claim).
+				Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:   client,
+				Scheme:   scheme,
+				Recorder: events.NewFakeRecorder(10),
+				Tracer:   asmetrics.NewNoOp(),
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+			result, err := reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+			require.Greater(t, result.RequeueAfter, time.Duration(0))
+
+			updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedClaim))
+			readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+			require.NotNil(t, readyCondition)
+			require.Equal(t, extensionsv1alpha1.ClaimExpiredReason, readyCondition.Reason)
+			finishedCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionFinished))
+			require.NotNil(t, finishedCondition)
+			require.Equal(t, sandboxv1alpha1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+
+			updatedSandbox := &sandboxv1alpha1.Sandbox{}
+			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedSandbox))
+
+			result, err = reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+			require.Zero(t, result.RequeueAfter)
+
+			err = client.Get(context.Background(), req.NamespacedName, updatedClaim)
+			if tc.expectClaimDeleted {
+				require.True(t, k8errors.IsNotFound(err))
+			} else {
+				require.NoError(t, err)
+				readyCondition = meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+				require.NotNil(t, readyCondition)
+				require.Equal(t, extensionsv1alpha1.ClaimExpiredReason, readyCondition.Reason)
+				finishedCondition = meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionFinished))
+				require.NotNil(t, finishedCondition)
+				require.Equal(t, sandboxv1alpha1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+			}
+
+			err = client.Get(context.Background(), req.NamespacedName, updatedSandbox)
+			if tc.expectSandboxDeleted {
+				require.True(t, k8errors.IsNotFound(err))
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
+	scheme := newScheme(t)
+	ttlZero := int32(0)
+	finishedAt := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "stale-ttl-claim",
+			Namespace: "default",
+			UID:       "stale-ttl-claim",
+			Annotations: map[string]string{
+				ObservabilityAnnotation: time.Now().Format(time.RFC3339Nano),
+			},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "stale-template"},
+			Lifecycle: &extensionsv1alpha1.Lifecycle{
+				ShutdownPolicy:          extensionsv1alpha1.ShutdownPolicyDelete,
+				TTLSecondsAfterFinished: &ttlZero,
+			},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+		}},
+	}
+
+	controller := true
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claim.Name,
+			Namespace: claim.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxClaim",
+				Name:       claim.Name,
+				UID:        claim.UID,
+				Controller: &controller,
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+		Status: sandboxv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:               string(sandboxv1alpha1.SandboxConditionFinished),
+			Status:             metav1.ConditionTrue,
+			Reason:             sandboxv1alpha1.SandboxReasonPodSucceeded,
+			LastTransitionTime: finishedAt,
+		}}},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, template, sandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   client,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+
+	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedClaim))
+	readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	require.NotNil(t, readyCondition)
+	require.Equal(t, extensionsv1alpha1.ClaimExpiredReason, readyCondition.Reason)
+	finishedCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionFinished))
+	require.NotNil(t, finishedCondition)
+	require.Equal(t, sandboxv1alpha1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+
+	require.NoError(t, client.Get(context.Background(), req.NamespacedName, &sandboxv1alpha1.Sandbox{}))
+
+	result, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Zero(t, result.RequeueAfter)
+
+	err = client.Get(context.Background(), req.NamespacedName, &extensionsv1alpha1.SandboxClaim{})
+	require.True(t, k8errors.IsNotFound(err))
 }
 
 // TestSandboxProvisionEvent verifies that Sandbox creation emits "SandboxProvisioned".

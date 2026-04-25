@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -2657,5 +2658,175 @@ func seedQueueForTest(q queue.SandboxQueue, objects []client.Object) {
 				q.Add(hash, key)
 			}
 		}
+	}
+}
+
+// TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag verifies that during informer cache lag,
+// the assigned sandbox label on the claim is used to identify the previously adopted Sandbox,
+// preventing duplicate adoptions from the warm pool.
+func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Labels: map[string]string{
+				"agents.x-k8s.io/sandbox-name": "adopted-sb",
+			},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	adoptedSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sb",
+			Namespace: "default",
+			UID:       "adopted-sb-uid",
+			Labels: map[string]string{
+				extensionsv1alpha1.SandboxIDLabel: "claim-uid-123",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						extensionsv1alpha1.SandboxIDLabel: "claim-uid-123",
+					},
+				},
+			},
+		},
+	}
+
+	// Another sandbox in the warm pool that we want to make sure doesn't get adopted
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	extraSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-sb-extra",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, adoptedSandbox, extraSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	if isAdoptable(extraSandbox) == nil {
+		hash := extraSandbox.Labels[sandboxTemplateRefHash]
+		key := queue.SandboxKey{Namespace: extraSandbox.Namespace, Name: extraSandbox.Name}
+		warmSandboxQueue.Add(hash, key)
+	}
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: warmSandboxQueue,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+
+	// Run reconcile
+	_, err := reconciler.Reconcile(context.Background(), req)
+	expectedErr := "triggered adoption completion for \"adopted-sb\": retrying"
+	if err == nil {
+		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
+	} else if err.Error() != expectedErr {
+		t.Errorf("Expected error %q, got: %q", expectedErr, err.Error())
+	}
+
+	// Verify that the claim status was NOT updated with the sandbox name (due to error)
+	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+
+	if updatedClaim.Status.SandboxStatus.Name == "adopted-sb" {
+		t.Error("expected claim status to NOT be updated with 'adopted-sb' during cache lag")
+	}
+
+	// Verify that the extra warm sandbox was NOT adopted (it should still have its warm pool labels)
+	var extra sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {
+		t.Fatalf("failed to get extra warm sandbox: %v", err)
+	}
+	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected extra warm sandbox to still have warm pool label, meaning it was not incorrectly adopted during cache lag")
+	}
+
+	// Simulate the cache catching up!
+	// Fetch the adopted sandbox object, add the SandboxClaim owner reference, and update it in fakeClient.
+	var adopted sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &adopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+	adopted.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+		Kind:       "SandboxClaim",
+		Name:       "test-claim",
+		UID:        "claim-uid-123",
+		Controller: ptr.To(true), // nolint:modernize
+	}}
+	if err := fakeClient.Update(context.Background(), &adopted); err != nil {
+		t.Fatalf("failed to update adopted sandbox with claim owner ref: %v", err)
+	}
+
+	// Run reconcile AGAIN
+	_, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected second Reconcile to succeed after cache caught up, but failed: %v", err)
+	}
+
+	// Verify that the claim status WAS updated this time!
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+		t.Errorf("expected claim status to be updated with 'adopted-sb' on 2nd pass, got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+
+	// Verify that the extra warm sandbox was STILL NOT adopted (it should still have its warm pool labels)
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {
+		t.Fatalf("failed to get extra warm sandbox: %v", err)
+	}
+	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
 	}
 }

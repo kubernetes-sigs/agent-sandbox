@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -44,6 +45,25 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithStatusSubresource(&sandboxv1alpha1.Sandbox{}).
 		WithRuntimeObjects(initialObjs...).
 		Build()
+}
+
+type alreadyExistsOnPodCreateClient struct {
+	client.WithWatch
+	pod *corev1.Pod
+}
+
+func (c *alreadyExistsOnPodCreateClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		if c.pod != nil {
+			pod := c.pod.DeepCopy()
+			if err := c.WithWatch.Create(ctx, pod); err != nil && !k8serrors.IsAlreadyExists(err) {
+				return err
+			}
+			c.pod = nil
+		}
+		return k8serrors.NewAlreadyExists(corev1.Resource("pods"), obj.GetName())
+	}
+	return c.WithWatch.Create(ctx, obj, opts...)
 }
 
 const sandboxUID = types.UID("test-sandbox-uid")
@@ -940,6 +960,7 @@ func TestReconcilePod(t *testing.T) {
 	testCases := []struct {
 		name                   string
 		initialObjs            []runtime.Object
+		wrapClient             func(client.WithWatch) client.WithWatch
 		sandbox                *sandboxv1alpha1.Sandbox
 		wantPod                *corev1.Pod
 		expectErr              bool
@@ -1149,6 +1170,41 @@ func TestReconcilePod(t *testing.T) {
 						},
 					},
 				},
+			},
+			sandbox:   sandboxObj,
+			wantPod:   nil,
+			expectErr: true,
+		},
+		{
+			name: "refuses pod created by another controller between get and create",
+			wrapClient: func(c client.WithWatch) client.WithWatch {
+				return &alreadyExistsOnPodCreateClient{
+					WithWatch: c,
+					pod: &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:            sandboxName,
+							Namespace:       sandboxNs,
+							ResourceVersion: "1",
+							OwnerReferences: []metav1.OwnerReference{
+								{
+									APIVersion:         "apps/v1",
+									Kind:               "Deployment",
+									Name:               "some-other-controller",
+									UID:                "some-other-uid",
+									Controller:         new(true),
+									BlockOwnerDeletion: new(true),
+								},
+							},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "foo",
+								},
+							},
+						},
+					},
+				}
 			},
 			sandbox:   sandboxObj,
 			wantPod:   nil,
@@ -1573,8 +1629,13 @@ func TestReconcilePod(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sandbox := tc.sandbox.DeepCopy()
 
+			fakeClient := newFakeClient(append(tc.initialObjs, sandbox)...)
+			if tc.wrapClient != nil {
+				fakeClient = tc.wrapClient(fakeClient)
+			}
+
 			r := SandboxReconciler{
-				Client:        newFakeClient(append(tc.initialObjs, sandbox)...),
+				Client:        fakeClient,
 				Scheme:        Scheme,
 				Tracer:        asmetrics.NewNoOp(),
 				ClusterDomain: "cluster.local",

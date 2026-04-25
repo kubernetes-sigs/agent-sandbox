@@ -635,8 +635,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil
 	}
 
-	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
-	if pod != nil {
+	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, error) {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
 		if r.Tracer.IsRecording(ctx) {
@@ -683,6 +682,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
+	}
+
+	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
+	if pod != nil {
+		return reconcileExistingPod(pod)
 	}
 
 	// Create new Pod
@@ -748,7 +752,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
 				return nil, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
 			}
-			return existingPod, nil
+			return reconcileExistingPod(existingPod)
 		}
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err

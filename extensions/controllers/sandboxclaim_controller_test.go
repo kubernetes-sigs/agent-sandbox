@@ -1387,6 +1387,103 @@ func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
 	require.True(t, k8errors.IsNotFound(err))
 }
 
+func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T) {
+	scheme := newScheme(t)
+	pastTime := metav1.Time{Time: time.Now().Add(-2 * time.Hour).Truncate(time.Second)}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-template", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxTemplateSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+	}
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "retain-claim", Namespace: "default", UID: types.UID("retain-claim")},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "cleanup-template"},
+			Lifecycle: &extensionsv1alpha1.Lifecycle{
+				ShutdownPolicy: extensionsv1alpha1.ShutdownPolicyRetain,
+				ShutdownTime:   &pastTime,
+			},
+		},
+		Status: extensionsv1alpha1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1alpha1.SandboxStatus{Name: "adopted-sandbox"},
+		},
+	}
+
+	adoptedSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sandbox",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: "extensions.agents.x-k8s.io/v1alpha1", Kind: "SandboxClaim", Name: claim.Name, UID: claim.UID, Controller: new(true)},
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{PodTemplate: sandboxv1alpha1.PodTemplate{}},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "SandboxReady",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, adoptedSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected first reconcile to requeue after marking claim expired, got %#v", result)
+	}
+
+	var fetchedClaim extensionsv1alpha1.SandboxClaim
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &fetchedClaim); err != nil {
+		t.Fatalf("expected claim to exist, got error: %v", err)
+	}
+
+	foundReason := false
+	for _, cond := range fetchedClaim.Status.Conditions {
+		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Reason == extensionsv1alpha1.ClaimExpiredReason {
+			foundReason = true
+		}
+	}
+	if !foundReason {
+		t.Fatalf("expected status reason %q, but not found", extensionsv1alpha1.ClaimExpiredReason)
+	}
+
+	result, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected second reconcile to finish without requeue, got %#v", result)
+	}
+
+	sandboxKey := types.NamespacedName{Name: "adopted-sandbox", Namespace: "default"}
+	var fetchedSandbox sandboxv1alpha1.Sandbox
+	err = fakeClient.Get(context.Background(), sandboxKey, &fetchedSandbox)
+	if err == nil {
+		t.Fatalf("expected adopted sandbox %q to be deleted, but it still exists", sandboxKey.String())
+	}
+	if !k8errors.IsNotFound(err) {
+		t.Fatalf("expected adopted sandbox %q to be deleted, but verifying deletion returned unexpected error: %v", sandboxKey.String(), err)
+	}
+}
+
 // TestSandboxProvisionEvent verifies that Sandbox creation emits "SandboxProvisioned".
 func TestSandboxProvisionEvent(t *testing.T) {
 	scheme := newScheme(t)

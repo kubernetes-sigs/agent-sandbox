@@ -16,7 +16,6 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -286,12 +285,10 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 }
 
 // computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
+// Thin wrapper over the shared sandboxcontrollers.ComputePodTemplateHash so the
+// warm pool controller can pass a *SandboxTemplate directly without converting.
 func computePodTemplateHash(template *extensionsv1alpha1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.PodTemplate)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
-	}
-	return sandboxcontrollers.NameHash(string(specJSON)), nil
+	return sandboxcontrollers.ComputePodTemplateHash(template.Spec.PodTemplate)
 }
 
 // fetchTemplateAndHash fetches the sandbox template and computes its hash.

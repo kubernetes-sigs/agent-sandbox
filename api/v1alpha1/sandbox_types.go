@@ -110,6 +110,26 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 }
 
+// UpdateStrategy describes how the controller should react to drift between
+// `Sandbox.Spec.PodTemplate` and an existing backing Pod's spec.
+// +kubebuilder:validation:Enum=None;Recreate
+type UpdateStrategy string
+
+const (
+	// UpdateStrategyNone is the default. The controller detects drift and may
+	// surface it via logs / status, but does NOT delete or modify the running
+	// Pod. Suits long-running, stateful workloads where deletion is
+	// disruptive.
+	UpdateStrategyNone UpdateStrategy = "None"
+
+	// UpdateStrategyRecreate opts in to automatic Pod recreation: when the
+	// controller observes a drift between the current Sandbox.Spec.PodTemplate
+	// hash and the hash stamped on the Pod at creation, it deletes the Pod so
+	// the next reconcile recreates it from the now-current template. This is
+	// destructive — the running container is killed.
+	UpdateStrategyRecreate UpdateStrategy = "Recreate"
+)
+
 // SandboxSpec defines the desired state of Sandbox.
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
@@ -136,6 +156,16 @@ type SandboxSpec struct {
 	// +kubebuilder:default=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// updateStrategy controls how the controller reacts when the running Pod's
+	// spec drifts from `spec.podTemplate`. Default `None` means drift is
+	// detected but the Pod is left alone (suits long-running, stateful
+	// workloads). Set to `Recreate` to opt in to automatic Pod deletion on
+	// drift; the next reconcile will recreate the Pod from the now-current
+	// template. See https://github.com/kubernetes-sigs/agent-sandbox/issues/612.
+	// +kubebuilder:default=None
+	// +optional
+	UpdateStrategy UpdateStrategy `json:"updateStrategy,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

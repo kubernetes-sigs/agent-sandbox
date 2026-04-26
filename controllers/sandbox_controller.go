@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -376,6 +377,34 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
+// ComputePodTemplateHash returns a stable hash of the given PodTemplate. The
+// hash is computed over the marshalled template (the source-of-truth side, not
+// the materialized Pod spec which Kubernetes may have augmented with admission
+// defaults), so it can be stamped at Pod creation time and compared on every
+// reconcile to detect template drift without false positives from defaulting.
+//
+// The function deep-copies the template and strips SandboxPodTemplateHashLabel
+// from its labels before marshalling. Without this, warm-pool sandboxes (which
+// stamp the hash into the template's pod-template labels at creation, see
+// extensions/controllers/sandboxwarmpool_controller.go) would produce a
+// self-referential hash: the marshalled input would contain a previous hash
+// value, and any change to that label would flip the computed hash, making
+// drift detection report perpetual drift.
+func ComputePodTemplateHash(template sandboxv1alpha1.PodTemplate) (string, error) {
+	canonical := template.DeepCopy()
+	if canonical.ObjectMeta.Labels != nil {
+		delete(canonical.ObjectMeta.Labels, sandboxv1alpha1.SandboxPodTemplateHashLabel)
+		if len(canonical.ObjectMeta.Labels) == 0 {
+			canonical.ObjectMeta.Labels = nil
+		}
+	}
+	specJSON, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
+	}
+	return NameHash(string(specJSON)), nil
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	service := &corev1.Service{}
@@ -660,8 +689,56 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, err
 		}
 
-		// TODO - Do we enfore (change) spec if a pod exists ?
-		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
+		// Drift check: if the pod was stamped with a SandboxPodTemplateHashLabel
+		// at creation time and the current template hashes differently, the
+		// Sandbox.Spec.PodTemplate has changed since the pod was made. Whether
+		// we react to the drift depends on Sandbox.Spec.UpdateStrategy:
+		//
+		//   - UpdateStrategyNone (default): drift is logged at V(1) but the
+		//     Pod is left alone. Long-running, stateful workloads stay running
+		//     even when the template is updated; the new template takes effect
+		//     on the next natural Pod recreate (delete, eviction, node drain).
+		//   - UpdateStrategyRecreate: the Pod is deleted; the next reconcile
+		//     loop creates a fresh Pod from the now-current template. This is
+		//     destructive — the running container is killed.
+		//
+		// See https://github.com/kubernetes-sigs/agent-sandbox/issues/612 for
+		// the design discussion: opt-in is the consensus default to avoid
+		// surprise disruption of in-flight sandbox operations.
+		//
+		// Pods missing the hash label predate this controller version (legacy
+		// / warm pool adoption from older versions); skip drift in that case
+		// regardless of strategy to avoid churn during a rolling controller
+		// upgrade.
+		//
+		// Only consider drift on pods owned by this sandbox — adoption from
+		// warm pool already replaced the template hash label as part of the
+		// hand-off, so anything still labelled with a stale hash is genuine
+		// drift, not adoption transition state.
+		if ownership == resourceOwnedBySandbox {
+			if stampedHash, hasHash := pod.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel]; hasHash {
+				currentHash, hashErr := ComputePodTemplateHash(sandbox.Spec.PodTemplate)
+				if hashErr != nil {
+					return nil, fmt.Errorf("failed to compute pod template hash: %w", hashErr)
+				}
+				if currentHash != stampedHash {
+					switch sandbox.Spec.UpdateStrategy {
+					case sandboxv1alpha1.UpdateStrategyRecreate:
+						log.Info("Recreating Pod because Sandbox.Spec.PodTemplate hash drifted (updateStrategy=Recreate)",
+							"Pod.Name", pod.Name, "stampedHash", stampedHash, "currentHash", currentHash)
+						if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+							return nil, fmt.Errorf("failed to delete drifted pod: %w", err)
+						}
+						// Treat as no-pod for this reconcile; next loop creates.
+						return nil, nil
+					default:
+						log.V(1).Info("Sandbox.Spec.PodTemplate has drifted from running Pod; updateStrategy=None, leaving Pod untouched",
+							"Pod.Name", pod.Name, "stampedHash", stampedHash, "currentHash", currentHash)
+					}
+				}
+			}
+		}
+
 		return pod, nil
 	}
 
@@ -673,9 +750,26 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		// SandboxPodTemplateHashLabel is controller-owned (stamped below from
+		// the freshly-computed hash) and must not be tracked as a
+		// template-propagated label. Otherwise updatePodMetadata would later
+		// strip it from the Pod when a template no longer carries it,
+		// breaking drift detection on warm-pool-adopted Pods.
+		if k == sandboxv1alpha1.SandboxPodTemplateHashLabel {
+			continue
+		}
 		labels[k] = v
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
+
+	// Stamp the pod-template hash AFTER copying template labels so a stale
+	// SandboxPodTemplateHashLabel in the template (warm pool sandboxes stamp
+	// it there at creation time) cannot overwrite the freshly-computed value.
+	templateHash, err := ComputePodTemplateHash(sandbox.Spec.PodTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute pod template hash: %w", err)
+	}
+	labels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = templateHash
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {

@@ -3845,6 +3845,12 @@ spec:
               shutdownTime:
                 format: date-time
                 type: string
+              updateStrategy:
+                default: None
+                enum:
+                - None
+                - Recreate
+                type: string
               volumeClaimTemplates:
                 items:
                   properties:

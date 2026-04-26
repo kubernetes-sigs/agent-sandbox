@@ -1221,8 +1221,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			return nil, err
 		}
 		// Reconcile workspace resources on the existing pod (in-place resize).
+		// Return errors instead of just logging so transient API failures
+		// trigger a requeue with backoff — otherwise the pod stays at the
+		// wrong size until the next reconcile happens for an unrelated reason.
 		if err := r.reconcileWorkspaceResources(ctx, sandbox, claim); err != nil {
 			logger.Error(err, "failed to reconcile workspace resources")
+			return nil, fmt.Errorf("reconcile workspace resources for claim %q: %w", claim.Name, err)
 		}
 		return sandbox, nil
 	}

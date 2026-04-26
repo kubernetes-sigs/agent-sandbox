@@ -644,6 +644,28 @@ func (r *SandboxClaimReconciler) reconcileWorkspaceResources(ctx context.Context
 		if err := r.Patch(ctx, podPatch, client.StrategicMergeFrom(pod)); err != nil {
 			return fmt.Errorf("patch pod resources: %w", err)
 		}
+
+		// Persist the new resources back to Sandbox.Spec.PodTemplate so they
+		// survive a future Pod recreate (node drain, kubelet restart, drift
+		// recreate). Without this the in-place resize is silently best-effort:
+		// the pod sees the new size now, but the next reconcile that has to
+		// build a fresh pod from the template would revert to whatever the
+		// SandboxClaim controller's adoption-time helper had stamped.
+		sandboxPatch := sandbox.DeepCopy()
+		updatedTemplate := false
+		for j := range sandboxPatch.Spec.PodTemplate.Spec.Containers {
+			c := &sandboxPatch.Spec.PodTemplate.Spec.Containers[j]
+			if c.Name != "workspace" {
+				continue
+			}
+			c.Resources = *patch
+			updatedTemplate = true
+		}
+		if updatedTemplate {
+			if err := r.Patch(ctx, sandboxPatch, client.MergeFrom(sandbox)); err != nil {
+				return fmt.Errorf("persist resized resources to Sandbox.Spec.PodTemplate: %w", err)
+			}
+		}
 		logger.Info("resized workspace container", "pod", pod.Name,
 			"cpuMillicores", claim.Spec.WorkspaceResources.CPUMillicores,
 			"memoryMiB", claim.Spec.WorkspaceResources.MemoryMiB)

@@ -1287,6 +1287,11 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	// Do not record creation metric if we have already seen the ready state.
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1alpha1.SandboxConditionReady))
 	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
+		// Already Ready before this reconcile; drain any entry re-added by a post-Ready UpdateFunc.
+		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
+			r.observedTimes.Delete(key)
+		}
 		return
 	}
 

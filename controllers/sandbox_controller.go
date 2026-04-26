@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -376,6 +377,19 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
+// ComputePodTemplateHash returns a stable hash of the given PodTemplate. The
+// hash is computed over the marshalled template (the source-of-truth side, not
+// the materialized Pod spec which Kubernetes may have augmented with admission
+// defaults), so it can be stamped at Pod creation time and compared on every
+// reconcile to detect template drift without false positives from defaulting.
+func ComputePodTemplateHash(template sandboxv1alpha1.PodTemplate) (string, error) {
+	specJSON, err := json.Marshal(template)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
+	}
+	return NameHash(string(specJSON)), nil
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	service := &corev1.Service{}
@@ -660,8 +674,36 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, err
 		}
 
-		// TODO - Do we enfore (change) spec if a pod exists ?
-		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
+		// Drift check: if the pod was stamped with a SandboxPodTemplateHashLabel
+		// at creation time and the current template hashes differently, the
+		// Sandbox.Spec.PodTemplate has changed since the pod was made. Delete
+		// the pod so the next reconcile recreates it from the current template.
+		// Pods missing the label predate this controller version (legacy / warm
+		// pool adoption from older versions); skip drift in that case to avoid
+		// surprise recreations during a rolling controller upgrade.
+		// Only consider drift on pods owned by this sandbox — adoption from
+		// warm pool already replaced the template hash label as part of the
+		// hand-off, so anything still labelled with a stale hash is genuine
+		// drift, not adoption transition state.
+		if ownership == resourceOwnedBySandbox {
+			stampedHash, hasHash := pod.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel]
+			if hasHash {
+				currentHash, hashErr := ComputePodTemplateHash(sandbox.Spec.PodTemplate)
+				if hashErr != nil {
+					return nil, fmt.Errorf("failed to compute pod template hash: %w", hashErr)
+				}
+				if currentHash != stampedHash {
+					log.Info("Recreating Pod because Sandbox.Spec.PodTemplate hash drifted",
+						"Pod.Name", pod.Name, "stampedHash", stampedHash, "currentHash", currentHash)
+					if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+						return nil, fmt.Errorf("failed to delete drifted pod: %w", err)
+					}
+					// Treat as no-pod for this reconcile; the next loop will recreate.
+					return nil, nil
+				}
+			}
+		}
+
 		return pod, nil
 	}
 
@@ -670,6 +712,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	labels := map[string]string{
 		sandboxLabel: nameHash,
 	}
+
+	// Stamp the pod-template hash so future reconciles can detect drift if
+	// Sandbox.Spec.PodTemplate is later updated.
+	templateHash, err := ComputePodTemplateHash(sandbox.Spec.PodTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute pod template hash: %w", err)
+	}
+	labels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = templateHash
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {

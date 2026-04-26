@@ -884,8 +884,23 @@ func TestReconcile(t *testing.T) {
 					t.Fatalf("unexpected sandbox status (-want,+got):\n%s", diff)
 				}
 			}
+			// Inject the SandboxPodTemplateHashLabel into want-Pod fixtures so
+			// each test case doesn't have to hardcode it. The hash is derived
+			// from sandboxSpec.PodTemplate, which is what the controller stamps
+			// on creation. Test cases that exercise spec drift will set the
+			// label explicitly to a different value.
+			templateHash, err := ComputePodTemplateHash(tc.sandboxSpec.PodTemplate)
+			require.NoError(t, err)
 			// Validate the other objects from the "cluster" (fake client)
 			for _, obj := range tc.wantObjs {
+				if pod, ok := obj.(*corev1.Pod); ok {
+					if pod.Labels == nil {
+						pod.Labels = map[string]string{}
+					}
+					if _, has := pod.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel]; !has {
+						pod.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = templateHash
+					}
+				}
 				liveObj := obj.DeepCopyObject().(client.Object)
 				err = r.Get(t.Context(), types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, liveObj)
 				require.NoError(t, err)
@@ -1503,6 +1518,30 @@ func TestReconcilePod(t *testing.T) {
 				Scheme:        Scheme,
 				Tracer:        asmetrics.NewNoOp(),
 				ClusterDomain: "cluster.local",
+			}
+
+			// Inject the SandboxPodTemplateHashLabel into want-Pod fixtures
+			// when the controller will create the pod fresh (no pre-existing
+			// pod in initialObjs). For the existing-pod update path, legacy
+			// pods don't get the label retroactively, so don't inject.
+			if tc.wantPod != nil {
+				preExistingPod := false
+				for _, obj := range tc.initialObjs {
+					if existing, ok := obj.(*corev1.Pod); ok && existing.Name == tc.wantPod.Name && existing.Namespace == tc.wantPod.Namespace {
+						preExistingPod = true
+						break
+					}
+				}
+				if !preExistingPod {
+					templateHash, hashErr := ComputePodTemplateHash(sandbox.Spec.PodTemplate)
+					require.NoError(t, hashErr)
+					if tc.wantPod.Labels == nil {
+						tc.wantPod.Labels = map[string]string{}
+					}
+					if _, has := tc.wantPod.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel]; !has {
+						tc.wantPod.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = templateHash
+					}
+				}
 			}
 
 			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
@@ -2273,4 +2312,132 @@ func TestSetServiceStatusCustomDomain(t *testing.T) {
 			require.Equal(t, tc.wantFQDN, sandbox.Status.ServiceFQDN)
 		})
 	}
+}
+
+// TestReconcilePodDriftRecreate covers the pod-template-hash drift detection
+// added by reconcilePod: when an existing Pod was stamped with a hash that no
+// longer matches the current Sandbox.Spec.PodTemplate, the Pod is deleted so
+// the next reconcile recreates it from the now-correct template. Pods missing
+// the hash label (legacy, e.g. created by an older controller version) must
+// not be recreated, so a rolling controller upgrade doesn't churn every Pod.
+func TestReconcilePodDriftRecreate(t *testing.T) {
+	const (
+		sandboxName = "sandbox-name"
+		sandboxNs   = "sandbox-ns"
+		nameHash    = "name-hash"
+	)
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, UID: sandboxUID},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: new(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+		},
+	}
+	currentHash, err := ComputePodTemplateHash(sandbox.Spec.PodTemplate)
+	require.NoError(t, err)
+
+	makePod := func(hashLabel string) *corev1.Pod {
+		labels := map[string]string{sandboxLabel: nameHash}
+		if hashLabel != "" {
+			labels[sandboxv1alpha1.SandboxPodTemplateHashLabel] = hashLabel
+		}
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				ResourceVersion: "1",
+				Labels:          labels,
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+		}
+	}
+
+	testCases := []struct {
+		name        string
+		stampedHash string // "" = no hash label (legacy)
+		wantDeleted bool
+	}{
+		{
+			name:        "recreates Pod when hash drifts from current PodTemplate",
+			stampedHash: "stale-hash-doesnt-match",
+			wantDeleted: true,
+		},
+		{
+			name:        "keeps Pod when hash matches current PodTemplate",
+			stampedHash: currentHash,
+			wantDeleted: false,
+		},
+		{
+			name:        "keeps Pod when hash label is absent (legacy Pod from older controller)",
+			stampedHash: "",
+			wantDeleted: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := makePod(tc.stampedHash)
+			sb := sandbox.DeepCopy()
+			r := SandboxReconciler{
+				Client:        newFakeClient(pod, sb),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
+			}
+
+			gotPod, reconcileErr := r.reconcilePod(t.Context(), sb, nameHash)
+			require.NoError(t, reconcileErr)
+
+			livePod := &corev1.Pod{}
+			getErr := r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod)
+			if tc.wantDeleted {
+				require.Nil(t, gotPod, "reconcilePod should return nil after deleting drifted pod")
+				require.True(t, k8serrors.IsNotFound(getErr), "drifted pod should be deleted but live pod still exists")
+			} else {
+				require.NoError(t, getErr, "non-drifted pod should still exist")
+				require.NotNil(t, gotPod, "reconcilePod should return existing pod when no drift")
+			}
+		})
+	}
+}
+
+// TestReconcilePodStampsTemplateHashOnCreate verifies that newly-created Pods
+// get the SandboxPodTemplateHashLabel set to the current PodTemplate hash, so
+// future reconciles can detect drift.
+func TestReconcilePodStampsTemplateHashOnCreate(t *testing.T) {
+	const (
+		sandboxName = "sandbox-name"
+		sandboxNs   = "sandbox-ns"
+		nameHash    = "name-hash"
+	)
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, UID: sandboxUID},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: new(int32(1)),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+		},
+	}
+	wantHash, err := ComputePodTemplateHash(sandbox.Spec.PodTemplate)
+	require.NoError(t, err)
+
+	r := SandboxReconciler{
+		Client:        newFakeClient(sandbox),
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+
+	pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+	require.NoError(t, err)
+	require.NotNil(t, pod)
+	require.Equal(t, wantHash, pod.Labels[sandboxv1alpha1.SandboxPodTemplateHashLabel])
 }

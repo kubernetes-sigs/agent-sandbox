@@ -618,7 +618,10 @@ func (r *SandboxClaimReconciler) reconcileWorkspaceResources(ctx context.Context
 	// Find the pod owned by this sandbox.
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, pod); err != nil {
-		return nil // Pod may not exist yet (still starting).
+		if k8errors.IsNotFound(err) {
+			return nil // Pod doesn't exist yet (still starting); next reconcile will retry.
+		}
+		return fmt.Errorf("get pod for in-place resize: %w", err)
 	}
 	if pod.Status.Phase != corev1.PodRunning {
 		return nil // Only resize running pods.

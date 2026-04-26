@@ -3267,3 +3267,85 @@ func seedQueueForTest(q queue.SandboxQueue, objects []client.Object) {
 		}
 	}
 }
+
+// TestBuildResizePatch covers the patch-generation helper used by the in-place
+// resize path. The cases include the regression for Copilot's review feedback:
+// when current.Limits already match the desired value but current.Requests do
+// not, the patch must still be produced so the requests are brought back in
+// line. The original logic compared only Limits and would silently no-op.
+func TestBuildResizePatch(t *testing.T) {
+	parse := resource.MustParse
+	cases := []struct {
+		name      string
+		current   corev1.ResourceRequirements
+		desired   *extensionsv1alpha1.WorkspaceResources
+		wantPatch bool
+	}{
+		{
+			name: "no change when requests and limits already match desired",
+			current: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    parse("2000m"),
+					corev1.ResourceMemory: parse("4096Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    parse("2000m"),
+					corev1.ResourceMemory: parse("4096Mi"),
+				},
+			},
+			desired:   &extensionsv1alpha1.WorkspaceResources{CPUMillicores: 2000, MemoryMiB: 4096},
+			wantPatch: false,
+		},
+		{
+			name: "patches when only Requests differs (Copilot regression)",
+			current: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: parse("500m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: parse("2000m")},
+			},
+			desired:   &extensionsv1alpha1.WorkspaceResources{CPUMillicores: 2000},
+			wantPatch: true,
+		},
+		{
+			name: "patches when only Limits differs",
+			current: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: parse("2000m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: parse("500m")},
+			},
+			desired:   &extensionsv1alpha1.WorkspaceResources{CPUMillicores: 2000},
+			wantPatch: true,
+		},
+		{
+			name:      "patches when current resources are empty",
+			current:   corev1.ResourceRequirements{},
+			desired:   &extensionsv1alpha1.WorkspaceResources{CPUMillicores: 2000, MemoryMiB: 4096},
+			wantPatch: true,
+		},
+		{
+			name: "patches memory when only memory drifts",
+			current: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    parse("2000m"),
+					corev1.ResourceMemory: parse("1024Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    parse("2000m"),
+					corev1.ResourceMemory: parse("1024Mi"),
+				},
+			},
+			desired:   &extensionsv1alpha1.WorkspaceResources{CPUMillicores: 2000, MemoryMiB: 4096},
+			wantPatch: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildResizePatch(tc.current, tc.desired)
+			if tc.wantPatch && got == nil {
+				t.Fatalf("expected a non-nil patch")
+			}
+			if !tc.wantPatch && got != nil {
+				t.Fatalf("expected nil patch, got %#v", got)
+			}
+		})
+	}
+}

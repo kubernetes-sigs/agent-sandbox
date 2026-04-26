@@ -671,7 +671,11 @@ func buildResizePatch(current corev1.ResourceRequirements, desired *extensionsv1
 
 	if desired.CPUMillicores > 0 {
 		qty := *resource.NewMilliQuantity(int64(desired.CPUMillicores), resource.DecimalSI)
-		if !current.Limits[corev1.ResourceCPU].Equal(qty) {
+		// Compare BOTH requests and limits. Earlier code only compared limits,
+		// which silently no-op'd a drift where requests had been edited (or
+		// never set) while limits already matched, leaving the pod with a
+		// guaranteed-QoS request mismatch.
+		if !current.Limits[corev1.ResourceCPU].Equal(qty) || !current.Requests[corev1.ResourceCPU].Equal(qty) {
 			target.Requests[corev1.ResourceCPU] = qty
 			target.Limits[corev1.ResourceCPU] = qty
 			changed = true
@@ -679,7 +683,7 @@ func buildResizePatch(current corev1.ResourceRequirements, desired *extensionsv1
 	}
 	if desired.MemoryMiB > 0 {
 		qty := *resource.NewQuantity(int64(desired.MemoryMiB)<<20, resource.BinarySI)
-		if !current.Limits[corev1.ResourceMemory].Equal(qty) {
+		if !current.Limits[corev1.ResourceMemory].Equal(qty) || !current.Requests[corev1.ResourceMemory].Equal(qty) {
 			target.Requests[corev1.ResourceMemory] = qty
 			target.Limits[corev1.ResourceMemory] = qty
 			changed = true

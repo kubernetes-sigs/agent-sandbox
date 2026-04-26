@@ -45,16 +45,8 @@ func NewSimpleSandboxQueue() *SimpleSandboxQueue {
 
 // Add pushes an item to the specific template's queue.
 func (s *SimpleSandboxQueue) Add(templateHash string, item SandboxKey) {
-	for {
-		q, _ := s.queues.LoadOrStore(templateHash, newSynchronizedQueue())
-		q.(*synchronizedQueue).Push(item)
-
-		// If the queue entry was concurrently removed while pushing,
-		// retry so the item lands in the current live queue.
-		if current, ok := s.queues.Load(templateHash); ok && current == q {
-			return
-		}
-	}
+	q, _ := s.queues.LoadOrStore(templateHash, newSynchronizedQueue())
+	q.(*synchronizedQueue).Push(item)
 }
 
 // Get pops an item from the specific template's queue.
@@ -71,14 +63,6 @@ func (s *SimpleSandboxQueue) RemoveItem(templateHash string, item SandboxKey) {
 	if q, ok := s.queues.Load(templateHash); ok {
 		sq := q.(*synchronizedQueue)
 		sq.Remove(item)
-
-		sq.mu.Lock()
-		empty := len(sq.items) == 0
-		sq.mu.Unlock()
-
-		if empty {
-			s.queues.CompareAndDelete(templateHash, sq)
-		}
 	}
 }
 

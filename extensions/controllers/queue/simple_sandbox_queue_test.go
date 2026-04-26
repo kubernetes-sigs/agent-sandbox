@@ -64,7 +64,7 @@ func TestSimpleSandboxQueue_RemoveItem_GhostPodFix(t *testing.T) {
 	// Ensure RemoveItem does not retain stale references in backing array tail.
 	rawQueue, ok := q.queues.Load(hash)
 	if !ok {
-		t.Errorf("Expected queue for %q to exist", hash)
+		t.Fatalf("Expected queue for %q to exist", hash)
 	}
 	sq := rawQueue.(*synchronizedQueue)
 	if cap(sq.items) > len(sq.items) {
@@ -89,8 +89,8 @@ func TestSimpleSandboxQueue_RemoveItem_GhostPodFix(t *testing.T) {
 	}
 
 	// Queue should now be empty
-	_, empty := q.Get(hash)
-	if empty {
+	_, hasItem := q.Get(hash)
+	if hasItem {
 		t.Errorf("Expected queue to be empty after Ghost Pod removal")
 	}
 }
@@ -129,20 +129,5 @@ func TestSimpleSandboxQueue_RemoveQueue_MemoryLeakFix(t *testing.T) {
 	_, ok := q.Get(hash)
 	if ok {
 		t.Errorf("Expected queue to be completely removed, but it still existed")
-	}
-
-	// Also verify item-by-item removal cleans up empty queues in sync.Map.
-	hash2 := "template-hash-item-by-item-delete"
-	key2 := SandboxKey{Namespace: "default", Name: "sb-2"}
-
-	q.Add(hash2, key1)
-	q.Add(hash2, key2)
-	q.RemoveItem(hash2, key1)
-	if _, exists := q.queues.Load(hash2); !exists {
-		t.Errorf("Expected queue for %q to still exist while items remain", hash2)
-	}
-	q.RemoveItem(hash2, key2)
-	if _, exists := q.queues.Load(hash2); exists {
-		t.Errorf("Expected empty queue for %q to be removed from sync.Map", hash2)
 	}
 }

@@ -3953,6 +3953,7 @@ spec:
                   - spec
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
             required:
             - podTemplate
             type: object

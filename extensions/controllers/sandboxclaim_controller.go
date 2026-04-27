@@ -641,90 +641,31 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 			logger.Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
-			// Take a snapshot of the pod BEFORE we mutate it to generate a clean JSON Patch.
-			originalAdopted := adopted.DeepCopy()
-
-			// Remove warm pool labels so the sandbox no longer appears in warm pool queries
-			delete(adopted.Labels, warmPoolSandboxLabel)
-			delete(adopted.Labels, sandboxTemplateRefHash)
-			delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
-
-			// Transfer ownership from SandboxWarmPool to SandboxClaim
-			adopted.OwnerReferences = nil
-			if err := controllerutil.SetControllerReference(claim, adopted, r.Scheme); err != nil {
+			// Update claim to record adoption (optimistic lock)
+			if claim.Labels == nil {
+				claim.Labels = make(map[string]string)
+			}
+			claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel] = adopted.Name
+			if err := r.Update(ctx, claim); err != nil {
 				r.WarmSandboxQueue.Add(templateHash, adoptedKey)
-				return false, fmt.Errorf("failed to set controller reference on adopted sandbox: %w", err)
-			}
-
-			// Propagate trace context from claim
-			if adopted.Annotations == nil {
-				adopted.Annotations = make(map[string]string)
-			}
-
-			// Ensure the adopted sandbox records its pod name before it can be observed Ready.
-			if podName := adopted.Annotations[v1alpha1.SandboxPodNameAnnotation]; podName != adopted.Name {
-				if podName != "" {
-					logger.Info("Correcting adopted sandbox pod-name annotation", "sandbox", adopted.Name, "oldPodName", podName, "newPodName", adopted.Name)
-				}
-				adopted.Annotations[v1alpha1.SandboxPodNameAnnotation] = adopted.Name
-			}
-
-			if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
-				adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
-			}
-
-			// Propagate claim identity labels for discovery and NetworkPolicy targeting.
-			// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
-			// (KEP-0174 only propagates to pod template labels; platform's informer reads
-			// Sandbox.metadata.labels).
-			adopted.Labels = ensureClaimIdentityLabels(adopted.Labels, claim)
-			adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
-
-			// Fetch the template to construct the mergedMeta that reconcileActive will build.
-			template, templateErr := r.getTemplate(ctx, claim)
-			if templateErr == nil && template != nil {
-				var mergedMeta v1alpha1.PodMetadata
-				template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
-
-				if mergedMeta.Labels == nil {
-					mergedMeta.Labels = make(map[string]string)
-				}
-				mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
-				mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
-
-				if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
-					// Adoption hasn't been patched yet. Put the sandbox back to avoid draining the pool!
-					r.WarmSandboxQueue.Add(templateHash, adoptedKey)
-					logger.Error(err, "Failed to merge pod metadata for adoption candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
+				if k8errors.IsConflict(err) {
+					// Conflict means someone else updated the claim. We fail and retry.
 					return false, err
 				}
-
-				// Force an exact match
-				adopted.Spec.PodTemplate.ObjectMeta = mergedMeta
-			} else {
-				// Fallback (just in case template is somehow missing)
-				adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
-
-				if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
-					r.WarmSandboxQueue.Add(templateHash, adoptedKey)
-					logger.Error(err, "Failed to merge pod metadata for fallback adoption candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
-					return false, err
-				}
+				logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
+				return false, err
 			}
 
-			if err := r.Patch(ctx, adopted, client.MergeFrom(originalAdopted)); err != nil {
+			// Call helper to complete adoption (patch sandbox)
+			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
 				if k8errors.IsNotFound(err) {
 					return false, nil
 				}
-
 				r.WarmSandboxQueue.Add(templateHash, adoptedKey)
-
 				if k8errors.IsConflict(err) {
-					// Patch conflicts are not expected here in the common case, but they can still legitimately occur.
 					return false, nil
 				}
-
-				logger.Error(err, "Failed to patch adoption candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
+				logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
 				return false, err
 			}
 
@@ -754,6 +695,74 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 	logger.Info("Failed to adopt sandbox after max retries", "claim", claim.Name)
 	return nil, nil
+}
+
+func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim, adopted *v1alpha1.Sandbox) error {
+	// Take a snapshot of the pod BEFORE we mutate it to generate a clean JSON Patch.
+	originalAdopted := adopted.DeepCopy()
+
+	// Remove warm pool labels so the sandbox no longer appears in warm pool queries
+	delete(adopted.Labels, warmPoolSandboxLabel)
+	delete(adopted.Labels, sandboxTemplateRefHash)
+	delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
+
+	// Transfer ownership from SandboxWarmPool to SandboxClaim
+	adopted.OwnerReferences = nil
+	if err := controllerutil.SetControllerReference(claim, adopted, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference on adopted sandbox: %w", err)
+	}
+
+	// Propagate trace context from claim
+	if adopted.Annotations == nil {
+		adopted.Annotations = make(map[string]string)
+	}
+
+	// Ensure the adopted sandbox records its pod name before it can be observed Ready.
+	if podName := adopted.Annotations[v1alpha1.SandboxPodNameAnnotation]; podName != adopted.Name {
+		adopted.Annotations[v1alpha1.SandboxPodNameAnnotation] = adopted.Name
+	}
+
+	if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
+		adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
+	}
+
+	// Propagate claim identity labels for discovery and NetworkPolicy targeting.
+	adopted.Labels = ensureClaimIdentityLabels(adopted.Labels, claim)
+	adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
+
+	// Fetch the template to construct the mergedMeta that reconcileActive will build.
+	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+	template, templateErr := r.getTemplate(ctx, claim)
+	if templateErr == nil && template != nil {
+		var mergedMeta v1alpha1.PodMetadata
+		template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
+
+		if mergedMeta.Labels == nil {
+			mergedMeta.Labels = make(map[string]string)
+		}
+		mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
+		mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
+
+		if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+			return err
+		}
+
+		// Force an exact match
+		adopted.Spec.PodTemplate.ObjectMeta = mergedMeta
+	} else {
+		// Fallback (just in case template is somehow missing)
+		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
+
+		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+			return err
+		}
+	}
+
+	if err := r.Patch(ctx, adopted, client.MergeFrom(originalAdopted)); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // isSandboxReady checks if a sandbox has Ready=True condition.
@@ -1044,6 +1053,48 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			}
 		} else if !k8errors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
+		}
+	}
+
+	// Check if a previously adopted sandbox is recorded in claim labels
+	if claim.Labels != nil {
+		if sbName := claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel]; sbName != "" {
+			logger.V(1).Info("Checking labels for sandbox name", "label", sbName, "claim", claim.Name)
+			sandbox := &v1alpha1.Sandbox{}
+			if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
+				if metav1.IsControlledBy(sandbox, claim) {
+					logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
+					return sandbox, nil
+				}
+
+				controllerRef := metav1.GetControllerOf(sandbox)
+				if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
+					// Still in warm pool. Try to complete adoption!
+					logger.Info("Sandbox found by label still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
+
+					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
+						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
+							logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
+						} else {
+							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
+						}
+					} else {
+						// If succeeded, return error to retry so next reconcile sees it controlled by us!
+						return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
+					}
+				}
+
+				logger.Info("Sandbox recorded in label belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
+			} else if k8errors.IsNotFound(err) {
+				logger.Info("Sandbox recorded in label not found, removing stale label", "sandbox", sbName, "claim", claim.Name)
+				patch := client.MergeFrom(claim.DeepCopy())
+				delete(claim.Labels, extensionsv1alpha1.AssignedSandboxNameLabel)
+				if err := r.Patch(ctx, claim, patch); err != nil {
+					return nil, fmt.Errorf("failed to remove stale sandbox label: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("failed to get sandbox %q from labels: %w", sbName, err)
+			}
 		}
 	}
 

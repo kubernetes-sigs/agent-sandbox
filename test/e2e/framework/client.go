@@ -62,6 +62,11 @@ func (cl *ClusterClient) WatchSet() *WatchSet {
 	return cl.watchSet
 }
 
+// DynamicClient returns the dynamic client backing the test framework.
+func (cl *ClusterClient) DynamicClient() dynamic.Interface {
+	return cl.dynamicClient
+}
+
 // List retrieves a list of objects matching the provided options.
 func (cl *ClusterClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	cl.Helper()
@@ -678,4 +683,30 @@ func (cl *ClusterClient) ExecuteOnNode(ctx context.Context, nodeName string, com
 	}
 
 	return stdout.String(), stderr.String(), nil
+}
+
+// IsKindCluster returns true if the test is running on a kind cluster.
+func (cl *ClusterClient) IsKindCluster() bool {
+	cl.Helper()
+
+	ctx := cl.Context()
+
+	var nodes corev1.NodeList
+	if err := cl.List(ctx, &nodes); err != nil {
+		cl.Fatalf("failed to list nodes: %v", err)
+	}
+
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if strings.HasPrefix(node.Spec.ProviderID, "kind://") {
+			return true
+		}
+		if strings.HasPrefix(node.Spec.ProviderID, "gce://") {
+			return false
+		}
+		cl.Logf("Unknown node provider id %q", node.Spec.ProviderID)
+	}
+
+	cl.Fatalf("cannot determine if cluster is kind (no node with recognized providerID)")
+	return false
 }

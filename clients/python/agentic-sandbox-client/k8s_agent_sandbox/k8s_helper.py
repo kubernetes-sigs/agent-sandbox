@@ -17,19 +17,17 @@ import time
 from typing import List
 from kubernetes import client, config, watch
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
-
-# Constants for API Groups and Resources
-CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
-CLAIM_API_VERSION = "v1alpha1"
-CLAIM_PLURAL_NAME = "sandboxclaims"
-
-SANDBOX_API_GROUP = "agents.x-k8s.io"
-SANDBOX_API_VERSION = "v1alpha1"
-SANDBOX_PLURAL_NAME = "sandboxes"
-
-GATEWAY_API_GROUP = "gateway.networking.k8s.io"
-GATEWAY_API_VERSION = "v1"
-GATEWAY_PLURAL = "gateways"
+from .constants import (
+    CLAIM_API_GROUP,
+    CLAIM_API_VERSION,
+    CLAIM_PLURAL_NAME,
+    GATEWAY_API_GROUP,
+    GATEWAY_API_VERSION,
+    GATEWAY_PLURAL,
+    SANDBOX_API_GROUP,
+    SANDBOX_API_VERSION,
+    SANDBOX_PLURAL_NAME,
+)
 
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
@@ -128,8 +126,12 @@ class K8sHelper:
                         w.stop()
                         return name
 
-    def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int):
-        """Waits for the Sandbox custom resource to have a 'Ready' status."""
+    def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
+        """Waits for the Sandbox custom resource to have a 'Ready' status.
+
+        Returns the first pod IP from the sandbox status when ready, or None if
+        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        """
         deadline = time.monotonic() + timeout
         logging.info(f"Watching for Sandbox {name} to become ready...")
         while True:
@@ -156,7 +158,8 @@ class K8sHelper:
                         if cond.get('type') == 'Ready' and cond.get('status') == 'True':
                             logging.info(f"Sandbox {name} is ready.")
                             w.stop()
-                            return
+                            pod_ips = status.get('podIPs', [])
+                            return pod_ips[0] if pod_ips else None
                 elif event["type"] == "DELETED":
                     logging.error(f"Sandbox {name} was deleted before becoming ready.")
                     w.stop()

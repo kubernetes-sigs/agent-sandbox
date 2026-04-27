@@ -64,16 +64,13 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	template := &extensionsv1alpha1.SandboxTemplate{}
 	template.Name = "chrome-template"
 	template.Namespace = ns.Name
-	imageTag := os.Getenv("IMAGE_TAG")
-	if imageTag == "" {
-		imageTag = "latest"
-	}
+	imageName := chromeSandboxImageName()
 	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
 					Name:            "chrome-sandbox",
-					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", imageTag),
+					Image:           imageName,
 					ImagePullPolicy: corev1.PullIfNotPresent,
 				},
 			},
@@ -125,7 +122,7 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	metrics := &ChromeSandboxClaimMetrics{}
 
 	// Unique name for this claim
-	claimName := fmt.Sprintf("claim-%d-%d", time.Now().UnixNano(), atomic.AddInt64(&claimCounter, 1))
+	claimName := fmt.Sprintf("claim-%d-%d", time.Now().UnixNano(), claimCounter.Add(1))
 
 	claim := &extensionsv1alpha1.SandboxClaim{}
 	claim.Name = claimName
@@ -152,4 +149,4 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	return metrics
 }
 
-var claimCounter int64
+var claimCounter atomic.Int64

@@ -44,12 +44,31 @@ type ChromeSandboxMetrics struct {
 	Total        AtomicTimeDuration // Total time from start to chrome ready
 }
 
-func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
+func getImageTag() string {
 	imageTag := os.Getenv("IMAGE_TAG")
 	if imageTag == "" {
 		imageTag = "latest"
 	}
+	return imageTag
+}
 
+func getImagePrefix() string {
+	imagePrefix := os.Getenv("IMAGE_PREFIX")
+	if imagePrefix == "" {
+		imagePrefix = "kind.local/"
+	}
+	return imagePrefix
+}
+
+func chromeSandboxImageName() string {
+	imageTag := getImageTag()
+	imagePrefix := getImagePrefix()
+
+	return fmt.Sprintf("%schrome-sandbox:%s", imagePrefix, imageTag)
+}
+
+func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
+	imageName := chromeSandboxImageName()
 	sandbox := &sandboxv1alpha1.Sandbox{}
 	sandbox.Name = "chrome-sandbox"
 	sandbox.Namespace = namespace
@@ -57,9 +76,8 @@ func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
-					Name: "chrome-sandbox",
-					// might be nice to remove the IMAGE_TAG env var so this is easier to run from IDE
-					Image:           fmt.Sprintf("kind.local/chrome-sandbox:%s", imageTag),
+					Name:            "chrome-sandbox",
+					Image:           imageName,
 					ImagePullPolicy: corev1.PullIfNotPresent,
 				},
 			},
@@ -77,7 +95,7 @@ func TestRunChromeSandbox(t *testing.T) {
 
 // BenchmarkChromeSandboxStartup measures the time for Chrome to start in a sandbox.
 // Run with: go test -bench=BenchmarkChromeSandboxStartup -benchtime=1x ./test/e2e/...
-// Compare results with: benchstat old.txt new.txt
+// Compare results with: benchstat old.txt new.txt.
 func BenchmarkChromeSandboxStartup(b *testing.B) {
 	time.Sleep(2 * time.Second) // Give cluster a moment to settle, and to help us split the logs by time
 
@@ -199,7 +217,12 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	if nodeName == "" {
 		t.Fatalf("pod not scheduled to a node, cannot get node logs")
 	}
-	t.MustGetNodeLogs(nodeName, logOptions)
+	if !t.IsKindCluster() {
+		// TODO: Support fetch node logs on kOps / other clusters
+		t.Logf("not collecting node logs; not running on a kind cluster")
+	} else {
+		t.MustGetNodeLogs(nodeName, logOptions)
+	}
 
 	return metrics
 }

@@ -5,9 +5,19 @@ all: fix-go-generate build lint-go lint-api test-unit toc-verify
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
+
+GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
+GIT_SHA     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE  ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
+	-X $(VERSION_PKG).gitSHA=$(GIT_SHA) \
+	-X $(VERSION_PKG).buildDate=$(BUILD_DATE)
+
 .PHONY: build
 build:
-	go build -o bin/manager cmd/agent-sandbox-controller/main.go
+	go build -ldflags "$(LD_FLAGS)" -o bin/manager cmd/agent-sandbox-controller/main.go
 
 KIND_CLUSTER=agent-sandbox
 
@@ -38,7 +48,11 @@ test-unit:
 
 .PHONY: test-e2e
 test-e2e:
-	./dev/ci/presubmits/test-e2e
+	RACE=$(RACE) ./dev/ci/presubmits/test-e2e
+
+.PHONY: test-e2e-race
+test-e2e-race:
+	RACE=1 ./dev/ci/presubmits/test-e2e
 
 .PHONY: test-e2e-benchmarks
 test-e2e-benchmarks:
@@ -48,9 +62,17 @@ test-e2e-benchmarks:
 lint-go:
 	./dev/tools/lint-go
 
+.PHONY: fix-go
+fix-go:
+	./dev/tools/lint-go --fix
+
 .PHONY: lint-api
 lint-api:
 	./dev/tools/lint-api
+
+.PHONY: fix-api
+fix-api:
+	./dev/tools/lint-api --fix
 
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
@@ -84,8 +106,7 @@ release-manifests:
 	./dev/tools/release --tag=${TAG}
 
 # Example usage:
-# make release-python-sdk TAG=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
-# make release-python-sdk TAG=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
+# make release-python-sdk TAG=v0.1.1.post1 (for patch release on PyPI)
 .PHONY: release-python-sdk
 release-python-sdk:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-python-sdk TAG=vX.Y.Z.postN)"; exit 1; fi

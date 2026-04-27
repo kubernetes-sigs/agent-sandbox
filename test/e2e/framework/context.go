@@ -31,20 +31,27 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var (
-	// root directory of the agent-sandbox repository
-	repoRoot = getRepoRoot()
+// GetKubeconfig returns the path to the kubeconfig file used by the tests.
+func GetKubeconfig() string {
+	kubeconfig := os.Getenv("KUBECONFIG")
+	if kubeconfig != "" {
+		return kubeconfig
+	}
+
+	// root directory of the agent-sandbox repository.
+	repoRoot := getRepoRoot()
 	// The e2e tests use the context specified in the local KUBECONFIG file.
 	// A localized KUBECONFIG is used to create an explicit cluster contract with
 	// the tests.
 	kubeconfig = filepath.Join(repoRoot, "bin", "KUBECONFIG")
-)
+
+	return kubeconfig
+}
 
 func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(controllers.Scheme))
@@ -101,6 +108,7 @@ func NewTestContext(t T) *TestContext {
 		T:            wrappedT,
 		artifactsDir: artifactsDir,
 	}
+	kubeconfig := GetKubeconfig()
 	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},
 		&clientcmd.ConfigOverrides{},
@@ -212,7 +220,7 @@ func (th *TestContext) dumpControllerLogs() {
 
 		// Print last 42 lines to test output (following k8s e2e convention)
 		tailReq := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
-			TailLines: ptr.To(int64(42)),
+			TailLines: new(int64(42)),
 		})
 		tailStream, err := tailReq.Stream(context.Background())
 		if err != nil {

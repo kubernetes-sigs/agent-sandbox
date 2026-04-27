@@ -16,6 +16,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
@@ -82,20 +83,42 @@ type Lifecycle struct {
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
+	// ttlSecondsAfterFinished limits how long a finished claim is retained.
+	// The timer starts from the mirrored Finished condition's LastTransitionTime.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
+
 	// shutdownPolicy determines the behavior when the SandboxClaim expires.
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
-// SandboxTemplateRef references a SandboxTemplate
+// SandboxTemplateRef references a SandboxTemplate.
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
 	// +required
 	Name string `json:"name,omitempty" protobuf:"bytes,1,name=name"`
 }
 
-// SandboxClaimSpec defines the desired state of Sandbox
+// EnvVar represents a custom environment variable key-value pair.
+type EnvVar struct {
+	// name of the environment variable.
+	// +required
+	Name string `json:"name"`
+
+	// value of the environment variable.
+	// +required
+	Value string `json:"value"`
+
+	// containerName specifies the target container for the environment variable.
+	// If not specified, it defaults to the first container defined in the template.
+	// +optional
+	ContainerName string `json:"containerName,omitempty"`
+}
+
+// SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
 	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
 	// +required
@@ -112,6 +135,16 @@ type SandboxClaimSpec struct {
 	// +optional
 	// +kubebuilder:default=default
 	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
+
+	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
+	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
+	// +optional
+	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
+
+	// env is a list of environment variables to inject into the sandbox
+	// +listType=atomic
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.
@@ -140,7 +173,7 @@ type SandboxStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim
-// SandboxClaim is the Schema for the sandbox Claim API
+// SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -159,7 +192,7 @@ type SandboxClaim struct {
 
 // +kubebuilder:object:root=true
 
-// SandboxList contains a list of Sandbox
+// SandboxList contains a list of Sandbox.
 type SandboxClaimList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

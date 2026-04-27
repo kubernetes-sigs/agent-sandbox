@@ -1,0 +1,38 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: simple-sandbox-template
+  namespace: default
+  labels:
+    app: my-app
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      serviceAccountName: sa-snapshots
+      runtimeClassName: gvisor
+      containers:
+      - name: simple-sandbox
+        image: <IMAGE_PATH>
+        ports:
+        - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+            ephemeral-storage: "512Mi"
+      restartPolicy: "OnFailure"

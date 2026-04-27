@@ -1,0 +1,33 @@
+name: checks
+on:
+  pull_request:
+    # Only run workflow on file changes related to this check
+    paths:
+      - 'docs/keps/**/*.md'
+      - 'dev/tools/update-toc'
+      - 'dev/tools/verify-toc'
+      - 'dev/tools/.notableofcontents'
+      - 'Makefile'
+      - '.github/workflows/check.yml'
+  push:
+    branches:
+      - 'release-*'
+      - 'master'
+      - 'main'
+    tags:
+      - 'v*'
+# To cancel running workflow when new commits pushed in a pull request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  toc-update:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+    name: Generate and format
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - run: make toc-update && git diff --exit-code

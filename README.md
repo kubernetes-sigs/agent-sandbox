@@ -35,7 +35,7 @@ The `extensions` module provides additional CRDs and controllers that build on t
 
 *   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
 *   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
-*   `SandboxWarmPool`: Manages a pool of pre-warmed Sandbox Pods that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
+*   `SandboxWarmPool`: Manages a pool of pre-warmed Sandboxes that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ agent-sandbox follows the Kubernetes controller pattern. Users create a Sandbox 
 ### Architecture Diagram
 
 ```mermaid
-flowchart TB
+flowchart LR
 
     User[User]
 
@@ -52,13 +52,16 @@ flowchart TB
     Template[SandboxTemplate]
     Sandbox[Sandbox]
 
-    ClaimController[Claim Controller]
-    Controller[Sandbox Controller]
-
-    Pod[Sandbox Pod]
-    Runtime[Sandbox Runtime Environment]
+    Pod[Pod]
+    Runtime[Sandbox Runtime]
 
     WarmPool[SandboxWarmPool]
+
+    subgraph Extensions[Extensions]
+      Claim
+      Template
+      WarmPool
+    end
 
     %% User paths
     User -->|creates| Sandbox
@@ -66,19 +69,17 @@ flowchart TB
 
     %% Claim workflow
     Claim -->|references| Template
-    Claim -->|reconciled by| ClaimController
-    ClaimController -->|creates| Sandbox
+    Claim -->|adopts| Sandbox
 
     %% Pod handling
-    ClaimController -->|adopts pod from| WarmPool
-    Sandbox -->|reconciled by| Controller
-    Controller -->|creates Pod if needed| Pod
+    Claim -->|adopts sandboxes from| WarmPool
+    Sandbox -->|creates Pod| Pod
 
     %% Runtime
     Pod --> Runtime
 
     %% Warm pool
-    WarmPool -->|pre-warmed pods| Pod
+    WarmPool -->|pre-warms sandboxes| Sandbox
 ```
 
 ## Installation
@@ -161,12 +162,31 @@ The current Roadmap can be found at [roadmap.md](roadmap.md).
 
 This is a community-driven effort, and we welcome collaboration!
 
+**Note on PR Velocity:** To maintain high velocity and keep our queues clean, this project uses stale PR management (30-day auto-stale and 15-day auto-close for inactive PRs) and allows maintainers to fast-track or take over approved community PRs. Please read our [Contributing Guidelines](CONTRIBUTING.md) for our full code review and PR policies.
+
+### AI-Assisted Code Reviews (Experimental)
+
+To help improve our review velocity, we are currently experimenting with AI-assisted code reviews, starting with GitHub Copilot as our automated first-pass reviewer. Here is the workflow:
+
+1. Copilot will be assigned as the first reviewer of all open PRs (skipping PRs without a signed CLA)
+1. After Copilot reviews are posted, the PR will be labeled `action-required: resolve-copilot-comments`
+   * **⚠️ Important Contribution Note:** If you receive a code suggestion from Copilot in your PR, please don't directly apply suggestions via the GitHub UI. It will set Copilot as co-author and break the Kubernetes CLA requirements. For more information, read our [Contributing Guidelines](CONTRIBUTING.md). 
+1. After all of Copilot reviews are marked resolved, the PR will be labeled `ready-for-review`
+1. Maintainers will review `ready-for-review` PRs and provide final approval 
+
+We actively welcome your feedback on the quality, relevance, and helpfulness of these automated reviews! As we iterate on this process, we also plan to evaluate and test different AI review tools to find the best fit for our project's workflow.
+
+### Contact Us
+
 Learn how to engage with the Kubernetes community on the [community page](http://kubernetes.io/community/).
 
 You can reach the maintainers of this project at:
 
-- [Slack](https://kubernetes.slack.com/messages/sig-apps)
-- [Mailing List](https://groups.google.com/a/kubernetes.io/g/sig-apps)
+- [#agent-sandbox Slack channel](https://kubernetes.slack.com/messages/agent-sandbox)
+  - If it's your first time joining the Kubernetes Slack, visit https://slack.k8s.io/ to get an invitation.
+  - Log in to [Kubernetes Slack](https://kubernetes.slack.com/) first before joining the channel.
+- [#sig-apps Slack channel](https://kubernetes.slack.com/messages/sig-apps) for general sig-apps discussions
+- [SIG Apps Mailing List](https://groups.google.com/a/kubernetes.io/g/sig-apps)
 
 Please feel free to open issues, suggest features, and contribute code!
 

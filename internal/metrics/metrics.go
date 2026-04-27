@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/agent-sandbox/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -26,13 +27,19 @@ const (
 	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+
+	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
+	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
+
+	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
+	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )
 
 var (
 	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef
+	// - sandbox_template: the SandboxTemplateRef.
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_startup_latency_ms",
@@ -46,7 +53,7 @@ var (
 	// ClaimControllerStartupLatency measures the time from controller first observed timestamp to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef
+	// - sandbox_template: the SandboxTemplateRef.
 	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_controller_startup_latency_ms",
@@ -61,7 +68,7 @@ var (
 	// Labels:
 	// - namespace: the namespace of the sandbox
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef
+	// - sandbox_template: the SandboxTemplateRef.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_creation_latency_ms",
@@ -78,7 +85,7 @@ var (
 	// - sandbox_template: the SandboxTemplateRef
 	// - launch_type: "warm", "cold", "unknown"
 	// - warmpool_name: the name of the warm pool (if applicable)
-	// - pod_condition: "ready", "not_ready"
+	// - pod_condition: "ready", "not_ready".
 	SandboxClaimCreationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "agent_sandbox_claim_creation_total",
@@ -93,12 +100,31 @@ var (
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
 	// - launch_type: "warm" | "cold"
-	// - sandbox_template: sandboxTemplateRef
+	// - sandbox_template: sandboxTemplateRef.
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
 		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template"},
 		nil,
+	)
+
+	buildVersionInfo = version.Get()
+
+	// BuildInfo exposes agent-sandbox-controller build metadata as a constant gauge.
+	BuildInfo = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "agent_sandbox_build_info",
+			Help: "Agent sandbox controller build metadata exposed as labels with a constant value of 1.",
+			ConstLabels: prometheus.Labels{
+				"git_version": buildVersionInfo.GitVersion,
+				"git_commit":  buildVersionInfo.GitSHA,
+				"build_date":  buildVersionInfo.BuildDate,
+				"go_version":  buildVersionInfo.GoVersion,
+				"compiler":    buildVersionInfo.Compiler,
+				"platform":    buildVersionInfo.Platform,
+			},
+		},
+		func() float64 { return 1 },
 	)
 )
 
@@ -108,6 +134,7 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
+	metrics.Registry.MustRegister(BuildInfo)
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.

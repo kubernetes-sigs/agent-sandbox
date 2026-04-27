@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
+from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 pytest.importorskip("kubernetes_asyncio")
-
-from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
-from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
 
 
 class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
@@ -44,7 +44,8 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
         body = call_kwargs["body"]
         self.assertEqual(body["spec"]["lifecycle"], lifecycle)
-        self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "test-template")
+        self.assertEqual(body["spec"]["sandboxTemplateRef"]
+                         ["name"], "test-template")
 
     async def test_no_lifecycle_omits_key(self):
         await self.helper.create_sandbox_claim(
@@ -71,7 +72,9 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         body = call_kwargs["body"]
         self.assertEqual(body["spec"]["lifecycle"], lifecycle)
         self.assertEqual(body["metadata"]["labels"], {"agent": "test"})
-        self.assertEqual(body["metadata"]["annotations"], {"key": "val"})
+        self.assertEqual(body["metadata"]["annotations"]["key"], "val")
+        self.assertIn(CLIENT_REQUEST_TIME_ANNOTATION,
+                      body["metadata"]["annotations"])
 
 
 class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
@@ -112,7 +115,8 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SandboxTemplateNotFoundError) as context:
             await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
 
-        self.assertIn("Template 'non-existent-template' not found", str(context.exception))
+        self.assertIn("Template 'non-existent-template' not found",
+                      str(context.exception))
 
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
     async def test_async_resolve_sandbox_name_deleted_event(self, mock_watch_class):
@@ -134,7 +138,9 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SandboxMetadataError) as context:
             await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
 
-        self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+        self.assertIn(
+            "SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+
 
 
 class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):

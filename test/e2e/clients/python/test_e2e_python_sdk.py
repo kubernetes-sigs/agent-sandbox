@@ -73,7 +73,8 @@ def deploy_router(tc, temp_namespace):
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
 
     print("Waiting for router deployment to be ready...")
-    tc.wait_for_deployment_ready("sandbox-router-deployment", namespace=temp_namespace)
+    tc.wait_for_deployment_ready(
+        "sandbox-router-deployment", namespace=temp_namespace)
 
 
 @pytest.fixture(scope="function")
@@ -146,6 +147,49 @@ def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_rou
 
     except Exception as e:
         pytest.fail(f"SDK test without warmpool failed: {e}")
+    finally:
+        client.delete_all()
+
+
+def test_python_sdk_annotation(tc, temp_namespace, sandbox_template):
+    """Tests that the Python SDK creates SandboxClaim with correct annotation."""
+    from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
+    from datetime import datetime
+
+    client = SandboxClient()
+    try:
+        sandbox = client.create_sandbox(
+            template=sandbox_template,
+            namespace=temp_namespace,
+        )
+
+        custom_objects_api = tc.get_custom_objects_api()
+        claim = custom_objects_api.get_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=temp_namespace,
+            plural="sandboxclaims",
+            name=sandbox.claim_name
+        )
+
+        annotations = claim.get("metadata", {}).get("annotations", {})
+        print(f"Annotations: {annotations}")
+
+        assert CLIENT_REQUEST_TIME_ANNOTATION in annotations, f"Expected annotation '{CLIENT_REQUEST_TIME_ANNOTATION}' missing"
+
+        timestamp_str = annotations[CLIENT_REQUEST_TIME_ANNOTATION]
+        print(f"Timestamp: {timestamp_str}")
+
+        try:
+            dt = datetime.fromisoformat(timestamp_str)
+            assert dt.tzname() == 'UTC', "Timestamp should be in UTC"
+        except ValueError as e:
+            pytest.fail(f"Failed to parse timestamp '{timestamp_str}': {e}")
+
+        print("--- SandboxClaim Annotation Test Passed! ---")
+
+    except Exception as e:
+        pytest.fail(f"SDK test failed: {e}")
     finally:
         client.delete_all()
 

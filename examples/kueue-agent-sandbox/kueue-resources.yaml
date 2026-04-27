@@ -1,0 +1,23 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: sandbox-cluster-queue
+spec:
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources: ["cpu", "memory"]
+    flavors:
+    - name: default
+      resources:
+      - name: cpu
+        nominalQuota: 1
+      - name: memory
+        nominalQuota: 1Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: sandbox-local-queue
+  namespace: default
+spec:
+  clusterQueue: sandbox-cluster-queue

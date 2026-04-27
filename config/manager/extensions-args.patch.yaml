@@ -1,0 +1,15 @@
+# Strategic-merge patch: add --extensions (base manager only has --leader-elect=true).
+# Applied only when EXTENSIONS=true (see Makefile: kustomize edit add patch in a temp copy).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: agent-sandbox-controller
+        args:
+        - --leader-elect=true
+        - --extensions

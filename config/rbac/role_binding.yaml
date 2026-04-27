@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-sandbox-controller
+  labels:
+    app: agent-sandbox-controller
+    app.kubernetes.io/name: agent-sandbox-operator
+    app.kubernetes.io/managed-by: kustomize
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+roleRef:
+  kind: ClusterRole
+  name: agent-sandbox-controller
+  apiGroup: rbac.authorization.k8s.io

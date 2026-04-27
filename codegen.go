@@ -22,3 +22,7 @@ package agentsandbox
 //go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen paths=./controllers/... output:rbac:dir=k8s rbac:roleName=agent-sandbox-controller,fileName=rbac.generated.yaml
 //go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen paths=./extensions/controllers/... output:rbac:dir=k8s rbac:roleName=agent-sandbox-controller-extensions,fileName=extensions-rbac.generated.yaml
 //go:generate ./dev/tools/client-gen-go.sh
+//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen object crd:maxDescLen=0 paths=./api/... output:crd:dir=config/crd/bases
+//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen object crd:maxDescLen=0 paths=./extensions/... output:crd:dir=config/crd/bases
+//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen paths=./controllers/... output:rbac:dir=config/rbac rbac:roleName=agent-sandbox-controller,fileName=rbac.generated.yaml
+//go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen paths=./extensions/controllers/... output:rbac:dir=config/rbac rbac:roleName=agent-sandbox-controller-extensions,fileName=extensions-rbac.generated.yaml

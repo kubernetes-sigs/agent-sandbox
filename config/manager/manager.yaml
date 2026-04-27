@@ -1,0 +1,96 @@
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  labels:
+    control-plane: agent-sandbox-controller
+    app.kubernetes.io/name: agent-sandbox-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: agent-sandbox-system
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+    control-plane: agent-sandbox-controller
+    app.kubernetes.io/name: agent-sandbox-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    app: agent-sandbox-controller
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+    control-plane: agent-sandbox-controller
+    app.kubernetes.io/name: agent-sandbox-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
+      control-plane: agent-sandbox-controller
+      app.kubernetes.io/name: agent-sandbox-operator
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: agent-sandbox-controller
+      labels:
+        app: agent-sandbox-controller
+        control-plane: agent-sandbox-controller
+        app.kubernetes.io/name: agent-sandbox-operator
+    spec:
+      securityContext:
+        # Projects are configured by default to adhere to the "restricted" Pod Security Standards.
+        # This ensures that deployments meet the highest security requirements for Kubernetes.
+        # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: agent-sandbox-controller
+      containers:
+      - name: agent-sandbox-controller
+        image: controller:latest # placeholder value, replaced by deployment scripts
+        args:
+          - --leader-elect=true
+        securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        # TODO(user): Configure the resources accordingly based on the project requirements.
+        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        volumeMounts: []
+      volumes: []
+      terminationGracePeriodSeconds: 10

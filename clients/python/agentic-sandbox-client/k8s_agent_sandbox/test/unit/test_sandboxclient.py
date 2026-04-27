@@ -153,7 +153,7 @@ class TestSandboxClient(unittest.TestCase):
         
         result = self.client.list_all_sandboxes("test-namespace")
         
-        self.mock_k8s_helper.list_sandbox_claims.assert_called_once_with("test-namespace")
+        self.mock_k8s_helper.list_sandbox_claims.assert_called_once_with("test-namespace", label_selector=None)
         self.assertEqual(result, ["sandbox-1", "sandbox-2"])
 
     def test_delete_sandbox_in_registry(self):
@@ -678,6 +678,58 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
         call_kwargs = self._create_sandbox_with_in_cluster_config()
         self.assertNotIn('pod_ip', call_kwargs)
 
+
+class TestSandboxClientTemplateVerification(unittest.TestCase):
+    """`get_sandbox(template_name=...)` must refuse to reconnect to a claim
+    whose sandboxTemplateRef doesn't match the requested template."""
+
+    def _build_client(self):
+        from k8s_agent_sandbox.sandbox_client import SandboxClient
+        with patch('k8s_agent_sandbox.sandbox_client.K8sHelper') as mock_helper_cls:
+            client = SandboxClient()
+            client.k8s_helper = mock_helper_cls.return_value
+            return client
+
+    def test_mismatched_template_raises_value_error(self):
+        client = self._build_client()
+        client.k8s_helper.get_sandbox_claim.return_value = {
+            "spec": {"sandboxTemplateRef": {"name": "python-secure"}},
+        }
+
+        with self.assertRaisesRegex(ValueError, "references template 'python-secure'"):
+            client.get_sandbox(
+                "claim-1",
+                namespace="demo",
+                template_name="other-template",
+            )
+
+    def test_matching_template_does_not_short_circuit_reconnect(self):
+        client = self._build_client()
+        client.k8s_helper.get_sandbox_claim.return_value = {
+            "spec": {"sandboxTemplateRef": {"name": "python-secure"}},
+        }
+        client.k8s_helper.resolve_sandbox_name.return_value = "sandbox-1"
+        client.k8s_helper.get_sandbox.return_value = {"metadata": {"name": "sandbox-1"}}
+
+        with patch.object(client, 'sandbox_class') as sandbox_cls:
+            client.get_sandbox(
+                "claim-1",
+                namespace="demo",
+                template_name="python-secure",
+            )
+            sandbox_cls.assert_called_once()
+
+    def test_missing_claim_raises_not_found(self):
+        from k8s_agent_sandbox.exceptions import SandboxNotFoundError
+        client = self._build_client()
+        client.k8s_helper.get_sandbox_claim.return_value = None
+
+        with self.assertRaises(SandboxNotFoundError):
+            client.get_sandbox(
+                "claim-1",
+                namespace="demo",
+                template_name="python-secure",
+            )
 
 if __name__ == '__main__':
     unittest.main()

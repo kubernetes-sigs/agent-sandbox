@@ -1,0 +1,72 @@
+name: Release Go Client
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  test-go-client:
+    name: Test Go client
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go client unit tests
+        run: go test ./clients/go/sandbox/... -count=1
+
+      - name: Build Go client examples
+        run: |
+          go build ./clients/go/examples/basic
+          go build ./clients/go/examples/gateway
+
+  publish-release-assets:
+    name: Publish release assets
+    needs: test-go-client
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up GitHub CLI
+        run: gh --version
+
+      - name: Generate and publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          go mod download
+          go generate ./...
+          git diff --exit-code
+          ./dev/tools/release --tag=${GITHUB_REF_NAME} --publish
+
+      - name: Append Go client release summary
+        run: |
+          echo '### Go client release' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Validated `./clients/go/sandbox/...` unit tests.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Built `clients/go/examples/basic` and `clients/go/examples/gateway`.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Updated the draft GitHub release for tag `'"${GITHUB_REF_NAME}"'`.' >> "$GITHUB_STEP_SUMMARY"

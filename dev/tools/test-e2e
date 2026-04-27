@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2025 The Kubernetes Authors.
+# Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -93,13 +93,24 @@ def setup_python_sdk(repo_root, env):
     # Install in editable mode within the virtual environment
     pip_executable = os.path.join(venv_path, "bin", "pip")
     install_cmd = [pip_executable, "install", "-e", f"{sdk_path}[test]"]
-    # Install in editable mode
     print(f"Running command: {' '.join(install_cmd)}")
     result = subprocess.run(install_cmd, env=env, cwd=repo_root, check=False)
     if result.returncode != 0:
         print("Failed to install Python SDK.")
         return False
     print("Python SDK installed successfully.")
+
+    # Install langchain-agent-sandbox if present
+    langchain_path = os.path.join(repo_root, "clients", "python", "langchain-agent-sandbox")
+    if os.path.isdir(langchain_path):
+        install_cmd = [pip_executable, "install", "-e", f"{langchain_path}[test]"]
+        print(f"Running command: {' '.join(install_cmd)}")
+        result = subprocess.run(install_cmd, env=env, cwd=repo_root, check=False)
+        if result.returncode != 0:
+            print("WARNING: Failed to install langchain-agent-sandbox, e2e tests for it will be skipped.")
+        else:
+            print("langchain-agent-sandbox installed successfully.")
+
     return True
 
 

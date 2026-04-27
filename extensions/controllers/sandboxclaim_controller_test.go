@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -2945,5 +2946,65 @@ func seedQueueForTest(q queue.SandboxQueue, objects []client.Object) {
 				q.Add(hash, key)
 			}
 		}
+	}
+}
+
+func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
+	templateName := "test-template"
+	templateHash := sandboxcontrollers.NameHash(templateName)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "namespace-a",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	// 1. Valid Sandbox (Same Namespace)
+	validSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "valid-sandbox",
+			Namespace: "namespace-a",
+			Labels: map[string]string{
+				sandboxTemplateRefHash: templateHash,
+				warmPoolSandboxLabel:   "pool-hash-123",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "SandboxWarmPool",
+			}},
+		},
+	}
+
+	// 2. Invalid Sandbox (Different Namespace, but identical hash)
+	invalidSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "invalid-sandbox",
+			Namespace: "namespace-b",
+			Labels: map[string]string{
+				sandboxTemplateRefHash: templateHash,
+				warmPoolSandboxLabel:   "pool-hash-123",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "SandboxWarmPool",
+			}},
+		},
+	}
+
+	// Test Valid: Should return nil (no error)
+	if err := verifySandboxCandidate(validSandbox, claim); err != nil {
+		t.Errorf("Expected valid sandbox in the same namespace to be accepted, but got: %v", err)
+	}
+
+	// Test Invalid: Should return an error about cross-namespace adoption
+	err := verifySandboxCandidate(invalidSandbox, claim)
+	if err == nil {
+		t.Fatal("FATAL: Cross-namespace sandbox was successfully verified! The namespace check is missing.")
+	} else if !errors.Is(err, ErrCrossNamespaceAdoption) {
+		t.Errorf("Expected ErrCrossNamespaceAdoption, but got a different error: %v", err)
 	}
 }

@@ -79,13 +79,14 @@ K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
 # Default remote (can be overriden: make release-publish REMOTE=upstream ...)
 REMOTE_UPSTREAM ?= upstream
+REMOTE_FORK ?= origin
 
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
 .PHONY: release-promote
 release-promote:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-promote TAG=vX.Y.Z)"; exit 1; fi
-	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR}
+	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK}
 
 # Publish a draft release to GitHub
 # Usage: make release-publish TAG=vX.Y.Z

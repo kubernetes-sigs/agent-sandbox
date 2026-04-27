@@ -34,9 +34,29 @@ IMAGES_TO_PROMOTE = [
     "python-runtime-sandbox"
 ]
 
-# Git Remotes (Adjust if your remote names differ)
-REMOTE_UPSTREAM = "upstream"
-REMOTE_FORK = "origin"
+# Git Remotes defaults are controlled by CLI arguments
+
+def get_remote_name(cwd=None, preferred_remote=None):
+    """Returns the preferred remote if specified and exists, or 'upstream' if it exists.
+    Falls back to 'origin' if neither are found.
+    Raises an exception if no valid remote is found.
+    """
+    try:
+        remotes = run_command(["git", "remote"], cwd=cwd, capture_output=True).splitlines()
+        if preferred_remote and preferred_remote in remotes:
+            return preferred_remote
+        
+        if "upstream" in remotes:
+            return "upstream"
+            
+        if "origin" in remotes:
+            return "origin"
+        
+        raise Exception(
+            f"Could not find any valid git remote. Available remotes: {remotes}. "
+        )
+    except Exception as e:
+        raise Exception(f"Failed to determine git remote: {e}")
 
 def check_environment():
     """Checks if the required tools are installed and authenticated."""
@@ -103,7 +123,12 @@ def main():
     parser = argparse.ArgumentParser(description='Stage 1: Tag and Promote Agent Sandbox Release')
     parser.add_argument('--tag', required=True, help='The git tag for the release (e.g., v0.1.0)')
     parser.add_argument('--k8s-io-dir', default=DEFAULT_K8S_IO_DIR, help='Path to local k8s.io repository')
+    parser.add_argument('--upstream-remote', default='upstream', help='Remote name for upstream repository')
+    parser.add_argument('--fork-remote', default='origin', help='Remote name for fork repository')
     args = parser.parse_args()
+    
+    upstream_remote = args.upstream_remote
+    fork_remote = args.fork_remote
 
     tag = args.tag
     validate_tag(tag)
@@ -116,14 +141,17 @@ def main():
     print(f"✅ Authenticated as: {gh_user}")
 
     print(f"🚀 Starting promotion process for {tag}")
+    
+    remote_agent_sandbox = get_remote_name(preferred_remote=upstream_remote)
+    print(f"ℹ️  Detected remote for agent-sandbox: {remote_agent_sandbox}")
 
     # --- Pre-flight Check ---
-    check_local_repo_state(REMOTE_UPSTREAM)
-    check_tag_exists(tag, remote=REMOTE_UPSTREAM)
+    check_local_repo_state(remote_agent_sandbox)
+    check_tag_exists(tag, remote=remote_agent_sandbox)
 
     # --- Step 1: Create and Push Tag ---
     print(f"--- Step 1: Handling Git Tag {tag} and Publish to PyPI---")
-    create_and_push_tag(tag, remote=REMOTE_UPSTREAM)
+    create_and_push_tag(tag, remote=remote_agent_sandbox)
 
     print("✅ Done! The 'pypi-publish' GitHub Action should now be running.")
 
@@ -157,11 +185,13 @@ def main():
         print("   Please stash or commit them before running the release script.")
         sys.exit(1)
 
-    # Sync k8s.io repo from UPSTREAM
-    print(f"🔄 Syncing k8s.io main branch from {REMOTE_UPSTREAM}...")
-    run_command(["git", "fetch", REMOTE_UPSTREAM], cwd=k8s_io_dir)
+    # Sync k8s.io repo from remote
+    remote_k8s_io = get_remote_name(cwd=k8s_io_dir, preferred_remote=upstream_remote)
+    print(f"ℹ️  Detected remote for k8s.io: {remote_k8s_io}")
+    print(f"🔄 Syncing k8s.io main branch from {remote_k8s_io}...")
+    run_command(["git", "fetch", remote_k8s_io], cwd=k8s_io_dir)
     run_command(["git", "checkout", "main"], cwd=k8s_io_dir)
-    run_command(["git", "reset", "--hard", f"{REMOTE_UPSTREAM}/main"], cwd=k8s_io_dir)
+    run_command(["git", "reset", "--hard", f"{remote_k8s_io}/main"], cwd=k8s_io_dir)
     
     branch_name = f"promote-agent-sandbox-{tag}"
     # Cleanup old promotion branch if already exists, and create the new promotion branch
@@ -210,8 +240,8 @@ def main():
     run_command(["git", "commit", "-m", f"Promote agent-sandbox {tag}"], cwd=k8s_io_dir)
     
     # Force push to ORIGIN (fork) to open PR (we force push to retry failed attempts)
-    print(f"⬆️  Pushing branch to {REMOTE_FORK}...")
-    run_command(["git", "push", "--force", "-u", REMOTE_FORK, branch_name], cwd=k8s_io_dir)
+    print(f"⬆️  Pushing branch to {fork_remote}...")
+    run_command(["git", "push", "--force", "-u", fork_remote, branch_name], cwd=k8s_io_dir)
 
     print("🚀 Creating PR...")
     head_branch_ref = f"{gh_user}:{branch_name}"
@@ -226,6 +256,15 @@ def main():
     ], cwd=k8s_io_dir, capture_output=True)
 
     print(f"✅ Promotion PR created: {pr_url}")
+    
+    # Write PR URL to a file for use in CI workflows
+    try:
+        with open("promote_pr.url", "w") as f:
+            f.write(pr_url.strip())
+        print("💾 Saved PR URL to promote_pr.url")
+    except Exception as e:
+        print(f"⚠️  Failed to save PR URL to file: {e}")
+
     print("👉 Action Required: Merge the PR and wait for the images to be promoted to registry.k8s.io")
 
 if __name__ == '__main__':

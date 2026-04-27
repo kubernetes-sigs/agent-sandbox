@@ -148,3 +148,4 @@ echo "Running benchmarks..."
 dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
 
 echo "Benchmark completed successfully."
+find "${ARTIFACTS}"

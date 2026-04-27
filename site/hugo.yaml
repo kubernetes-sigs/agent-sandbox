@@ -149,7 +149,7 @@ module:
   - disableWatch: true
     source: ../docs
     target: assets/additional/docs
-    includeFiles: ["testing.md", "api.md"]
+    includeFiles: ["testing.md"]
   imports:
     - path: github.com/google/docsy
       disable: false

@@ -25,6 +25,9 @@ import (
 const (
 	// ClaimExpiredReason is the reason used in conditions/events when a claim expires.
 	ClaimExpiredReason = "ClaimExpired"
+
+	// AssignedSandboxNameLabel is the label key applied to the claim to identify the adopted Sandbox name.
+	AssignedSandboxNameLabel = "agents.x-k8s.io/sandbox-name"
 )
 
 // WarmPoolPolicy describes the policy for using warm pools.

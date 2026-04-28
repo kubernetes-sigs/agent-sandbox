@@ -3253,3 +3253,147 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
 	}
 }
+
+func TestSandboxClaimRecoveryWhenTemplateCreated(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "recovery-claim"
+	templateName := "recovery-template"
+
+	nonePolicy := extensionsv1alpha1.WarmPoolPolicyNone
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			UID:       "claim-uid",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName},
+			WarmPool:    &nonePolicy,
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	// Step 1: Reconcile without template
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	// Should return no error but RequeueAfter because template is missing
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error when template is missing, but got %v", err)
+	}
+	if result.RequeueAfter != 1*time.Minute {
+		t.Errorf("expected RequeueAfter to be 1 minute, got %v", result.RequeueAfter)
+	}
+
+	// Verify status is set to TemplateNotFound
+	var updatedClaim extensionsv1alpha1.SandboxClaim
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+	cond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	if cond == nil || cond.Reason != "TemplateNotFound" {
+		t.Errorf("expected status reason 'TemplateNotFound', got %v", cond)
+	}
+
+	// Step 2: Create template and reconcile again
+	if err := fakeClient.Create(context.Background(), template); err != nil {
+		t.Fatalf("failed to create template: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error when template exists, but got %v", err)
+	}
+
+	// Verify sandbox is created
+	var sandbox sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); err != nil {
+		t.Fatalf("expected sandbox to be created, but got error: %v", err)
+	}
+}
+
+func TestMapTemplateToClaims(t *testing.T) {
+	scheme := newScheme(t)
+	templateName := "test-template"
+
+	claim1 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName}},
+	}
+	claim2 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-2", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName}},
+	}
+	claimOther := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-other", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "other-template"}},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+	}
+
+	// We need to manually set up the indexer on the fake client's indexer if it supports it,
+	// or we can mock the List behavior. Fake client from controller-runtime does NOT use indexers by default
+	// unless configured with WithIndex.
+
+	// Let's use the WithIndex option on the fake client builder to support the matchingFields query!
+	fakeClientWithIndex := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim1, claim2, claimOther, template).
+		WithIndex(&extensionsv1alpha1.SandboxClaim{}, extensionsv1alpha1.TemplateRefField, func(obj client.Object) []string {
+			c := obj.(*extensionsv1alpha1.SandboxClaim)
+			if c.Spec.TemplateRef.Name == "" {
+				return nil
+			}
+			return []string{c.Spec.TemplateRef.Name}
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client: fakeClientWithIndex,
+		Scheme: scheme,
+	}
+
+	requests := reconciler.mapTemplateToClaims(context.Background(), template)
+
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	expectedNames := map[string]bool{"claim-1": true, "claim-2": true}
+	for _, req := range requests {
+		if !expectedNames[req.Name] {
+			t.Errorf("unexpected claim name in requests: %s", req.Name)
+		}
+		if req.Namespace != "default" {
+			t.Errorf("expected namespace 'default', got %s", req.Namespace)
+		}
+	}
+}

@@ -16,9 +16,15 @@ spec:
     singular: sandboxwarmpool
   scope: Namespaced
   versions:
-  - additionalPrinterColumns:
+  - additionalPrinterColumns: 
     - jsonPath: .status.readyReplicas
       name: Ready
+      type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.availableReplicas
+      name: Available
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -59,17 +65,20 @@ spec:
             - replicas
             - sandboxTemplateRef
             type: object
-          status:
-            properties:
-              readyReplicas:
-                format: int32
-                type: integer
-              replicas:
-                format: int32
-                type: integer
-              selector:
-                type: string
-            type: object
+            status:
+                properties:
+                  availableReplicas:
+                    format: int32
+                    type: integer
+                  readyReplicas:
+                    format: int32
+                    type: integer
+                  replicas:
+                    format: int32
+                    type: integer
+                  selector:
+                    type: string
+                type: object
         required:
         - spec
         type: object

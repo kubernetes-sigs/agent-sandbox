@@ -164,6 +164,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 	warmPool.Status.ReadyReplicas = readyReplicas
+	warmPool.Status.AvailableReplicas = warmPool.Status.ReadyReplicas
 
 	// Create new sandboxes if we need more
 	if currentReplicas < desiredReplicas && tmplErr == nil {

@@ -82,10 +82,6 @@ type SandboxWarmPoolStatus struct {
 	// +optional
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
-	// conditions represent the latest available observations of the pool state.
-	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
-
 	// selector is the label selector used to find the pods in the pool.
 	// +optional
 	Selector string `json:"selector,omitempty"`

@@ -57,6 +57,10 @@ import (
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
 
+// DefaultWarmPoolAdoptionRetries is the default number of retry attempts when adopting
+// a sandbox from the warm pool fails due to conflicts or not-found errors.
+const DefaultWarmPoolAdoptionRetries = 3
+
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
@@ -76,6 +80,14 @@ func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha
 		return *claim.Spec.WarmPool
 	}
 	return extensionsv1alpha1.WarmPoolPolicyDefault
+}
+
+// getWarmPoolMaxRetries returns the maximum number of retry attempts for warm pool adoption.
+func getWarmPoolMaxRetries(claim *extensionsv1alpha1.SandboxClaim) int {
+	if claim.Spec.WarmPoolMaxRetries != nil {
+		return int(*claim.Spec.WarmPoolMaxRetries)
+	}
+	return DefaultWarmPoolAdoptionRetries
 }
 
 // observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
@@ -627,9 +639,10 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	templateHash := sandboxcontrollers.NameHash(claim.Spec.TemplateRef.Name)
+	maxRetries := getWarmPoolMaxRetries(claim)
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
-	for range 3 {
+	for range maxRetries {
 		adopted, adoptedKey, err := r.getCandidate(ctx, claim, templateHash)
 		if err != nil {
 			return nil, err

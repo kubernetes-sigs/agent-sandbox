@@ -121,6 +121,8 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
     ```
     (Note: To run the integration test file successfully, `tenant-id` and `user-id` labels should also be added to the `groupByLabelValue.labels` list in the `PodSnapshotPolicy`.)
 
+    **Snapshot Sharing & Isolation**: By default, snapshots are shared across all sandboxes created from the same template in a namespace (isolated by `agents.x-k8s.io/sandbox-template-ref-hash`). This is intentional and allows for restoring state across different sandbox instances of the same template. To achieve instance-level isolation instead, you can add a unique identifier (e.g., `agents.x-k8s.io/claim-uid`, `user-id`, etc.) to the `PodSnapshotPolicy` grouping rules.
+
 5.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 
 ### Running Tests:

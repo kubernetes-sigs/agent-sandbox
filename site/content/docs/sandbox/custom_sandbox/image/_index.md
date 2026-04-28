@@ -29,7 +29,3 @@ sandbox = client.create_sandbox("python-sandbox-template")
 sandbox.commands.run("pip install custom-package==1.0.0")
 response = sandbox.commands.run("python -c 'import custom_package; print(\"Success!\")'")
 ```
-
-### \[NOT FOR PUBLISHING\] 2. Use `kubernetes` Python SDK to create a new SandboxTemplate instance
-
-We can create a Python script that uses `kubernetes` SDK to deploy a custom template, or update an existing template with our custom Docker image.

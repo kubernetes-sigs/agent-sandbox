@@ -11,7 +11,7 @@
   <a href="https://goreportcard.com/report/sigs.k8s.io/agent-sandbox"><img src="https://goreportcard.com/badge/sigs.k8s.io/agent-sandbox" alt="Go Report Card"></a>
 </p>
 
-[Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
+[Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md) · [API Behavior](docs/api-behavior.md)
 
 **agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes.**
 
@@ -109,6 +109,22 @@ For detailed installation and usage instructions, please refer to the [Python SD
 ## Configuration
 
 For advanced scale and concurrency tuning (e.g., API QPS and worker counts), please see the [Configuration Guide](docs/configuration.md).
+
+## API Behavior Reference
+
+The Sandbox CRD has several non-obvious behaviors around replica scaling, pod template updates, and
+persistent volume lifecycle that are important to understand before building on top of this API.
+See the [API Behavior Reference](docs/api-behavior.md) for a full breakdown, including:
+
+*   How `spec.replicas: 0` pauses a Sandbox while preserving PVC-backed filesystem state, and how
+    setting it back to `1` restores that state — enabling a lightweight save/restore primitive for
+    agent filesystem context.
+*   Which parts of `spec.podTemplate` are applied to a running Pod immediately (metadata) vs. only
+    on Pod recreation (spec).
+*   How `spec.volumeClaimTemplates` entries drive PVC creation and what happens to PVCs when
+    entries are removed or when the Sandbox is scaled down.
+*   How `SandboxTemplate` changes propagate (or don't) to running `SandboxWarmPool` pods under
+    each `updateStrategy`.
 
 ## Getting Started
 

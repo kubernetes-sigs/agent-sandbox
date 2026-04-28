@@ -96,7 +96,30 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
    * For detailed setup instructions, refer to the [GKE Pod Snapshots public documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots).
    * Ensure a GCS bucket is configured to store the pod snapshot states and that the necessary IAM permissions are applied.
 
-4.  **CRDs**: `PodSnapshotStorageConfig`, `PodSnapshotPolicy` CRDs must be applied. `PodSnapshotPolicy` should specify the selector match labels. (Note: For the test file to work, `maxSnapshotCountPerGroup` in `PodSnapshotPolicy` must be set to 2 or more, and the grouping labels must include `tenant-id` and `user-id`.)
+4.  **CRDs**: `PodSnapshotStorageConfig`, `PodSnapshotPolicy` CRDs must be applied. As a requirement, the label `agents.x-k8s.io/sandbox-template-ref-hash` must be added to the `PodSnapshotPolicy` grouping rules.
+
+    Example `PodSnapshotPolicy`:
+    ```yaml
+    apiVersion: podsnapshot.gke.io/v1
+    kind: PodSnapshotPolicy
+    metadata:
+      name: example-psp-workload
+      namespace: sandbox-test
+    spec:
+      storageConfigName: example-pssc-gcs
+      selector:
+        matchLabels:
+          app: agent-sandbox-workload
+      triggerConfig:
+        type: manual
+        postCheckpoint: resume
+      snapshotGroupingRules:
+        groupByLabelValue:
+          labels: ["agents.x-k8s.io/sandbox-template-ref-hash", "tenant-id", "user-id"]
+          groupRetentionPolicy:
+            maxSnapshotCountPerGroup: 3
+    ```
+    (Note: To run the integration test file successfully, `tenant-id` and `user-id` labels should also be added to the `groupByLabelValue.labels` list in the `PodSnapshotPolicy`.)
 
 5.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 

@@ -15,6 +15,7 @@
 import atexit
 import logging
 import requests
+from kubernetes.client import ApiException
 from .trace_manager import create_tracer_manager, trace_span, trace
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
@@ -26,7 +27,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
-from .constants import POD_NAME_ANNOTATION
+from .constants import POD_NAME_ANNOTATION, SANDBOX_TEMPLATE_REF_HASH_LABEL
 
 class Sandbox:
     """
@@ -93,6 +94,15 @@ class Sandbox:
         pod_name = annotations.get(POD_NAME_ANNOTATION)
         self._pod_name = pod_name if pod_name is not None else self.sandbox_id
         return self._pod_name
+
+    def get_sandbox_template_ref_hash(self) -> str | None:
+        """Fetches the Sandbox object from Kubernetes and retrieves its template ref hash."""
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        spec = sandbox_object.get('spec') or {}
+        pod_template = spec.get('podTemplate') or {}
+        pt_metadata = pod_template.get('metadata') or {}
+        pt_labels = pt_metadata.get('labels') or {}
+        return pt_labels.get(SANDBOX_TEMPLATE_REF_HASH_LABEL)
 
     def get_pod_ip(self) -> str | None:
         """Fetches the first pod IP from the Sandbox status.

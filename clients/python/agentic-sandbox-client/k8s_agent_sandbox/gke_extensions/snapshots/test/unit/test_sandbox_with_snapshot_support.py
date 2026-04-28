@@ -25,7 +25,7 @@ from k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support im
     ResumeResponse,
 )
 from k8s_agent_sandbox.constants import (
-    PODSNAPSHOT_POD_NAME_LABEL,
+    SANDBOX_TEMPLATE_REF_HASH_LABEL,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
@@ -67,6 +67,9 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         # Access the underlying engine
         self.engine = self.sandbox.snapshots
         self.engine.get_pod_name_func = self.sandbox.get_pod_name
+        
+        # Mock get_sandbox_template_ref_hash_func directly on the engine
+        self.engine.get_sandbox_template_ref_hash_func = MagicMock(return_value="test-template-hash")
 
     def tearDown(self):
         logging.info(f"Finished {self._testMethodName}.")
@@ -458,7 +461,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-1",
                         "uid": "uid-1",
                         "creationTimestamp": "2023-01-02T00:00:00Z",
-                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
+                        "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -467,7 +470,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-2",
                         "uid": "uid-2",
                         "creationTimestamp": "2023-01-01T00:00:00Z",
-                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
+                        "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -499,7 +502,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector=f"{PODSNAPSHOT_POD_NAME_LABEL}=test-pod,test-label=test-value",
+            label_selector=f"{SANDBOX_TEMPLATE_REF_HASH_LABEL}=test-template-hash,test-label=test-value",
         )
 
     def test_snapshots_list_filter_empty(self):
@@ -576,7 +579,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-1",
                         "uid": "uid-1",
                         "creationTimestamp": None,  # Test Case: None
-                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
+                        "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -585,7 +588,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "name": "snap-2",
                         "uid": "uid-2",
                         "creationTimestamp": "2023-01-01T00:00:00Z",
-                        "labels": {PODSNAPSHOT_POD_NAME_LABEL: "test-pod"},
+                        "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -616,7 +619,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector=f"{PODSNAPSHOT_POD_NAME_LABEL}=test-pod",
+            label_selector=f"{SANDBOX_TEMPLATE_REF_HASH_LABEL}=test-template-hash",
         )
 
     def test_snapshots_list_no_pod_name(self):

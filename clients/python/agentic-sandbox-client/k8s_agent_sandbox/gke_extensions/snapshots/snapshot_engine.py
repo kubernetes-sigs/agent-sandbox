@@ -21,7 +21,7 @@ from kubernetes.client import ApiException
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from k8s_agent_sandbox.constants import (
-    PODSNAPSHOT_POD_NAME_LABEL,
+    SANDBOX_TEMPLATE_REF_HASH_LABEL,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
@@ -91,10 +91,12 @@ class SnapshotEngine:
         namespace: str,
         k8s_helper,
         get_pod_name_func: Callable[[], str],
+        get_sandbox_template_ref_hash_func: Callable[[], str | None],
     ):
         self.namespace = namespace
         self.k8s_helper = k8s_helper
         self.get_pod_name_func = get_pod_name_func
+        self.get_sandbox_template_ref_hash_func = get_sandbox_template_ref_hash_func
         self.created_manual_triggers = []
 
     def create(
@@ -293,7 +295,17 @@ class SnapshotEngine:
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-        selectors.append(f"{PODSNAPSHOT_POD_NAME_LABEL}={pod_name}")
+        template_ref_hash = self.get_sandbox_template_ref_hash_func()
+        if not template_ref_hash:
+            logger.warning(f"Template reference hash not found for pod {pod_name}.")
+            return ListSnapshotResult(
+                success=False,
+                snapshots=[],
+                error_reason="Template reference hash not found.",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+        
+        selectors.append(f"{SANDBOX_TEMPLATE_REF_HASH_LABEL}={template_ref_hash}")
 
         if filter_by.grouping_labels:
             for k, v in filter_by.grouping_labels.items():
@@ -332,7 +344,7 @@ class SnapshotEngine:
                         SnapshotDetail(
                             snapshot_uid=metadata.get("name"),
                             source_pod=metadata.get("labels", {}).get(
-                                PODSNAPSHOT_POD_NAME_LABEL, "Unknown"
+                                SANDBOX_TEMPLATE_REF_HASH_LABEL, "Unknown"
                             ),
                             creation_timestamp=metadata.get("creationTimestamp"),
                             status="Ready" if is_ready else "NotReady",

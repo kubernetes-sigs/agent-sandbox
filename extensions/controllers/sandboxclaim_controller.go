@@ -68,6 +68,8 @@ var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
+var ErrCrossNamespaceAdoption = errors.New("cross-namespace adoption forbidden")
+
 // getWarmPoolPolicy returns the effective warm pool policy for a claim.
 func getWarmPoolPolicy(claim *extensionsv1alpha1.SandboxClaim) extensionsv1alpha1.WarmPoolPolicy {
 	if claim.Spec.WarmPool != nil {
@@ -601,6 +603,11 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted for template", "sandbox", adopted.Name, "templateHash", templateHash, "reason", err.Error())
+			// If it's a good sandbox just in the wrong namespace,
+			// add it to the skipped list so the defer block puts it back.
+			if errors.Is(err, ErrCrossNamespaceAdoption) {
+				skipped = append(skipped, adoptedKey)
+			}
 			continue
 		}
 
@@ -1362,6 +1369,10 @@ func (h *sandboxEventHandler) Generic(_ context.Context, _ event.GenericEvent, _
 }
 
 func verifySandboxCandidate(candidate *v1alpha1.Sandbox, claim *extensionsv1alpha1.SandboxClaim) error {
+	if candidate.Namespace != claim.Namespace {
+		return fmt.Errorf("%w: sandbox is in %q, claim is in %q", ErrCrossNamespaceAdoption, candidate.Namespace, claim.Namespace)
+	}
+
 	if err := isAdoptable(candidate); err != nil {
 		return err
 	}

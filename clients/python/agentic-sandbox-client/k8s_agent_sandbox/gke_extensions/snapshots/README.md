@@ -92,7 +92,7 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
     pip install -e clients/python/agentic-sandbox-client/
     ```
 
-3.  **Pod Snapshot Controller**: The Pod Snapshot controller must be installed in a **GKE standard cluster** running with **gVisor**. 
+3.  **Pod Snapshot Controller**: The Pod Snapshot controller must be installed in a **GKE standard cluster** (version >= 1.35.2-gke.1842000) running with **gVisor**. 
    * For detailed setup instructions, refer to the [GKE Pod Snapshots public documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots).
    * Ensure a GCS bucket is configured to store the pod snapshot states and that the necessary IAM permissions are applied.
 

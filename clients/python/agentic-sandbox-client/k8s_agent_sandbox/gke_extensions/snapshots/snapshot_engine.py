@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from k8s_agent_sandbox.constants import (
     SANDBOX_TEMPLATE_REF_HASH_LABEL,
+    PODSNAPSHOT_POD_NAME_ANNOTATION,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
@@ -343,8 +344,8 @@ class SnapshotEngine:
                     valid_snapshots.append(
                         SnapshotDetail(
                             snapshot_uid=metadata.get("name"),
-                            source_pod=metadata.get("labels", {}).get(
-                                SANDBOX_TEMPLATE_REF_HASH_LABEL, "Unknown"
+                            source_pod=metadata.get("annotations", {}).get(
+                                PODSNAPSHOT_POD_NAME_ANNOTATION, "Unknown"
                             ),
                             creation_timestamp=metadata.get("creationTimestamp"),
                             status="Ready" if is_ready else "NotReady",

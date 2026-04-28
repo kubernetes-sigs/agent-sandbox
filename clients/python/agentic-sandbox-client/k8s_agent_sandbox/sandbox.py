@@ -15,7 +15,6 @@
 import atexit
 import logging
 import requests
-from kubernetes.client import ApiException
 from .trace_manager import create_tracer_manager, trace_span, trace
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem

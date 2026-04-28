@@ -26,6 +26,7 @@ from k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support im
 )
 from k8s_agent_sandbox.constants import (
     SANDBOX_TEMPLATE_REF_HASH_LABEL,
+    PODSNAPSHOT_POD_NAME_ANNOTATION,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
@@ -462,6 +463,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "uid": "uid-1",
                         "creationTimestamp": "2023-01-02T00:00:00Z",
                         "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
+                        "annotations": {PODSNAPSHOT_POD_NAME_ANNOTATION: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -471,6 +473,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "uid": "uid-2",
                         "creationTimestamp": "2023-01-01T00:00:00Z",
                         "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
+                        "annotations": {PODSNAPSHOT_POD_NAME_ANNOTATION: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -496,7 +499,9 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.assertEqual(len(result.snapshots), 2)
         # Verify it sorted by creationTimestamp newest first
         self.assertEqual(result.snapshots[0].snapshot_uid, "snap-1")
+        self.assertEqual(result.snapshots[0].source_pod, "test-pod")
         self.assertEqual(result.snapshots[1].snapshot_uid, "snap-2")
+        self.assertEqual(result.snapshots[1].source_pod, "test-pod")
         self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.assert_called_once_with(
             group=PODSNAPSHOT_API_GROUP,
             version=PODSNAPSHOT_API_VERSION,
@@ -580,6 +585,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "uid": "uid-1",
                         "creationTimestamp": None,  # Test Case: None
                         "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
+                        "annotations": {PODSNAPSHOT_POD_NAME_ANNOTATION: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -589,6 +595,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                         "uid": "uid-2",
                         "creationTimestamp": "2023-01-01T00:00:00Z",
                         "labels": {SANDBOX_TEMPLATE_REF_HASH_LABEL: "test-template-hash"},
+                        "annotations": {PODSNAPSHOT_POD_NAME_ANNOTATION: "test-pod"},
                     },
                     "status": {"conditions": [{"type": "Ready", "status": "True"}]},
                 },
@@ -629,6 +636,14 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Pod name not found", result.error_reason)
+
+    def test_snapshots_list_no_template_hash(self):
+        """Test list snapshots fails when template reference hash is missing."""
+        self.engine.get_sandbox_template_ref_hash_func.return_value = None
+        result = self.engine.list()
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, ERROR_CODE)
+        self.assertIn("Template reference hash not found", result.error_reason)
 
     def test_snapshots_list_api_exception(self):
         self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.side_effect = ApiException(

@@ -92,6 +92,40 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertNotIn("lifecycle", body["spec"])
 
+    def test_create_claim_with_warmpool_none(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim", "test-template", "test-namespace", warmpool="none"
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body["spec"]["warmpool"], "none")
+
+    def test_create_claim_with_specific_warmpool(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim", "test-template", "test-namespace", warmpool="custom-pool"
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body["spec"]["warmpool"], "custom-pool")
+
+    def test_create_claim_warmpool_omitted(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertNotIn("warmpool", body["spec"])
+
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")

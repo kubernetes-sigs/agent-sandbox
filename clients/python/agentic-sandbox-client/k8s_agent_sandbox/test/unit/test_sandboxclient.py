@@ -64,7 +64,7 @@ class TestSandboxClient(unittest.TestCase):
             
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
             
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None)
+            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None, warmpool=None)
             self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
@@ -206,6 +206,7 @@ class TestSandboxClient(unittest.TestCase):
                 "sandbox-claim-1234abcd", "test-template", "test-namespace",
                 labels={"agent": "code-agent", "team": "platform"},
                 lifecycle=None,
+                warmpool=None,
             )
 
     def test_create_claim_with_labels(self):
@@ -220,6 +221,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels={"agent": "code-agent"},
             lifecycle=None,
+            warmpool=None,
         )
 
     def test_create_claim(self):
@@ -233,6 +235,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels=None,
             lifecycle=None,
+            warmpool=None,
         )
 
     def test_validate_labels_rejects_invalid_value(self):
@@ -344,6 +347,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=lifecycle,
+            warmpool=None,
         )
 
     def test_create_claim_without_lifecycle(self):
@@ -357,6 +361,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=None,
+            warmpool=None,
         )
 
     def test_shutdown_after_seconds_validation_zero(self):

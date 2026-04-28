@@ -110,6 +110,27 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
 }
 
+// SandboxUpdateStrategyType is a string enumeration type that enumerates
+// all possible update strategies for the Sandbox controller.
+// +kubebuilder:validation:Enum=None;Resize
+type SandboxUpdateStrategyType string
+
+const (
+	// NoneSandboxUpdateStrategyType indicates no automatic pod updates on template drift.
+	NoneSandboxUpdateStrategyType SandboxUpdateStrategyType = "None"
+	// ResizeSandboxUpdateStrategyType indicates in-place pod resize via /resize subresource on resource drift.
+	ResizeSandboxUpdateStrategyType SandboxUpdateStrategyType = "Resize"
+)
+
+// SandboxUpdateStrategy defines the update strategy for the Sandbox.
+type SandboxUpdateStrategy struct {
+	// type indicates the type of the SandboxUpdateStrategy.
+	// Default is None.
+	// +kubebuilder:default=None
+	// +optional
+	Type SandboxUpdateStrategyType `json:"type,omitempty"`
+}
+
 // SandboxSpec defines the desired state of Sandbox.
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
@@ -137,6 +158,10 @@ type SandboxSpec struct {
 	// +kubebuilder:default=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// updateStrategy defines the strategy for updating pod resources on template drift.
+	// +optional
+	UpdateStrategy *SandboxUpdateStrategy `json:"updateStrategy,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

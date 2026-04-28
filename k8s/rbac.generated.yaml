@@ -19,6 +19,13 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - pods/resize
+  verbs:
+  - patch
+  - update
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes

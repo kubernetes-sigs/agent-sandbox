@@ -41,9 +41,23 @@ var ReadyConditionIsTrue = &StatusPredicate{
 	MatchStatus: metav1.ConditionTrue,
 }
 
+// ConditionReasonEquals checks if the given object has a condition with the
+// specified type and reason.
+func ConditionReasonEquals(conditionType, reason string) ObjectPredicate {
+	return &ConditionReasonPredicate{
+		ConditionType: conditionType,
+		Reason:        reason,
+	}
+}
+
 type StatusPredicate struct {
 	MatchType   string
 	MatchStatus metav1.ConditionStatus
+}
+
+type ConditionReasonPredicate struct {
+	ConditionType string
+	Reason        string
 }
 
 func (s *StatusPredicate) Matches(obj client.Object) (bool, error) {
@@ -67,6 +81,29 @@ func (s *StatusPredicate) Matches(obj client.Object) (bool, error) {
 
 func (s *StatusPredicate) String() string {
 	return fmt.Sprintf("StatusPredicate(Type=%s,Status=%s)", s.MatchType, s.MatchStatus)
+}
+
+func (c *ConditionReasonPredicate) Matches(obj client.Object) (bool, error) {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+
+	for _, cond := range status.Status.Conditions {
+		if cond.Type == c.ConditionType && cond.Reason == c.Reason {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *ConditionReasonPredicate) String() string {
+	return fmt.Sprintf("ConditionReasonPredicate(Type=%s,Reason=%s)", c.ConditionType, c.Reason)
 }
 
 // asUnstructured converts a client.Object to an *unstructured.Unstructured.

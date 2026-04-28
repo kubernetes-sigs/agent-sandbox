@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -447,6 +448,92 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 			require.Equal(t, "from-podtemplate", sb.Spec.PodTemplate.ObjectMeta.Annotations["pod-annotation"])
 		}
 	})
+}
+
+func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "app", Image: "test-image"},
+					},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{Name: "data"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("1Gi"),
+							},
+						},
+					},
+				},
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{Name: "cache"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("500Mi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1alpha1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-vct",
+		},
+		Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+			Replicas: 1,
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(template).
+			Build(),
+		Scheme: scheme,
+	}
+
+	err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	list := &sandboxv1alpha1.SandboxList{}
+	err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+
+	sb := list.Items[0]
+	require.Len(t, sb.Spec.VolumeClaimTemplates, 2, "sandbox should have 2 volumeClaimTemplates")
+	require.Equal(t, "data", sb.Spec.VolumeClaimTemplates[0].Name)
+	require.Equal(t, "cache", sb.Spec.VolumeClaimTemplates[1].Name)
+	require.Equal(t, templateName, sb.Annotations[sandboxv1alpha1.SandboxTemplateRefAnnotation],
+		"sandbox should have template ref annotation for metrics")
 }
 
 func TestReconcilePoolReadyReplicas(t *testing.T) {

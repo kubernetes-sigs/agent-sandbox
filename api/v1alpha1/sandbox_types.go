@@ -27,9 +27,15 @@ func (c ConditionType) String() string { return string(c) }
 const (
 	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"
+	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
+	SandboxConditionFinished ConditionType = "Finished"
 
 	// SandboxReasonExpired indicates expired state for Sandbox.
 	SandboxReasonExpired = "SandboxExpired"
+	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
+	SandboxReasonPodSucceeded = "PodSucceeded"
+	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
+	SandboxReasonPodFailed = "PodFailed"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
@@ -116,6 +122,7 @@ type SandboxSpec struct {
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
 	// +optional
+	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.

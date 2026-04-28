@@ -49,6 +49,7 @@ import (
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	sandboxControllerFieldOwner = "sandbox-controller"
+	immediateRequeueDelay       = time.Millisecond
 )
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
@@ -86,6 +87,26 @@ func resolvePodName(sandbox *sandboxv1alpha1.Sandbox) string {
 		return name
 	}
 	return sandbox.Name
+}
+
+// MergeVolumeClaimVolumes merges PVC-backed volumes into an existing volume
+// list, replacing any volumes with matching names. This follows StatefulSet
+// semantics where volumeClaimTemplate volumes take priority.
+func MergeVolumeClaimVolumes(existing []corev1.Volume, pvcVolumes []corev1.Volume) []corev1.Volume {
+	if len(pvcVolumes) == 0 {
+		return existing
+	}
+	vctNames := make(map[string]struct{}, len(pvcVolumes))
+	for _, v := range pvcVolumes {
+		vctNames[v.Name] = struct{}{}
+	}
+	filtered := make([]corev1.Volume, 0, len(existing))
+	for _, v := range existing {
+		if _, ok := vctNames[v.Name]; !ok {
+			filtered = append(filtered, v)
+		}
+	}
+	return append(filtered, pvcVolumes...)
 }
 
 var (
@@ -150,15 +171,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Check if already marked as expired to avoid repeated operations, including cleanups
-	if sandboxMarkedExpired(sandbox) {
-		log.Info("Sandbox is already marked as expired")
-		// Note: The sandbox won't be deleted if shutdown policy is changed to delete after expiration.
-		//       To delete an expired sandbox, the user should delete the sandbox instead of updating it.
-		//       This keeps the controller code simple.
-		return ctrl.Result{}, nil
-	}
-
 	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
 	tc := r.Tracer.GetTraceContext(ctx)
 	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
@@ -180,15 +192,28 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	oldStatus := sandbox.Status.DeepCopy()
 	var err error
 	sandboxDeleted := false
+	result := ctrl.Result{}
 
-	expired, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
-
-	// Check if sandbox has expired
+	expired, _ := checkSandboxExpiry(sandbox, time.Now())
 	if expired {
+		if !sandboxMarkedExpired(sandbox) {
+			setSandboxExpiredCondition(sandbox)
+			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+				return ctrl.Result{}, statusUpdateErr
+			}
+			return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+		}
+
 		log.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
 		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
 	} else {
 		err = r.reconcileChildResources(ctx, sandbox)
+		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
+		result.RequeueAfter = requeueAfter
+		if expiredAfterReconcile {
+			setSandboxExpiredCondition(sandbox)
+			result.RequeueAfter = immediateRequeueDelay
+		}
 	}
 
 	if !sandboxDeleted {
@@ -199,7 +224,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 	// return errors seen
-	return ctrl.Result{RequeueAfter: requeueAfter}, err
+	return result, err
 }
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
@@ -208,7 +233,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	var allErrors error
 
-	// Reconcile PVCs
+	// Reconcile PVCs from volumeClaimTemplates
 	err := r.reconcilePVCs(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
@@ -232,6 +257,12 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// compute and set overall Ready condition
 	readyCondition := r.computeReadyCondition(sandbox, allErrors, svc, pod)
 	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+
+	if finishedCondition := r.computeFinishedCondition(sandbox, pod); finishedCondition != nil {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, *finishedCondition)
+	} else {
+		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionFinished))
+	}
 
 	return allErrors
 }
@@ -297,6 +328,31 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 	}
 
 	return readyCondition
+}
+
+func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1alpha1.Sandbox, pod *corev1.Pod) *metav1.Condition {
+	if pod == nil {
+		return nil
+	}
+
+	condition := &metav1.Condition{
+		Type:               string(sandboxv1alpha1.SandboxConditionFinished),
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: sandbox.Generation,
+	}
+
+	switch pod.Status.Phase {
+	case corev1.PodSucceeded:
+		condition.Reason = sandboxv1alpha1.SandboxReasonPodSucceeded
+		condition.Message = "Pod completed successfully"
+	case corev1.PodFailed:
+		condition.Reason = sandboxv1alpha1.SandboxReasonPodFailed
+		condition.Message = "Pod failed"
+	default:
+		return nil
+	}
+
+	return condition
 }
 
 // podIPsFromStatus converts the K8s PodIP slice to a plain string slice.
@@ -579,8 +635,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil
 	}
 
-	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
-	if pod != nil {
+	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, error) {
 		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
 		if r.Tracer.IsRecording(ctx) {
@@ -629,6 +684,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
+	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
+	if pod != nil {
+		return reconcileExistingPod(pod)
+	}
+
 	// Create new Pod
 	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	labels := map[string]string{
@@ -657,9 +717,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 
+	// Build PVC volumes from volumeClaimTemplates
+	var pvcVolumes []corev1.Volume
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name
-		mutatedSpec.Volumes = append(mutatedSpec.Volumes, corev1.Volume{
+		pvcVolumes = append(pvcVolumes, corev1.Volume{
 			Name: pvcTemplate.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -668,6 +730,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			},
 		})
 	}
+	mutatedSpec.Volumes = MergeVolumeClaimVolumes(mutatedSpec.Volumes, pvcVolumes)
 	pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sandbox.Name,
@@ -682,6 +745,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			log.Info("Pod already exists, fetching existing pod",
+				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			existingPod := &corev1.Pod{}
+			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
+				return nil, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
+			}
+			return reconcileExistingPod(existingPod)
+		}
 		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
@@ -910,8 +982,9 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Clear all status fields explicitly
-		sandbox.Status = sandboxv1alpha1.SandboxStatus{}
+		// Drop live-resource status while retaining terminal conditions.
+		conditions := sandbox.Status.Conditions
+		sandbox.Status = sandboxv1alpha1.SandboxStatus{Conditions: conditions}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1alpha1.SandboxConditionReady),
@@ -932,21 +1005,28 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox, now time.Time) (bool, 
 	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0
 	}
-
-	expiryTime := sandbox.Spec.ShutdownTime.Time
-	if !now.Before(expiryTime) {
+	shutdownTime := sandbox.Spec.ShutdownTime.Time
+	if !now.Before(shutdownTime) {
 		return true, 0
 	}
-
-	// Calculate remaining time
-	remainingTime := expiryTime.Sub(now)
+	remainingTime := shutdownTime.Sub(now)
 
 	// TODO(barney-s): Do we need a inverse exponential backoff here ?
-	//requeueAfter := max(remainingTime/2, 2*time.Second)
+	// requeueAfter := max(remainingTime/2, 2*time.Second)
 
 	// Requeue at expiry time or in 2 seconds whichever is later
 	requeueAfter := max(remainingTime, 2*time.Second)
 	return false, requeueAfter
+}
+
+func setSandboxExpiredCondition(sandbox *sandboxv1alpha1.Sandbox) {
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1alpha1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: sandbox.Generation,
+		Reason:             sandboxv1alpha1.SandboxReasonExpired,
+		Message:            "Sandbox has expired",
+	})
 }
 
 // sandboxMarkedExpired checks if the sandbox is already marked as expired.

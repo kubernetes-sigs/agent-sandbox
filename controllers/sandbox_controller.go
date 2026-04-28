@@ -871,13 +871,12 @@ func (r *SandboxReconciler) reconcilePodResources(ctx context.Context, pod *core
 	}
 
 	needsResize := false
-	podContainers := pod.Spec.Containers
 
-	for i := range podContainers {
+	for i := range pod.Spec.Containers {
 		for _, desired := range desiredContainers {
-			if podContainers[i].Name == desired.Name {
-				if !equality.Semantic.DeepEqual(podContainers[i].Resources, desired.Resources) {
-					podContainers[i].Resources = desired.Resources
+			if pod.Spec.Containers[i].Name == desired.Name {
+				if !equality.Semantic.DeepEqual(pod.Spec.Containers[i].Resources, desired.Resources) {
+					pod.Spec.Containers[i].Resources = desired.Resources
 					needsResize = true
 				}
 				break

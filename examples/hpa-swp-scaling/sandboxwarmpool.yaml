@@ -6,6 +6,6 @@ metadata:
   labels:
     app: python-sdk-warmpool
 spec:
-  replicas:  10
+  replicas: 10
   sandboxTemplateRef:
     name: python-sandbox-template

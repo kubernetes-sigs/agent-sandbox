@@ -20,4 +20,4 @@ spec:
             metric.labels.warmpool_name: "python-sdk-warmpool"
       target:
         type: Value 
-        value: 0.5
+        value: "0.5"

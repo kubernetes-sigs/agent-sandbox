@@ -27,7 +27,7 @@ In this example, we show how to scale a pool of warm sandboxes dynamically based
    - **Minimum Capacity**: 10 sandboxes 
    - **Maximum Capacity**: 100 sandboxes (sets a hard budget ceiling).
    - **Metric**: `agent_sandbox_claim_creation_total`. This is a counter metric that is incremented every time a sandbox claim is created. Note that while this is a counter metric, it is evaluated as a rate of change by the Custom Metrics Adapter for HPA.
-  - **The Target**: 0.5 rate of claims created per second. The HPA will adjust the warmpool replicas to maintain this target.
+   - **The Target**: 0.5 rate of claims created per second. The HPA will adjust the warmpool replicas to maintain this target.
 
    ```bash
    kubectl apply -f hpa.yaml
@@ -41,8 +41,9 @@ In this example, we show how to scale a pool of warm sandboxes dynamically based
 5. **Verify scaling**:
    Run the following command to watch the HPA scale:
    ```bash
-   kubectl get hpa -n hpa-test -w | ts '[%Y-%m-%d %H:%M:%S]'
+   kubectl get hpa -n hpa-test -w
    ```
+   *Note: If you have `ts` from `moreutils` installed and want timestamped output, you can use: `kubectl get hpa -n hpa-test -w | ts '[%Y-%m-%d %H:%M:%S]'`*
 
    Example output:
    ```text

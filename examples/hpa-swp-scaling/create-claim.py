@@ -28,7 +28,7 @@ CLAIM_TTL_SECONDS = 60
 # Initialize K8s Client
 try:
     config.load_kube_config()
-except:
+except Exception:
     config.load_incluster_config()
 
 custom_api = client.CustomObjectsApi()
@@ -49,8 +49,8 @@ def delete_expired_claims():
             now = datetime.now(timezone.utc)
             for claim in claims.get('items', []):
                 creation_ts_str = claim['metadata']['creationTimestamp']
-                # K8s timestamps are Zulu/UTC
-                creation_ts = datetime.strptime(creation_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                # K8s timestamps are Zulu/UTC, fromisoformat handles fractional seconds if we replace Z with offset
+                creation_ts = datetime.fromisoformat(creation_ts_str.replace('Z', '+00:00'))
                 
                 if now - creation_ts > timedelta(seconds=CLAIM_TTL_SECONDS):
                     name = claim['metadata']['name']
@@ -59,7 +59,8 @@ def delete_expired_claims():
                         version="v1alpha1",
                         name=name,
                         namespace=NAMESPACE,
-                        plural="sandboxclaims"
+                        plural="sandboxclaims",
+                        body=client.V1DeleteOptions()
                     )
                     print(f"[Cleanup] Deleted expired claim: {name}")
         except Exception as e:
@@ -103,7 +104,7 @@ if __name__ == "__main__":
             loop_start = time.time()
             
             # Fire and forget the creation in a thread to avoid blocking the clock
-            threading.Thread(target=create_claim, args=(counter,)).start()
+            threading.Thread(target=create_claim, args=(counter,), daemon=True).start()
             
             counter += 1
             

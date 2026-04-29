@@ -62,7 +62,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default ready_condition:true sandbox_template:unknown": 1,
+				"claimed:false expired:false launch_type:cold namespace:default ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -80,7 +80,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default ready_condition:false sandbox_template:unknown": 1,
+				"claimed:false expired:false launch_type:cold namespace:default ready_condition:false sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -150,9 +150,41 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 3, // We expect 3 distinct metric series for the 4 sandboxes
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default ready_condition:true sandbox_template:unknown":     1,
-				"expired:true launch_type:warm namespace:test-ns ready_condition:false sandbox_template:my-template": 1,
-				"expired:false launch_type:cold namespace:default ready_condition:false sandbox_template:unknown":    2,
+				"claimed:false expired:false launch_type:cold namespace:default ready_condition:true sandbox_template:unknown":     1,
+				"claimed:false expired:true launch_type:warm namespace:test-ns ready_condition:false sandbox_template:my-template": 1,
+				"claimed:false expired:false launch_type:cold namespace:default ready_condition:false sandbox_template:unknown":    2,
+			},
+		},
+		{
+			name: "claimed sandbox",
+			sandboxes: []runtime.Object{
+				&sandboxv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-claimed",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "agents.x-k8s.io/v1alpha1",
+								Kind:       "SandboxClaim",
+								Name:       "my-claim",
+								UID:        "1234",
+								Controller: new(true),
+							},
+						},
+					},
+					Status: sandboxv1alpha1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"claimed:true expired:false launch_type:cold namespace:default ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 	}

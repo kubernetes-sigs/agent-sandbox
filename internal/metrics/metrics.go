@@ -104,7 +104,7 @@ var (
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
-		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template"},
+		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "claimed"},
 		nil,
 	)
 

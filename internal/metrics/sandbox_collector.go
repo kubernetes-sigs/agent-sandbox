@@ -39,6 +39,7 @@ type AgentSandboxesMetricKey struct {
 	Expired        string
 	LaunchType     string
 	Template       string
+	Claimed        string
 }
 
 // NewAgentSandboxesConstMetric creates a new Prometheus ConstMetric for the agent_sandboxes gauge.
@@ -52,6 +53,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.Expired,
 		key.LaunchType,
 		key.Template,
+		key.Claimed,
 	)
 }
 
@@ -133,12 +135,18 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			sandboxTemplateStr = template
 		}
 
+		claimedStr := "false"
+		if controllerRef := metav1.GetControllerOf(&sandbox); controllerRef != nil && controllerRef.Kind == "SandboxClaim" {
+			claimedStr = "true"
+		}
+
 		key := AgentSandboxesMetricKey{
 			Namespace:      sandbox.Namespace,
 			ReadyCondition: readyConditionStr,
 			Expired:        expiredStr,
 			LaunchType:     launchTypeStr,
 			Template:       sandboxTemplateStr,
+			Claimed:        claimedStr,
 		}
 		counts[key]++
 	}

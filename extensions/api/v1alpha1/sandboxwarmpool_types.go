@@ -44,6 +44,10 @@ type SandboxWarmPoolSpec struct {
 	// updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
+
+	// enableWarmPoolEviction marks pods created by this warm pool as ready-to-evict by default.
+	// +optional
+	EnableWarmPoolEviction *bool `json:"enableWarmPoolEviction,omitempty"`
 }
 
 // SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates

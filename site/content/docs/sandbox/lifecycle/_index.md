@@ -17,7 +17,7 @@ This guide uses `kubectl` directly and is compatible with any Kubernetes environ
 
 - A running Kubernetes cluster.
 - The [`kubectl`](https://kubernetes.io/docs/tasks/tools/#kubectl) CLI tool installed and configured to point to your cluster.
-- The [Agent Sandbox Controller]({{< ref "/docs/overview" >}}) installed.
+- The [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - A `SandboxTemplate` named `simple-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
 

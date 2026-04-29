@@ -31,7 +31,7 @@ This means any sandbox workload (VSCode, Python runtime, coding agent, etc.) can
 
 ## Prerequisites
 
-- The [Agent Sandbox Controller]({{< ref "/docs/overview" >}}) installed on your cluster.
+- The [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed on your cluster.
 - [`kubectl`](https://kubernetes.io/docs/tasks/tools/#kubectl) installed and configured to point to your cluster.
 
 ## Getting Started

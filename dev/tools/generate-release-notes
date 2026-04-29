@@ -17,6 +17,7 @@ import os
 import sys
 import json
 import urllib.request
+import urllib.error
 import subprocess
 import argparse
 import re
@@ -135,6 +136,8 @@ def get_pr_descriptions(pr_numbers):
 
 
 def generate_highlights(commits, breaking_changes, pr_descriptions, tag):
+    # TODO: Use Vertex AI for Gemini API 
+
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         print("⚠️ GEMINI_API_KEY not set. Skipping Gemini highlights.")
@@ -185,8 +188,16 @@ Breaking Changes:
                 if parts:
                     return parts[0].get("text")
             return None
+    except urllib.error.HTTPError as e:
+        print(f"⚠️ HTTP Error calling Gemini API ({e.code}: {e.reason}). Skipping Gemini highlights.")
+        try:
+            error_body = e.read().decode("utf-8")
+            print(f"   Response body: {error_body}")
+        except Exception:
+            pass
+        return None
     except Exception as e:
-        print(f"⚠️ Error calling Gemini API ({type(e).__name__}). Skipping Gemini highlights.")
+        print(f"⚠️ Error calling Gemini API ({type(e).__name__}: {e}). Skipping Gemini highlights.")
         return None
 
 

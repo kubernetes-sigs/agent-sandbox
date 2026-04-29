@@ -39,24 +39,26 @@ IMAGES_TO_PROMOTE = [
 def get_remote_name(cwd=None, preferred_remote=None):
     """Returns the preferred remote if specified and exists, or 'upstream' if it exists.
     Falls back to 'origin' if neither are found.
-    Raises an exception if no valid remote is found.
     """
-    try:
-        remotes = run_command(["git", "remote"], cwd=cwd, capture_output=True).splitlines()
-        if preferred_remote and preferred_remote in remotes:
-            return preferred_remote
-        
-        if "upstream" in remotes:
-            return "upstream"
-            
-        if "origin" in remotes:
-            return "origin"
-        
-        raise Exception(
-            f"Could not find any valid git remote. Available remotes: {remotes}. "
-        )
-    except Exception as e:
-        raise Exception(f"Failed to determine git remote: {e}")
+    remotes_output = run_command(
+        ["git", "remote"],
+        cwd=cwd,
+        capture_output=True,
+        allow_error=True,
+    )
+
+    if not remotes_output:
+        return "origin"
+
+    remotes = remotes_output.splitlines()
+
+    if preferred_remote and preferred_remote in remotes:
+        return preferred_remote
+
+    if "upstream" in remotes:
+        return "upstream"
+
+    return "origin"
 
 def check_environment():
     """Checks if the required tools are installed and authenticated."""
@@ -246,16 +248,29 @@ def main():
     print("🚀 Creating PR...")
     head_branch_ref = f"{gh_user}:{branch_name}"
 
-    pr_url = run_command([
-        "gh", "pr", "create",
-        "--title", f"Promote agent-sandbox {tag}",
-        "--body", f"Promoting agent-sandbox images for release {tag}",
-        "--head", head_branch_ref, 
-        "--base", "main",
-        "--repo", "kubernetes/k8s.io" 
-    ], cwd=k8s_io_dir, capture_output=True)
-
-    print(f"✅ Promotion PR created: {pr_url}")
+    try:
+        pr_url = run_command([
+            "gh", "pr", "create",
+            "--title", f"Promote agent-sandbox {tag}",
+            "--body", f"Promoting agent-sandbox images for release {tag}",
+            "--head", head_branch_ref, 
+            "--base", "main",
+            "--repo", "kubernetes/k8s.io" 
+        ], cwd=k8s_io_dir, capture_output=True)
+        print(f"✅ Promotion PR created: {pr_url}")
+    except Exception as e:
+        print(f"⚠️  gh pr create failed (perhaps PR already exists). Attempting to find existing PR...")
+        try:
+            pr_url = run_command([
+                "gh", "pr", "view", branch_name,
+                "--repo", "kubernetes/k8s.io",
+                "--json", "url",
+                "--jq", ".url"
+            ], cwd=k8s_io_dir, capture_output=True)
+            print(f"✅ Found existing PR: {pr_url}")
+        except Exception as e2:
+            print(f"❌ Failed to create or find PR: {e2}")
+            sys.exit(1)
     
     # Write PR URL to a file for use in CI workflows
     try:

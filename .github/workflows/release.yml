@@ -21,6 +21,7 @@ jobs:
   promote:
     name: Promote Images
     runs-on: ubuntu-latest
+    environment: release
     timeout-minutes: 180
     outputs:
       pr_url: ${{ steps.extract-pr.outputs.pr_url }}
@@ -59,6 +60,7 @@ jobs:
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
+          # TODO: Use workload identity instead
           # workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
           # service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
 
@@ -111,7 +113,9 @@ jobs:
     needs: promote
     if: needs.promote.outputs.run_release == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 720 # 12-hour limit for long k8s.io merge cycles
+    environment: release
+    timeout-minutes: 360 # 6-hour limit for long k8s.io merge cycles
+
     steps:
       - name: Wait for PR Merge
         env:
@@ -121,8 +125,8 @@ jobs:
         run: |
           echo "Waiting for $PR_URL to be merged..."
 
-          # 144 attempts, every 5 minutes = 12 hours total
-          for i in {1..144}; do
+          # 72 attempts, every 5 minutes = 6 hours total
+          for i in {1..72}; do
             # Explicitly check the kubernetes/k8s.io repo context
             STATE=$(gh pr view "$PR_URL" --repo kubernetes/k8s.io --json state --jq '.state')
             
@@ -147,6 +151,7 @@ jobs:
     needs: [promote, poll-merge]
     if: needs.promote.outputs.run_release == 'true'
     runs-on: ubuntu-latest
+    environment: release
 
     steps:
       - name: Checkout

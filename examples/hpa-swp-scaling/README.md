@@ -2,7 +2,7 @@
 
 This example demonstrates how to use the Kubernetes Horizontal Pod Autoscaler (HPA) to scale a `SandboxWarmPool` based on custom metrics emitted by the agent sandbox controller.
 
-> [!IMPORTANT]
+> **Note:**
 > This example is tailored to Google Cloud Platform (GCP) / Google Kubernetes Engine (GKE). It depends on GKE Managed Service for Prometheus and the Stackdriver Custom Metrics Adapter.
 
 ## Overview
@@ -25,7 +25,7 @@ In this example, we show how to scale a pool of warm sandboxes dynamically based
    kubectl apply -f sandboxwarmpool.yaml
    ```
 
-2. **Expose metrics to Prometheus Cloud Monitoring**:
+2. **Expose metrics via GKE Managed Service for Prometheus**:
    Apply the `pod-monitoring.yaml` to enable metric scraping.
    ```bash
    kubectl apply -f pod-monitoring.yaml
@@ -35,11 +35,11 @@ In this example, we show how to scale a pool of warm sandboxes dynamically based
    Once the custom metric is exposed in Prometheus, you can connect it to the HPA configuration. We set the guardrails for scaling:
    - **Minimum Capacity**: 10 sandboxes 
    - **Maximum Capacity**: 100 sandboxes (sets a hard budget ceiling).
-   - **Metric**: `agent_sandbox_claim_creation_total`. This is a counter metric that is incremented every time a sandbox claim is created.
+   - **Metric**: Raw Prometheus metric `agent_sandbox_claim_creation_total`, which the GKE Custom Metrics Adapter exposes to the HPA as `prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter`. This is a counter metric that is incremented every time a sandbox claim is created.
    - **The Target**: 0.5 rate of claims created per second. The HPA will adjust the warmpool replicas to maintain this target.
 
-   > [!NOTE]
-   > In the GKE Custom Metrics Adapter, metrics from Prometheus Managed Service are mapped to the `prometheus.googleapis.com|...` format. The metric counter is evaluated as a rate of change (rate per second).
+   > **Note:**
+   > In the GKE Custom Metrics Adapter, metrics from Prometheus Managed Service are mapped to the `prometheus.googleapis.com|...` format. In this example, `hpa.yaml` uses the adapter-mapped metric name `prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter`, and the counter is evaluated as a rate of change (rate per second).
 
    ```bash
    kubectl apply -f hpa.yaml

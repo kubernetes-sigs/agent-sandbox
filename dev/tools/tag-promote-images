@@ -36,9 +36,11 @@ IMAGES_TO_PROMOTE = [
 
 # Git Remotes defaults are controlled by CLI arguments
 
-def get_remote_name(cwd=None, preferred_remote=None):
-    """Returns the preferred remote if specified and exists, or 'upstream' if it exists.
-    Falls back to 'origin' if neither are found.
+def get_remote_name(cwd=None, preferred_remote=None, exclude_remote=None):
+    """Returns the preferred remote if specified and exists.
+    Falls back to 'upstream' if it exists.
+    Falls back to 'origin' if it exists and is not explicitly excluded.
+    Otherwise, raises ValueError.
     """
     remotes_output = run_command(
         ["git", "remote"],
@@ -48,17 +50,28 @@ def get_remote_name(cwd=None, preferred_remote=None):
     )
 
     if not remotes_output:
-        return "origin"
+        raise ValueError(f"No git remotes found in repository at {cwd or 'current directory'}")
 
     remotes = remotes_output.splitlines()
 
     if preferred_remote and preferred_remote in remotes:
-        return preferred_remote
+        if not exclude_remote or preferred_remote != exclude_remote:
+            return preferred_remote
 
     if "upstream" in remotes:
-        return "upstream"
+        if not exclude_remote or "upstream" != exclude_remote:
+            return "upstream"
 
-    return "origin"
+    if "origin" in remotes:
+        if not exclude_remote or "origin" != exclude_remote:
+            return "origin"
+
+    raise ValueError(
+        f"Could not determine a valid remote name. "
+        f"Preferred remote '{preferred_remote}' was not found, and 'upstream'/'origin' are either missing or excluded. "
+        f"Available remotes: {remotes}. Please specify correct remote names via flags."
+    )
+
 
 def check_environment():
     """Checks if the required tools are installed and authenticated."""
@@ -188,7 +201,7 @@ def main():
         sys.exit(1)
 
     # Sync k8s.io repo from remote
-    remote_k8s_io = get_remote_name(cwd=k8s_io_dir, preferred_remote=upstream_remote)
+    remote_k8s_io = get_remote_name(cwd=k8s_io_dir, preferred_remote=upstream_remote, exclude_remote=fork_remote)
     print(f"ℹ️  Detected remote for k8s.io: {remote_k8s_io}")
     print(f"🔄 Syncing k8s.io main branch from {remote_k8s_io}...")
     run_command(["git", "fetch", remote_k8s_io], cwd=k8s_io_dir)

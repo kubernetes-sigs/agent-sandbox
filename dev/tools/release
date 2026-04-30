@@ -28,8 +28,6 @@ def run_command(cmd):
         print(f"Error running command: {' '.join(cmd)}")
         sys.exit(1)
 
-
-
 def main():
     parser = argparse.ArgumentParser(description='Generate release manifests.')
     parser.add_argument('--tag', required=True, help='The git tag for the release.')

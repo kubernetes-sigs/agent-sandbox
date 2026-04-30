@@ -1,6 +1,21 @@
 # Sandbox State Management with Conditions
 
-We need to expose `status` method for Sandboxes in the Python SDK: https://github.com/kubernetes-sigs/agent-sandbox/pull/280. The current outstanding implementation checks the `Pod` status instead of `Sandbox` and transforms the Pod status into the Sandbox status on the client side. This is not an ideal implementation. We should expose `status` of the Sandbox on the controller side as a first class field. 
+<!-- toc -->
+- [Motivation](#motivation)
+- [Condition Hierarchy](#condition-hierarchy)
+- [Condition Dependency Matrix](#condition-dependency-matrix)
+- [Usage Examples](#usage-examples)
+- [Consumer Compatibility](#consumer-compatibility)
+- [Alternatives Considered](#alternatives-considered)
+<!-- /toc -->
+
+Currently, `Sandbox.Status` relies primarily on a single `Ready` condition.
+
+* When the Sandbox is ready to take traffic, `Ready` is set to True.
+
+* When the Sandbox is not ready to take traffic, `Ready` is set to False.
+
+* When the Sandbox is Suspended (replicas set to 0), the underlying Pod is deleted. In this state, the `Ready` condition typically defaults to `False` or becomes stale. There is no explicit machine-readable field to distinguish between a "Suspended" state (intended) and "Pod not ready" (unintended) during first time initialization for example.
 
 To align with Kubernetes API standards and address the previous limitations of using `phase` for Sandbox as discussed in https://github.com/kubernetes-sigs/agent-sandbox/pull/121, this proposal uses a `status.conditions` model instead of adding the deprecated `status.phase` field. This model establishes three conditions: `Initialized`, `Ready` and `Suspended`.
 
@@ -24,7 +39,7 @@ This represents the **First-Time Setup** of the sandbox. Once the persistent env
 #### 2. `Suspended`
 This condition explicitly tracks the scale-down process of the Sandbox.
 * **Behavior:** When `True`, the **Pod** has been successfully terminated to conserve cluster resources, meaning the scale-down is complete. When `False`, it implies the Sandbox is either fully operational or actively in the process of scaling down.
-* **Ready Impact:** Similar to a Deployment of size 0, a fully suspended Sandbox is not intrinsically "broken." If convention dictates that `Ready` means all child objects are successfully in their desired state, a suspended Sandbox (where desired Pods=0) is considered to have `Ready` equal to `True`.
+* **Ready Impact:** Similar to a Deployment of size 0, a fully suspended Sandbox is not intrinsically "broken." It just means it's not ready to take the traffic.
 
 #### 3. `Ready` (Root Condition)
 The overarching signal for whether all child objects are successfully applied to the cluster and are themselves `Ready`.

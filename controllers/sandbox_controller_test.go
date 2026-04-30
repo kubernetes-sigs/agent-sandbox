@@ -64,7 +64,7 @@ func TestComputeConditions(t *testing.T) {
 	sbWithRepl := func(replicas int32) *sandboxv1alpha1.Sandbox {
 		return &sandboxv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Generation: gen},
-			Spec:       sandboxv1alpha1.SandboxSpec{Replicas: ptr.To(replicas)},
+			Spec:       sandboxv1alpha1.SandboxSpec{Replicas: new(replicas)},
 		}
 	}
 

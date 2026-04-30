@@ -47,7 +47,7 @@ import (
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel = sandboxv1alpha1.SandboxNameHashLabel
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )

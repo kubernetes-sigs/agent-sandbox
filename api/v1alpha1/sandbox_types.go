@@ -47,6 +47,9 @@ const (
 	SandboxPropagatedLabelsAnnotation = "agents.x-k8s.io/propagated-labels"
 	// SandboxPropagatedAnnotationsAnnotation is the annotation used to track the annotations explicitly propagated from sandbox spec to pod.
 	SandboxPropagatedAnnotationsAnnotation = "agents.x-k8s.io/propagated-annotations"
+	// SandboxNameHashLabel is a shared label used by controllers and extensions
+	// to associate resources with a Sandbox.
+	SandboxNameHashLabel = sandboxv1alpha1.SandboxNameHashLabel
 )
 
 type PodMetadata struct {

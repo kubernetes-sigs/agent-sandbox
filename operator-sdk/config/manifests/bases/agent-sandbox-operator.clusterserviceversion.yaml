@@ -1,0 +1,45 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+  name: agent-sandbox-operator.v0.4.3
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions: {}
+  description: Agent-sandbox enables easy management of isolated, stateful, singleton
+    workloads, ideal for use cases like AI agent runtimes.
+  displayName: Agent Sandbox Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      deployments: null
+    strategy: ""
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - agent
+  - sandbox
+  - kubernetes
+  links:
+  - name: Agent Sandbox Operator
+    url: https://agent-sandbox.sigs.k8s.io/
+  maintainers:
+  - email: your@email.com
+    name: Maintainer Name
+  maturity: alpha
+  provider:
+    name: kubernetes-sigs
+    url: https://github.com/kubernetes-sigs
+  version: 0.4.3

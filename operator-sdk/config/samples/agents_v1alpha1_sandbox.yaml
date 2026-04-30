@@ -1,0 +1,24 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: sandbox-sample
+spec:
+  # Default values copied from <repo_root>/helm/values.yaml
+  affinity: {}
+  controller:
+    extensions: false
+    extraArgs: []
+    leaderElect: true
+  image:
+    pullPolicy: IfNotPresent
+    repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
+    tag: ""
+  namespace:
+    create: true
+    name: agent-sandbox-system
+  nodeSelector: {}
+  replicaCount: 1
+  resources: {}
+  tolerations: []
+  
+  

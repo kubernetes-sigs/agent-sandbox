@@ -5,15 +5,19 @@
 This guide provides step-by-step instructions for configuring a Kyverno
 ValidatingPolicy on a Kubernetes cluster. The goal of this policy is to prevent
 any user or process from granting new permissions to a ServiceAccount that is
-actively being used by a custom Sandbox resource.
+actively being used by a custom Sandbox resource, whether permissions are
+granted directly to that ServiceAccount or indirectly through the built-in
+ServiceAccount groups.
 
 This acts as a critical security boundary, preventing accidental or malicious
 privilege escalation for sandboxed environments.
 
 How it works:
 The policy intercepts RoleBinding and ClusterRoleBinding create and update
-requests. If the request targets a ServiceAccount that is referenced by a
-Sandbox-owned Pod, the request is denied.
+requests. If the request targets a ServiceAccount referenced by a
+Sandbox-owned Pod, or a Group subject that would include that ServiceAccount
+(`system:serviceaccounts` or `system:serviceaccounts:<namespace>`), the request
+is denied.
 
 ---
 
@@ -91,6 +95,10 @@ kubectl apply -f .chainsaw-tests/setup-sandbox.yaml
 kubectl apply -f .chainsaw-tests/bad-rolebinding.yaml
 ```
 
+The same deny behavior also applies if you bind one of the built-in
+ServiceAccount groups that would include the active Sandbox ServiceAccount, such
+as `system:serviceaccounts:sandbox-ns` or cluster-wide `system:serviceaccounts`.
+
 ### C. Check expected outcome 
 
 The request should be denied by admission.
@@ -117,6 +125,13 @@ kubectl apply -f .chainsaw-tests/bad-rolebinding.yaml
 
 Expected: RoleBinding is created after Sandbox ownership is removed.
 
+### Scenario 4: ServiceAccount Group subject covering an active Sandbox ServiceAccount (should be denied)
+
+If a RoleBinding or ClusterRoleBinding uses a Group subject like
+`system:serviceaccounts:sandbox-ns` or `system:serviceaccounts`, the request is
+also denied whenever that group would include a ServiceAccount currently used by
+a Sandbox-owned Pod.
+
 ---
 
 ## 5. Run Automated Chainsaw Tests
@@ -134,8 +149,8 @@ The test file is:
 Step mapping in the test:
 
 - step-01: apply RBAC + policy and assert readiness
-- step-02: assert deny for active Sandbox ServiceAccount
-- step-03: assert allow for unused ServiceAccount
+- step-02: assert deny for active Sandbox ServiceAccount and matching ServiceAccount groups
+- step-03: assert allow for unused ServiceAccount and a binding with no subjects
 - step-04: remove Sandbox owner, create bare Pod, then allow binding
 
 ---

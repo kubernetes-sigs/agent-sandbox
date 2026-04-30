@@ -44,14 +44,24 @@ spec:
         ) ||
         (
           subject.kind == 'Group' &&
-          resource.List('v1', 'pods', '').items.orValue([]).exists(pod,
-            pod.metadata.?ownerReferences.orValue([]).exists(owner,
-              owner.kind == 'Sandbox' &&
-              owner.apiVersion.startsWith('agents.x-k8s.io/')
-            ) &&
+          (
             (
-              subject.name == 'system:serviceaccounts' ||
-              subject.name == 'system:serviceaccounts:' + pod.metadata.?namespace.orValue('')
+              subject.name == 'system:serviceaccounts' &&
+              resource.List('v1', 'pods', '').items.orValue([]).exists(pod,
+                pod.metadata.?ownerReferences.orValue([]).exists(owner,
+                  owner.kind == 'Sandbox' &&
+                  owner.apiVersion.startsWith('agents.x-k8s.io/')
+                )
+              )
+            ) ||
+            (
+              subject.name.startsWith('system:serviceaccounts:') &&
+              resource.List('v1', 'pods', subject.name.substring(23)).items.orValue([]).exists(pod,
+                pod.metadata.?ownerReferences.orValue([]).exists(owner,
+                  owner.kind == 'Sandbox' &&
+                  owner.apiVersion.startsWith('agents.x-k8s.io/')
+                )
+              )
             )
           )
         )

@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	"k8s.io/utils/ptr"
 )
 
 func newFakeClient(objects ...runtime.Object) *fake.ClientBuilder {
@@ -164,11 +165,11 @@ func TestSandboxCollector(t *testing.T) {
 						Namespace: "default",
 						OwnerReferences: []metav1.OwnerReference{
 							{
-								APIVersion: "agents.x-k8s.io/v1alpha1",
+								APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
 								Kind:       "SandboxClaim",
 								Name:       "my-claim",
 								UID:        "1234",
-								Controller: new(true),
+								Controller: ptr.To(true),
 							},
 						},
 					},
@@ -200,7 +201,7 @@ func TestSandboxCollector(t *testing.T) {
 								Kind:       "SandboxWarmPool",
 								Name:       "my-warmpool",
 								UID:        "5678",
-								Controller: new(true),
+								Controller: ptr.To(true),
 							},
 						},
 					},

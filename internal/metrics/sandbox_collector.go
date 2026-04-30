@@ -137,9 +137,9 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 
 		ownedByStr := "None"
 		if controllerRef := metav1.GetControllerOf(&sandbox); controllerRef != nil {
-			if controllerRef.Kind == "SandboxClaim" {
+			if controllerRef.Kind == "SandboxClaim" && controllerRef.APIVersion == "extensions.agents.x-k8s.io/v1alpha1" {
 				ownedByStr = "SandboxClaim"
-			} else if controllerRef.Kind == "SandboxWarmPool" {
+			} else if controllerRef.Kind == "SandboxWarmPool" && controllerRef.APIVersion == "extensions.agents.x-k8s.io/v1alpha1" {
 				ownedByStr = "Warmpool"
 			}
 		}

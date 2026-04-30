@@ -158,7 +158,12 @@ def test_claim_annotation(client: SandboxClient, template_name: str, namespace: 
     print("\n--- Testing SandboxClaim Annotation ---")
     import uuid
     from datetime import datetime
-    from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
+    from k8s_agent_sandbox.constants import (
+        CLIENT_REQUEST_TIME_ANNOTATION,
+        CLAIM_API_GROUP,
+        CLAIM_API_VERSION,
+        CLAIM_PLURAL_NAME,
+    )
 
     claim_name = f"test-annotation-{uuid.uuid4().hex[:8]}"
 
@@ -168,10 +173,10 @@ def test_claim_annotation(client: SandboxClient, template_name: str, namespace: 
     try:
         # Get claim using k8s_helper
         claim = client.k8s_helper.custom_objects_api.get_namespaced_custom_object(
-            group="extensions.agents.x-k8s.io",
-            version="v1alpha1",
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
             namespace=namespace,
-            plural="sandboxclaims",
+            plural=CLAIM_PLURAL_NAME,
             name=claim_name
         )
 
@@ -367,6 +372,9 @@ def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
 
     # Test wrong template name
     test_wrong_template_name(client, namespace)
+
+    # Test SandboxClaim annotation
+    test_claim_annotation(client, template_name, namespace)
 
     # Run Sandbox Tests
     run_sandbox_tests(sandbox)

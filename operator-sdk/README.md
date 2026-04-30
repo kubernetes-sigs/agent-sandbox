@@ -67,5 +67,10 @@ make bundle-push BUNDLE_IMG=<registry>/<repo>/agent-sandbox-operator-bundle:v0.1
 ## Important Notes
 
 - `watches.yaml` points to `../helm`, so chart changes in `helm/` are consumed directly.
-- CRDs in `config/crd/bases/` should be refreshed from `helm/crds/` when Helm CRDs change.
-- RBAC in `config/rbac/role.yaml` is based on your generated Helm RBAC rules.
+- CRDs and RBAC are auto-synced from `helm/` before `make install`, `make deploy`, and `make bundle`.
+- You can run sync explicitly anytime:
+
+```bash
+cd operator-sdk
+make sync-helm-assets
+```

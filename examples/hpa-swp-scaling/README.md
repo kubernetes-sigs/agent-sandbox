@@ -1,10 +1,19 @@
-# SandboxWarmPool Scaling with HPA
+# SandboxWarmPool Scaling with HPA (GKE Specific)
 
 This example demonstrates how to use the Kubernetes Horizontal Pod Autoscaler (HPA) to scale a `SandboxWarmPool` based on custom metrics emitted by the agent sandbox controller.
+
+> [!IMPORTANT]
+> This example is tailored to Google Cloud Platform (GCP) / Google Kubernetes Engine (GKE). It depends on GKE Managed Service for Prometheus and the Stackdriver Custom Metrics Adapter.
 
 ## Overview
 
 In this example, we show how to scale a pool of warm sandboxes dynamically based on the rate of sandbox claims being created. This allows the system to maintain a ready supply of sandboxes as demand increases.
+
+## Prerequisites
+
+- A Google Kubernetes Engine (GKE) cluster.
+- GKE Managed Service for Prometheus enabled.
+- Custom Metrics Adapter installed on your cluster as described in the [GKE Documentation](https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/autoscaling-metrics#step1).
 
 ## Steps to Run
 
@@ -17,17 +26,20 @@ In this example, we show how to scale a pool of warm sandboxes dynamically based
    ```
 
 2. **Expose metrics to Prometheus Cloud Monitoring**:
-   Apply the `pod-monitoring.yaml` to enable metric scraping. You must also configure the Custom Metrics Adapter and enable required permissions as described in the [GKE Documentation](https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/autoscaling-metrics#step1).
+   Apply the `pod-monitoring.yaml` to enable metric scraping.
    ```bash
    kubectl apply -f pod-monitoring.yaml
    ```
 
 3. **Configure the HPA**:
-  Once the custom metric is exposed in Prometheus, you can connect it to the HPA configuration. We set the guardrails for scaling:
+   Once the custom metric is exposed in Prometheus, you can connect it to the HPA configuration. We set the guardrails for scaling:
    - **Minimum Capacity**: 10 sandboxes 
    - **Maximum Capacity**: 100 sandboxes (sets a hard budget ceiling).
-   - **Metric**: `agent_sandbox_claim_creation_total`. This is a counter metric that is incremented every time a sandbox claim is created. Note that while this is a counter metric, it is evaluated as a rate of change by the Custom Metrics Adapter for HPA.
+   - **Metric**: `agent_sandbox_claim_creation_total`. This is a counter metric that is incremented every time a sandbox claim is created.
    - **The Target**: 0.5 rate of claims created per second. The HPA will adjust the warmpool replicas to maintain this target.
+
+   > [!NOTE]
+   > In the GKE Custom Metrics Adapter, metrics from Prometheus Managed Service are mapped to the `prometheus.googleapis.com|...` format. The metric counter is evaluated as a rate of change (rate per second).
 
    ```bash
    kubectl apply -f hpa.yaml

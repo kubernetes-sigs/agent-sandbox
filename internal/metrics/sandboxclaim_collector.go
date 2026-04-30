@@ -29,10 +29,10 @@ import (
 
 // AgentSandboxClaimsMetricKey is used to aggregate counts for identical SandboxClaims metric label combinations.
 type AgentSandboxClaimsMetricKey struct {
-	Namespace   string
-	ReadyStatus string
-	Reason      string
-	Template    string
+	Namespace      string
+	ReadyCondition string
+	Reason         string
+	Template       string
 }
 
 // NewAgentSandboxClaimsConstMetric creates a new Prometheus ConstMetric for the agent_sandbox_claims gauge.
@@ -42,7 +42,7 @@ func NewAgentSandboxClaimsConstMetric(count int, key AgentSandboxClaimsMetricKey
 		prometheus.GaugeValue,
 		float64(count),
 		key.Namespace,
-		key.ReadyStatus,
+		key.ReadyCondition,
 		key.Reason,
 		key.Template,
 	)
@@ -87,6 +87,9 @@ func (c *SandboxClaimCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), metricsCollectTimeout)
 	defer cancel()
 
+	// TODO(chw120): The current O(N) List call during metrics collection poses a scalability concern.
+	// In large clusters, frequent scrapes could lead to high CPU usage or OOM.
+	// This should be replaced with a more efficient implementation.
 	if err := c.client.List(ctx, &claimList); err != nil {
 		c.logger.Error(err, "Failed to list sandbox claims for metrics collection")
 		return
@@ -94,24 +97,27 @@ func (c *SandboxClaimCollector) Collect(ch chan<- prometheus.Metric) {
 
 	counts := make(map[AgentSandboxClaimsMetricKey]int)
 	for _, claim := range claimList.Items {
-		readyStatusStr := "false"
+		readyConditionStr := "false"
 		reasonStr := "Unknown"
 
 		readyCond := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
 		if readyCond != nil {
 			if readyCond.Status == metav1.ConditionTrue {
-				readyStatusStr = "true"
+				readyConditionStr = "true"
 			}
 			reasonStr = readyCond.Reason
 		}
 
 		templateStr := claim.Spec.TemplateRef.Name
+		if templateStr == "" {
+			templateStr = "unknown"
+		}
 
 		key := AgentSandboxClaimsMetricKey{
-			Namespace:   claim.Namespace,
-			ReadyStatus: readyStatusStr,
-			Reason:      reasonStr,
-			Template:    templateStr,
+			Namespace:      claim.Namespace,
+			ReadyCondition: readyConditionStr,
+			Reason:         reasonStr,
+			Template:       templateStr,
 		}
 		counts[key]++
 	}

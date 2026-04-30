@@ -69,7 +69,7 @@ func TestSandboxClaimCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"namespace:default ready_status:true reason:SandboxReady sandbox_template:my-template": 1,
+				"namespace:default ready_condition:true reason:SandboxReady sandbox_template:my-template": 1,
 			},
 		},
 		{
@@ -98,7 +98,7 @@ func TestSandboxClaimCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"namespace:default ready_status:false reason:SandboxMissing sandbox_template:my-template": 1,
+				"namespace:default ready_condition:false reason:SandboxMissing sandbox_template:my-template": 1,
 			},
 		},
 		{
@@ -127,7 +127,7 @@ func TestSandboxClaimCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"namespace:default ready_status:false reason:TemplateNotFound sandbox_template:missing-template": 1,
+				"namespace:default ready_condition:false reason:TemplateNotFound sandbox_template:missing-template": 1,
 			},
 		},
 		{
@@ -156,7 +156,30 @@ func TestSandboxClaimCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"namespace:default ready_status:false reason:ClaimExpired sandbox_template:my-template": 1,
+				"namespace:default ready_condition:false reason:ClaimExpired sandbox_template:my-template": 1,
+			},
+		},
+		{
+			name: "claim without conditions",
+			claims: []runtime.Object{
+				&extensionsv1alpha1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "claim-no-cond",
+						Namespace: "default",
+					},
+					Spec: extensionsv1alpha1.SandboxClaimSpec{
+						TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+							Name: "my-template",
+						},
+					},
+					Status: extensionsv1alpha1.SandboxClaimStatus{
+						Conditions: nil,
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"namespace:default ready_condition:false reason:Unknown sandbox_template:my-template": 1,
 			},
 		},
 		{
@@ -225,8 +248,8 @@ func TestSandboxClaimCollector(t *testing.T) {
 			},
 			expectedCount: 2, // 2 series: (default, true, SandboxReady, my-template) and (test-ns, false, SandboxMissing, other-template)
 			expectedLabels: map[string]int{
-				"namespace:default ready_status:true reason:SandboxReady sandbox_template:my-template":       2,
-				"namespace:test-ns ready_status:false reason:SandboxMissing sandbox_template:other-template": 1,
+				"namespace:default ready_condition:true reason:SandboxReady sandbox_template:my-template":       2,
+				"namespace:test-ns ready_condition:false reason:SandboxMissing sandbox_template:other-template": 1,
 			},
 		},
 	}

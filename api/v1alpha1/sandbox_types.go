@@ -45,6 +45,7 @@ const (
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
 	SandboxConditionFinished ConditionType = "Finished"
+
 	// SandboxReasonReady indicates the sandbox is fully operational
 	SandboxReasonReady = "SandboxReady"
 	// SandboxReasonPodInitializing indicates the sandbox pod is being created or starting
@@ -55,17 +56,16 @@ const (
 	SandboxReasonSuspended = "SandboxSuspended"
 	// SandboxReasonUnresponsive indicates the sandbox pod is in an unknown state
 	SandboxReasonUnresponsive = "SandboxUnresponsive"
-	// SandboxReasonSystemTermination indicates the sandbox is being terminated by the system (e.g., expiry)
-	SandboxReasonSystemTermination = "SystemInitiatedTermination"
-	// SandboxReasonUserTermination indicates the sandbox is being terminated by user request
-	SandboxReasonUserTermination = "UserInitiatedTermination"
 
-	// SandboxReasonExpired indicates expired state for Sandbox.
+	// SandboxReasonExpired indicates the sandbox is being terminated due to expiration.
 	SandboxReasonExpired = "SandboxExpired"
 	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
 	SandboxReasonPodSucceeded = "PodSucceeded"
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
+
+	// SandboxReasonDeleting indicates the sandbox is being terminated due to deletion.
+	SandboxReasonDeleting = "SandboxDeleting"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
@@ -77,6 +77,11 @@ const (
 	SandboxPropagatedLabelsAnnotation = "agents.x-k8s.io/propagated-labels"
 	// SandboxPropagatedAnnotationsAnnotation is the annotation used to track the annotations explicitly propagated from sandbox spec to pod.
 	SandboxPropagatedAnnotationsAnnotation = "agents.x-k8s.io/propagated-annotations"
+)
+
+type PodMetadata struct {
+	// labels defines the map of string keys and values that can be used to organize and categorize
+	// (scope and select) objects. May match selectors of replication controllers
 	// and services.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
 	// +optional

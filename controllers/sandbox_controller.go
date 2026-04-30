@@ -249,6 +249,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// Reconcile PVCs from volumeClaimTemplates
 	err := r.reconcilePVCs(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
+	pvcsProvisioned := err == nil
 
 	// Reconcile Pod
 	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
@@ -348,14 +349,14 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 		switch pod.Status.Phase {
 		case corev1.PodRunning:
 			podIsReady := false
+			podMessage := "Pod is not Ready"
 			for _, condition := range pod.Status.Conditions {
 				if condition.Type == corev1.PodReady {
 					if condition.Status == corev1.ConditionTrue {
 						if len(pod.Status.PodIPs) == 0 {
-							message = "Pod is Ready but has no podIPs yet"
+							podMessage = "Pod is Ready but has no podIPs yet"
 						} else {
-							message = "Pod is Ready"
-							podReady = true
+							podIsReady = true
 						}
 					}
 					break
@@ -368,12 +369,20 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 			} else {
 				ready.Status = metav1.ConditionFalse
 				ready.Reason = sandboxv1alpha1.SandboxReasonPodNotReady
-				ready.Message = "Pod is not Ready"
+				ready.Message = podMessage
 			}
 		case corev1.PodUnknown:
 			ready.Status = metav1.ConditionUnknown
 			ready.Reason = sandboxv1alpha1.SandboxReasonUnresponsive
 			ready.Message = "Pod status is unknown"
+		case corev1.PodSucceeded:
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = sandboxv1alpha1.SandboxReasonPodSucceeded
+			ready.Message = "Pod completed successfully"
+		case corev1.PodFailed:
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = sandboxv1alpha1.SandboxReasonPodFailed
+			ready.Message = "Pod failed"
 		default:
 			ready.Status = metav1.ConditionFalse
 			ready.Reason = sandboxv1alpha1.SandboxReasonPodNotReady
@@ -610,17 +619,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	// Determine the pod name to look up
-<<<<<<< HEAD
 	podName := resolvePodName(sandbox)
 	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]
 	if podName != sandbox.Name {
-=======
-	podName := sandbox.Name
-	var trackedPodName string
-	var podNameAnnotationExists bool
-	if trackedPodName, podNameAnnotationExists = sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; podNameAnnotationExists && trackedPodName != "" {
-		podName = trackedPodName
->>>>>>> 94fa3f1 (Add a KEP to discuss the status field of Sandbox.)
 		log.Info("Using tracked pod name from sandbox annotation", "podName", podName)
 	}
 
@@ -856,8 +857,8 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Handle deletion of labels
 	propagatedLabelsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
-		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
-		for k := range propagatedLabels {
+		propagatedLabels := strings.Split(propagatedLabelsStr, ",")
+		for _, k := range propagatedLabels {
 			if k == "" {
 				continue
 			}
@@ -884,8 +885,8 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Handle deletion of annotations
 	propagatedAnnotationsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation]
 	if propagatedAnnotationsStr != "" {
-		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
-		for k := range propagatedAnnotations {
+		propagatedAnnotations := strings.Split(propagatedAnnotationsStr, ",")
+		for _, k := range propagatedAnnotations {
 			if k == "" {
 				continue
 			}

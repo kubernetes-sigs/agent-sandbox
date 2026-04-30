@@ -30,18 +30,34 @@ spec:
   - Deny
   validations:
   - expression: |-
-      !object.subjects.exists(subject,
-        subject.kind == 'ServiceAccount' &&
-        subject.?namespace.orValue('') != '' &&
-        resource.List('v1', 'pods', subject.namespace).items.orValue([]).exists(pod,
-          pod.spec.?serviceAccountName.orValue('') == subject.name &&
-          pod.metadata.?ownerReferences.orValue([]).exists(owner,
-            owner.kind == 'Sandbox' &&
-            owner.apiVersion.startsWith('agents.x-k8s.io/')
+      !object.?subjects.orValue([]).exists(subject,
+        (
+          subject.kind == 'ServiceAccount' &&
+          subject.?namespace.orValue('') != '' &&
+          resource.List('v1', 'pods', subject.namespace).items.orValue([]).exists(pod,
+            pod.spec.?serviceAccountName.orValue('') == subject.name &&
+            pod.metadata.?ownerReferences.orValue([]).exists(owner,
+              owner.kind == 'Sandbox' &&
+              owner.apiVersion.startsWith('agents.x-k8s.io/')
+            )
+          )
+        ) ||
+        (
+          subject.kind == 'Group' &&
+          resource.List('v1', 'pods', '').items.orValue([]).exists(pod,
+            pod.metadata.?ownerReferences.orValue([]).exists(owner,
+              owner.kind == 'Sandbox' &&
+              owner.apiVersion.startsWith('agents.x-k8s.io/')
+            ) &&
+            (
+              subject.name == 'system:serviceaccounts' ||
+              subject.name == 'system:serviceaccounts:' + pod.metadata.?namespace.orValue('')
+            )
           )
         )
       )
     messageExpression: '''Binding denied: one or more subjects reference a ServiceAccount
-      that is actively used by a Sandbox-owned Pod. ServiceAccounts in use by Pods
-      controlled by a Sandbox CR (agents.x-k8s.io) must not be granted additional
-      RBAC bindings to prevent privilege escalation in sandboxed environments.'''
+      or ServiceAccount group that is actively used by a Sandbox-owned Pod.
+      ServiceAccounts in use by Pods controlled by a Sandbox CR (agents.x-k8s.io)
+      must not be granted additional RBAC bindings to prevent privilege escalation
+      in sandboxed environments.'''

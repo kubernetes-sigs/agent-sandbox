@@ -1,0 +1,9 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: test-allow-no-subjects
+  namespace: test-ns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: view

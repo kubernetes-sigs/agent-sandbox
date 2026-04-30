@@ -53,12 +53,24 @@ spec:
         expect:
         - check:
             ($error != null): true
+    - apply:
+        file: bad-rolebinding-sa-group-ns.yaml
+        expect:
+        - check:
+            ($error != null): true
+    - apply:
+        file: bad-clusterrolebinding-sa-group-all.yaml
+        expect:
+        - check:
+            ($error != null): true
   - name: step-03
     try:
     - apply:
         file: setup-other-sa.yaml
     - apply:
         file: good-rolebinding.yaml
+    - apply:
+        file: no-subjects-rolebinding.yaml
   - name: step-04
     try:
     - script:

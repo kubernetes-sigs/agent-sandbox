@@ -95,7 +95,7 @@ kubectl apply -f .chainsaw-tests/bad-rolebinding.yaml
 
 The request should be denied by admission.
 ```
-Error from server: error when creating "examples/policy/kyverno/.chainsaw-tests/bad-rolebinding.yaml": admission webhook "vpol.validate.kyverno.svc-fail" denied the request: Policy prevent-sandbox-sa-binding failed: Binding denied: one or more subjects reference a ServiceAccount that is actively used by a Sandbox-owned Pod. ServiceAccounts in use by Pods controlled by a Sandbox CR (agents.x-k8s.io) must not be granted additional RBAC bindings to prevent privilege escalation in sandboxed environments.
+Error from server: error when creating "examples/policy/kyverno/.chainsaw-tests/bad-rolebinding.yaml": admission webhook "vpol.validate.kyverno.svc-fail" denied the request: Policy prevent-sandbox-sa-binding failed: Binding denied: one or more subjects reference a ServiceAccount or ServiceAccount group that is actively used by a Sandbox-owned Pod. ServiceAccounts in use by Pods controlled by a Sandbox CR (agents.x-k8s.io) must not be granted additional RBAC bindings to prevent privilege escalation in sandboxed environments.
 ```
 
 ### Scenario 2: Binding to an unused ServiceAccount (should be allowed)

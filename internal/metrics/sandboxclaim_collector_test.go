@@ -225,7 +225,7 @@ func TestSandboxClaimCollector(t *testing.T) {
 			},
 			expectedCount: 2, // 2 series: (default, true, SandboxReady, my-template) and (test-ns, false, SandboxMissing, other-template)
 			expectedLabels: map[string]int{
-				"namespace:default ready_status:true reason:SandboxReady sandbox_template:my-template": 2,
+				"namespace:default ready_status:true reason:SandboxReady sandbox_template:my-template":       2,
 				"namespace:test-ns ready_status:false reason:SandboxMissing sandbox_template:other-template": 1,
 			},
 		},

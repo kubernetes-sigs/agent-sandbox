@@ -1,0 +1,11 @@
+resources:
+- ../manifests
+
+patches:
+- target:
+    kind: Deployment
+    name: controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --extensions=true

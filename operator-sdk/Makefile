@@ -38,6 +38,14 @@ BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
 # BUNDLE_GEN_FLAGS are the flags passed to the operator-sdk generate bundle command
 BUNDLE_GEN_FLAGS ?= -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS)
 
+# EXTENSIONS controls whether the extensions flag is added to manager args
+# while generating bundle manifests.
+EXTENSIONS ?= true
+BUNDLE_KUSTOMIZATION ?= config/manifests
+ifeq ($(EXTENSIONS),true)
+BUNDLE_KUSTOMIZATION = config/manifests-extensions
+endif
+
 # USE_IMAGE_DIGESTS defines if images are resolved via tags or digests
 # You can enable this value if you would like to use SHA Based Digests
 # To enable set flag to true
@@ -183,7 +191,7 @@ endif
 bundle: sync-helm-assets kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
+	$(KUSTOMIZE) build $(BUNDLE_KUSTOMIZATION) | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	$(OPERATOR_SDK) bundle validate ./bundle
 
 .PHONY: bundle-build

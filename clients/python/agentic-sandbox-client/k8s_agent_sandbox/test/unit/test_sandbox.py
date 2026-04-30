@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.sandbox import Sandbox
-from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig, SandboxTracerConfig, SandboxStatus
+from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig, SandboxTracerConfig
 
 
 class TestSandbox(unittest.TestCase):
@@ -214,26 +214,6 @@ class TestSandbox(unittest.TestCase):
             mock_close.assert_called_once()
 
         self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(self.claim_name, self.namespace)
-
-    def test_status(self):
-        """Tests that the status method correctly parses sandbox conditions."""
-        self.mock_k8s_helper.get_sandbox.return_value = {
-            "status": {
-                "conditions": [
-                    {"type": "Initialized", "status": "True", "reason": "SandboxInitialized"},
-                    {"type": "Suspended", "status": "False", "reason": "NotSuspended"},
-                    {"type": "Ready", "status": "True", "reason": "SandboxReady"}
-                ]
-            }
-        }
-
-        status = self.sandbox.status()
-
-        self.assertIsInstance(status, SandboxStatus)
-        self.assertEqual(status.initialized, "True")
-        self.assertEqual(status.suspended, "False")
-        self.assertEqual(status.ready, "True")
-        self.mock_k8s_helper.get_sandbox.assert_called_with(self.sandbox_id, self.namespace)
 
 if __name__ == '__main__':
     unittest.main()

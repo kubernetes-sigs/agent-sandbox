@@ -22,22 +22,6 @@ class SandboxCondition(BaseModel):
     reason: str | None = None
     message: str | None = None
 
-class SandboxStatus(BaseModel):
-    """Represents the status of the Sandbox with parsed conditions."""
-    conditions: list[SandboxCondition] = []
-
-    @property
-    def initialized(self) -> str:
-        return next((c.status for c in self.conditions if c.type == "Initialized"), "Unknown")
-
-    @property
-    def suspended(self) -> str:
-        return next((c.status for c in self.conditions if c.type == "Suspended"), "Unknown")
-
-    @property
-    def ready(self) -> str:
-        return next((c.status for c in self.conditions if c.type == "Ready"), "Unknown")
-
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
     stdout: str = ""  # Standard output from the command.

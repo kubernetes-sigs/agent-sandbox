@@ -1,5 +1,22 @@
 # KEP-539: Establish gRPC and Protobuf Contract for Agent Sandbox Runtime
 
+<!-- toc -->
+- [Summary](#summary)
+- [Motivation](#motivation)
+- [Goals](#goals)
+- [Proposal](#proposal)
+  - [1. Protobuf Definition (`/proto`)](#1-protobuf-definition-proto)
+  - 2. Behavioral Specification (`CONFORMANCE.md`)
+  - 3. Tooling & CI
+  - 4. Unified Sandbox Daemon (`sandboxd`)
+  - 5. "Bring Your Own Daemon" (Extensibility)
+- Implementation Plan
+  - Phase 1: RFC Phase
+  - Phase 2: Validation
+  - Phase 3: Automation
+- Additional Context
+<!-- /toc -->
+
 ## Summary
 
 Currently, the agent-sandbox project has independent client implementations in Go and Python. There are more upcoming PRs to also include Typescript client implementation as well. To ensure interoperability, reduce maintenance overhead, and provide a definitive "source of truth" for the sandbox API, this KEP proposes establishing a common contract using Protocol Buffers (Protobuf) and gRPC. Furthermore, it proposes a unified, language-agnostic server daemon (`sandboxd`) to run inside all sandbox environments. It also outlines the standardization of behavioral expectations, tooling, and CI.

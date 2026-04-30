@@ -161,7 +161,7 @@ def test_wrong_template_name(client: SandboxClient, namespace: str):
     print("--- Wrong Template Name Test Passed! ---")
 
 
-def test_explicit_close_connection_and_persistence(client: SandboxClient, template_name: str, namespace: str):
+def test_explicit_disconnect_and_persistence(client: SandboxClient, template_name: str, namespace: str):
     print("\n--- Testing Explicit Disconnect and Persistence ---")
     persist_sandbox = client.create_sandbox(template_name, namespace=namespace)
     persist_claim = persist_sandbox.claim_name

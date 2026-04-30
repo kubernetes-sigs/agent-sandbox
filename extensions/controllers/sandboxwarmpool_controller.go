@@ -46,7 +46,7 @@ import (
 const (
 	sandboxTemplateRefHash     = "agents.x-k8s.io/sandbox-template-ref-hash"
 	warmPoolSandboxLabel       = "agents.x-k8s.io/warm-pool-sandbox"
-	WarmPoolEvictionAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+	warmPoolEvictionAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
@@ -343,7 +343,9 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	}
 
 	if enableEviction {
-		podAnnotations[WarmPoolEvictionAnnotation] = "true"
+		podAnnotations[warmPoolEvictionAnnotation] = "true"
+	} else {
+		delete(podAnnotations, warmPoolEvictionAnnotation)
 	}
 
 	replicas := int32(1)

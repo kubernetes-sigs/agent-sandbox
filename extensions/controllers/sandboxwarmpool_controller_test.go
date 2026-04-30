@@ -447,7 +447,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 			// Verify pod template annotations
 			require.Equal(t, "from-podtemplate", sb.Spec.PodTemplate.ObjectMeta.Annotations["pod-annotation"])
-			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[WarmPoolEvictionAnnotation])
+			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation])
 		}
 	})
 }
@@ -461,15 +461,14 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	template := createTemplate(poolNamespace)
-
 	boolPtr := func(b bool) *bool { return &b }
 
 	testCases := []struct {
-		name               string
-		specEnableEviction *bool
-		controllerEnable   bool
-		expectEviction     bool
+		name                string
+		specEnableEviction  *bool
+		controllerEnable    bool
+		templateAnnotations map[string]string
+		expectEviction      bool
 	}{
 		{
 			name:               "Spec false overrides controller true",
@@ -495,6 +494,20 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			controllerEnable:   false,
 			expectEviction:     false,
 		},
+		{
+			name:                "EnableWarmPoolEviction: false removes annotation even if template has it",
+			specEnableEviction:  boolPtr(false),
+			controllerEnable:    false,
+			templateAnnotations: map[string]string{warmPoolEvictionAnnotation: "true"},
+			expectEviction:      false,
+		},
+		{
+			name:                "EnableWarmPoolEviction: true overwrites template false",
+			specEnableEviction:  boolPtr(true),
+			controllerEnable:    false,
+			templateAnnotations: map[string]string{warmPoolEvictionAnnotation: "false"},
+			expectEviction:      true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -514,10 +527,15 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 				},
 			}
 
+			testTemplate := createTemplate(poolNamespace)
+			if tc.templateAnnotations != nil {
+				testTemplate.Spec.PodTemplate.ObjectMeta.Annotations = tc.templateAnnotations
+			}
+
 			r := SandboxWarmPoolReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(scheme).
-					WithRuntimeObjects(template).
+					WithRuntimeObjects(testTemplate).
 					Build(),
 				Scheme:                 scheme,
 				EnableWarmPoolEviction: tc.controllerEnable,
@@ -532,7 +550,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			require.Len(t, list.Items, 1)
 
 			sb := list.Items[0]
-			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[WarmPoolEvictionAnnotation]
+			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]
 			if tc.expectEviction {
 				require.True(t, exists, "expected eviction annotation to exist")
 				require.Equal(t, "true", val)

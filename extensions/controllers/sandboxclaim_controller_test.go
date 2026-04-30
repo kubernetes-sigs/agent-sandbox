@@ -1586,7 +1586,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				PodTemplate: sandboxv1alpha1.PodTemplate{
 					ObjectMeta: sandboxv1alpha1.PodMetadata{
 						Annotations: map[string]string{
-							WarmPoolEvictionAnnotation: "true",
+							warmPoolEvictionAnnotation: "true",
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -1677,6 +1677,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectedAdoptedSandbox:  "pool-sb-1",
 			expectNewSandboxCreated: false,
 		},
+
 		{
 			name: "creates new sandbox when no warm pool sandboxes exist",
 			existingObjects: []client.Object{
@@ -1875,7 +1876,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 
 				// Verify eviction annotation was removed
-				if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[WarmPoolEvictionAnnotation]; exists {
+				if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
 					t.Errorf("expected eviction annotation to be removed from adopted sandbox")
 				}
 

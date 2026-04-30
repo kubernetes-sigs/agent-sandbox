@@ -724,7 +724,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	delete(adopted.Labels, warmPoolSandboxLabel)
 	delete(adopted.Labels, sandboxTemplateRefHash)
 	delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
-	delete(adopted.Spec.PodTemplate.ObjectMeta.Annotations, WarmPoolEvictionAnnotation)
+	delete(adopted.Spec.PodTemplate.ObjectMeta.Annotations, warmPoolEvictionAnnotation)
 
 	// Transfer ownership from SandboxWarmPool to SandboxClaim
 	adopted.OwnerReferences = nil

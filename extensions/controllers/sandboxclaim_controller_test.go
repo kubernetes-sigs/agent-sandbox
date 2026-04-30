@@ -2990,36 +2990,224 @@ func TestGetOrRecordObservedTime(t *testing.T) {
 }
 
 func TestSandboxClaimReconcileCleanup(t *testing.T) {
-	scheme := newScheme(t)
-
-	claim := &extensionsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	newReconcilerFor := func(t *testing.T, objs ...client.Object) *SandboxClaimReconciler {
+		t.Helper()
+		scheme := newScheme(t)
+		fc := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objs...).
+			WithStatusSubresource(&extensionsv1alpha1.SandboxClaim{}).
+			Build()
+		return &SandboxClaimReconciler{
+			Client:           fc,
+			Scheme:           scheme,
+			WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+			Recorder:         events.NewFakeRecorder(10),
+			Tracer:           asmetrics.NewNoOp(),
+		}
 	}
 
-	// Create a fake client without the claim, so it returns NotFound
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	reconciler := &SandboxClaimReconciler{
-		Client: client,
-		Scheme: scheme,
+	makeReadyClaim := func(name string) *extensionsv1alpha1.SandboxClaim {
+		return &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				UID:       types.UID(name),
+				Annotations: map[string]string{
+					asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				},
+			},
+			Spec: extensionsv1alpha1.SandboxClaimSpec{
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			},
+			Status: extensionsv1alpha1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: "Ready",
+				}},
+			},
+		}
 	}
 
-	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-	// Pre-populate map
-	reconciler.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: claim.UID})
+	ctrlBool := true
+	makeOwnedReadySandbox := func(cl *extensionsv1alpha1.SandboxClaim) *sandboxv1alpha1.Sandbox {
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cl.Name,
+				Namespace: cl.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxClaim",
+					Name:       cl.Name,
+					UID:        cl.UID,
+					Controller: &ctrlBool,
+				}},
+			},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: "Ready",
+				}},
+			},
+		}
+	}
 
-	req := reconcile.Request{
-		NamespacedName: key,
-	}
-	_, err := reconciler.Reconcile(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
+	reconcileAll := func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+		t.Helper()
+		for _, cl := range claims {
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cl.Name, Namespace: cl.Namespace}}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("Reconcile(%s): %v", cl.Name, err)
+			}
+		}
 	}
 
-	_, ok := reconciler.observedTimes.Load(key)
-	if ok {
-		t.Error("Entry should be deleted by Reconcile when object is not found")
+	testCases := []struct {
+		name        string
+		build       func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim)
+		action      func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim)
+		wantEntries int
+	}{
+		{
+			// Reconcile on a missing claim removes the observedTimes entry via the NotFound fallback.
+			name: "NotFound reconcile removes stale entry",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				cl := makeReadyClaim("stale-claim")
+				r := newReconcilerFor(t)
+				key := types.NamespacedName{Name: cl.Name, Namespace: cl.Namespace}
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: cl.UID})
+				return r, []*extensionsv1alpha1.SandboxClaim{cl}
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+			// CreateFunc adds an entry; recordControllerStartupLatency removes it on the first
+			// Not-Ready → Ready transition detected by recordCreationLatencyMetric.
+			name: "new claim transitioning to Ready cleans its entry",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				cl := &extensionsv1alpha1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "new-claim", Namespace: "default", UID: "new-claim"},
+					Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+				}
+				r := newReconcilerFor(t, cl, makeOwnedReadySandbox(cl))
+				return r, []*extensionsv1alpha1.SandboxClaim{cl}
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				for _, cl := range claims {
+					pred.Create(event.CreateEvent{Object: cl})
+				}
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+			// Simulates a controller restart where the informer replays UpdateFunc for existing,
+			// already-Ready claims. The reconciler must correctly clean up the observed time entries.
+			name: "already-Ready claims are cleaned up after restart simulation",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				const n = 10
+				objs := make([]client.Object, 0, n*2)
+				claims := make([]*extensionsv1alpha1.SandboxClaim, n)
+				for i := range n {
+					cl := makeReadyClaim(fmt.Sprintf("ready-claim-%d", i))
+					claims[i] = cl
+					objs = append(objs, cl, makeOwnedReadySandbox(cl))
+				}
+				return newReconcilerFor(t, objs...), claims
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				for _, cl := range claims {
+					pred.Update(event.UpdateEvent{ObjectOld: cl, ObjectNew: cl})
+				}
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+
+			// Simulates an update for already ready claim.
+			// The reconciler must correctly clean up the observed time entries.
+			name: "post-Ready UpdateFunc re-creates entry that is then cleaned on next reconcile",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				cl := &extensionsv1alpha1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "post-ready-claim", Namespace: "default", UID: "post-ready"},
+					Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+				}
+				r := newReconcilerFor(t, cl, makeOwnedReadySandbox(cl))
+				return r, []*extensionsv1alpha1.SandboxClaim{cl}
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				// Step 1: CreateFunc → entry added
+				for _, cl := range claims {
+					pred.Create(event.CreateEvent{Object: cl})
+				}
+				// Step 2: First reconcile → Not-Ready → Ready transition → entry cleaned.
+				reconcileAll(t, r, claims)
+				// Step 3: Post-Ready UpdateFunc
+				for _, cl := range claims {
+					pred.Update(event.UpdateEvent{ObjectOld: cl, ObjectNew: cl})
+				}
+				// Step 4: Reconcile with old=Ready, new=Ready
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+			// DeleteFunc is the sole cleanup path for entries that accumulated after a restart.
+			// Firing it for each claim fully drains the map.
+			name: "DeleteFunc drains entries accumulated after restart simulation",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				const n = 10
+				objs := make([]client.Object, 0, n*2)
+				claims := make([]*extensionsv1alpha1.SandboxClaim, n)
+				for i := range n {
+					cl := makeReadyClaim(fmt.Sprintf("rescue-claim-%d", i))
+					claims[i] = cl
+					objs = append(objs, cl, makeOwnedReadySandbox(cl))
+				}
+				return newReconcilerFor(t, objs...), claims
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				for _, cl := range claims {
+					pred.Update(event.UpdateEvent{ObjectOld: cl, ObjectNew: cl})
+				}
+				reconcileAll(t, r, claims)
+				for _, cl := range claims {
+					pred.Delete(event.DeleteEvent{Object: cl})
+				}
+			},
+			wantEntries: 0,
+		},
 	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, claims := tc.build(t)
+
+			tc.action(t, r, claims)
+
+			gotEntries := countObservedTimesEntries(r)
+			if gotEntries != tc.wantEntries {
+				t.Errorf("observedTimes has %d entries, want %d", gotEntries, tc.wantEntries)
+			}
+		})
+	}
+}
+
+// countObservedTimesEntries returns the number of live entries in the observedTimes map.
+func countObservedTimesEntries(r *SandboxClaimReconciler) int {
+	count := 0
+	r.observedTimes.inner.Range(func(_, _ any) bool { count++; return true })
+	return count
 }
 
 // seedQueueForTest acts as a mock Informer, pre-loading the test queue with adoptable sandboxes.

@@ -17,7 +17,7 @@ make test-e2e
 ## Running only e2e benchmarks
 To run only e2e benchmarks:
 ```shell
-make test-e2e --suite=benchmarks
+make test-e2e-benchmarks
 ```
 ## Running Tests with Race Detector
 

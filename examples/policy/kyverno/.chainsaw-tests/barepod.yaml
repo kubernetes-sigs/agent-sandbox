@@ -1,0 +1,11 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: bare-pod
+  namespace: sandbox-ns
+spec:
+  serviceAccountName: sandbox-sa
+  containers:
+  - name: my-container
+    image: busybox
+    command: ["/bin/sh", "-c", "sleep 3600"]

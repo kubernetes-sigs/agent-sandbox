@@ -101,7 +101,7 @@ var (
 	// - expired: "true" | "false"
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: sandboxTemplateRef.
-	// - owned_by: "SandboxClaim" | "Warmpool" | "None"
+	// - owned_by: "SandboxClaim" | "Warmpool" | "None".
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",

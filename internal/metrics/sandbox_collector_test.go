@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	"k8s.io/utils/ptr"
 )
 
 func newFakeClient(objects ...runtime.Object) *fake.ClientBuilder {
@@ -37,6 +36,7 @@ func newFakeClient(objects ...runtime.Object) *fake.ClientBuilder {
 }
 
 func TestSandboxCollector(t *testing.T) {
+	trueVal := true
 	testCases := []struct {
 		name           string
 		sandboxes      []runtime.Object
@@ -169,7 +169,7 @@ func TestSandboxCollector(t *testing.T) {
 								Kind:       "SandboxClaim",
 								Name:       "my-claim",
 								UID:        "1234",
-								Controller: ptr.To(true),
+								Controller: &trueVal,
 							},
 						},
 					},
@@ -201,7 +201,7 @@ func TestSandboxCollector(t *testing.T) {
 								Kind:       "SandboxWarmPool",
 								Name:       "my-warmpool",
 								UID:        "5678",
-								Controller: ptr.To(true),
+								Controller: &trueVal,
 							},
 						},
 					},

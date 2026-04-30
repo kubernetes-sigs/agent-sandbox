@@ -1,0 +1,19 @@
+---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: sandbox-example
+  namespace: sandbox-ns
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: my-sandbox
+      annotations:
+        test: "yes"
+    spec:
+      serviceAccountName: sandbox-sa
+      containers:
+      - name: my-container
+        image: busybox
+        command: ["/bin/sh", "-c", "sleep 3600"]

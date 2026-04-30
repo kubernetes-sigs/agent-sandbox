@@ -1,0 +1,85 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: prevent-sandbox-sa-binding
+spec:
+  template: false
+  steps:
+  - name: step-01
+    try:
+    - apply:
+        file: setup-rbac.yaml
+    - apply:
+        file: ../prevent-sandbox-sa-binding.yaml
+    - assert:
+        resource:
+            apiVersion: policies.kyverno.io/v1
+            kind: ValidatingPolicy
+            metadata:
+              name: prevent-sandbox-sa-binding
+            status:
+              conditionStatus:
+                (conditions[?type == 'WebhookConfigured']):
+                - message: Webhook configured.
+                  reason: Succeeded
+                  status: "True"
+                  type: WebhookConfigured
+                (conditions[?type == 'RBACPermissionsGranted']):
+                - message: Policy is ready for reporting.
+                  reason: Succeeded
+                  status: "True"
+                  type: RBACPermissionsGranted
+                ready: true
+        timeout: 10s
+  - name: step-02
+    try:
+    - apply:
+        file: setup-sa.yaml
+    - apply:
+        file: setup-sandbox.yaml
+    - assert:
+        resource:
+            apiVersion: v1
+            kind: Pod
+            metadata:
+              namespace: sandbox-ns
+              ownerReferences:
+              - kind: Sandbox
+            spec:
+              serviceAccountName: sandbox-sa
+        timeout: 30s
+    - apply:
+        file: bad-rolebinding.yaml
+        expect:
+        - check:
+            ($error != null): true
+  - name: step-03
+    try:
+    - apply:
+        file: setup-other-sa.yaml
+    - apply:
+        file: good-rolebinding.yaml
+  - name: step-04
+    try:
+    - script:
+        timeout: 30s
+        content: |
+          kubectl delete --force --grace-period=0 -f setup-sandbox.yaml --ignore-not-found=true
+          kubectl delete --force --grace-period=0 pod --all -n sandbox-ns --ignore-not-found=true
+    - script:
+        timeout: 30s
+        content: |
+          set -euo pipefail
+          end=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$end" ]; do
+            if ! kubectl get pods -n sandbox-ns -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.serviceAccountName}{"|"}{range .metadata.ownerReferences[*]}{.kind}{","}{end}{"\n"}{end}' | grep -qE '\|sandbox-sa\|.*Sandbox'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Timed out waiting for Sandbox-owned pods using sandbox-sa to be deleted" >&2
+          exit 1
+    - apply:
+        file: barepod.yaml
+    - apply:
+        file: bad-rolebinding.yaml

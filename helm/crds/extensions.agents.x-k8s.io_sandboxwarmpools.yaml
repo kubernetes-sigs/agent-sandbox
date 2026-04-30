@@ -35,6 +35,8 @@ spec:
             type: object
           spec:
             properties:
+              enableWarmPoolEviction:
+                type: boolean
               replicas:
                 format: int32
                 minimum: 0

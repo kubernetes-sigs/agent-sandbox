@@ -1,8 +1,17 @@
-## Description
+#### What this PR does / why we need it:
 <!-- Provide a clear and concise description of the changes in this PR. -->
-Fixes #<!-- issue number -->
 
-## Release Note
+#### Which issue(s) this PR is related to:
+<!--
+To automatically close the linked issue(s) when this PR is merged,
+add the word "Fixes" before the issue number or link.
+
+Examples:
+Fixes #<issue number>
+<issue link> (issue in a different repository)
+-->
+
+#### Release Note
 <!--
 If this PR requires a release note (for features, fixes, or breaking changes), please add it below. 
 If no release note is needed, you can leave this block empty or write "NONE".

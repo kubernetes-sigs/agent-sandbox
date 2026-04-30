@@ -15,13 +15,6 @@
 from typing import Literal, Union
 from pydantic import BaseModel
 
-class SandboxCondition(BaseModel):
-    """Represents a status condition of the Sandbox."""
-    type: str
-    status: str
-    reason: str | None = None
-    message: str | None = None
-
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
     stdout: str = ""  # Standard output from the command.

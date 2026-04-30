@@ -21,7 +21,7 @@ from .files.filesystem import Filesystem
 from .models import (
     SandboxConnectionConfig,
     SandboxInClusterConnectionConfig,
-    SandboxLocalTunnelConnectionConfig, 
+    SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper

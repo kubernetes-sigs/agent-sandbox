@@ -21,31 +21,35 @@ import re
 from shared.git_ops import run_command
 
 def increment_patch(version_str):
-    """Increments the patch version of a SemVer string (e.g., v0.1.0 -> v0.1.1).
-    Handles non-standard tags by defaulting to v0.0.0 for incrementing.
+    """Calculates the next release candidate tag.
+    - If already an RC (e.g., v0.1.0rc1), increments the RC counter (v0.1.0rc2).
+    - Otherwise, increments the patch version and starts at rc1 (e.g., v0.1.0 -> v0.1.1rc1).
+    
+    TODO: Remove the rc suffix for official releases before switching to final patch versions.
     """
-    # Clean the version string if it has extra suffixes (e.g., v1.0.0-alpha -> v1.0.0)
+    rc_match = re.match(r'^v?(\d+\.\d+\.\d+)rc(\d+)$', version_str)
+    if rc_match:
+        version = rc_match.group(1)
+        rc_num = int(rc_match.group(2))
+        return f"v{version}rc{rc_num + 1}"
+
     clean_version = re.match(r'^v?(\d+\.\d+\.\d+)', version_str)
     if clean_version:
         version_to_parse = f"v{clean_version.group(1)}"
     else:
-        # For even simpler tags like v1 or v1.0
         parts = re.findall(r'\d+', version_str)
         while len(parts) < 3:
             parts.append("0")
         version_to_parse = f"v{'.'.join(parts[:3])}"
 
     match = re.match(r'^v(\d+)\.(\d+)\.(\d+)$', version_to_parse)
-    if not match:
-        # Fallback for completely unexpected formats
-        print(f"⚠️  Warning: Non-standard version format '{version_str}'. Defaulting to v0.0.1.")
-        return "v0.0.1"
-        
     major, minor, patch = map(int, match.groups())
-    return f"v{major}.{minor}.{patch + 1}"
+    patch += 1
+
+    return f"v{major}.{minor}.{patch}rc0"
+
 
 def main():
-
     print("🔍 Checking for new commits since last release...")
     
     # Get latest tag

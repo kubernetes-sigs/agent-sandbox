@@ -11,9 +11,14 @@ on:
         description: "Tag for release (e.g., v0.2.0). Leave blank for auto-patch."
         required: false
         type: string
+      poll_timeout_mins:
+        description: "Maximum minutes to poll for PR merge"
+        default: "360"
+        required: false
+        type: string
 
 permissions:
-  contents: write # Allows to create and push tags
+  contents: write # Allows creating and pushing tags
   pull-requests: write
   id-token: write # Required for Google Auth
 
@@ -65,7 +70,7 @@ jobs:
           # service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
 
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f #v2
 
       - name: Setup Git Identity
         run: |
@@ -114,7 +119,7 @@ jobs:
     if: needs.promote.outputs.run_release == 'true'
     runs-on: ubuntu-latest
     environment: release
-    timeout-minutes: 360 # 6-hour limit for long k8s.io merge cycles
+    timeout-minutes: ${{ fromJSON(github.event.inputs.poll_timeout_mins || '360') > 360 && 360 || fromJSON(github.event.inputs.poll_timeout_mins || '360') }}
 
     steps:
       - name: Wait for PR Merge
@@ -125,8 +130,16 @@ jobs:
         run: |
           echo "Waiting for $PR_URL to be merged..."
 
-          # 72 attempts, every 5 minutes = 6 hours total
-          for i in {1..72}; do
+          TIMEOUT_MINS="${{ github.event.inputs.poll_timeout_mins || '360' }}"
+          if [ "$TIMEOUT_MINS" -gt 360 ]; then
+            echo "⚠️ Provided timeout ($TIMEOUT_MINS mins) exceeds maximum GitHub limit. Capping to 360 minutes."
+            TIMEOUT_MINS=360
+          fi
+
+          ATTEMPTS=$(( TIMEOUT_MINS / 5 ))
+          echo "Polling every 5 minutes for up to $TIMEOUT_MINS minutes ($ATTEMPTS attempts)..."
+
+          for ((i=1; i<=ATTEMPTS; i++)); do
             # Explicitly check the kubernetes/k8s.io repo context
             STATE=$(gh pr view "$PR_URL" --repo kubernetes/k8s.io --json state --jq '.state')
             
@@ -143,7 +156,7 @@ jobs:
             sleep 300
           done
 
-          echo "❌ Timed out waiting for merge."
+          echo "❌ Timed out waiting for merge after $TIMEOUT_MINS minutes."
           exit 1
 
   publish-draft:
@@ -174,6 +187,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-2.5-flash
         run: |
           # This finally publishes the draft for your review
           make release-publish TAG="${{ needs.promote.outputs.new_tag }}"

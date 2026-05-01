@@ -135,15 +135,15 @@ def get_pr_descriptions(pr_numbers):
     return pr_descriptions
 
 
-def generate_highlights(commits, breaking_changes, pr_descriptions, tag):
+def generate_highlights(commits, breaking_changes, pr_descriptions, tag, model="gemini-2.5-flash"):
     # TODO: Use Vertex AI for Gemini API 
 
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         print("⚠️ GEMINI_API_KEY not set. Skipping Gemini highlights.")
         return None
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
     commit_titles = "\n".join([c["title"] for c in commits])
     commit_messages = "\n".join([f"- {c['title']}\n  {c['body']}" for c in commits])
@@ -209,6 +209,9 @@ def main():
     parser.add_argument(
         "--output", default="release_notes_preview.md", help="File to save notes to."
     )
+    parser.add_argument(
+        "--model", default=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), help="The Gemini model to use."
+    )
     args = parser.parse_args()
 
     tag = args.tag
@@ -224,7 +227,7 @@ def main():
 
     # Generate highlights using breaking changes and PR descriptions
     highlights = generate_highlights(
-        commits, "\n".join(breaking_changes), pr_descriptions, tag
+        commits, "\n".join(breaking_changes), pr_descriptions, tag, model=args.model
     )
 
     installation_notes = f"""

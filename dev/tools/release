@@ -32,6 +32,7 @@ def main():
     parser = argparse.ArgumentParser(description='Generate release manifests.')
     parser.add_argument('--tag', required=True, help='The git tag for the release.')
     parser.add_argument('--publish', action='store_true', help='Publish the release to GitHub.')
+    parser.add_argument('--model', default=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), help='Gemini model to use for generating release notes.')
     args = parser.parse_args()
     tag = args.tag
 
@@ -98,7 +99,7 @@ def main():
         print(f"INFO: Generating release notes using dev/tools/generate-release-notes...")
         try:
             subprocess.run(
-                ["./dev/tools/generate-release-notes", "--tag", tag, "--output", notes_file],
+                ["./dev/tools/generate-release-notes", "--tag", tag, "--output", notes_file, "--model", args.model],
                 check=True
             )
             print(f"INFO: Release notes generated at {notes_file}")

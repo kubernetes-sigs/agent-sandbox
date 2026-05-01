@@ -9,15 +9,15 @@ Those tags are the source of truth for:
 
 ## Repository Release Flow
 
-The project is released on an as-needed basis. The process is as follows:
+The project is released on an as-needed basis. The current process is:
 
-1. An issue proposes a new release with a changelog since the last release.
-1. All [OWNERS](OWNERS) must LGTM the release.
-1. An OWNER promotes images and prepares release assets as needed.
-1. An OWNER pushes the repository tag for the release.
-1. GitHub Actions validates the Go SDK and publishes or updates the draft GitHub Release assets.
-1. The release issue is closed.
-1. An announcement email is sent to `dev@kubernetes.io` and `sig-apps@kubernetes.io` with the subject `[ANNOUNCE] agent-sandbox $VERSION is released`.
+1. Run `make release-promote TAG=vX.Y.Z` to create the repository tag, wait for the tagged image to be pushed, and generate the image promotion PR. Creating the Git tag also triggers the Python SDK release workflow.
+1. Wait for the image promotion PR to be approved and merged.
+1. Run `make release-publish TAG=vX.Y.Z` to generate the release manifests and publish the GitHub Release as a draft.
+1. Review and edit the draft GitHub Release, then publish it.
+1. Approve the Python publishing workflow manually.
+
+These steps are being automated in GitHub Actions so that a release only requires adding a repository tag.
 
 ## Go SDK Releases
 

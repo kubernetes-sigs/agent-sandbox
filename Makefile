@@ -110,15 +110,14 @@ release-manifests:
 	./dev/tools/release --tag=${TAG}
 
 # Example usage:
-# make release-python-sdk TAG=v0.1.1.post1 (for patch release on PyPI)
+# make release-go-sdk TAG=v0.1.1.post1 (for client-only patch release)
 .PHONY: release-go-sdk
 release-go-sdk:
-	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-go-sdk TAG=vX.Y.Z)"; exit 1; fi
+	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-go-sdk TAG=vX.Y.Z.postN)"; exit 1; fi
 	./dev/tools/release-go --tag=${TAG} --remote=${REMOTE_UPSTREAM}
 
 # Example usage:
-# make release-python-sdk TAG=v0.1.1rc1 (to release only on TestPyPI, blocked from PyPI in workflow)
-# make release-python-sdk TAG=v0.1.1.post1 (for patch release on TestPyPI and PyPI)
+# make release-python-sdk TAG=v0.1.1.post1 (for patch release on PyPI)
 .PHONY: release-python-sdk
 release-python-sdk:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-python-sdk TAG=vX.Y.Z.postN)"; exit 1; fi

@@ -62,11 +62,13 @@ jobs:
           go mod download
           go generate ./...
           git diff --exit-code
-          ./dev/tools/release --tag=${GITHUB_REF_NAME} --publish
+          ./dev/tools/release --tag="${GITHUB_REF_NAME}" --publish
 
       - name: Append Go client release summary
         run: |
-          echo '### Go client release' >> "$GITHUB_STEP_SUMMARY"
-          echo '- Validated `./clients/go/sandbox/...` unit tests.' >> "$GITHUB_STEP_SUMMARY"
-          echo '- Built `clients/go/examples/basic` and `clients/go/examples/gateway`.' >> "$GITHUB_STEP_SUMMARY"
-          echo '- Updated the draft GitHub release for tag `'"${GITHUB_REF_NAME}"'`.' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Go client release"
+            echo "- Validated \`./clients/go/sandbox/...\` unit tests."
+            echo "- Built \`clients/go/examples/basic\` and \`clients/go/examples/gateway\`."
+            echo "- Updated the draft GitHub release for tag \`${GITHUB_REF_NAME}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

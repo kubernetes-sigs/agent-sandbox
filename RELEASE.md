@@ -17,7 +17,7 @@ The project is released on an as-needed basis. The process is as follows:
 1. An OWNER pushes the repository tag for the release.
 1. GitHub Actions validates the Go SDK and publishes or updates the draft GitHub Release assets.
 1. The release issue is closed.
-1. An announcement email is sent to `dev@kubernetes.io` with the subject `[ANNOUNCE] agent-sandbox $VERSION is released`.
+1. An announcement email is sent to `dev@kubernetes.io` and `sig-apps@kubernetes.io` with the subject `[ANNOUNCE] agent-sandbox $VERSION is released`.
 
 ## Go SDK Releases
 

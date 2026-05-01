@@ -47,13 +47,11 @@ def check_local_repo_state(remote):
     """Ensures the local agent-sandbox repo is clean and up-to-date."""
     print(f"🛡️  Verifying local repository state...")
 
-    # 1. Check for uncommitted changes
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print("ℹ️  Running in GitHub Actions. Skipping uncommitted changes check.")
-    elif run_command(["git", "status", "--porcelain"], capture_output=True):
-        print(
-            "❌ You have uncommitted changes in agent-sandbox. Please commit or stash them."
-        )
+    # 1. Check for uncommitted changes in tracked files
+    status = run_command(["git", "status", "--porcelain", "-uno"], capture_output=True)
+    if status:
+        print("❌ You have uncommitted changes in tracked files in agent-sandbox. Please commit or stash them.")
+        print(f"🛑 Modified files:\n{status}")
         sys.exit(1)
 
     # 2. Fetch upstream

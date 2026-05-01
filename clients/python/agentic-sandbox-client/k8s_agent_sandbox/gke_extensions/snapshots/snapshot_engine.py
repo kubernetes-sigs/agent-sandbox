@@ -264,7 +264,7 @@ class SnapshotEngine:
         self, filter_by: SnapshotFilter | dict | None = None
     ) -> ListSnapshotResult:
         """
-        Checks for existing snapshots matching the grouping labels associated with the sandboxTemplate across the sandbox instances.
+        Checks for existing snapshots matching the grouping labels associated with the sandbox
         Returns a ListSnapshotResult containing valid snapshots sorted by creation timestamp (newest first).
 
         filter_by: Structure containing filters (status and grouping_labels).

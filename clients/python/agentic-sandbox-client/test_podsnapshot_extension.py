@@ -96,10 +96,6 @@ def test_manual_snapshots(client, sandbox, template_name: str, namespace: str) -
     print(
         f"\nChecking if sandbox was restored from latest snapshot '{second_snapshot_uid}'..."
     )
-    restored_sandbox = client.create_sandbox(template_name, namespace=namespace)
-    restore_result = restored_sandbox.is_restored_from_snapshot(second_snapshot_uid)
-    assert restore_result.success, restore_result.error_reason
-    print("Pod was restored from the most recent snapshot.")
 
     return first_snapshot_uid, second_snapshot_uid
 

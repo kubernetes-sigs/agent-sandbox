@@ -21,7 +21,7 @@ from kubernetes.client import ApiException
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from k8s_agent_sandbox.constants import (
-    SANDBOX_TEMPLATE_REF_HASH_LABEL,
+    SANDBOX_NAME_HASH_LABEL,
     PODSNAPSHOT_POD_NAME_ANNOTATION,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOT_API_GROUP,
@@ -92,12 +92,12 @@ class SnapshotEngine:
         namespace: str,
         k8s_helper,
         get_pod_name_func: Callable[[], str],
-        get_sandbox_template_ref_hash_func: Callable[[], str | None],
+        get_sandbox_name_hash_func: Callable[[], str | None],
     ):
         self.namespace = namespace
         self.k8s_helper = k8s_helper
         self.get_pod_name_func = get_pod_name_func
-        self.get_sandbox_template_ref_hash_func = get_sandbox_template_ref_hash_func
+        self.get_sandbox_name_hash_func = get_sandbox_name_hash_func
         self.created_manual_triggers = []
 
     def create(
@@ -296,17 +296,17 @@ class SnapshotEngine:
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-        template_ref_hash = self.get_sandbox_template_ref_hash_func()
-        if not template_ref_hash:
-            logger.warning(f"Template reference hash not found for pod {pod_name}.")
+        sandbox_name_hash = self.get_sandbox_name_hash_func()
+        if not sandbox_name_hash:
+            logger.warning(f"Sandbox name hash not found for pod {pod_name}.")
             return ListSnapshotResult(
                 success=False,
                 snapshots=[],
-                error_reason="Template reference hash not found.",
+                error_reason="Sandbox name hash not found.",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
         
-        selectors.append(f"{SANDBOX_TEMPLATE_REF_HASH_LABEL}={template_ref_hash}")
+        selectors.append(f"{SANDBOX_NAME_HASH_LABEL}={sandbox_name_hash}")
 
         if filter_by.grouping_labels:
             for k, v in filter_by.grouping_labels.items():

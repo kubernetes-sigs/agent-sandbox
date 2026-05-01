@@ -96,7 +96,7 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
    * For detailed setup instructions, refer to the [GKE Pod Snapshots public documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots).
    * Ensure a GCS bucket is configured to store the pod snapshot states and that the necessary IAM permissions are applied.
 
-4.  **CRDs**: `PodSnapshotStorageConfig`, `PodSnapshotPolicy` CRDs must be applied. As a requirement, the label `agents.x-k8s.io/sandbox-template-ref-hash` must be added to the `PodSnapshotPolicy` grouping rules.
+4.  **CRDs**: `PodSnapshotStorageConfig`, `PodSnapshotPolicy` CRDs must be applied. As a requirement, the label `agents.x-k8s.io/sandbox-name-hash` must be added to the `PodSnapshotPolicy` grouping rules.
 
     Example `PodSnapshotPolicy`:
     ```yaml
@@ -115,13 +115,11 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
         postCheckpoint: resume
       snapshotGroupingRules:
         groupByLabelValue:
-          labels: ["agents.x-k8s.io/sandbox-template-ref-hash", "tenant-id", "user-id"]
+          labels: ["agents.x-k8s.io/sandbox-name-hash", "tenant-id", "user-id"]
           groupRetentionPolicy:
             maxSnapshotCountPerGroup: 3
     ```
     (Note: To run the integration test file successfully, `tenant-id` and `user-id` labels should also be added to the `groupByLabelValue.labels` list in the `PodSnapshotPolicy`.)
-
-    **Snapshot Sharing & Isolation**: By default, snapshots are shared across all sandboxes created from the same template in a namespace (isolated by `agents.x-k8s.io/sandbox-template-ref-hash`). This is intentional and allows for restoring state across different sandbox instances of the same template. To achieve instance-level isolation instead, you can add a unique identifier (e.g., `agents.x-k8s.io/claim-uid`, `user-id`, etc.) to the `PodSnapshotPolicy` grouping rules.
 
 5.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 

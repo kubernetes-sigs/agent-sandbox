@@ -26,7 +26,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
-from .constants import POD_NAME_ANNOTATION, SANDBOX_TEMPLATE_REF_HASH_LABEL
+from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
 
 class Sandbox:
     """
@@ -81,6 +81,7 @@ class Sandbox:
         # Internal state tracking
         self._is_closed = False
         self._pod_name = None
+        self._sandbox_name_hash = None
         
     def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
@@ -94,14 +95,25 @@ class Sandbox:
         self._pod_name = pod_name if pod_name is not None else self.sandbox_id
         return self._pod_name
 
-    def get_sandbox_template_ref_hash(self) -> str | None:
-        """Fetches the Sandbox object from Kubernetes and retrieves its template ref hash."""
+
+    def get_sandbox_name_hash(self) -> str | None:
+        """Fetches the Sandbox object from Kubernetes and retrieves its name hash from selector.
+        Caches the result to avoid repeated API calls.
+        """
+        # Return cached value if available
+        if self._sandbox_name_hash is not None:
+            return self._sandbox_name_hash
+
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        spec = sandbox_object.get('spec') or {}
-        pod_template = spec.get('podTemplate') or {}
-        pt_metadata = pod_template.get('metadata') or {}
-        pt_labels = pt_metadata.get('labels') or {}
-        return pt_labels.get(SANDBOX_TEMPLATE_REF_HASH_LABEL)
+        status = sandbox_object.get('status') or {}
+        selector = status.get('selector') or ""
+        if "=" in selector:
+            key, value = selector.split("=")
+            if key == SANDBOX_NAME_HASH_LABEL:
+                self._sandbox_name_hash = value
+                return value
+                
+        return None
 
     def get_pod_ip(self) -> str | None:
         """Fetches the first pod IP from the Sandbox status.

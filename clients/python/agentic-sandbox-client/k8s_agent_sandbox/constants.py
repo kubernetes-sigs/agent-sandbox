@@ -27,7 +27,7 @@ SANDBOX_PLURAL_NAME = "sandboxes"
 
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 PODSNAPSHOT_POD_NAME_ANNOTATION = "podsnapshot.gke.io/origin-pod"
-SANDBOX_TEMPLATE_REF_HASH_LABEL = "agents.x-k8s.io/sandbox-template-ref-hash"
+SANDBOX_NAME_HASH_LABEL = "agents.x-k8s.io/sandbox-name-hash"
 
 PODSNAPSHOT_API_GROUP = "podsnapshot.gke.io"
 PODSNAPSHOT_API_VERSION = "v1"

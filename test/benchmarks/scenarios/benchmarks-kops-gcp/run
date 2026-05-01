@@ -42,34 +42,53 @@ pushd dev/tools
 GOBIN="${BINDIR}" go install ./resourcectl
 popd
 
-# Get project info
+UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
+
+# Get project info from boskos if available, otherwise use the default project.
 if [[ -n "${BOSKOS_HOST:-}" ]]; then
-  PROJECT_ID=$(resourcectl get gcp-project)
-  if [[ $? -ne 0 ]]; then
+  if ! PROJECT_ID=$(resourcectl get --key project-main --boskos-type gce-project); then
     echo "Failed to acquire project from Boskos"
     exit 1
   fi
+  echo "Acquired project ${PROJECT_ID} from Boskos."
 else
   PROJECT_ID=$(gcloud config get-value project)
 fi
 
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-echo "Using project: ${PROJECT_ID}"
+echo "Using project: ${PROJECT_ID} (number: ${PROJECT_NUMBER})"
 
-UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
-
-IMAGE_PREFIX="gcr.io/${PROJECT_ID}/"
+IMAGE_PREFIX="gcr.io/${PROJECT_ID}/agent-sandbox/"
 export IMAGE_PREFIX
 echo "Using image prefix: ${IMAGE_PREFIX}"
 
-IMAGE_TAG="${UNIQUE_SUFFIX}"
+# Configure Docker to use gcloud credential helper for gcr.io
+gcloud auth configure-docker --quiet gcr.io
+
+# We don't set up registry permissions here because Boskos does not allow
+# configuring IAM permissions on the project. The kOps cluster is configured
+# to use the default compute service account, which has access by default.
+
+# Compute image tag based on the git tag
+IMAGE_TAG=$(git describe --tags --dirty --always)
+# Add a timestamp if it's dirty
+if [[ "${IMAGE_TAG}" == *"-dirty" ]]; then
+  IMAGE_TAG="${IMAGE_TAG}-${UNIQUE_SUFFIX}"
+fi
 export IMAGE_TAG
 echo "Using image tag: ${IMAGE_TAG}"
+
+# Push images
+for image in "agent-sandbox-controller" "chrome-sandbox"; do
+  echo "Pushing ${image} to ${IMAGE_PREFIX}..."
+  dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
+done
+
 
 BUCKET_NAME="kops-state-${PROJECT_NUMBER}"
 echo "Using bucket: ${BUCKET_NAME}"
 
-# Create bucket if not exists
+# Create state store bucket if not exists
 if ! gcloud storage buckets describe "gs://${BUCKET_NAME}" >/dev/null 2>&1; then
   echo "Creating bucket gs://${BUCKET_NAME}..."
   gcloud storage buckets create "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --location=us-central1
@@ -103,8 +122,10 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Creating kOps cluster configuration..."
+# --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
   --cloud=gce \
+  --gce-service-account=default \
   --name="${CLUSTER_NAME}" \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \
@@ -122,18 +143,6 @@ kops export kubeconfig --name "${CLUSTER_NAME}" --admin
 echo "Waiting for cluster to be ready..."
 kops validate cluster --wait 10m
 
-# Grant permissions to pull images
-NODE_SA="node-${CLUSTER_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-# Legacy gcr.io
-gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member="serviceAccount:${NODE_SA}" --role="roles/storage.objectViewer"
-# gcr.io transparently redirecting to artifact registry (but still needs a different IAM permission)
-gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member="serviceAccount:${NODE_SA}" --role="roles/artifactregistry.reader"
-
-# Push images
-for image in "agent-sandbox-controller" "chrome-sandbox"; do
-  echo "Pushing ${image} to ${IMAGE_PREFIX}..."
-  dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
-done
 
 # Deploy to cluster
 echo "Deploying to cluster..."

@@ -72,7 +72,25 @@ def run_go_e2e_benchmarks(repo_root, artifact_dir, env):
 
         process.wait()
 
-    return process.returncode
+    if process.returncode != 0:
+        print(f"Go E2E benchmarks process failed with exit code {process.returncode}")
+        return process.returncode
+
+    csv_file = os.path.join(artifact_dir, "benchmarks.csv")
+    benchstat_cmd = utils.go_tool_args(
+        "benchstat",
+        "-format", "csv",
+        benchmark_file
+    )
+    print(f"Running benchstat: {' '.join(benchstat_cmd)}")
+    with open(csv_file, "w") as f_csv:
+        benchstat_result = subprocess.run(benchstat_cmd, env=env, cwd=repo_root, stdout=f_csv)
+
+    if benchstat_result.returncode != 0:
+        print(f"benchstat failed with exit code {benchstat_result.returncode}")
+        return benchstat_result.returncode
+
+    return 0
 
 
 def setup_python_sdk(repo_root, env):

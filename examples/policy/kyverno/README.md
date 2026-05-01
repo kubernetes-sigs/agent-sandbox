@@ -19,6 +19,14 @@ Sandbox-owned Pod, or a Group subject that would include that ServiceAccount
 (`system:serviceaccounts` or `system:serviceaccounts:<namespace>`), the request
 is denied.
 
+Performance note:
+For `system:serviceaccounts` (cluster-wide) Group subjects, the policy may need
+to evaluate Pods across namespaces. In very large clusters, this can increase
+admission latency and may contribute to webhook timeouts under heavy load.
+If this becomes an issue, consider reducing use of cluster-wide
+`system:serviceaccounts` bindings, or adapting this sample with a caching
+strategy (for example, GlobalContextEntry) to reduce per-request lookup cost.
+
 ---
 
 ## 2. Prerequisites

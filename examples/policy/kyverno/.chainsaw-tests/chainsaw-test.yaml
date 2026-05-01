@@ -53,16 +53,19 @@ spec:
         expect:
         - check:
             ($error != null): true
+            (contains($error, 'prevent-sandbox-sa-binding')): true
     - apply:
         file: bad-rolebinding-sa-group-ns.yaml
         expect:
         - check:
             ($error != null): true
+            (contains($error, 'prevent-sandbox-sa-binding')): true
     - apply:
         file: bad-clusterrolebinding-sa-group-all.yaml
         expect:
         - check:
             ($error != null): true
+            (contains($error, 'prevent-sandbox-sa-binding')): true
   - name: step-03
     try:
     - apply:

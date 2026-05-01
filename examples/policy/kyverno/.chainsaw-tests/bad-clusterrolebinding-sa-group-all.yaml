@@ -9,3 +9,4 @@ roleRef:
 subjects:
 - kind: Group
   name: system:serviceaccounts
+  apiGroup: rbac.authorization.k8s.io

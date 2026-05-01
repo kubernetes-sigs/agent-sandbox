@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import subprocess
 import sys
 import re
@@ -47,10 +48,15 @@ def check_local_repo_state(remote):
     print(f"🛡️  Verifying local repository state...")
 
     # 1. Check for uncommitted changes
-    if run_command(["git", "status", "--porcelain"], capture_output=True):
-        print(
-            "❌ You have uncommitted changes in agent-sandbox. Please commit or stash them."
-        )
+    is_ga = os.environ.get("GITHUB_ACTIONS") == "true"
+    status = run_command(
+        ["git", "status", "--porcelain", "-uno"] if is_ga else ["git", "status", "--porcelain"],
+        capture_output=True
+    )
+    if status:
+        msg = "in tracked files " if is_ga else ""
+        print(f"❌ You have uncommitted changes {msg}in agent-sandbox. Please commit or stash them.")
+        print(f"🛑 Modified files:\n{status}")
         sys.exit(1)
 
     # 2. Fetch upstream

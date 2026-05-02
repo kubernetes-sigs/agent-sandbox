@@ -97,7 +97,13 @@ jobs:
         env:
           # Use a Fine-Grained PAT scoped to kubernetes/k8s.io with contents:write and pull_requests:write
           GH_TOKEN: ${{ secrets.K8S_IO_PAT }}
+          # Use the Fork token for Git pushing
+          FORK_TOKEN: ${{ secrets.FORK_K8S_IO_PAT }}
         run: |
+          # Update the git remote for the fork to use the FORK_TOKEN
+          GH_USER=$(gh api user --jq .login)
+          git remote set-url origin "https://x-access-token:${FORK_TOKEN}@github.com/$GH_USER/k8s.io.git"          
+          
           # Run promotion script
           TAG="${{ steps.set-tag.outputs.new_tag || steps.auto-tag.outputs.new_tag }}"
           make release-promote TAG="$TAG" K8S_IO_DIR=../k8s.io REMOTE_UPSTREAM=upstream REMOTE_FORK=origin

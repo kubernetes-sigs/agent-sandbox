@@ -102,7 +102,7 @@ jobs:
         run: |
           # Update the git remote for the fork to use the FORK_TOKEN
           GH_USER=$(gh api user --jq .login)
-          git remote set-url origin "https://x-access-token:${FORK_TOKEN}@github.com/$GH_USER/k8s.io.git"          
+          git -C ../k8s.io remote set-url origin "https://x-access-token:${FORK_TOKEN}@github.com/$GH_USER/k8s.io.git"          
           
           # Run promotion script
           TAG="${{ steps.set-tag.outputs.new_tag || steps.auto-tag.outputs.new_tag }}"

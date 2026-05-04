@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,8 +27,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 // State is the local state of the resourcectl CLI.
@@ -46,28 +50,46 @@ type BoskosResource struct {
 	// HeartbeatPID is the pid of the heartbeat process that is keeping this
 	// resource alive.
 	HeartbeatPID int `json:"heartbeatPid"`
+	// Owner is the owner of the resource we acquired from boskos
+	Owner string `json:"owner"`
+	// Key is a user-specified key used to identify this resource
+	Key string `json:"key,omitempty"`
 }
 
 // ReleaseFromBoskos releases the Boskos resource by sending a request to Boskos.
 func (r *BoskosResource) ReleaseFromBoskos(ctx context.Context) error {
-	boskosHost := os.Getenv("BOSKOS_HOST")
-	if boskosHost != "" && r.Name != "" {
-		url := fmt.Sprintf("%s/release?name=%s&state=busy&dest=free", boskosHost, url.QueryEscape(r.Name))
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-		if err != nil {
-			return fmt.Errorf("error creating request to release resource from boskos: %v", err)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("error releasing resource from boskos: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("boskos returned status %d on release: %s", resp.StatusCode, string(body))
-		}
-		fmt.Printf("Released resource %s from boskos\n", r.Name)
+	log := klog.FromContext(ctx)
+
+	if r.Name == "" {
+		return nil
 	}
+
+	boskosHost, err := getBoskosHost()
+	if err != nil {
+		return err
+	}
+
+	owner := r.Owner
+	if owner == "" {
+		owner = getBoskosOwner()
+	}
+	url := fmt.Sprintf("%s/release?name=%s&state=busy&dest=free&owner=%s", boskosHost, url.QueryEscape(r.Name), url.QueryEscape(owner))
+	log.Info("releasing resource from boskos", "name", r.Name, "owner", owner)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("error creating request to release resource from boskos: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("error releasing resource from boskos: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("boskos returned status %d on release: %s", resp.StatusCode, string(body))
+	}
+	log.Info("released resource from boskos", "name", r.Name)
+
 	return nil
 }
 
@@ -90,19 +112,35 @@ func run(ctx context.Context) error {
 	command := os.Args[1]
 	switch command {
 	case "get":
-		if len(os.Args) < 3 {
-			return fmt.Errorf("Usage: resourcectl get <type>")
+		fs := flag.NewFlagSet("get", flag.ExitOnError)
+		var key, boskosType string
+		fs.StringVar(&key, "key", "", "Key to track this resource")
+		fs.StringVar(&boskosType, "boskos-type", "", "Boskos resource type")
+
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
 		}
-		getType := os.Args[2]
-		return runGet(ctx, getType)
+
+		if key == "" || boskosType == "" {
+			return fmt.Errorf("Usage: resourcectl get --key <key> --boskos-type <type>")
+		}
+		return runGet(ctx, boskosType, key)
 	case "cleanup":
 		return runCleanup(ctx)
 	case "heartbeat":
-		if len(os.Args) < 4 || os.Args[2] != "--name" {
-			return fmt.Errorf("Usage: resourcectl heartbeat --name <name>")
+		fs := flag.NewFlagSet("heartbeat", flag.ExitOnError)
+		var name, owner string
+		fs.StringVar(&name, "name", "", "Resource name")
+		fs.StringVar(&owner, "owner", "", "Resource owner")
+
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
 		}
-		name := os.Args[3]
-		return runHeartbeat(ctx, name)
+
+		if name == "" {
+			return fmt.Errorf("Usage: resourcectl heartbeat --name <name> [--owner <owner>]")
+		}
+		return runHeartbeat(ctx, name, owner)
 	default:
 		return fmt.Errorf("Unknown command: %s", command)
 	}
@@ -157,15 +195,47 @@ func writeState(state *State) error {
 	return nil
 }
 
-// runGet acquires a resource of the given type from Boskos and starts a
-// heartbeat process for it.
-func runGet(ctx context.Context, resourceType string) error {
+// getBoskosHost returns the boskos host from the environment variable BOSKOS_HOST.
+func getBoskosHost() (string, error) {
 	boskosHost := os.Getenv("BOSKOS_HOST")
 	if boskosHost == "" {
-		return fmt.Errorf("BOSKOS_HOST env var is not set")
+		return "", fmt.Errorf("BOSKOS_HOST env var is not set")
+	}
+	// The host might be specified as a hostname (no scheme) or as a url including the scheme.
+	if !strings.HasPrefix(boskosHost, "http://") && !strings.HasPrefix(boskosHost, "https://") {
+		boskosHost = "http://" + boskosHost
+	}
+	return boskosHost, nil
+}
+
+// getBoskosOwner returns the owner to use for Boskos requests.
+func getBoskosOwner() string {
+	prefix := "resourcectl"
+	if job := os.Getenv("JOB_NAME"); job != "" {
+		if build := os.Getenv("BUILD_ID"); build != "" {
+			return fmt.Sprintf("%s-%s-%s", prefix, job, build)
+		}
+		return fmt.Sprintf("%s-%s", prefix, job)
+	}
+	if user := os.Getenv("USER"); user != "" {
+		return fmt.Sprintf("%s-%s", prefix, user)
+	}
+	return prefix
+}
+
+// runGet acquires a resource of the given type from Boskos and starts a
+// heartbeat process for it.
+func runGet(ctx context.Context, resourceType string, key string) error {
+	log := klog.FromContext(ctx)
+
+	boskosHost, err := getBoskosHost()
+	if err != nil {
+		return err
 	}
 
-	url := fmt.Sprintf("%s/acquire?type=%s&state=free&dest=busy", boskosHost, url.QueryEscape(resourceType))
+	owner := getBoskosOwner()
+	url := fmt.Sprintf("%s/acquire?type=%s&state=free&dest=busy&owner=%s", boskosHost, url.QueryEscape(resourceType), url.QueryEscape(owner))
+	log.Info("acquiring resource from boskos", "type", resourceType, "owner", owner, "key", key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return fmt.Errorf("error creating request: %v", err)
@@ -191,7 +261,7 @@ func runGet(ctx context.Context, resourceType string) error {
 	}
 
 	// Start heartbeat process
-	cmd := exec.Command(os.Args[0], "heartbeat", "--name", resource.Name)
+	cmd := exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
 	// TODO: Log stdout/stderr of the heartbeat process
 	if err := cmd.Start(); err != nil {
@@ -208,6 +278,8 @@ func runGet(ctx context.Context, resourceType string) error {
 		Name:         resource.Name,
 		Type:         resourceType,
 		HeartbeatPID: cmd.Process.Pid,
+		Owner:        owner,
+		Key:          key,
 	})
 
 	if err := writeState(state); err != nil {
@@ -273,13 +345,19 @@ func killHeartbeatProcess(ctx context.Context, r *BoskosResource) error {
 
 // runHeartbeat sends periodic heartbeats to Boskos to keep the resource alive.
 // This is run as a child process of runGet.
-func runHeartbeat(ctx context.Context, name string) error {
-	boskosHost := os.Getenv("BOSKOS_HOST")
-	if boskosHost == "" {
-		return fmt.Errorf("BOSKOS_HOST env var is not set")
+func runHeartbeat(ctx context.Context, name, owner string) error {
+	log := klog.FromContext(ctx)
+
+	boskosHost, err := getBoskosHost()
+	if err != nil {
+		return err
 	}
 
-	url := fmt.Sprintf("%s/update?name=%s&state=busy", boskosHost, url.QueryEscape(name))
+	if owner == "" {
+		owner = getBoskosOwner()
+	}
+	url := fmt.Sprintf("%s/update?name=%s&state=busy&owner=%s", boskosHost, url.QueryEscape(name), url.QueryEscape(owner))
+	log.Info("starting heartbeat", "name", name, "owner", owner)
 
 	// Send initial heartbeat
 	if err := sendOneHeartbeat(ctx, url); err != nil {

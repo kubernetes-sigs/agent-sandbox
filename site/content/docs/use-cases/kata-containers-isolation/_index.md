@@ -37,7 +37,7 @@ spec:
   ```
 - [minikube](https://minikube.sigs.k8s.io/docs/start/)
 - [`kubectl`](https://kubernetes.io/docs/tasks/tools/#kubectl) installed and configured to point to your cluster.
-- The [Agent Sandbox Controller]({{< ref "/docs/overview" >}}) installed on your cluster.
+- The [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed on your cluster.
 
 ## Getting Started
 

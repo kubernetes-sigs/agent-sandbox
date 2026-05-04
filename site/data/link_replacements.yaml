@@ -30,8 +30,8 @@ replacements:
 
   # Installation section from getting started
   - pattern: '\]\(/README\.md/#installation\)'
-    replacement: '](/docs/overview/#installation)'
-    description: "Root README installation to docs/overview"
+    replacement: '](/docs/getting_started/overview/#installation)'
+    description: "Root README installation to docs/getting_started/overview"
 
   # Agent sandbox router - redirect to GitHub
   - pattern: '\]\(/clients/python/agentic-sandbox-client/README\.md(#[^)]+)\)'
@@ -83,5 +83,5 @@ replacements:
 
   # Generic ../../README.md or ../../INSTALL.md links
   - pattern: '\]\(\.\.\/\.\./(README|INSTALL)\.md(#[^)]+)?\)'
-    replacement: '](/docs/overview/$2)'
+    replacement: '](/docs/getting_started/overview/$2)'
     description: "Parent directory README/INSTALL to docs/overview"

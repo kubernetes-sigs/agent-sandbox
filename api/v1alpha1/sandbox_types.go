@@ -122,6 +122,7 @@ type SandboxSpec struct {
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
 	// +optional
+	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.

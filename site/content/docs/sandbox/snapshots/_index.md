@@ -17,7 +17,7 @@ This guide requires a GKE Autopilot cluster with a gVisor node pool. See [GKE Cl
 
 - A GKE Autopilot cluster with a gVisor node pool and necessary CRDs applied.
 - Google Cloud credentials configured in your environment.
-- The [Agent Sandbox Controller]({{< ref "/docs/overview" >}}) installed.
+- The [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
 - A `SandboxTemplate` named `simple-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.

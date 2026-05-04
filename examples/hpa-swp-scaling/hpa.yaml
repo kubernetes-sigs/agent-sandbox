@@ -1,0 +1,23 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-warmpool-hpa
+  namespace: hpa-test # Namespace of the SandboxWarmPool
+spec:
+  scaleTargetRef:
+    apiVersion: extensions.agents.x-k8s.io/v1alpha1
+    kind: SandboxWarmPool
+    name: python-sdk-warmpool
+  minReplicas: 10
+  maxReplicas: 100
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: "prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"
+        selector:
+          matchLabels:
+            metric.labels.warmpool_name: "python-sdk-warmpool"
+      target:
+        type: Value 
+        value: "0.5"

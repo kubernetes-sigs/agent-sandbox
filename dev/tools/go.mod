@@ -8,6 +8,8 @@ tool (
 	sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter
 )
 
+require k8s.io/klog/v2 v2.130.1
+
 require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect
 	4d63.com/gochecknoglobals v0.2.2 // indirect
@@ -72,6 +74,7 @@ require (
 	github.com/fzipp/gocyclo v0.6.0 // indirect
 	github.com/ghostiam/protogetter v0.3.20 // indirect
 	github.com/go-critic/go-critic v0.14.3 // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-toolsmith/astcast v1.1.0 // indirect
 	github.com/go-toolsmith/astcopy v1.1.0 // indirect
 	github.com/go-toolsmith/astequal v1.2.0 // indirect

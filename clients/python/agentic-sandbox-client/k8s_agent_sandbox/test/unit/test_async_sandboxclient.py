@@ -65,7 +65,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             sandbox = await self.client.create_sandbox("test-template", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-template", "test-namespace", labels=None, lifecycle=None
+                ANY, "test-template", "test-namespace", labels=None, lifecycle=None, warmpool=None
             )
             self.assertEqual(sandbox, mock_sandbox_instance)
 

@@ -29,6 +29,7 @@ from .models import (
     SandboxLocalTunnelConnectionConfig,
 )
 from .k8s_helper import K8sHelper
+from .metrics import sandbox_client_discovery_latency_ms
 from .exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
@@ -85,13 +86,22 @@ class GatewayConnectionStrategy(ConnectionStrategy):
         if self.base_url:
             return self.base_url
             
-        ip_address = self.k8s_helper.wait_for_gateway_ip(
-            self.config.gateway_name,
-            self.config.gateway_namespace,
-            self.config.gateway_ready_timeout
-        )
-        self.base_url = f"http://{ip_address}"
-        return self.base_url
+        start_time = time.monotonic()
+        status = "success"
+        try:
+            ip_address = self.k8s_helper.wait_for_gateway_ip(
+                self.config.gateway_name,
+                self.config.gateway_namespace,
+                self.config.gateway_ready_timeout
+            )
+            self.base_url = f"http://{ip_address}"
+            return self.base_url
+        except Exception:
+            status = "failure"
+            raise
+        finally:
+            latency = (time.monotonic() - start_time) * 1000
+            sandbox_client_discovery_latency_ms.labels(mode="gateway", status=status).observe(latency)
 
     def close(self):
         self.base_url = None
@@ -116,6 +126,14 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             s.bind(('127.0.0.1', 0))
             return s.getsockname()[1]
 
+    def _is_port_open(self, port: int) -> bool:
+        """Checks if a port is open on localhost."""
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                return True
+        except (socket.timeout, ConnectionRefusedError):
+            return False
+
     def connect(self) -> str:
         if self.base_url and self.port_forward_process and self.port_forward_process.poll() is None:
              return self.base_url
@@ -123,40 +141,48 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         if self.port_forward_process:
              self.close()
 
-        local_port = self._get_free_port()
-
-        logging.info(
-            f"Starting tunnel for Sandbox {self.sandbox_id}")
-        self.port_forward_process = subprocess.Popen(
-            [
-                "kubectl", "port-forward",
-                ROUTER_SERVICE_NAME,
-                f"{local_port}:8080",
-                "-n", self.namespace
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-
-        logging.info("Waiting for port-forwarding to be ready...")
         start_time = time.monotonic()
-        while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
-            if self.port_forward_process.poll() is not None:
-                _, stderr = self.port_forward_process.communicate()
-                raise SandboxPortForwardError(
-                    f"Tunnel crashed: {stderr.decode(errors='replace')}")
+        status = "success"
+        
+        try:
+            local_port = self._get_free_port()
 
-            try:
-                with socket.create_connection(("127.0.0.1", local_port), timeout=0.1):
+            logging.info(
+                f"Starting tunnel for Sandbox {self.sandbox_id}")
+            
+            self.port_forward_process = subprocess.Popen(
+                [
+                    "kubectl", "port-forward",
+                    ROUTER_SERVICE_NAME,
+                    f"{local_port}:8080",
+                    "-n", self.namespace
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            logging.info("Waiting for port-forwarding to be ready...")
+            while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
+                if self.port_forward_process.poll() is not None:
+                    _, stderr = self.port_forward_process.communicate()
+                    raise SandboxPortForwardError(
+                        f"Tunnel crashed: {stderr.decode(errors='replace')}")
+
+                if self._is_port_open(local_port):
                     self.base_url = f"http://127.0.0.1:{local_port}"
                     logging.info(f"Tunnel ready at {self.base_url}")
-                    time.sleep(0.5)
                     return self.base_url
-            except (socket.timeout, ConnectionRefusedError):
+                
                 time.sleep(0.5)
 
-        self.close()
-        raise TimeoutError("Failed to establish tunnel to Router Service.")
+            self.close()
+            raise TimeoutError("Failed to establish tunnel to Router Service.")
+        except Exception:
+            status = "failure"
+            raise
+        finally:
+            latency = (time.monotonic() - start_time) * 1000
+            sandbox_client_discovery_latency_ms.labels(mode="port_forward", status=status).observe(latency)
 
     def close(self):
         if self.port_forward_process:

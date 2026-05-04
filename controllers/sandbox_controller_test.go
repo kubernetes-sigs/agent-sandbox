@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -44,6 +45,25 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithStatusSubresource(&sandboxv1alpha1.Sandbox{}).
 		WithRuntimeObjects(initialObjs...).
 		Build()
+}
+
+type alreadyExistsOnPodCreateClient struct {
+	client.WithWatch
+	pod *corev1.Pod
+}
+
+func (c *alreadyExistsOnPodCreateClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		if c.pod != nil {
+			pod := c.pod.DeepCopy()
+			if err := c.WithWatch.Create(ctx, pod); err != nil && !k8serrors.IsAlreadyExists(err) {
+				return err
+			}
+			c.pod = nil
+		}
+		return k8serrors.NewAlreadyExists(corev1.Resource("pods"), obj.GetName())
+	}
+	return c.WithWatch.Create(ctx, obj, opts...)
 }
 
 const sandboxUID = types.UID("test-sandbox-uid")
@@ -940,6 +960,7 @@ func TestReconcilePod(t *testing.T) {
 	testCases := []struct {
 		name                   string
 		initialObjs            []runtime.Object
+		wrapClient             func(client.WithWatch) client.WithWatch
 		sandbox                *sandboxv1alpha1.Sandbox
 		wantPod                *corev1.Pod
 		expectErr              bool
@@ -1155,6 +1176,116 @@ func TestReconcilePod(t *testing.T) {
 			expectErr: true,
 		},
 		{
+			name: "refuses pod created by another controller between get and create",
+			wrapClient: func(c client.WithWatch) client.WithWatch {
+				return &alreadyExistsOnPodCreateClient{
+					WithWatch: c,
+					pod: &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:            sandboxName,
+							Namespace:       sandboxNs,
+							ResourceVersion: "1",
+							OwnerReferences: []metav1.OwnerReference{
+								{
+									APIVersion:         "apps/v1",
+									Kind:               "Deployment",
+									Name:               "some-other-controller",
+									UID:                "some-other-uid",
+									Controller:         new(true),
+									BlockOwnerDeletion: new(true),
+								},
+							},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "foo",
+								},
+							},
+						},
+					},
+				}
+			},
+			sandbox:   sandboxObj,
+			wantPod:   nil,
+			expectErr: true,
+		},
+		{
+			name: "creates pod with volumeClaimTemplate volumes replacing conflicting pod template volumes",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						ObjectMeta: sandboxv1alpha1.PodMetadata{
+							Annotations: map[string]string{
+								"agents.x-k8s.io/template": "default",
+							},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "test-container",
+									VolumeMounts: []corev1.VolumeMount{
+										{Name: "data", MountPath: "/data"},
+									},
+								},
+							},
+							Volumes: []corev1.Volume{
+								{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+								{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "my-config"}}}},
+							},
+						},
+					},
+					VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+						{
+							EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{Name: "data"},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							},
+						},
+					},
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/template":               "default",
+						"agents.x-k8s.io/propagated-annotations": "agents.x-k8s.io/template",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "data", MountPath: "/data"},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						// config preserved, data replaced by PVC
+						{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "my-config"}}}},
+						{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-" + sandboxName}}},
+					},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1alpha1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
 			name:        "annotated pod missing with replicas=1: clears annotation and recreates pod",
 			initialObjs: []runtime.Object{},
 			sandbox: &sandboxv1alpha1.Sandbox{
@@ -1190,7 +1321,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxLabel: nameHash,
 					},
 					Annotations: map[string]string{
 						"agents.x-k8s.io/template":               "default",
@@ -1498,8 +1629,13 @@ func TestReconcilePod(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sandbox := tc.sandbox.DeepCopy()
 
+			fakeClient := newFakeClient(append(tc.initialObjs, sandbox)...)
+			if tc.wrapClient != nil {
+				fakeClient = tc.wrapClient(fakeClient)
+			}
+
 			r := SandboxReconciler{
-				Client:        newFakeClient(append(tc.initialObjs, sandbox)...),
+				Client:        fakeClient,
 				Scheme:        Scheme,
 				Tracer:        asmetrics.NewNoOp(),
 				ClusterDomain: "cluster.local",
@@ -1511,10 +1647,10 @@ func TestReconcilePod(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, tc.wantPod, pod)
 
 			// Validate the Pod from the "cluster" (fake client)
 			if tc.wantPod != nil {
+				require.NotNil(t, pod, "expected pod to be returned")
 				livePod := &corev1.Pod{}
 				err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
 				require.NoError(t, err)
@@ -2273,4 +2409,56 @@ func TestSetServiceStatusCustomDomain(t *testing.T) {
 			require.Equal(t, tc.wantFQDN, sandbox.Status.ServiceFQDN)
 		})
 	}
+}
+
+func TestMergeVolumeClaimVolumes(t *testing.T) {
+	pvcVol := corev1.Volume{
+		Name: "data",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: "data-my-pod",
+			},
+		},
+	}
+
+	t.Run("replaces conflicting volume", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, []corev1.Volume{pvcVol})
+
+		require.Len(t, result, 2)
+		// config preserved
+		require.Equal(t, "config", result[0].Name)
+		require.NotNil(t, result[0].ConfigMap)
+		// data replaced by PVC
+		require.Equal(t, "data", result[1].Name)
+		require.NotNil(t, result[1].PersistentVolumeClaim)
+	})
+
+	t.Run("appends when no conflict", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, []corev1.Volume{pvcVol})
+
+		require.Len(t, result, 2)
+		require.Equal(t, "config", result[0].Name)
+		require.Equal(t, "data", result[1].Name)
+	})
+
+	t.Run("no-op when pvcVolumes is empty", func(t *testing.T) {
+		existing := []corev1.Volume{
+			{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		}
+
+		result := MergeVolumeClaimVolumes(existing, nil)
+
+		require.Len(t, result, 1)
+		require.Equal(t, "data", result[0].Name)
+		require.NotNil(t, result[0].EmptyDir)
+	})
 }

@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -29,10 +30,12 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -1441,6 +1444,79 @@ Loop:
 	}
 	if !foundProvisionEvent {
 		t.Errorf("Expected event %q not found", expectedMsg)
+	}
+}
+
+func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "vct-claim"
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "vct-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "vct-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "test"}},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{Name: "data"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("1Gi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, template).
+		WithStatusSubresource(claim).Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	// Verify sandbox was created with volumeClaimTemplates
+	sandbox := &sandboxv1alpha1.Sandbox{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: claimName, Namespace: "default"}, sandbox)
+	if err != nil {
+		t.Fatalf("Failed to get sandbox: %v", err)
+	}
+
+	if len(sandbox.Spec.VolumeClaimTemplates) != 1 {
+		t.Fatalf("expected 1 volumeClaimTemplate, got %d", len(sandbox.Spec.VolumeClaimTemplates))
+	}
+	if sandbox.Spec.VolumeClaimTemplates[0].Name != "data" {
+		t.Errorf("expected volumeClaimTemplate name 'data', got %q", sandbox.Spec.VolumeClaimTemplates[0].Name)
+	}
+	expectedStorage := resource.MustParse("1Gi")
+	actualStorage := sandbox.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests[corev1.ResourceStorage]
+	if !actualStorage.Equal(expectedStorage) {
+		t.Errorf("expected storage %s, got %s", expectedStorage.String(), actualStorage.String())
 	}
 }
 
@@ -2903,36 +2979,224 @@ func TestGetOrRecordObservedTime(t *testing.T) {
 }
 
 func TestSandboxClaimReconcileCleanup(t *testing.T) {
-	scheme := newScheme(t)
-
-	claim := &extensionsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "uid-1"},
+	newReconcilerFor := func(t *testing.T, objs ...client.Object) *SandboxClaimReconciler {
+		t.Helper()
+		scheme := newScheme(t)
+		fc := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objs...).
+			WithStatusSubresource(&extensionsv1alpha1.SandboxClaim{}).
+			Build()
+		return &SandboxClaimReconciler{
+			Client:           fc,
+			Scheme:           scheme,
+			WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+			Recorder:         events.NewFakeRecorder(10),
+			Tracer:           asmetrics.NewNoOp(),
+		}
 	}
 
-	// Create a fake client without the claim, so it returns NotFound
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	reconciler := &SandboxClaimReconciler{
-		Client: client,
-		Scheme: scheme,
+	makeReadyClaim := func(name string) *extensionsv1alpha1.SandboxClaim {
+		return &extensionsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				UID:       types.UID(name),
+				Annotations: map[string]string{
+					asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				},
+			},
+			Spec: extensionsv1alpha1.SandboxClaimSpec{
+				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+			},
+			Status: extensionsv1alpha1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: "Ready",
+				}},
+			},
+		}
 	}
 
-	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-	// Pre-populate map
-	reconciler.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: claim.UID})
+	ctrlBool := true
+	makeOwnedReadySandbox := func(cl *extensionsv1alpha1.SandboxClaim) *sandboxv1alpha1.Sandbox {
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cl.Name,
+				Namespace: cl.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					Kind:       "SandboxClaim",
+					Name:       cl.Name,
+					UID:        cl.UID,
+					Controller: &ctrlBool,
+				}},
+			},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: "Ready",
+				}},
+			},
+		}
+	}
 
-	req := reconcile.Request{
-		NamespacedName: key,
-	}
-	_, err := reconciler.Reconcile(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
+	reconcileAll := func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+		t.Helper()
+		for _, cl := range claims {
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cl.Name, Namespace: cl.Namespace}}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("Reconcile(%s): %v", cl.Name, err)
+			}
+		}
 	}
 
-	_, ok := reconciler.observedTimes.Load(key)
-	if ok {
-		t.Error("Entry should be deleted by Reconcile when object is not found")
+	testCases := []struct {
+		name        string
+		build       func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim)
+		action      func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim)
+		wantEntries int
+	}{
+		{
+			// Reconcile on a missing claim removes the observedTimes entry via the NotFound fallback.
+			name: "NotFound reconcile removes stale entry",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				cl := makeReadyClaim("stale-claim")
+				r := newReconcilerFor(t)
+				key := types.NamespacedName{Name: cl.Name, Namespace: cl.Namespace}
+				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now(), uid: cl.UID})
+				return r, []*extensionsv1alpha1.SandboxClaim{cl}
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+			// CreateFunc adds an entry; recordControllerStartupLatency removes it on the first
+			// Not-Ready → Ready transition detected by recordCreationLatencyMetric.
+			name: "new claim transitioning to Ready cleans its entry",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				cl := &extensionsv1alpha1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "new-claim", Namespace: "default", UID: "new-claim"},
+					Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+				}
+				r := newReconcilerFor(t, cl, makeOwnedReadySandbox(cl))
+				return r, []*extensionsv1alpha1.SandboxClaim{cl}
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				for _, cl := range claims {
+					pred.Create(event.CreateEvent{Object: cl})
+				}
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+			// Simulates a controller restart where the informer replays UpdateFunc for existing,
+			// already-Ready claims. The reconciler must correctly clean up the observed time entries.
+			name: "already-Ready claims are cleaned up after restart simulation",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				const n = 10
+				objs := make([]client.Object, 0, n*2)
+				claims := make([]*extensionsv1alpha1.SandboxClaim, n)
+				for i := range n {
+					cl := makeReadyClaim(fmt.Sprintf("ready-claim-%d", i))
+					claims[i] = cl
+					objs = append(objs, cl, makeOwnedReadySandbox(cl))
+				}
+				return newReconcilerFor(t, objs...), claims
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				for _, cl := range claims {
+					pred.Update(event.UpdateEvent{ObjectOld: cl, ObjectNew: cl})
+				}
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+
+			// Simulates an update for already ready claim.
+			// The reconciler must correctly clean up the observed time entries.
+			name: "post-Ready UpdateFunc re-creates entry that is then cleaned on next reconcile",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				cl := &extensionsv1alpha1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "post-ready-claim", Namespace: "default", UID: "post-ready"},
+					Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+				}
+				r := newReconcilerFor(t, cl, makeOwnedReadySandbox(cl))
+				return r, []*extensionsv1alpha1.SandboxClaim{cl}
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				// Step 1: CreateFunc → entry added
+				for _, cl := range claims {
+					pred.Create(event.CreateEvent{Object: cl})
+				}
+				// Step 2: First reconcile → Not-Ready → Ready transition → entry cleaned.
+				reconcileAll(t, r, claims)
+				// Step 3: Post-Ready UpdateFunc
+				for _, cl := range claims {
+					pred.Update(event.UpdateEvent{ObjectOld: cl, ObjectNew: cl})
+				}
+				// Step 4: Reconcile with old=Ready, new=Ready
+				reconcileAll(t, r, claims)
+			},
+			wantEntries: 0,
+		},
+		{
+			// DeleteFunc is the sole cleanup path for entries that accumulated after a restart.
+			// Firing it for each claim fully drains the map.
+			name: "DeleteFunc drains entries accumulated after restart simulation",
+			build: func(t *testing.T) (*SandboxClaimReconciler, []*extensionsv1alpha1.SandboxClaim) {
+				const n = 10
+				objs := make([]client.Object, 0, n*2)
+				claims := make([]*extensionsv1alpha1.SandboxClaim, n)
+				for i := range n {
+					cl := makeReadyClaim(fmt.Sprintf("rescue-claim-%d", i))
+					claims[i] = cl
+					objs = append(objs, cl, makeOwnedReadySandbox(cl))
+				}
+				return newReconcilerFor(t, objs...), claims
+			},
+			action: func(t *testing.T, r *SandboxClaimReconciler, claims []*extensionsv1alpha1.SandboxClaim) {
+				pred := r.getTimingPredicate()
+				for _, cl := range claims {
+					pred.Update(event.UpdateEvent{ObjectOld: cl, ObjectNew: cl})
+				}
+				reconcileAll(t, r, claims)
+				for _, cl := range claims {
+					pred.Delete(event.DeleteEvent{Object: cl})
+				}
+			},
+			wantEntries: 0,
+		},
 	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, claims := tc.build(t)
+
+			tc.action(t, r, claims)
+
+			gotEntries := countObservedTimesEntries(r)
+			if gotEntries != tc.wantEntries {
+				t.Errorf("observedTimes has %d entries, want %d", gotEntries, tc.wantEntries)
+			}
+		})
+	}
+}
+
+// countObservedTimesEntries returns the number of live entries in the observedTimes map.
+func countObservedTimesEntries(r *SandboxClaimReconciler) int {
+	count := 0
+	r.observedTimes.inner.Range(func(_, _ any) bool { count++; return true })
+	return count
 }
 
 // seedQueueForTest acts as a mock Informer, pre-loading the test queue with adoptable sandboxes.
@@ -2944,6 +3208,380 @@ func seedQueueForTest(q queue.SandboxQueue, objects []client.Object) {
 				key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
 				q.Add(hash, key)
 			}
+		}
+	}
+}
+
+func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
+	templateName := "test-template"
+	templateHash := sandboxcontrollers.NameHash(templateName)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "namespace-a",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	// 1. Valid Sandbox (Same Namespace)
+	validSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "valid-sandbox",
+			Namespace: "namespace-a",
+			Labels: map[string]string{
+				sandboxTemplateRefHash: templateHash,
+				warmPoolSandboxLabel:   "pool-hash-123",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "SandboxWarmPool",
+			}},
+		},
+	}
+
+	// 2. Invalid Sandbox (Different Namespace, but identical hash)
+	invalidSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "invalid-sandbox",
+			Namespace: "namespace-b",
+			Labels: map[string]string{
+				sandboxTemplateRefHash: templateHash,
+				warmPoolSandboxLabel:   "pool-hash-123",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "SandboxWarmPool",
+			}},
+		},
+	}
+
+	// Test Valid: Should return nil (no error)
+	if err := verifySandboxCandidate(validSandbox, claim); err != nil {
+		t.Errorf("Expected valid sandbox in the same namespace to be accepted, but got: %v", err)
+	}
+
+	// Test Invalid: Should return an error about cross-namespace adoption
+	err := verifySandboxCandidate(invalidSandbox, claim)
+	if err == nil {
+		t.Fatal("FATAL: Cross-namespace sandbox was successfully verified! The namespace check is missing.")
+	} else if !errors.Is(err, ErrCrossNamespaceAdoption) {
+		t.Errorf("Expected ErrCrossNamespaceAdoption, but got a different error: %v", err)
+	}
+}
+
+// TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag verifies that during informer cache lag,
+// the assigned sandbox label on the claim is used to identify the previously adopted Sandbox,
+// preventing duplicate adoptions from the warm pool.
+func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Labels: map[string]string{
+				"agents.x-k8s.io/sandbox-name": "adopted-sb",
+			},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	adoptedSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sb",
+			Namespace: "default",
+			UID:       "adopted-sb-uid",
+			Labels: map[string]string{
+				extensionsv1alpha1.SandboxIDLabel: "claim-uid-123",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						extensionsv1alpha1.SandboxIDLabel: "claim-uid-123",
+					},
+				},
+			},
+		},
+	}
+
+	// Another sandbox in the warm pool that we want to make sure doesn't get adopted
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	extraSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-sb-extra",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, adoptedSandbox, extraSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	if isAdoptable(extraSandbox) == nil {
+		hash := extraSandbox.Labels[sandboxTemplateRefHash]
+		key := queue.SandboxKey{Namespace: extraSandbox.Namespace, Name: extraSandbox.Name}
+		warmSandboxQueue.Add(hash, key)
+	}
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: warmSandboxQueue,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+
+	// Run reconcile
+	_, err := reconciler.Reconcile(context.Background(), req)
+	expectedErr := "triggered adoption completion for \"adopted-sb\": retrying"
+	if err == nil {
+		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
+	} else if err.Error() != expectedErr {
+		t.Errorf("Expected error %q, got: %q", expectedErr, err.Error())
+	}
+
+	// Verify that the claim status was NOT updated with the sandbox name (due to error)
+	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+
+	if updatedClaim.Status.SandboxStatus.Name == "adopted-sb" {
+		t.Error("expected claim status to NOT be updated with 'adopted-sb' during cache lag")
+	}
+
+	// Verify that the extra warm sandbox was NOT adopted (it should still have its warm pool labels)
+	var extra sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {
+		t.Fatalf("failed to get extra warm sandbox: %v", err)
+	}
+	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected extra warm sandbox to still have warm pool label, meaning it was not incorrectly adopted during cache lag")
+	}
+
+	// Simulate the cache catching up!
+	// Fetch the adopted sandbox object, add the SandboxClaim owner reference, and update it in fakeClient.
+	var adopted sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &adopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+	adopted.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+		Kind:       "SandboxClaim",
+		Name:       "test-claim",
+		UID:        "claim-uid-123",
+		Controller: ptr.To(true), // nolint:modernize
+	}}
+	if err := fakeClient.Update(context.Background(), &adopted); err != nil {
+		t.Fatalf("failed to update adopted sandbox with claim owner ref: %v", err)
+	}
+
+	// Run reconcile AGAIN
+	_, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected second Reconcile to succeed after cache caught up, but failed: %v", err)
+	}
+
+	// Verify that the claim status WAS updated this time!
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+		t.Errorf("expected claim status to be updated with 'adopted-sb' on 2nd pass, got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+
+	// Verify that the extra warm sandbox was STILL NOT adopted (it should still have its warm pool labels)
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {
+		t.Fatalf("failed to get extra warm sandbox: %v", err)
+	}
+	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
+	}
+}
+
+func TestSandboxClaimRecoveryWhenTemplateCreated(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "recovery-claim"
+	templateName := "recovery-template"
+
+	nonePolicy := extensionsv1alpha1.WarmPoolPolicyNone
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			UID:       "claim-uid",
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName},
+			WarmPool:    &nonePolicy,
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	// Step 1: Reconcile without template
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	// Should return no error but RequeueAfter because template is missing
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error when template is missing, but got %v", err)
+	}
+	if result.RequeueAfter != 1*time.Minute {
+		t.Errorf("expected RequeueAfter to be 1 minute, got %v", result.RequeueAfter)
+	}
+
+	// Verify status is set to TemplateNotFound
+	var updatedClaim extensionsv1alpha1.SandboxClaim
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+	cond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+	if cond == nil || cond.Reason != "TemplateNotFound" {
+		t.Errorf("expected status reason 'TemplateNotFound', got %v", cond)
+	}
+
+	// Step 2: Create template and reconcile again
+	if err := fakeClient.Create(context.Background(), template); err != nil {
+		t.Fatalf("failed to create template: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error when template exists, but got %v", err)
+	}
+
+	// Verify sandbox is created
+	var sandbox sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); err != nil {
+		t.Fatalf("expected sandbox to be created, but got error: %v", err)
+	}
+}
+
+func TestMapTemplateToClaims(t *testing.T) {
+	scheme := newScheme(t)
+	templateName := "test-template"
+
+	claim1 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName}},
+	}
+	claim2 := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-2", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName}},
+	}
+	claimOther := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-other", Namespace: "default"},
+		Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "other-template"}},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+	}
+
+	// We need to manually set up the indexer on the fake client's indexer if it supports it,
+	// or we can mock the List behavior. Fake client from controller-runtime does NOT use indexers by default
+	// unless configured with WithIndex.
+
+	// Let's use the WithIndex option on the fake client builder to support the matchingFields query!
+	fakeClientWithIndex := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim1, claim2, claimOther, template).
+		WithIndex(&extensionsv1alpha1.SandboxClaim{}, extensionsv1alpha1.TemplateRefField, func(obj client.Object) []string {
+			c := obj.(*extensionsv1alpha1.SandboxClaim)
+			if c.Spec.TemplateRef.Name == "" {
+				return nil
+			}
+			return []string{c.Spec.TemplateRef.Name}
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client: fakeClientWithIndex,
+		Scheme: scheme,
+	}
+
+	requests := reconciler.mapTemplateToClaims(context.Background(), template)
+
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	expectedNames := map[string]bool{"claim-1": true, "claim-2": true}
+	for _, req := range requests {
+		if !expectedNames[req.Name] {
+			t.Errorf("unexpected claim name in requests: %s", req.Name)
+		}
+		if req.Namespace != "default" {
+			t.Errorf("expected namespace 'default', got %s", req.Namespace)
 		}
 	}
 }

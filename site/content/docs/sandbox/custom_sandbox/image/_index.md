@@ -7,7 +7,7 @@ description: >
 ---
 ## Prerequisites
 
-- A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/overview" >}}) installed.
+- A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
 - A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
@@ -29,7 +29,3 @@ sandbox = client.create_sandbox("python-sandbox-template")
 sandbox.commands.run("pip install custom-package==1.0.0")
 response = sandbox.commands.run("python -c 'import custom_package; print(\"Success!\")'")
 ```
-
-### \[NOT FOR PUBLISHING\] 2. Use `kubernetes` Python SDK to create a new SandboxTemplate instance
-
-We can create a Python script that uses `kubernetes` SDK to deploy a custom template, or update an existing template with our custom Docker image.

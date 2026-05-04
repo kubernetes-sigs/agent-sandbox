@@ -108,6 +108,19 @@ var (
 		nil,
 	)
 
+	// AgentSandboxClaimsDesc describes the agent_sandbox_claims metric point-in-time counts.
+	// Labels:
+	// - namespace: the namespace of the claim
+	// - ready_condition: "true" | "false"
+	// - reason: condition reason (e.g., "ClaimExpired", "SandboxMissing")
+	// - sandbox_template: sandboxTemplateRef.
+	AgentSandboxClaimsDesc = prometheus.NewDesc(
+		"agent_sandbox_claims",
+		"Monitor the point-in-time number of sandbox claims in the cluster.",
+		[]string{"namespace", "ready_condition", "reason", "sandbox_template"},
+		nil,
+	)
+
 	buildVersionInfo = version.Get()
 
 	// BuildInfo exposes agent-sandbox-controller build metadata as a constant gauge.

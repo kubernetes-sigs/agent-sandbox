@@ -1,0 +1,5 @@
+# Sample CRs for OLM bundle (optional). Add *_example.yaml files and list them under resources.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources: []

@@ -51,14 +51,14 @@ func TestSandboxShutdownTime(t *testing.T) {
 				{
 					Type:               string(sandboxv1alpha1.SandboxConditionInitialized),
 					Status:             metav1.ConditionTrue,
-					ObservedGeneration: 2,
+					ObservedGeneration: 1,
 					Reason:             sandboxv1alpha1.SandboxReasonInitialized,
 					Message:            "Service and PVCs are provisioned",
 				},
 				{
 					Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
 					Status:             metav1.ConditionFalse,
-					ObservedGeneration: 2,
+					ObservedGeneration: 1,
 					Reason:             sandboxv1alpha1.SandboxReasonNotSuspended,
 					Message:            "Sandbox is operational and not suspended",
 				},
@@ -98,6 +98,20 @@ func TestSandboxShutdownTime(t *testing.T) {
 			ServiceFQDN: "",
 			Replicas:    0,
 			Conditions: []metav1.Condition{
+				{
+					Type:               string(sandboxv1alpha1.SandboxConditionInitialized),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1alpha1.SandboxReasonInitialized,
+					Message:            "Service and PVCs are provisioned",
+				},
+				{
+					Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1alpha1.SandboxReasonNotSuspended,
+					Message:            "Sandbox is operational and not suspended",
+				},
 				{
 					Type:               string(sandboxv1alpha1.SandboxConditionReady),
 					Status:             metav1.ConditionFalse,

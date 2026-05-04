@@ -1903,6 +1903,164 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxClaimWarmPoolAdoptionRetries(t *testing.T) {
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template",
+			Namespace: "default",
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test", Image: "test"}},
+				},
+			},
+		},
+	}
+
+	warmPoolUID := types.UID("warmpool-uid-123")
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	templateHash := sandboxcontrollers.NameHash("test-template")
+
+	createWarmPoolSandbox := func(name string) client.Object {
+		replicas := int32(1)
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					warmPoolSandboxLabel:   poolNameHash,
+					sandboxTemplateRefHash: templateHash,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+						Kind:       "SandboxWarmPool",
+						Name:       "test-pool",
+						UID:        warmPoolUID,
+						Controller: new(true),
+					},
+				},
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{
+				Replicas: &replicas,
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "test"}},
+					},
+				},
+			},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "DependenciesReady"},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name           string
+		maxRetries     int32
+		sandboxes      []client.Object
+		conflicts      int
+		expectAdoption bool
+	}{
+		{
+			name:           "exhausts retries with fewer candidates than retries",
+			maxRetries:     5,
+			sandboxes:      []client.Object{createWarmPoolSandbox("sb-1"), createWarmPoolSandbox("sb-2"), createWarmPoolSandbox("sb-3")},
+			conflicts:      3,
+			expectAdoption: false,
+		},
+		{
+			name:           "succeeds after conflicts with enough candidates",
+			maxRetries:     5,
+			sandboxes:      []client.Object{createWarmPoolSandbox("sb-1"), createWarmPoolSandbox("sb-2"), createWarmPoolSandbox("sb-3"), createWarmPoolSandbox("sb-4")},
+			conflicts:      3,
+			expectAdoption: true,
+		},
+		{
+			name:           "default retries (3) exhausted with only 2 candidates",
+			maxRetries:     0, // 0 = use default
+			sandboxes:      []client.Object{createWarmPoolSandbox("sb-1"), createWarmPoolSandbox("sb-2")},
+			conflicts:      2,
+			expectAdoption: false,
+		},
+		{
+			name:           "default retries (3) succeeds with 3 candidates",
+			maxRetries:     0, // 0 = use default
+			sandboxes:      []client.Object{createWarmPoolSandbox("sb-1"), createWarmPoolSandbox("sb-2"), createWarmPoolSandbox("sb-3")},
+			conflicts:      2,
+			expectAdoption: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var claim *extensionsv1alpha1.SandboxClaim
+			if tc.maxRetries > 0 {
+				retries := tc.maxRetries
+				claim = &extensionsv1alpha1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+					Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}, WarmPoolMaxRetries: &retries},
+				}
+			} else {
+				claim = &extensionsv1alpha1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+					Spec:       extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"}},
+				}
+			}
+
+			objects := []client.Object{template, claim}
+			objects = append(objects, tc.sandboxes...)
+
+			scheme := newScheme(t)
+			fakeClient := &conflictClient{
+				Client:       fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(claim).Build(),
+				maxConflicts: tc.conflicts,
+			}
+
+			warmSandboxQueue := queue.NewSimpleSandboxQueue()
+			for _, obj := range tc.sandboxes {
+				if sb, ok := obj.(*sandboxv1alpha1.Sandbox); ok {
+					warmSandboxQueue.Add(templateHash, queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name})
+				}
+			}
+
+			reconciler := &SandboxClaimReconciler{
+				Client:           fakeClient,
+				Scheme:           scheme,
+				WarmSandboxQueue: warmSandboxQueue,
+				Tracer:           asmetrics.NewNoOp(),
+			}
+
+			ctx := context.Background()
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}})
+			if err != nil {
+				t.Fatalf("reconcile failed: %v", err)
+			}
+
+			if tc.expectAdoption {
+				adopted := false
+				for _, sb := range tc.sandboxes {
+					sandbox := sb.(*sandboxv1alpha1.Sandbox)
+					var updated sandboxv1alpha1.Sandbox
+					if fakeClient.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: "default"}, &updated) == nil {
+						if metav1.IsControlledBy(&updated, claim) {
+							adopted = true
+							break
+						}
+					}
+				}
+				if !adopted {
+					t.Error("expected a sandbox to be adopted from warm pool")
+				}
+			}
+		})
+	}
+}
+
 func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 	q := queue.NewSimpleSandboxQueue()
 	handler := &sandboxEventHandler{sandboxQueue: q}

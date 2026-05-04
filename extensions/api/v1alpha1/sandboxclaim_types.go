@@ -144,6 +144,14 @@ type SandboxClaimSpec struct {
 	// +optional
 	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
+	// warmpoolMaxRetries is the number of retry attempts when adopting a sandbox
+	// from the warm pool fails due to conflicts or not-found errors.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +kubebuilder:default=3
+	// +optional
+	WarmPoolMaxRetries *int32 `json:"warmpoolMaxRetries,omitempty"`
+
 	// env is a list of environment variables to inject into the sandbox
 	// +listType=atomic
 	// +optional

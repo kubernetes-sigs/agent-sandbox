@@ -17,3 +17,4 @@ spec:
   # - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
   # If not specified, defaults to "default"
   # warmpool: "default"
+  # warmPoolMaxRetries: 3   # Maximum retry attempts for warm pool adoption (default: 3, range: 1-10)

@@ -1,0 +1,10 @@
+title: Establish gRPC and Protobuf Contract for Agent Sandbox Runtime
+kep-number: 539
+authors:
+  - "@SHRUTI6991"
+status: implementable
+creation-date: 2026-04-30
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

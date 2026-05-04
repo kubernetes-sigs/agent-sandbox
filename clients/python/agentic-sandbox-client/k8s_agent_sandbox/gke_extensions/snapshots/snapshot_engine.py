@@ -21,7 +21,8 @@ from kubernetes.client import ApiException
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from k8s_agent_sandbox.constants import (
-    PODSNAPSHOT_POD_NAME_LABEL,
+    SANDBOX_NAME_HASH_LABEL,
+    PODSNAPSHOT_POD_NAME_ANNOTATION,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
@@ -90,10 +91,12 @@ class SnapshotEngine:
         namespace: str,
         k8s_helper,
         get_pod_name_func: Callable[[], str],
+        get_sandbox_name_hash_func: Callable[[], str | None],
     ):
         self.namespace = namespace
         self.k8s_helper = k8s_helper
         self.get_pod_name_func = get_pod_name_func
+        self.get_sandbox_name_hash_func = get_sandbox_name_hash_func
         self.created_manual_triggers = []
 
     def create(
@@ -292,7 +295,17 @@ class SnapshotEngine:
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-        selectors.append(f"{PODSNAPSHOT_POD_NAME_LABEL}={pod_name}")
+        sandbox_name_hash = self.get_sandbox_name_hash_func()
+        if not sandbox_name_hash:
+            logger.warning(f"Sandbox name hash not found for pod {pod_name}.")
+            return ListSnapshotResult(
+                success=False,
+                snapshots=[],
+                error_reason="Sandbox name hash not found.",
+                error_code=SNAPSHOT_ERROR_CODE,
+            )
+        
+        selectors.append(f"{SANDBOX_NAME_HASH_LABEL}={sandbox_name_hash}")
 
         label_selector = ",".join(selectors)
 
@@ -326,8 +339,8 @@ class SnapshotEngine:
                     valid_snapshots.append(
                         SnapshotDetail(
                             snapshot_uid=metadata.get("name"),
-                            source_pod=metadata.get("labels", {}).get(
-                                PODSNAPSHOT_POD_NAME_LABEL, "Unknown"
+                            source_pod=metadata.get("annotations", {}).get(
+                                PODSNAPSHOT_POD_NAME_ANNOTATION, "Unknown"
                             ),
                             creation_timestamp=metadata.get("creationTimestamp"),
                             status="Ready" if is_ready else "NotReady",

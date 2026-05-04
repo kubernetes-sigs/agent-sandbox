@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.19.0
+    controller-gen.kubebuilder.io/version: v0.20.1
   name: sandboxwarmpools.extensions.agents.x-k8s.io
 spec:
   group: extensions.agents.x-k8s.io
@@ -20,36 +20,68 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.availableReplicas
+      name: Available
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: SandboxWarmPool is the Schema for the sandboxwarmpools API.
         properties:
           apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
             type: object
           spec:
+            description: spec defines the desired state of SandboxWarmPool
             properties:
               replicas:
+                description: |-
+                  replicas is the desired number of sandboxes in the pool.
+                  This field is controlled by an HPA if specified.
                 format: int32
                 minimum: 0
                 type: integer
               sandboxTemplateRef:
+                description: |-
+                  sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
+                  Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
                 properties:
                   name:
+                    description: name of the SandboxTemplate
                     type: string
                 required:
                 - name
                 type: object
               updateStrategy:
+                description: updateStrategy - strategy for updating the SandboxWarmPool
+                  pods based on sandboxTemplateRef name change or underlying template
+                  changes
                 properties:
                   type:
                     default: OnReplenish
+                    description: |-
+                      type indicates the type of the SandboxWarmPoolUpdateStrategy.
+                      Default is OnReplenish.
                     enum:
                     - Recreate
                     - OnReplenish
@@ -60,14 +92,25 @@ spec:
             - sandboxTemplateRef
             type: object
           status:
+            description: status defines the observed state of SandboxWarmPool
             properties:
+              availableReplicas:
+                description: availableReplicas is the number of sandboxes available
+                  for use.
+                format: int32
+                type: integer
               readyReplicas:
+                description: readyReplicas is the total number of sandboxes in the
+                  pool that are in a ready state.
                 format: int32
                 type: integer
               replicas:
+                description: replicas is the total number of sandboxes in the pool.
                 format: int32
                 type: integer
               selector:
+                description: selector is the label selector used to find the pods
+                  in the pool.
                 type: string
             type: object
         required:

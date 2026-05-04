@@ -286,6 +286,48 @@ async def main():
 asyncio.run(main())
 ```
 
+## Metrics
+
+The client exposes a Prometheus metric to track the latency of establishing connections to sandboxes:
+- `sandbox_client_discovery_latency_ms`: A Histogram tracking latency in milliseconds, with labels `mode` (e.g., `port_forward`, `gateway`) and `status` (`success` or `failure`).
+
+### Usage Example
+
+```python
+from prometheus_client import start_http_server
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig
+
+# Start a Prometheus metrics server
+start_http_server(8000)
+
+client = SandboxClient(
+    connection_config=SandboxLocalTunnelConnectionConfig()
+)
+# ... use client as usual ...
+```
+
+### Multi-process Usage
+
+When using the client in a multi-process environment (e.g., with Gunicorn or multiprocessing), you must configure the `prometheus_client` to use a shared directory for metrics.
+
+Refer to the [Prometheus Python Client documentation on Multiprocess Mode](https://github.com/prometheus/client_python#multiprocess-mode-eg-gunicorn) for details.
+
+Example:
+```python
+import os
+from prometheus_client import CollectorRegistry, generate_latest
+from prometheus_client.multiprocess import MultiProcessCollector
+
+# Ensure PROMETHEUS_MULTIPROC_DIR is set in environment
+# os.environ['PROMETHEUS_MULTIPROC_DIR'] = '/path/to/shared/dir'
+
+registry = CollectorRegistry()
+MultiProcessCollector(registry)
+metrics_data = generate_latest(registry)
+```
+```
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

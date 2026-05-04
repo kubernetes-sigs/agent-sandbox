@@ -16,8 +16,9 @@ How it works:
 The policy intercepts RoleBinding and ClusterRoleBinding create and update
 requests. If the request targets a ServiceAccount referenced by a
 Sandbox-owned Pod, or a Group subject that would include that ServiceAccount
-(`system:serviceaccounts` or `system:serviceaccounts:<namespace>`), the request
-is denied.
+(`system:serviceaccounts` or `system:serviceaccounts:<namespace>`), or a User
+subject that encodes a ServiceAccount identity
+(`system:serviceaccount:<namespace>:<name>`), the request is denied.
 
 Performance note:
 For `system:serviceaccounts` (cluster-wide) Group subjects, the policy may need
@@ -105,13 +106,15 @@ kubectl apply -f .chainsaw-tests/bad-rolebinding.yaml
 
 The same deny behavior also applies if you bind one of the built-in
 ServiceAccount groups that would include the active Sandbox ServiceAccount, such
-as `system:serviceaccounts:sandbox-ns` or cluster-wide `system:serviceaccounts`.
+as `system:serviceaccounts:sandbox-ns` or cluster-wide `system:serviceaccounts`,
+or if you use the equivalent User form
+`system:serviceaccount:sandbox-ns:sandbox-sa`.
 
 ### C. Check expected outcome 
 
 The request should be denied by admission.
 ```
-Error from server: error when creating "examples/policy/kyverno/.chainsaw-tests/bad-rolebinding.yaml": admission webhook "vpol.validate.kyverno.svc-fail" denied the request: Policy prevent-sandbox-sa-binding failed: Binding denied: one or more subjects reference a ServiceAccount or ServiceAccount group that is actively used by a Sandbox-owned Pod. ServiceAccounts in use by Pods controlled by a Sandbox CR (agents.x-k8s.io) must not be granted additional RBAC bindings to prevent privilege escalation in sandboxed environments.
+Error from server: error when creating "examples/policy/kyverno/.chainsaw-tests/bad-rolebinding.yaml": admission webhook "vpol.validate.kyverno.svc-fail" denied the request: Policy prevent-sandbox-sa-binding failed: Binding denied: one or more subjects reference a ServiceAccount or equivalent ServiceAccount identity (group/user form) that is actively used by a Sandbox-owned Pod. ServiceAccounts in use by Pods controlled by a Sandbox CR (agents.x-k8s.io) must not be granted additional RBAC bindings to prevent privilege escalation in sandboxed environments.
 ```
 
 ### Scenario 2: Binding to an unused ServiceAccount (should be allowed)
@@ -133,12 +136,14 @@ kubectl apply -f .chainsaw-tests/bad-rolebinding.yaml
 
 Expected: RoleBinding is created after Sandbox ownership is removed.
 
-### Scenario 4: ServiceAccount Group subject covering an active Sandbox ServiceAccount (should be denied)
+### Scenario 4: ServiceAccount Group/User subject covering an active Sandbox ServiceAccount (should be denied)
 
 If a RoleBinding or ClusterRoleBinding uses a Group subject like
 `system:serviceaccounts:sandbox-ns` or `system:serviceaccounts`, the request is
 also denied whenever that group would include a ServiceAccount currently used by
-a Sandbox-owned Pod.
+a Sandbox-owned Pod. The same applies to the User form
+`system:serviceaccount:<namespace>:<name>` when it maps to an active Sandbox
+ServiceAccount.
 
 ---
 
@@ -157,7 +162,7 @@ The test file is:
 Step mapping in the test:
 
 - step-01: apply RBAC + policy and assert readiness
-- step-02: assert deny for active Sandbox ServiceAccount and matching ServiceAccount groups
+- step-02: assert deny for active Sandbox ServiceAccount and matching ServiceAccount group/user identities
 - step-03: assert allow for unused ServiceAccount and a binding with no subjects
 - step-04: remove Sandbox owner, create bare Pod, then allow binding
 

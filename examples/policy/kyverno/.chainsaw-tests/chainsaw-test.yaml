@@ -66,6 +66,12 @@ spec:
         - check:
             ($error != null): true
             (contains($error, 'prevent-sandbox-sa-binding')): true
+    - apply:
+        file: bad-rolebinding-sa-user.yaml
+        expect:
+        - check:
+            ($error != null): true
+            (contains($error, 'prevent-sandbox-sa-binding')): true
   - name: step-03
     try:
     - apply:
@@ -77,7 +83,7 @@ spec:
   - name: step-04
     try:
     - script:
-        timeout: 30s
+        timeout: 60s
         content: |
           kubectl delete --force --grace-period=0 -f setup-sandbox.yaml --ignore-not-found=true
           kubectl delete --force --grace-period=0 pod --all -n sandbox-ns --ignore-not-found=true

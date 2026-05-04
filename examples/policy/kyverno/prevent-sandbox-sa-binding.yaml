@@ -64,10 +64,21 @@ spec:
               )
             )
           )
+        ) ||
+        (
+          subject.kind == 'User' &&
+          subject.name.startsWith('system:serviceaccount:') &&
+          resource.List('v1', 'pods', '').items.orValue([]).exists(pod,
+            subject.name == 'system:serviceaccount:' + pod.metadata.?namespace.orValue('') + ':' + pod.spec.?serviceAccountName.orValue('') &&
+            pod.metadata.?ownerReferences.orValue([]).exists(owner,
+              owner.kind == 'Sandbox' &&
+              owner.apiVersion.startsWith('agents.x-k8s.io/')
+            )
+          )
         )
       )
     messageExpression: '''Binding denied: one or more subjects reference a ServiceAccount
-      or ServiceAccount group that is actively used by a Sandbox-owned Pod.
-      ServiceAccounts in use by Pods controlled by a Sandbox CR (agents.x-k8s.io)
-      must not be granted additional RBAC bindings to prevent privilege escalation
-      in sandboxed environments.'''
+      or equivalent ServiceAccount identity (group/user form) that is actively
+      used by a Sandbox-owned Pod. ServiceAccounts in use by Pods controlled by
+      a Sandbox CR (agents.x-k8s.io) must not be granted additional RBAC
+      bindings to prevent privilege escalation in sandboxed environments.'''

@@ -6,13 +6,13 @@
     - [1. <code>Initialized</code>](#1-initialized)
     - [2. <code>Suspended</code>](#2-suspended)
     - [3. <code>Ready</code> (Root Condition)](#3-ready-root-condition)
-    - [Why &quot;Initialized&quot; matters](#why-initialized-matters)
-    - [Terminal States: Expired &amp; Terminating](#terminal-states-expired--terminating)
+    - [Why "Initialized" matters](#why-initialized-matters)
+    - [Terminal States: Expired & Terminating](#terminal-states-expired--terminating)
 - [Usage Examples](#usage-examples)
 - [Consumer Compatibility](#consumer-compatibility)
 - [Alternatives Considered](#alternatives-considered)
     - [1. Retaining the Legacy <code>status.phase</code> Field](#1-retaining-the-legacy-statusphase-field)
-    - [2. Utilizing a Single &quot;Ready&quot; Condition](#2-utilizing-a-single-ready-condition)
+    - [2. Utilizing a Single "Ready" Condition](#2-utilizing-a-single-ready-condition)
 <!-- /toc -->
 
 Currently, `Sandbox.Status` relies primarily on a single `Ready` condition.
@@ -21,7 +21,7 @@ Currently, `Sandbox.Status` relies primarily on a single `Ready` condition.
 
 * When the Sandbox is not ready to take traffic, `Ready` is set to False.
 
-* When the Sandbox is Suspended (replicas set to 0), the underlying Pod is deleted. In this state, the `Ready` condition typically defaults to `False` or becomes stale. There is no explicit machine-readable field to distinguish between a "Suspended" state (intended) and "Pod not ready" (unintended) during first time initialization for example.
+* When the Sandbox is Suspended (replicas set to 0), the underlying Pod is deleted. In this state, the `Ready` condition typically defaults to `False` or becomes stale. There is no explicit machine-readable field to distinguish between a "Suspended" state (intended) and "Pod not present" (unintended) during first time apply for example.
 
 To align with Kubernetes API standards and address the previous limitations of using `phase` for Sandbox as discussed in https://github.com/kubernetes-sigs/agent-sandbox/pull/121, this proposal uses a `status.conditions` model instead of adding the deprecated `status.phase` field. This model establishes three conditions: `Initialized`, `Ready` and `Suspended`.
 

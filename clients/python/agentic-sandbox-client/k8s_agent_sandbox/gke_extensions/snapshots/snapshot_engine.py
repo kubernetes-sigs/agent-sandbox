@@ -81,7 +81,8 @@ class SnapshotFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ready_only: bool = True
-    grouping_labels: dict[str, str] | None = None
+    created_after: datetime | None = None
+    created_before: datetime | None = None
 
 
 class SnapshotEngine:
@@ -264,10 +265,10 @@ class SnapshotEngine:
         self, filter_by: SnapshotFilter | dict | None = None
     ) -> ListSnapshotResult:
         """
-        Checks for existing snapshots matching the grouping labels associated with the sandbox
+        Checks for existing snapshots associated with the sandbox.
         Returns a ListSnapshotResult containing valid snapshots sorted by creation timestamp (newest first).
 
-        filter_by: Structure containing filters (status and grouping_labels).
+        filter_by: Structure containing filters (ready_only, created_after, created_before).
         """
         if filter_by is None:
             filter_by = SnapshotFilter()
@@ -308,10 +309,6 @@ class SnapshotEngine:
         
         selectors.append(f"{SANDBOX_NAME_HASH_LABEL}={sandbox_name_hash}")
 
-        if filter_by.grouping_labels:
-            for k, v in filter_by.grouping_labels.items():
-                selectors.append(f"{k}={v}")
-
         label_selector = ",".join(selectors)
 
         logger.info(f"Listing snapshots with label selector: {label_selector}")
@@ -338,6 +335,21 @@ class SnapshotEngine:
                         break
                 # Skip if only ready snapshots are requested
                 if filter_by.ready_only and not is_ready:
+                    continue
+
+                # Filter by creation timestamp if requested
+                creation_time_str = metadata.get("creationTimestamp")
+                if creation_time_str:
+                    try:
+                        creation_time = datetime.fromisoformat(creation_time_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        creation_time = None
+                else:
+                    creation_time = None
+
+                if filter_by.created_after and (not creation_time or creation_time < filter_by.created_after):
+                    continue
+                if filter_by.created_before and (not creation_time or creation_time > filter_by.created_before):
                     continue
 
                 try:
@@ -398,7 +410,8 @@ class SnapshotEngine:
         self,
         snapshot_uid: str | None = None,
         scope: str | None = None,
-        labels: dict | None = None,
+        created_after: datetime | str | None = None,
+        created_before: datetime | str | None = None,
         timeout: int = 180,
     ) -> DeleteSnapshotResult:
         """Helper method to execute deletion of snapshots."""
@@ -408,19 +421,12 @@ class SnapshotEngine:
             snapshots_to_delete.append(snapshot_uid)
         elif scope == "global":
             logger.info("Deleting ALL snapshots for this pod.")
-            snapshots_result = self.list(filter_by={"ready_only": False})
-            if not snapshots_result.success:
-                return DeleteSnapshotResult(
-                    success=False,
-                    deleted_snapshots=[],
-                    error_reason=f"Failed to list snapshots before deletion: {snapshots_result.error_reason}",
-                    error_code=SNAPSHOT_ERROR_CODE,
-                )
-            snapshots_to_delete = [s.snapshot_uid for s in snapshots_result.snapshots]
-        elif labels:
-            logger.info(f"Deleting snapshots matching labels: {labels}")
             snapshots_result = self.list(
-                filter_by={"grouping_labels": labels, "ready_only": False}
+                filter_by={
+                    "ready_only": False,
+                    "created_after": created_after,
+                    "created_before": created_before,
+                }
             )
             if not snapshots_result.success:
                 return DeleteSnapshotResult(
@@ -518,29 +524,15 @@ class SnapshotEngine:
 
     def delete_all(
         self,
-        delete_by: Literal["all", "labels"] = "all",
-        label_value: dict[str, str] | None = None,
+        created_after: datetime | str | None = None,
+        created_before: datetime | str | None = None,
         timeout: int = 180,
     ) -> DeleteSnapshotResult:
-        """Deletes snapshots based on a specific strategy.
-
-        Args:
-            delete_by: The criteria to use ('all', 'labels').
-            label_value: The value associated with the criteria (e.g., a dict
-              for labels).
-        """
-        match delete_by:
-            case "all":
-                logger.info("Deleting every snapshot for this pod...")
-                return self._execute_deletion(scope="global", timeout=timeout)
-
-            case "labels":
-                if not isinstance(label_value, dict):
-                    raise ValueError(
-                        "label_value must be a dict when deleting by labels"
-                    )
-                logger.info(f"Deleting snapshots matching labels: {label_value}")
-                return self._execute_deletion(labels=label_value, timeout=timeout)
-
-            case _:
-                raise ValueError(f"Unsupported deletion strategy: {delete_by}")
+        """Deletes all snapshots for this pod within an optional time range."""
+        logger.info("Deleting every snapshot for this pod...")
+        return self._execute_deletion(
+            scope="global",
+            created_after=created_after,
+            created_before=created_before,
+            timeout=timeout,
+        )

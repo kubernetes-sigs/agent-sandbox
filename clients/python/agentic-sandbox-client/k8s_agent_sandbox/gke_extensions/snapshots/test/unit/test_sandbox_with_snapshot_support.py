@@ -327,7 +327,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
 
         self.assertTrue(result.success, result.error_reason)
         self.assertEqual(result.error_code, SUCCESS_CODE)
@@ -337,7 +337,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
     def test_is_restored_from_snapshot_empty_uid(self):
         """Test is_restored_from_snapshot with empty UID."""
-        result = self.sandbox.is_restored_from_snapshot("")
+        result = self.sandbox._is_restored_from_snapshot("")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Snapshot UID cannot be empty", result.error_reason)
@@ -354,7 +354,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
@@ -366,7 +366,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_no_pod_name(self):
         """Test is_restored_from_snapshot when pod name is missing."""
         self.sandbox.get_pod_name.return_value = None
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Pod name not found", result.error_reason)
@@ -377,7 +377,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         mock_pod.status = None
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Pod status or conditions not found", result.error_reason)
@@ -388,7 +388,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         mock_pod.status.conditions = None
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Pod status or conditions not found", result.error_reason)
@@ -404,7 +404,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("not restored from the given snapshot", result.error_reason)
@@ -419,7 +419,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("started as a fresh instance", result.error_reason)
@@ -430,7 +430,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             status=500, reason="Internal Server Error"
         )
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Failed to check pod restore status", result.error_reason)
@@ -447,7 +447,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             "Deserialization error"
         )
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Unexpected error", result.error_reason)
@@ -490,9 +490,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             mock_response
         )
 
-        result = self.engine.list(
-            filter_by={"grouping_labels": {"test-label": "test-value"}}
-        )
+        result = self.engine.list()
 
         self.assertTrue(result.success)
         self.assertEqual(len(result.snapshots), 2)
@@ -506,7 +504,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector=f"{SANDBOX_NAME_HASH_LABEL}=test-hash,test-label=test-value",
+            label_selector=f"{SANDBOX_NAME_HASH_LABEL}=test-hash",
         )
 
     def test_snapshots_list_filter_empty(self):
@@ -541,6 +539,60 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         # Sorted by creationTimestamp descending
         self.assertEqual(result.snapshots[0].snapshot_uid, "not-ready-snap")
         self.assertEqual(result.snapshots[1].snapshot_uid, "ready-snap")
+
+    def test_snapshots_list_filter_by_timestamp(self):
+        """Test list snapshots filtering by created_after and created_before."""
+        mock_response = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "snap-old",
+                        "creationTimestamp": "2023-01-01T12:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+                {
+                    "metadata": {
+                        "name": "snap-mid",
+                        "creationTimestamp": "2023-01-02T12:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+                {
+                    "metadata": {
+                        "name": "snap-new",
+                        "creationTimestamp": "2023-01-03T12:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+            ]
+        }
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = (
+            mock_response
+        )
+
+        # Filter created_after "2023-01-02T00:00:00Z"
+        result = self.engine.list(filter_by={"created_after": "2023-01-02T00:00:00Z"})
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 2)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-new")
+        self.assertEqual(result.snapshots[1].snapshot_uid, "snap-mid")
+
+        # Filter created_before "2023-01-02T23:59:59Z"
+        result = self.engine.list(filter_by={"created_before": "2023-01-02T23:59:59Z"})
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 2)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-mid")
+        self.assertEqual(result.snapshots[1].snapshot_uid, "snap-old")
+
+        # Filter between both
+        result = self.engine.list(filter_by={
+            "created_after": "2023-01-02T00:00:00Z",
+            "created_before": "2023-01-02T23:59:59Z",
+        })
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 1)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-mid")
 
     def test_snapshots_list_filter_incorrect_arguments(self):
         """Test list snapshots with a incorrect arguments for filter_by."""
@@ -687,15 +739,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             timeout=180,
         )
 
-    def test_snapshots_delete_all_invalid_strategy(self):
-        """Test delete_all raises ValueError for unsupported strategy."""
-        with self.assertRaises(ValueError) as context:
-            self.engine.delete_all(delete_by="invalid-strategy")
-        self.assertIn(
-            "Unsupported deletion strategy: invalid-strategy",
-            str(context.exception),
-        )
-
     @patch(
         "k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine.wait_for_snapshot_deletion"
     )
@@ -720,14 +763,12 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 {}
             )
 
-            result = self.engine.delete_all(
-                delete_by="labels", label_value={"foo": "bar"}
-            )
+            result = self.engine.delete_all()
 
             self.assertTrue(result.success)
             self.assertEqual(result.deleted_snapshots, ["snap-a"])
             mock_list.assert_called_once_with(
-                filter_by={"grouping_labels": {"foo": "bar"}, "ready_only": False}
+                filter_by={"ready_only": False, "created_after": None, "created_before": None}
             )
             self.mock_k8s_helper.custom_objects_api.delete_namespaced_custom_object.assert_called_once_with(
                 group=PODSNAPSHOT_API_GROUP,
@@ -887,10 +928,10 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_code=0,
             )
             self.engine.delete_all()
-            mock_execute.assert_called_once_with(scope="global", timeout=180)
+            mock_execute.assert_called_once_with(scope="global", created_after=None, created_before=None, timeout=180)
 
-    def test_snapshots_delete_all_by_labels(self):
-        """Test delete_all calls _execute_deletion with labels."""
+    def test_snapshots_delete_all_by_timestamp(self):
+        """Test delete_all passes created_after and created_before down to _execute_deletion."""
         with patch.object(self.engine, "_execute_deletion") as mock_execute:
             mock_execute.return_value = DeleteSnapshotResult(
                 success=True,
@@ -898,8 +939,15 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_reason="",
                 error_code=0,
             )
-            self.engine.delete_all(delete_by="labels", label_value={"foo": "bar"})
-            mock_execute.assert_called_once_with(labels={"foo": "bar"}, timeout=180)
+            self.engine.delete_all(created_after="2023-01-01T00:00:00Z", created_before="2023-01-02T00:00:00Z")
+            mock_execute.assert_called_once_with(
+                scope="global",
+                created_after="2023-01-01T00:00:00Z",
+                created_before="2023-01-02T00:00:00Z",
+                timeout=180,
+            )
+
+
 
     def test_snapshots_delete_empty_fails(self):
         """Test delete raises TypeError if snapshot_uid is missing."""

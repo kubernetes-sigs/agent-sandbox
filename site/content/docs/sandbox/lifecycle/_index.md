@@ -73,7 +73,9 @@ When creating a new sandbox via the `k8s_agent_sandbox` SDK, you can customize i
 
 The following example demonstrates how to pass these parameters. Notice how the SDK handles the cluster cleanup policy for you:
 
-```python
+
+{{< blocks/tabs name="hello-world" >}}
+  {{< blocks/tab name="Python" codelang="python" >}}
 import time
 from k8s_agent_sandbox import SandboxClient
 
@@ -111,4 +113,171 @@ def verify_sandbox_lifecycle():
 
 if __name__ == "__main__":
     verify_sandbox_lifecycle()
-```
+  {{< /blocks/tab >}}
+  {{< blocks/tab name="Go" codelang="go" >}}
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
+
+// --- SandboxClient ---
+
+type SandboxClient struct {
+	http    *http.Client
+	baseURL string
+}
+
+func NewSandboxClient() *SandboxClient {
+	return &SandboxClient{http: &http.Client{}, baseURL: sandboxAPIBase}
+}
+
+// CreateSandboxOptions mirrors the keyword arguments on client.create_sandbox().
+type CreateSandboxOptions struct {
+	SandboxReadyTimeout  int // seconds to wait for sandbox to become ready
+	ShutdownAfterSeconds int // TTL before the cluster auto-deletes the sandbox
+}
+
+func (c *SandboxClient) CreateSandbox(template string, opts CreateSandboxOptions) (*Sandbox, error) {
+	payload := map[string]any{
+		"template":               template,
+		"sandbox_ready_timeout":  opts.SandboxReadyTimeout,
+		"shutdown_after_seconds": opts.ShutdownAfterSeconds,
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := c.http.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create sandbox: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &Sandbox{ID: result.ID, client: c}, nil
+}
+
+// --- Sandbox ---
+
+type Sandbox struct {
+	ID     string
+	client *SandboxClient
+}
+
+func (s *Sandbox) Commands() *CommandService { return &CommandService{sandbox: s} }
+
+func (s *Sandbox) Terminate() error {
+	url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	resp, err := s.client.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("terminate: %w", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return nil
+}
+
+// --- CommandService ---
+
+type CommandService struct{ sandbox *Sandbox }
+
+type CommandResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+func (r CommandResult) String() string {
+	return fmt.Sprintf("CommandResult{ExitCode: %d, Stdout: %q}", r.ExitCode, r.Stdout)
+}
+
+// ErrSandboxExpired is returned when a command is run on a sandbox that has been
+// auto-deleted by the cluster's shutdown policy — mirrors the Python exception.
+var ErrSandboxExpired = errors.New("sandbox no longer accessible: shutdown policy triggered")
+
+func (c *CommandService) Run(cmd string) (CommandResult, error) {
+	body, _ := json.Marshal(map[string]string{"command": cmd})
+	url := fmt.Sprintf("%s/sandboxes/%s/commands", c.sandbox.client.baseURL, c.sandbox.ID)
+	resp, err := c.sandbox.client.http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		// Network-level failure after TTL expiry — the pod is gone.
+		return CommandResult{}, fmt.Errorf("%w: %w", ErrSandboxExpired, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return CommandResult{}, ErrSandboxExpired
+	}
+
+	var result struct {
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return CommandResult{}, fmt.Errorf("decode response: %w", err)
+	}
+	return CommandResult{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}, nil
+}
+
+// --- verify lifecycle ---
+
+func verifySandboxLifecycle() {
+	client := NewSandboxClient()
+	ttl := 5 * time.Second
+
+	fmt.Printf("Creating sandbox with a %s TTL...\n", ttl)
+
+	// 1. Verify creation and sandbox_ready_timeout
+	sandbox, err := client.CreateSandbox("simple-sandbox-template", CreateSandboxOptions{
+		SandboxReadyTimeout:  15,
+		ShutdownAfterSeconds: int(ttl.Seconds()),
+	})
+	if err != nil {
+		panic(fmt.Sprintf("failed to create sandbox: %v", err))
+	}
+
+	fmt.Println("Sandbox created successfully! Running initial command...")
+	response, err := sandbox.Commands().Run("echo 'Sandbox is alive!'")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Output: %s\n\n", response)
+
+	// 2. Verify shutdown_after_seconds (auto-deletion)
+	waitTime := ttl + 3*time.Second // buffer for Kubernetes controller sync
+	fmt.Printf("Waiting %s for the cluster to auto-delete the sandbox...\n", waitTime)
+	time.Sleep(waitTime)
+
+	fmt.Println("Attempting to run a command on the expired sandbox...")
+	_, err = sandbox.Commands().Run("echo 'Is anyone there?'")
+	if err != nil {
+		if errors.Is(err, ErrSandboxExpired) {
+			fmt.Println("✅ SUCCESS: Sandbox is no longer accessible! The cluster cleaned it up.")
+		} else {
+			fmt.Println("✅ SUCCESS: Sandbox is no longer accessible! The cluster cleaned it up.")
+		}
+		fmt.Printf("   Error received: %v\n", err)
+	} else {
+		fmt.Println("❌ FAILED: Sandbox is still alive! The shutdown policy did not trigger.")
+	}
+}
+
+func main() {
+	verifySandboxLifecycle()
+}
+  {{< /blocks/tab >}}
+{{< /blocks/tabs >}}
+

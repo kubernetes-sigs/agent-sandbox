@@ -63,7 +63,7 @@ class SandboxWithSnapshotSupport(Sandbox):
     def is_active(self) -> bool:
         return super().is_active and self._snapshots is not None
     
-    def is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult:
+    def _is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult:
         """
         Checks if this sandbox was restored from the provided snapshot.
 
@@ -272,7 +272,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                     error_code=SUCCESS_CODE
                 )
 
-            restore_check = self.is_restored_from_snapshot(latest_snapshot_uid)
+            restore_check = self._is_restored_from_snapshot(latest_snapshot_uid)
             if restore_check.success:
                 logger.info(f"Sandbox '{self.sandbox_id}' successfully restored from snapshot '{latest_snapshot_uid}'.")
                 return ResumeResponse(

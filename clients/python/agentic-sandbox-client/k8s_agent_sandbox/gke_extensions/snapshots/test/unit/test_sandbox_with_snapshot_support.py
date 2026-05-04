@@ -327,7 +327,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
 
         self.assertTrue(result.success, result.error_reason)
         self.assertEqual(result.error_code, SUCCESS_CODE)
@@ -337,7 +337,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
     def test_is_restored_from_snapshot_empty_uid(self):
         """Test is_restored_from_snapshot with empty UID."""
-        result = self.sandbox.is_restored_from_snapshot("")
+        result = self.sandbox._is_restored_from_snapshot("")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Snapshot UID cannot be empty", result.error_reason)
@@ -354,7 +354,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
@@ -366,7 +366,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_is_restored_from_snapshot_no_pod_name(self):
         """Test is_restored_from_snapshot when pod name is missing."""
         self.sandbox.get_pod_name.return_value = None
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Pod name not found", result.error_reason)
@@ -377,7 +377,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         mock_pod.status = None
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Pod status or conditions not found", result.error_reason)
@@ -388,7 +388,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         mock_pod.status.conditions = None
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Pod status or conditions not found", result.error_reason)
@@ -404,7 +404,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("not restored from the given snapshot", result.error_reason)
@@ -419,7 +419,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
         self.mock_k8s_helper.core_v1_api.read_namespaced_pod.return_value = mock_pod
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("started as a fresh instance", result.error_reason)
@@ -430,7 +430,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             status=500, reason="Internal Server Error"
         )
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Failed to check pod restore status", result.error_reason)
@@ -447,7 +447,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             "Deserialization error"
         )
 
-        result = self.sandbox.is_restored_from_snapshot("test-uid")
+        result = self.sandbox._is_restored_from_snapshot("test-uid")
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, ERROR_CODE)
         self.assertIn("Unexpected error", result.error_reason)
@@ -504,7 +504,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector=f"{SANDBOX_NAME_HASH_LABEL}=test-hash,test-label=test-value",
+            label_selector=f"{SANDBOX_NAME_HASH_LABEL}=test-hash",
         )
 
     def test_snapshots_list_filter_empty(self):

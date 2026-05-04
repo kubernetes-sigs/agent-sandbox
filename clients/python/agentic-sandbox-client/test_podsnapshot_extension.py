@@ -56,7 +56,7 @@ def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: s
 def wait_for_snapshot_ready(sandbox, snapshot_uid: str, max_retries: int = 30, sleep_time: int = 2) -> bool:
     """Helper to poll until a specific snapshot UID is reported as ready."""
     for _ in range(max_retries):
-        check_list = sandbox.snapshots.list(filter_by={"grouping_labels": {"tenant-id": "test-tenant", "user-id": "test-user"}})
+        check_list = sandbox.snapshots.list()
         if check_list.success and any(s.snapshot_uid == snapshot_uid for s in check_list.snapshots):
             print(f"Snapshot '{snapshot_uid}' is ready.")
             return True
@@ -128,7 +128,7 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     """Tests listing all snapshots and verifying snapshot deletion."""
     print("\n======= Testing List and Delete =======")
     print(f"\nListing all snapshots for sandbox '{sandbox.sandbox_id}'...")
-    list_result = sandbox.snapshots.list(filter_by={"grouping_labels": {"tenant-id": "test-tenant", "user-id": "test-user"}})
+    list_result = sandbox.snapshots.list()
     assert list_result.success, list_result.error_reason
 
     for snap in list_result.snapshots:

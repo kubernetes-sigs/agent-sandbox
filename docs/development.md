@@ -42,7 +42,7 @@ make all
 
 ### Regenerate API documentation
 
-Whenever any changes are made to the `api/` folder or the `extensions/`, you may need to regenerate API documentation to keep it up-to-date.
+Whenever any changes are made to the `api/` folder or the `extensions/`, you may need to regenerate API documentation to keep it up-to-date. You will probably need to rebase your branch.
 
 ```sh
 make generate-api-docs

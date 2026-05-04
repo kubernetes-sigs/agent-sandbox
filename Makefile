@@ -9,7 +9,7 @@ fix-go-generate:
 generate-api-docs: ## Generate API reference documentation
 	@echo "Generating API Docs..."
 	go install github.com/elastic/crd-ref-docs@latest
-	$(GOPATH)/bin/crd-ref-docs --source-path=./ --config=./docs/crd-ref-docs.yaml --renderer=markdown --output-path=./docs/api.md
+	$(GOPATH)/bin/crd-ref-docs --source-path=./ --config=./docs/crd-ref-docs.yaml --renderer=markdown --output-path=./docs/api.md --max-depth=10
 	rm -rf ./tmp-api-source
 
 VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version

@@ -1,0 +1,7 @@
+resources:
+# From k8s/controller.yaml: ServiceAccount, core ClusterRoleBinding, metrics Service
+- support.yaml
+# From controller-gen (same rules as k8s/*.generated.yaml)
+- role.yaml
+- extensions_role.yaml
+- extensions_role_binding.yaml

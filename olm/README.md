@@ -131,7 +131,7 @@ Contributors should **not** hand-edit the synced paths below. Change the upstrea
 
 `make copy-k8s-config` (also run as the `manifests` target) copies from `../k8s` (`K8S_ROOT`, default one level above this module):
 
-- `k8s/crds/*.yaml` → `config/crd/bases/`
+- `k8s/crds/*.yaml` → `config/crd/bases/` and `config/crd/kustomization.yaml` (resource list derived from copied CRDs)
 - `k8s/rbac.generated.yaml` → `config/rbac/role.yaml`
 - `k8s/extensions-rbac.generated.yaml` → `config/rbac/extensions_role.yaml`
 - `k8s/extensions.yaml` → `config/rbac/extensions_role_binding.yaml`

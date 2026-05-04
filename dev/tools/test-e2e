@@ -15,10 +15,15 @@
 
 import os
 import argparse
+import shutil
 import subprocess
 import sys
 
+import json
+import time
+
 from shared import utils
+from shared.node import ensure_node
 
 
 def run_go_e2e_tests(repo_root, artifact_dir, env):
@@ -103,6 +108,59 @@ def setup_python_sdk(repo_root, env):
     return True
 
 
+def setup_typescript_sdk(repo_root, env):
+    """Installs the TypeScript SDK dependencies and builds it.
+
+    Returns (success, npm_path, npx_path).
+    """
+    print("========= Ensuring TypeScript SDK is built... =========")
+
+    npm_path, npx_path = ensure_node(repo_root, env)
+    if not npm_path or not npx_path:
+        return False, None, None
+
+    sdk_path = os.path.join(repo_root, "clients", "typescript", "agentic-sandbox-client")
+
+    print(f"Installing TypeScript SDK dependencies at {sdk_path}")
+    result = subprocess.run([npm_path, "install"], cwd=sdk_path, env=env, check=False)
+    if result.returncode != 0:
+        print("Failed to install TypeScript SDK dependencies.")
+        return False, None, None
+
+    print("Building TypeScript SDK...")
+    result = subprocess.run([npm_path, "run", "build"], cwd=sdk_path, env=env, check=False)
+    if result.returncode != 0:
+        print("Failed to build TypeScript SDK.")
+        return False, None, None
+
+    print("TypeScript SDK built successfully.")
+    return True, npm_path, npx_path
+
+
+def run_typescript_e2e_tests(repo_root, artifact_dir, env, npm_path, npx_path):
+    """Runs the TypeScript SDK E2E tests"""
+    print("========= Running TypeScript SDK E2E tests... =========")
+    e2e_dir = os.path.join(repo_root, "test", "e2e", "clients", "typescript")
+
+    print(f"Installing test dependencies at {e2e_dir}")
+    result = subprocess.run([npm_path, "install"], cwd=e2e_dir, env=env, check=False)
+    if result.returncode != 0:
+        print("Failed to install TypeScript E2E test dependencies.")
+        return result.returncode
+
+    junit_report_path = os.path.join(repo_root, "bin", "e2e-ts-sdk-junit.xml")
+    vitest_cmd = [
+        npx_path, "vitest", "run",
+        "--reporter=verbose",
+        "--reporter=junit",
+        f"--outputFile.junit={junit_report_path}",
+    ]
+
+    print(f"Running command: {' '.join(vitest_cmd)}")
+    result = subprocess.run(vitest_cmd, cwd=e2e_dir, env=env)
+    return result.returncode
+
+
 def run_python_e2e_tests(repo_root, artifact_dir, env):
     """Runs the Python e2e tests and generates a junit report"""
     print("========= Running Python SDK E2E tests... =========")
@@ -129,6 +187,82 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
     return result.returncode
 
 
+def ensure_extensions_enabled():
+    """Ensures the controller is running with --extensions flag.
+
+    Both k8s/controller.yaml and k8s/extensions.controller.yaml define the
+    same Deployment. deploy-to-kube applies them in non-deterministic order,
+    which can leave the controller without the --extensions flag. SDK E2E tests
+    require SandboxClaim and SandboxWarmPool support, so we patch the
+    Deployment here and wait for the rollout to complete.
+    """
+    print("========= Ensuring controller extensions are enabled... =========")
+
+    # Check current args
+    result = subprocess.run(
+        [
+            "kubectl", "get", "deployment", "agent-sandbox-controller",
+            "-n", "agent-sandbox-system",
+            "-o", "json",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        print(f"Warning: could not read controller deployment args: {result.stderr.strip()}")
+        return False
+
+    deployment = json.loads(result.stdout)
+    current_args = deployment["spec"]["template"]["spec"]["containers"][0].get("args", [])
+    if "--extensions" in current_args or "--extensions=true" in current_args:
+        print("Controller already running with --extensions. Nothing to do.")
+        return True
+
+    print(f"Current controller args: {current_args}")
+    print("Patching controller deployment to add --extensions flag...")
+
+    new_args = current_args + ["--extensions"]
+    patch = json.dumps({
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{
+                        "name": "agent-sandbox-controller",
+                        "args": new_args,
+                    }]
+                }
+            }
+        }
+    })
+
+    patch_result = subprocess.run(
+        [
+            "kubectl", "patch", "deployment", "agent-sandbox-controller",
+            "-n", "agent-sandbox-system",
+            "-p", patch,
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if patch_result.returncode != 0:
+        print(f"Error patching deployment: {patch_result.stderr.strip()}")
+        return False
+
+    print("Patch applied. Waiting for rollout to complete...")
+    rollout_result = subprocess.run(
+        [
+            "kubectl", "rollout", "status", "deployment/agent-sandbox-controller",
+            "-n", "agent-sandbox-system",
+            "--timeout=120s",
+        ],
+        check=False,
+    )
+    if rollout_result.returncode != 0:
+        print("Error: controller rollout did not complete within 120s.")
+        return False
+
+    print("Controller is now running with --extensions.")
+    return True
+
+
 def main(args):
     """ invokes unit tests and outputs a junit results file """
     repo_root = utils.get_repo_root()
@@ -146,15 +280,27 @@ def main(args):
     if not setup_python_sdk(repo_root, env):
         return 1
 
+    ts_ok, npm_path, npx_path = setup_typescript_sdk(repo_root, env)
+    if not ts_ok:
+        return 1
+
+    # SDK tests (Python + TypeScript) use SandboxClaim and SandboxWarmPool,
+    # which require --extensions to be set on the controller.
+    if not ensure_extensions_enabled():
+        print("Failed to enable extensions on controller. Aborting.")
+        return 1
+
     exit_code = 0
 
     go_test_result = 0
     go_benchmark_result = 0
     python_test_result = 0
+    typescript_test_result = 0
 
     if args.suite in ["all", "tests"]:
         go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
         python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
+        typescript_test_result = run_typescript_e2e_tests(repo_root, artifact_dir, env, npm_path, npx_path)
         
     if args.suite in ["all", "benchmarks"]:
         go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
@@ -169,7 +315,11 @@ def main(args):
         print("Python SDK E2E tests failed.")
         exit_code = 1
 
-    if go_test_result != 0 or python_test_result != 0 or go_benchmark_result != 0:
+    if typescript_test_result != 0:
+        print("TypeScript SDK E2E tests failed.")
+        exit_code = 1
+
+    if go_test_result != 0 or python_test_result != 0 or go_benchmark_result != 0 or typescript_test_result != 0:
         print("One or more E2E tests failed.")
         exit_code = 1
 

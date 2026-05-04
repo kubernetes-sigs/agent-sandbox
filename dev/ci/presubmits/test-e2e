@@ -45,6 +45,7 @@ class E2ETestRunner(TestRunner):
         if artifact_dir:
             shutil.copy(f"{self.repo_root}/bin/e2e-go-junit.xml", f"{artifact_dir}/junit_go.xml")
             shutil.copy(f"{self.repo_root}/bin/e2e-python-sdk-junit.xml", f"{artifact_dir}/junit_python_sdk.xml")
+            shutil.copy(f"{self.repo_root}/bin/e2e-ts-sdk-junit.xml", f"{artifact_dir}/junit_ts_sdk.xml")
 
 if __name__ == "__main__":
     runner = E2ETestRunner()

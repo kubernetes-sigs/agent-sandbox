@@ -3,8 +3,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+  creationTimestamp: null
   name: sandboxwarmpools.extensions.agents.x-k8s.io
 spec:
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: agent-sandbox-webhook-service
+          namespace: agent-sandbox-system
+          path: /convert
+      conversionReviewVersions:
+      - v1
+      - v1beta1
   group: extensions.agents.x-k8s.io
   names:
     kind: SandboxWarmPool
@@ -154,14 +166,9 @@ spec:
         specReplicasPath: .spec.replicas
         statusReplicasPath: .status.replicas
       status: {}
-  conversion:
-    strategy: Webhook
-    webhook:
-      conversionReviewVersions:
-      - v1
-      - v1beta1
-      clientConfig:
-        service:
-          name: agent-sandbox-webhook-service
-          namespace: agent-sandbox-system
-          path: /convert
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null

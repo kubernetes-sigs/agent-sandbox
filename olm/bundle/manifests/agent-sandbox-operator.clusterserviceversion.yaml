@@ -5,6 +5,7 @@ metadata:
     alm-examples: '[]'
     capabilities: Basic Install
     categories: AI/Machine Learning
+    createdAt: "2026-06-18T08:54:46Z"
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -13,35 +14,47 @@ metadata:
   labels:
     operatorframework.io/arch.amd64: supported
     operatorframework.io/os.linux: supported
-  name: agent-sandbox-operator.v0.0.0
+  name: agent-sandbox-operator.v0.5.2
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
-    - description: Sandbox provides an isolated, stateful runtime environment for
-        AI agent workloads.
-      displayName: Sandbox
-      kind: Sandbox
-      name: sandboxes.agents.x-k8s.io
-      version: v1beta1
     - description: SandboxClaim requests a Sandbox from a warm pool for use by an
         AI agent.
       displayName: Sandbox Claim
       kind: SandboxClaim
       name: sandboxclaims.extensions.agents.x-k8s.io
       version: v1beta1
+    - kind: SandboxClaim
+      name: sandboxclaims.extensions.agents.x-k8s.io
+      version: v1alpha1
+    - description: Sandbox provides an isolated, stateful runtime environment for
+        AI agent workloads.
+      displayName: Sandbox
+      kind: Sandbox
+      name: sandboxes.agents.x-k8s.io
+      version: v1beta1
+    - kind: Sandbox
+      name: sandboxes.agents.x-k8s.io
+      version: v1alpha1
     - description: SandboxTemplate defines a reusable specification for creating Sandboxes.
       displayName: Sandbox Template
       kind: SandboxTemplate
       name: sandboxtemplates.extensions.agents.x-k8s.io
       version: v1beta1
+    - kind: SandboxTemplate
+      name: sandboxtemplates.extensions.agents.x-k8s.io
+      version: v1alpha1
     - description: SandboxWarmPool maintains a pool of pre-provisioned Sandboxes for
         fast allocation.
       displayName: Sandbox Warm Pool
       kind: SandboxWarmPool
       name: sandboxwarmpools.extensions.agents.x-k8s.io
       version: v1beta1
+    - kind: SandboxWarmPool
+      name: sandboxwarmpools.extensions.agents.x-k8s.io
+      version: v1alpha1
   description: Agent-sandbox enables easy management of isolated, stateful, singleton
     workloads, ideal for use cases like AI agent runtimes.
   displayName: Agent Sandbox Operator
@@ -50,8 +63,218 @@ spec:
     mediatype: image/png
   install:
     spec:
-      deployments: null
-    strategy: ""
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - persistentvolumeclaims
+          - pods
+          - services
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - agents.x-k8s.io
+          resources:
+          - sandboxes
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - agents.x-k8s.io
+          resources:
+          - sandboxes/finalizers
+          - sandboxes/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - apiextensions.k8s.io
+          resourceNames:
+          - sandboxclaims.extensions.agents.x-k8s.io
+          - sandboxes.agents.x-k8s.io
+          - sandboxtemplates.extensions.agents.x-k8s.io
+          - sandboxwarmpools.extensions.agents.x-k8s.io
+          resources:
+          - customresourcedefinitions
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - create
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - events.k8s.io
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          verbs:
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          - events.k8s.io
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+          - update
+        - apiGroups:
+          - agents.x-k8s.io
+          resources:
+          - sandboxes
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - extensions.agents.x-k8s.io
+          resources:
+          - sandboxclaims
+          - sandboxtemplates
+          - sandboxwarmpools
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - extensions.agents.x-k8s.io
+          resources:
+          - sandboxclaims/finalizers
+          - sandboxclaims/status
+          - sandboxtemplates/finalizers
+          - sandboxwarmpools/finalizers
+          - sandboxwarmpools/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - networking.k8s.io
+          resources:
+          - networkpolicies
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        serviceAccountName: agent-sandbox-controller
+      deployments:
+      - label:
+          app: agent-sandbox-controller
+        name: agent-sandbox-controller
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: agent-sandbox-controller
+          strategy: {}
+          template:
+            metadata:
+              labels:
+                app: agent-sandbox-controller
+            spec:
+              containers:
+              - args:
+                - --leader-elect=true
+                - --extensions
+                image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.2
+                name: agent-sandbox-controller
+                ports:
+                - containerPort: 8080
+                  name: metrics
+                  protocol: TCP
+                - containerPort: 8081
+                  name: healthz
+                  protocol: TCP
+                - containerPort: 9443
+                  name: webhook
+                  protocol: TCP
+                resources: {}
+                volumeMounts:
+                - mountPath: /etc/sandbox-config
+                  name: config-volume
+                  readOnly: true
+              serviceAccountName: agent-sandbox-controller
+              volumes:
+              - configMap:
+                  name: agent-sandbox-config
+                  optional: true
+                name: config-volume
+      permissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - secrets
+          verbs:
+          - create
+        - apiGroups:
+          - ""
+          resourceNames:
+          - agent-sandbox-webhook-certs
+          resources:
+          - secrets
+          verbs:
+          - get
+          - patch
+          - update
+        serviceAccountName: agent-sandbox-controller
+    strategy: deployment
   installModes:
   - supported: false
     type: OwnNamespace
@@ -75,4 +298,4 @@ spec:
   provider:
     name: kubernetes-sigs
     url: https://agent-sandbox.sigs.k8s.io/
-  version: 0.0.0
+  version: 0.5.2

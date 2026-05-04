@@ -1,9 +1,9 @@
 # VERSION defines the project version for the bundle.
-# Update this value when you upgrade the version of your project.
+# Defaults match the committed olm/bundle/; bump together when releasing.
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.0.1
+VERSION ?= 0.5.1
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -53,7 +53,7 @@ endif
 OPERATOR_SDK_VERSION ?= v1.42.2
 OPM_VERSION ?= v1.55.0
 # Image URL for the agent-sandbox-controller (built from the repo root Dockerfile).
-IMG ?= controller:latest
+IMG ?= registry.k8s.io/agent-sandbox/agent-sandbox-controller:v$(VERSION)
 
 # Parent repo root (one level above this module); holds the controller Dockerfile and source.
 REPO_ROOT ?= ..

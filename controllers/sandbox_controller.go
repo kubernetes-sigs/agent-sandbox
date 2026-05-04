@@ -26,6 +26,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,6 +132,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=pods/resize,verbs=update;patch
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -679,6 +681,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, err
 		}
 
+		if sandbox.Spec.UpdateStrategy != nil && sandbox.Spec.UpdateStrategy.Type == sandboxv1alpha1.ResizeSandboxUpdateStrategyType {
+			if err := r.reconcilePodResources(ctx, pod, sandbox); err != nil {
+				return nil, err
+			}
+		}
+
 		// TODO - Do we enfore (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
@@ -849,6 +857,46 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 		updated = true
 	}
 	return updated
+}
+
+// reconcilePodResources compares the desired container resource requirements from the
+// sandbox's PodTemplate against the actual pod and performs an in-place resize if there
+// is a drift. Returns an error if the resize call fails.
+func (r *SandboxReconciler) reconcilePodResources(ctx context.Context, pod *corev1.Pod, sandbox *sandboxv1alpha1.Sandbox) error {
+	log := log.FromContext(ctx)
+
+	desiredContainers := sandbox.Spec.PodTemplate.Spec.Containers
+	if len(desiredContainers) == 0 {
+		return nil
+	}
+
+	needsResize := false
+
+	for i := range pod.Spec.Containers {
+		for _, desired := range desiredContainers {
+			if pod.Spec.Containers[i].Name == desired.Name {
+				if !equality.Semantic.DeepEqual(pod.Spec.Containers[i].Resources, desired.Resources) {
+					pod.Spec.Containers[i].Resources = desired.Resources
+					needsResize = true
+				}
+				break
+			}
+		}
+	}
+
+	if !needsResize {
+		return nil
+	}
+
+	log.Info("Pod resources drifted from desired spec, performing in-place resize",
+		"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+
+	if err := r.Client.SubResource("resize").Update(ctx, pod); err != nil {
+		return fmt.Errorf("pod resize failed: %w", err)
+	}
+
+	log.Info("Pod resized successfully", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+	return nil
 }
 
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) error {

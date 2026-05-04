@@ -2462,3 +2462,388 @@ func TestMergeVolumeClaimVolumes(t *testing.T) {
 		require.NotNil(t, result[0].EmptyDir)
 	})
 }
+
+// resizeTrackingClient wraps a fake client to track whether SubResource("resize").Update was called.
+type resizeTrackingClient struct {
+	client.WithWatch
+	resizeCalled bool
+	resizeErr    error
+}
+
+func (c *resizeTrackingClient) SubResource(subResource string) client.SubResourceClient {
+	if subResource == "resize" {
+		return &resizeSubClient{
+			client:    c,
+			resizeErr: c.resizeErr,
+		}
+	}
+	return c.WithWatch.SubResource(subResource)
+}
+
+type resizeSubClient struct {
+	client    *resizeTrackingClient
+	resizeErr error
+}
+
+func (c *resizeSubClient) Get(_ context.Context, _ client.Object, _ client.Object, _ ...client.SubResourceGetOption) error {
+	return nil
+}
+
+func (c *resizeSubClient) Create(_ context.Context, _ client.Object, _ client.Object, _ ...client.SubResourceCreateOption) error {
+	return nil
+}
+
+func (c *resizeSubClient) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	c.client.resizeCalled = true
+	if c.resizeErr != nil {
+		return c.resizeErr
+	}
+	// Perform a regular update to persist changes in the fake client
+	updateOpts := []client.UpdateOption{}
+	for _, opt := range opts {
+		if uo, ok := opt.(client.UpdateOption); ok {
+			updateOpts = append(updateOpts, uo)
+		}
+	}
+	return c.client.Update(ctx, obj, updateOpts...)
+}
+
+func (c *resizeSubClient) Apply(_ context.Context, _ runtime.ApplyConfiguration, _ ...client.SubResourceApplyOption) error {
+	return nil
+}
+
+func (c *resizeSubClient) Patch(_ context.Context, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+	return nil
+}
+
+func TestReconcilePodResources(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := "name-hash"
+
+	baseSandbox := func() *sandboxv1alpha1.Sandbox {
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: sandboxNs,
+				UID:       sandboxUID,
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{
+				Replicas: new(int32(1)),
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("500m"),
+										corev1.ResourceMemory: resource.MustParse("256Mi"),
+									},
+									Limits: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("1"),
+										corev1.ResourceMemory: resource.MustParse("512Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	basePod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				ResourceVersion: "1",
+				Labels:          map[string]string{sandboxLabel: nameHash},
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: "test-container",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("250m"),
+								corev1.ResourceMemory: resource.MustParse("128Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("256Mi"),
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("pod resources match desired spec — no resize call", func(t *testing.T) {
+		sandbox := baseSandbox()
+		pod := basePod()
+		// Make pod resources match the sandbox desired resources
+		pod.Spec.Containers[0].Resources = *sandbox.Spec.PodTemplate.Spec.Containers[0].Resources.DeepCopy()
+
+		rc := &resizeTrackingClient{WithWatch: newFakeClient(sandbox, pod)}
+		r := SandboxReconciler{
+			Client:        rc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		err := r.reconcilePodResources(t.Context(), pod, sandbox)
+		require.NoError(t, err)
+		require.False(t, rc.resizeCalled, "resize should not be called when resources match")
+	})
+
+	t.Run("pod resources differ — resize subresource is called", func(t *testing.T) {
+		sandbox := baseSandbox()
+		pod := basePod()
+
+		rc := &resizeTrackingClient{WithWatch: newFakeClient(sandbox, pod)}
+		r := SandboxReconciler{
+			Client:        rc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		err := r.reconcilePodResources(t.Context(), pod, sandbox)
+		require.NoError(t, err)
+		require.True(t, rc.resizeCalled, "resize should be called when resources differ")
+
+		// Verify pod was updated with desired resources
+		livePod := &corev1.Pod{}
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod))
+		require.Equal(t, sandbox.Spec.PodTemplate.Spec.Containers[0].Resources, livePod.Spec.Containers[0].Resources)
+	})
+
+	t.Run("resize fails when subresource is unsupported — error is returned", func(t *testing.T) {
+		sandbox := baseSandbox()
+		pod := basePod()
+
+		rc := &resizeTrackingClient{
+			WithWatch: newFakeClient(sandbox, pod),
+			resizeErr: errors.New("resize subresource not supported"),
+		}
+		r := SandboxReconciler{
+			Client:        rc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		err := r.reconcilePodResources(t.Context(), pod, sandbox)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "resize subresource not supported")
+		require.True(t, rc.resizeCalled, "resize should have been attempted")
+	})
+
+	t.Run("container name matching — only matching containers are updated", func(t *testing.T) {
+		sandbox := &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: sandboxNs,
+				UID:       sandboxUID,
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{
+				Replicas: new(int32(1)),
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "app",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU: resource.MustParse("1"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				ResourceVersion: "1",
+				Labels:          map[string]string{sandboxLabel: nameHash},
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: "app",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("500m"),
+							},
+						},
+					},
+					{
+						Name: "sidecar",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("100m"),
+							},
+						},
+					},
+				},
+			},
+		}
+
+		rc := &resizeTrackingClient{WithWatch: newFakeClient(sandbox, pod)}
+		r := SandboxReconciler{
+			Client:        rc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		err := r.reconcilePodResources(t.Context(), pod, sandbox)
+		require.NoError(t, err)
+		require.True(t, rc.resizeCalled, "resize should be called when 'app' container resources differ")
+
+		livePod := &corev1.Pod{}
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod))
+		// 'app' container should have updated resources
+		require.Equal(t, resource.MustParse("1"), *livePod.Spec.Containers[0].Resources.Requests.Cpu())
+		// 'sidecar' container should be unchanged (not in desired spec)
+		require.Equal(t, resource.MustParse("100m"), *livePod.Spec.Containers[1].Resources.Requests.Cpu())
+	})
+}
+
+func TestReconcilePodResourcesUpdateStrategy(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := "name-hash"
+
+	sandboxWithDrift := func(updateStrategy *sandboxv1alpha1.SandboxUpdateStrategy) *sandboxv1alpha1.Sandbox {
+		return &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: sandboxNs,
+				UID:       sandboxUID,
+			},
+			Spec: sandboxv1alpha1.SandboxSpec{
+				Replicas:       new(int32(1)),
+				UpdateStrategy: updateStrategy,
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("500m"),
+										corev1.ResourceMemory: resource.MustParse("256Mi"),
+									},
+									Limits: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("1"),
+										corev1.ResourceMemory: resource.MustParse("512Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	existingPod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				ResourceVersion: "1",
+				Labels:          map[string]string{sandboxLabel: nameHash},
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: "test-container",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("250m"),
+								corev1.ResourceMemory: resource.MustParse("128Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("256Mi"),
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("resize NOT called when UpdateStrategy is nil", func(t *testing.T) {
+		sandbox := sandboxWithDrift(nil)
+		pod := existingPod()
+
+		rc := &resizeTrackingClient{WithWatch: newFakeClient(sandbox, pod)}
+		r := SandboxReconciler{
+			Client:        rc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+		require.NoError(t, err)
+		require.False(t, rc.resizeCalled, "resize should not be called when UpdateStrategy is nil")
+	})
+
+	t.Run("resize NOT called when UpdateStrategy is None", func(t *testing.T) {
+		sandbox := sandboxWithDrift(&sandboxv1alpha1.SandboxUpdateStrategy{
+			Type: sandboxv1alpha1.NoneSandboxUpdateStrategyType,
+		})
+		pod := existingPod()
+
+		rc := &resizeTrackingClient{WithWatch: newFakeClient(sandbox, pod)}
+		r := SandboxReconciler{
+			Client:        rc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+		require.NoError(t, err)
+		require.False(t, rc.resizeCalled, "resize should not be called when UpdateStrategy is None")
+	})
+
+	t.Run("resize IS called when UpdateStrategy is Resize", func(t *testing.T) {
+		sandbox := sandboxWithDrift(&sandboxv1alpha1.SandboxUpdateStrategy{
+			Type: sandboxv1alpha1.ResizeSandboxUpdateStrategyType,
+		})
+		pod := existingPod()
+
+		rc := &resizeTrackingClient{WithWatch: newFakeClient(sandbox, pod)}
+		r := SandboxReconciler{
+			Client:        rc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+		require.NoError(t, err)
+		require.True(t, rc.resizeCalled, "resize should be called when UpdateStrategy is Resize")
+
+		// Verify pod was updated with desired resources
+		livePod := &corev1.Pod{}
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod))
+		require.Equal(t, sandbox.Spec.PodTemplate.Spec.Containers[0].Resources, livePod.Spec.Containers[0].Resources)
+	})
+}

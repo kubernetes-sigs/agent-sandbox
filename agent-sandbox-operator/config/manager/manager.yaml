@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-sandbox-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: agent-sandbox-controller
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox-controller
+    spec:
+      containers:
+      - args:
+        - --leader-elect=true
+        - --extensions
+        image: controller:latest
+        name: agent-sandbox-controller
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: healthz
+          protocol: TCP
+      serviceAccountName: agent-sandbox-controller

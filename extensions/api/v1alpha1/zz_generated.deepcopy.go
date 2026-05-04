@@ -398,9 +398,9 @@ func (in *SandboxWarmPoolSpec) DeepCopyInto(out *SandboxWarmPoolSpec) {
 		*out = new(SandboxWarmPoolUpdateStrategy)
 		**out = **in
 	}
-	if in.EnableWarmPoolEviction != nil {
-		in, out := &in.EnableWarmPoolEviction, &out.EnableWarmPoolEviction
-		*out = new(bool)
+	if in.EvictionPolicy != nil {
+		in, out := &in.EvictionPolicy, &out.EvictionPolicy
+		*out = new(SandboxWarmPoolEvictionPolicy)
 		**out = **in
 	}
 }

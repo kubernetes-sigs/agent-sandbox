@@ -35,8 +35,11 @@ spec:
             type: object
           spec:
             properties:
-              enableWarmPoolEviction:
-                type: boolean
+              evictionPolicy:
+                enum:
+                - Always
+                - Never
+                type: string
               replicas:
                 format: int32
                 minimum: 0

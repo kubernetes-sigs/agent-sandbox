@@ -45,10 +45,22 @@ type SandboxWarmPoolSpec struct {
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
 
-	// enableWarmPoolEviction marks pods created by this warm pool as ready-to-evict by default.
+	// evictionPolicy defines the behavior for evicting pods in the warm pool.
 	// +optional
-	EnableWarmPoolEviction *bool `json:"enableWarmPoolEviction,omitempty"`
+	EvictionPolicy *SandboxWarmPoolEvictionPolicy `json:"evictionPolicy,omitempty"`
 }
+
+// SandboxWarmPoolEvictionPolicy is a string enumeration type that enumerates
+// all possible eviction policies for the SandboxWarmPool controller.
+// +kubebuilder:validation:Enum=Always;Never
+type SandboxWarmPoolEvictionPolicy string
+
+const (
+	// AlwaysSandboxWarmPoolEvictionPolicy indicates that pods created by this warm pool are marked as ready-to-evict.
+	AlwaysSandboxWarmPoolEvictionPolicy SandboxWarmPoolEvictionPolicy = "Always"
+	// NeverSandboxWarmPoolEvictionPolicy indicates that pods created by this warm pool are not marked as ready-to-evict.
+	NeverSandboxWarmPoolEvictionPolicy SandboxWarmPoolEvictionPolicy = "Never"
+)
 
 // SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates
 // all possible update strategies for the SandboxWarmPool controller.

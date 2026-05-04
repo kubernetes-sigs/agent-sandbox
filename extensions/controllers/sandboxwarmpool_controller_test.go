@@ -461,49 +461,51 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	boolPtr := func(b bool) *bool { return &b }
+	policyPtr := func(p extensionsv1alpha1.SandboxWarmPoolEvictionPolicy) *extensionsv1alpha1.SandboxWarmPoolEvictionPolicy {
+		return &p
+	}
 
 	testCases := []struct {
 		name                string
-		specEnableEviction  *bool
+		specEvictionPolicy  *extensionsv1alpha1.SandboxWarmPoolEvictionPolicy
 		controllerEnable    bool
 		templateAnnotations map[string]string
 		expectEviction      bool
 	}{
 		{
-			name:               "Spec false overrides controller true",
-			specEnableEviction: boolPtr(false),
+			name:               "Spec Never overrides controller true",
+			specEvictionPolicy: policyPtr(extensionsv1alpha1.NeverSandboxWarmPoolEvictionPolicy),
 			controllerEnable:   true,
 			expectEviction:     false,
 		},
 		{
-			name:               "Spec true overrides controller false",
-			specEnableEviction: boolPtr(true),
+			name:               "Spec Always overrides controller false",
+			specEvictionPolicy: policyPtr(extensionsv1alpha1.AlwaysSandboxWarmPoolEvictionPolicy),
 			controllerEnable:   false,
 			expectEviction:     true,
 		},
 		{
 			name:               "Spec unset falls back to controller true",
-			specEnableEviction: nil,
+			specEvictionPolicy: nil,
 			controllerEnable:   true,
 			expectEviction:     true,
 		},
 		{
 			name:               "Spec unset falls back to controller false",
-			specEnableEviction: nil,
+			specEvictionPolicy: nil,
 			controllerEnable:   false,
 			expectEviction:     false,
 		},
 		{
-			name:                "EnableWarmPoolEviction: false removes annotation even if template has it",
-			specEnableEviction:  boolPtr(false),
+			name:                "EvictionPolicy Never removes annotation even if template has it",
+			specEvictionPolicy:  policyPtr(extensionsv1alpha1.NeverSandboxWarmPoolEvictionPolicy),
 			controllerEnable:    false,
 			templateAnnotations: map[string]string{warmPoolEvictionAnnotation: "true"},
 			expectEviction:      false,
 		},
 		{
-			name:                "EnableWarmPoolEviction: true overwrites template false",
-			specEnableEviction:  boolPtr(true),
+			name:                "EvictionPolicy Always overwrites template false",
+			specEvictionPolicy:  policyPtr(extensionsv1alpha1.AlwaysSandboxWarmPoolEvictionPolicy),
 			controllerEnable:    false,
 			templateAnnotations: map[string]string{warmPoolEvictionAnnotation: "false"},
 			expectEviction:      true,
@@ -523,7 +525,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
 						Name: templateName,
 					},
-					EnableWarmPoolEviction: tc.specEnableEviction,
+					EvictionPolicy: tc.specEvictionPolicy,
 				},
 			}
 

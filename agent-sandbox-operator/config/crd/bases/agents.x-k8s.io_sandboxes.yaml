@@ -16,7 +16,7 @@ spec:
     singular: sandbox
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - name: v1beta1
     schema:
       openAPIV3Schema:
         properties:
@@ -28,6 +28,12 @@ spec:
             type: object
           spec:
             properties:
+              operatingMode:
+                default: Running
+                enum:
+                - Running
+                - Suspended
+                type: string
               podTemplate:
                 properties:
                   metadata:
@@ -3830,12 +3836,8 @@ spec:
                 required:
                 - spec
                 type: object
-              replicas:
-                default: 1
-                format: int32
-                maximum: 1
-                minimum: 0
-                type: integer
+              service:
+                type: boolean
               shutdownPolicy:
                 default: Retain
                 enum:
@@ -3995,14 +3997,12 @@ spec:
                   - type
                   type: object
                 type: array
+              nodeName:
+                type: string
               podIPs:
                 items:
                   type: string
                 type: array
-              replicas:
-                format: int32
-                minimum: 0
-                type: integer
               selector:
                 type: string
               service:
@@ -4016,8 +4016,4 @@ spec:
     served: true
     storage: true
     subresources:
-      scale:
-        labelSelectorPath: .status.selector
-        specReplicasPath: .spec.replicas
-        statusReplicasPath: .status.replicas
       status: {}

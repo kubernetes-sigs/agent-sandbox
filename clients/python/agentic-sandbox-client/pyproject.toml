@@ -46,11 +46,22 @@ exclude = [
 root = "../../.."
 
 [project.optional-dependencies]
+langchain = [
+    "langchain",
+]
+adk = [
+    "google-adk",
+]
+crewai = [
+    "crewai[tools]",
 async = [
     "httpx",
     "kubernetes_asyncio",
 ]
 test = [
+    "k8s_agent_sandbox[langchain]",
+    "k8s_agent_sandbox[adk]",
+    "k8s_agent_sandbox[crewai]",
     "pytest",
     "pytest-xdist",
     "pytest-asyncio",

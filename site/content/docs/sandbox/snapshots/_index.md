@@ -22,15 +22,18 @@ This guide requires a GKE Autopilot cluster with a gVisor node pool. See [GKE Cl
 - A `SandboxTemplate` named `simple-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
 
-### Manual Snapshot & Restore
+### Suspend & Resume with Snapshots
 
 Unlike automatic pausing, snapshots give you granular control over when state is saved. This is ideal for multi-turn agents where the environment needs to be "parked" between user prompts to save costs.
 
 #### Basic Workflow Example
 
-The following example demonstrates creating a sandbox, modifying its filesystem, taking a snapshot, and restoring that state into a completely new sandbox.
+The following example demonstrates creating a sandbox, modifying its filesystem, taking a snapshot, and suspending/resuming it to restore the state.
 
 > Note: this example uses `simple-sandbox-template`, which you should create in your GKE cluster first. The associated resources can be found [here](https://github.com/volatilemolotov/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source).
+
+> [!NOTE]
+> A sandbox can only be restored from its own previous snapshots (via the `suspend()` and `resume()` lifecycle). A new sandbox cannot be restored from the snapshot of another sandbox.
 
 
 ```python
@@ -62,16 +65,19 @@ assert snapshot_response is not None
 
 print(f"Snapshot saved with ID: {snapshot_response.snapshot_uid}")
 
-# 5. Clean up the original sandbox
-sandbox.terminate()
+# 5. Suspend the Sandbox
+# This takes a snapshot and scales the container replicas to 0.
+suspend_result = sandbox.suspend(snapshot_before_suspend=True)
+assert suspend_result.success
 sleep()
 
-# 6. Later, restore the sandbox from the snapshot
-restored_sandbox = client.create_sandbox("simple-sandbox-template")
-is_restored = restored_sandbox.is_restored_from_snapshot(snapshot_response.snapshot_uid)
-print(f"Is restored?\nAnswer: {is_restored}")
+# 6. Later, Resume the Sandbox
+# This scales up the container and automatically restores the latest state.
+resume_result = sandbox.resume()
+assert resume_result.success
+assert resume_result.restored_from_snapshot
 
 # 7. Verify the filesystem state was preserved
-response = restored_sandbox.commands.run("cat /tmp/data/status.txt")
+response = sandbox.commands.run("cat /tmp/data/status.txt")
 print(response.stdout) # Should output 'session_active'
 ```

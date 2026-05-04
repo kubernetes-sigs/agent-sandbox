@@ -81,6 +81,8 @@ class SnapshotFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ready_only: bool = True
+    created_after: datetime | None = None
+    created_before: datetime | None = None
 
 
 class SnapshotEngine:
@@ -266,7 +268,7 @@ class SnapshotEngine:
         Checks for existing snapshots associated with the sandbox.
         Returns a ListSnapshotResult containing valid snapshots sorted by creation timestamp (newest first).
 
-        filter_by: Structure containing filters (ready_only).
+        filter_by: Structure containing filters (ready_only, created_after, created_before).
         """
         if filter_by is None:
             filter_by = SnapshotFilter()
@@ -335,6 +337,21 @@ class SnapshotEngine:
                 if filter_by.ready_only and not is_ready:
                     continue
 
+                # Filter by creation timestamp if requested
+                creation_time_str = metadata.get("creationTimestamp")
+                if creation_time_str:
+                    try:
+                        creation_time = datetime.fromisoformat(creation_time_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        creation_time = None
+                else:
+                    creation_time = None
+
+                if filter_by.created_after and (not creation_time or creation_time < filter_by.created_after):
+                    continue
+                if filter_by.created_before and (not creation_time or creation_time > filter_by.created_before):
+                    continue
+
                 try:
                     valid_snapshots.append(
                         SnapshotDetail(
@@ -393,6 +410,8 @@ class SnapshotEngine:
         self,
         snapshot_uid: str | None = None,
         scope: str | None = None,
+        created_after: datetime | str | None = None,
+        created_before: datetime | str | None = None,
         timeout: int = 180,
     ) -> DeleteSnapshotResult:
         """Helper method to execute deletion of snapshots."""
@@ -402,7 +421,13 @@ class SnapshotEngine:
             snapshots_to_delete.append(snapshot_uid)
         elif scope == "global":
             logger.info("Deleting ALL snapshots for this pod.")
-            snapshots_result = self.list(filter_by={"ready_only": False})
+            snapshots_result = self.list(
+                filter_by={
+                    "ready_only": False,
+                    "created_after": created_after,
+                    "created_before": created_before,
+                }
+            )
             if not snapshots_result.success:
                 return DeleteSnapshotResult(
                     success=False,
@@ -499,8 +524,15 @@ class SnapshotEngine:
 
     def delete_all(
         self,
+        created_after: datetime | str | None = None,
+        created_before: datetime | str | None = None,
         timeout: int = 180,
     ) -> DeleteSnapshotResult:
-        """Deletes all snapshots for this pod."""
+        """Deletes all snapshots for this pod within an optional time range."""
         logger.info("Deleting every snapshot for this pod...")
-        return self._execute_deletion(scope="global", timeout=timeout)
+        return self._execute_deletion(
+            scope="global",
+            created_after=created_after,
+            created_before=created_before,
+            timeout=timeout,
+        )

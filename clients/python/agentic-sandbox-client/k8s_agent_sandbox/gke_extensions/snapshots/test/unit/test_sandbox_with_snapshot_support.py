@@ -540,6 +540,60 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.assertEqual(result.snapshots[0].snapshot_uid, "not-ready-snap")
         self.assertEqual(result.snapshots[1].snapshot_uid, "ready-snap")
 
+    def test_snapshots_list_filter_by_timestamp(self):
+        """Test list snapshots filtering by created_after and created_before."""
+        mock_response = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "snap-old",
+                        "creationTimestamp": "2023-01-01T12:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+                {
+                    "metadata": {
+                        "name": "snap-mid",
+                        "creationTimestamp": "2023-01-02T12:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+                {
+                    "metadata": {
+                        "name": "snap-new",
+                        "creationTimestamp": "2023-01-03T12:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+            ]
+        }
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = (
+            mock_response
+        )
+
+        # Filter created_after "2023-01-02T00:00:00Z"
+        result = self.engine.list(filter_by={"created_after": "2023-01-02T00:00:00Z"})
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 2)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-new")
+        self.assertEqual(result.snapshots[1].snapshot_uid, "snap-mid")
+
+        # Filter created_before "2023-01-02T23:59:59Z"
+        result = self.engine.list(filter_by={"created_before": "2023-01-02T23:59:59Z"})
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 2)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-mid")
+        self.assertEqual(result.snapshots[1].snapshot_uid, "snap-old")
+
+        # Filter between both
+        result = self.engine.list(filter_by={
+            "created_after": "2023-01-02T00:00:00Z",
+            "created_before": "2023-01-02T23:59:59Z",
+        })
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 1)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-mid")
+
     def test_snapshots_list_filter_incorrect_arguments(self):
         """Test list snapshots with a incorrect arguments for filter_by."""
         mock_response = {
@@ -714,7 +768,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.deleted_snapshots, ["snap-a"])
             mock_list.assert_called_once_with(
-                filter_by={"ready_only": False}
+                filter_by={"ready_only": False, "created_after": None, "created_before": None}
             )
             self.mock_k8s_helper.custom_objects_api.delete_namespaced_custom_object.assert_called_once_with(
                 group=PODSNAPSHOT_API_GROUP,
@@ -874,7 +928,24 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_code=0,
             )
             self.engine.delete_all()
-            mock_execute.assert_called_once_with(scope="global", timeout=180)
+            mock_execute.assert_called_once_with(scope="global", created_after=None, created_before=None, timeout=180)
+
+    def test_snapshots_delete_all_by_timestamp(self):
+        """Test delete_all passes created_after and created_before down to _execute_deletion."""
+        with patch.object(self.engine, "_execute_deletion") as mock_execute:
+            mock_execute.return_value = DeleteSnapshotResult(
+                success=True,
+                deleted_snapshots=["snap-x"],
+                error_reason="",
+                error_code=0,
+            )
+            self.engine.delete_all(created_after="2023-01-01T00:00:00Z", created_before="2023-01-02T00:00:00Z")
+            mock_execute.assert_called_once_with(
+                scope="global",
+                created_after="2023-01-01T00:00:00Z",
+                created_before="2023-01-02T00:00:00Z",
+                timeout=180,
+            )
 
 
 

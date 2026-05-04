@@ -13,15 +13,16 @@ The main entry point for the snapshot extension. It inherits from the base `Sand
 This class wraps the base `Sandbox` to seamlessly provide snapshot capabilities. It manages the sandbox lifecycle while granting access to the underlying snapshot operations via the `.snapshots` property.
 *   **Suspend**: Scales the sandbox down to 0 replicas, temporarily pausing execution. It can optionally take a snapshot immediately before suspending (enabled by default).
 *   **Resume**: Scales the sandbox back up to 1 replica, automatically restoring its state from the most recent available snapshot.
-*   **Is Restored From Snapshot**: Checks if the current sandbox was successfully restored from a specific snapshot UID.
 *   **Is Suspended**: Checks if the sandbox is currently suspended (i.e., scaled down to 0 replicas).
+
+> **Note**: A sandbox can only be restored from its own previous snapshots (via the Suspend/Resume lifecycle). A new or different sandbox cannot be restored from the snapshot of another sandbox.
 
 ### `SnapshotEngine`
 The core engine responsible for interacting with the GKE Pod Snapshot Controller.
 *   **Create**: Creates `PodSnapshotManualTrigger` custom resources and waits for the snapshot to be completed.
-*   **List**: Lists existing snapshots for a sandbox, with optional filtering by grouping labels and a flag to return ready-only snapshots.
+*   **List**: Lists existing snapshots for a sandbox, with optional filtering by creation timestamp range (`created_after`/`created_before`) and a flag to return ready-only snapshots.
 *   **Delete**: Deletes a specific snapshot by UID.
-*   **Delete All**: Deletes snapshots based on a strategy: either all snapshots for the pod, or filtered by grouping labels.
+*   **Delete All**: Deletes all snapshots for the pod, with optional filtering by creation timestamp range (`created_after`/`created_before`).
 *   **Cleanup**: Ensures that manual trigger resources are cleanly deleted when the sandbox context exits.
 
 ## Usage Example
@@ -115,11 +116,10 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
         postCheckpoint: resume
       snapshotGroupingRules:
         groupByLabelValue:
-          labels: ["agents.x-k8s.io/sandbox-name-hash", "tenant-id", "user-id"]
+          labels: ["agents.x-k8s.io/sandbox-name-hash"]
           groupRetentionPolicy:
             maxSnapshotCountPerGroup: 3
     ```
-    (Note: To run the integration test file successfully, `tenant-id` and `user-id` labels should also be added to the `groupByLabelValue.labels` list in the `PodSnapshotPolicy`.)
 
 5.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 

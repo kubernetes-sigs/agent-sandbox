@@ -146,28 +146,42 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     ), f"Expected older snapshot UID '{first_snapshot_uid}', but got '{list_result.snapshots[2].snapshot_uid}'"
 
     print(
-        f"\nDeleting snapshot '{suspend_third_snapshot_uid}' of the sandbox '{sandbox.sandbox_id}'..."
+        f"\nDeleting second snapshot '{second_snapshot_uid}' by UID..."
     )
-    delete_result = sandbox.snapshots.delete(snapshot_uid=suspend_third_snapshot_uid)
+    delete_result = sandbox.snapshots.delete(snapshot_uid=second_snapshot_uid)
     assert delete_result.success, delete_result.error_reason
-    assert (
-        len(delete_result.deleted_snapshots) == 1
-    ), f"Expected 1 deleted snapshot, but got {len(delete_result.deleted_snapshots)}"
-    assert (
-        delete_result.deleted_snapshots[0] == suspend_third_snapshot_uid
-    ), f"Expected deleted snapshot UID '{suspend_third_snapshot_uid}', but got '{delete_result.deleted_snapshots[0]}''"
-    print(f"Snapshot '{suspend_third_snapshot_uid}' deleted successfully.")
+    assert len(delete_result.deleted_snapshots) == 1
+    assert delete_result.deleted_snapshots[0] == second_snapshot_uid
+    print(f"Snapshot '{second_snapshot_uid}' deleted successfully.")
 
-    print(f"\nDeleting all snapshots for sandbox '{sandbox.sandbox_id}'...")
+    creation_time_2 = list_result.snapshots[1].creation_timestamp
+
+    print(f"\nListing snapshots created after '{creation_time_2}'...")
+    # Test listing with timestamp filter
+    list_after = sandbox.snapshots.list(filter_by={"created_after": creation_time_2})
+    assert list_after.success
+    assert len(list_after.snapshots) >= 1
+    assert list_after.snapshots[0].snapshot_uid == suspend_third_snapshot_uid
+    for snap in list_after.snapshots:
+        print(
+            f"Snapshot UID: {snap.snapshot_uid}, Source Pod: {snap.source_pod}, Creation Time: {snap.creation_timestamp}"
+        )
+
+    print(
+        f"\nDeleting snapshots created after '{creation_time_2}' of the sandbox '{sandbox.sandbox_id}'..."
+    )
+    delete_result = sandbox.snapshots.delete_all(created_after=creation_time_2)
+    assert delete_result.success, delete_result.error_reason
+    assert len(delete_result.deleted_snapshots) >= 1
+    assert suspend_third_snapshot_uid in delete_result.deleted_snapshots
+    print(f"Snapshots deleted successfully: {delete_result.deleted_snapshots}")
+
+    print(f"\nDeleting all remaining snapshots for sandbox '{sandbox.sandbox_id}'...")
     delete_result = sandbox.snapshots.delete_all()
     assert delete_result.success, delete_result.error_reason
-    assert (
-        len(delete_result.deleted_snapshots) == 2
-    ), f"Expected 2 deleted snapshots, but got {len(delete_result.deleted_snapshots)}"
-    assert (
-        first_snapshot_uid in delete_result.deleted_snapshots and second_snapshot_uid in delete_result.deleted_snapshots
-    ), f"Expected deleted snapshot UIDs to include '{first_snapshot_uid}' and '{second_snapshot_uid}'"
-    print(f"Snapshots deleted successfully.")
+    assert len(delete_result.deleted_snapshots) >= 1
+    assert first_snapshot_uid in delete_result.deleted_snapshots
+    print(f"Remaining snapshots deleted successfully: {delete_result.deleted_snapshots}")
 
 
 def main(

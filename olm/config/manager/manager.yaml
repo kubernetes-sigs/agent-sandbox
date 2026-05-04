@@ -33,4 +33,13 @@ spec:
         - containerPort: 8081
           name: healthz
           protocol: TCP
+        volumeMounts:
+        - mountPath: /etc/sandbox-config
+          name: config-volume
+          readOnly: true
       serviceAccountName: agent-sandbox-controller
+      volumes:
+      - configMap:
+          name: agent-sandbox-config
+          optional: true
+        name: config-volume

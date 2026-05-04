@@ -3,16 +3,28 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: sandboxtemplates.extensions.agents.x-k8s.io
+  creationTimestamp: null
+  name: sandboxes.agents.x-k8s.io
 spec:
-  group: extensions.agents.x-k8s.io
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: agent-sandbox-webhook-service
+          namespace: agent-sandbox-system
+          path: /convert
+      conversionReviewVersions:
+      - v1
+      - v1beta1
+  group: agents.x-k8s.io
   names:
-    kind: SandboxTemplate
-    listKind: SandboxTemplateList
-    plural: sandboxtemplates
+    kind: Sandbox
+    listKind: SandboxList
+    plural: sandboxes
     shortNames:
-    - sandboxtemplate
-    singular: sandboxtemplate
+    - sandbox
+    singular: sandbox
   scope: Namespaced
   versions:
   - name: v1beta1
@@ -27,203 +39,11 @@ spec:
             type: object
           spec:
             properties:
-              envVarsInjectionPolicy:
-                default: Disallowed
+              operatingMode:
+                default: Running
                 enum:
-                - Allowed
-                - Overrides
-                - Disallowed
-                type: string
-              networkPolicy:
-                properties:
-                  egress:
-                    items:
-                      properties:
-                        ports:
-                          items:
-                            properties:
-                              endPort:
-                                format: int32
-                                type: integer
-                              port:
-                                anyOf:
-                                - type: integer
-                                - type: string
-                                x-kubernetes-int-or-string: true
-                              protocol:
-                                type: string
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                        to:
-                          items:
-                            properties:
-                              ipBlock:
-                                properties:
-                                  cidr:
-                                    type: string
-                                  except:
-                                    items:
-                                      type: string
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                required:
-                                - cidr
-                                type: object
-                              namespaceSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                              podSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      type: object
-                    type: array
-                  ingress:
-                    items:
-                      properties:
-                        from:
-                          items:
-                            properties:
-                              ipBlock:
-                                properties:
-                                  cidr:
-                                    type: string
-                                  except:
-                                    items:
-                                      type: string
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                required:
-                                - cidr
-                                type: object
-                              namespaceSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                              podSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                        ports:
-                          items:
-                            properties:
-                              endPort:
-                                format: int32
-                                type: integer
-                              port:
-                                anyOf:
-                                - type: integer
-                                - type: string
-                                x-kubernetes-int-or-string: true
-                              protocol:
-                                type: string
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      type: object
-                    type: array
-                type: object
-              networkPolicyManagement:
-                default: Managed
-                enum:
-                - Managed
-                - Unmanaged
+                - Running
+                - Suspended
                 type: string
               podTemplate:
                 properties:
@@ -711,7 +531,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -767,7 +587,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -789,7 +609,7 @@ spec:
                                   configMapRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -800,7 +620,7 @@ spec:
                                   secretRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -957,7 +777,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -1064,7 +884,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -1288,7 +1108,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -1463,7 +1283,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -1519,7 +1339,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -1541,7 +1361,7 @@ spec:
                                   configMapRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -1552,7 +1372,7 @@ spec:
                                   secretRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -1709,7 +1529,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -1816,7 +1636,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -2040,7 +1860,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -2196,7 +2016,7 @@ spec:
                         items:
                           properties:
                             name:
-                              default: ''
+                              default: ""
                               type: string
                           type: object
                           x-kubernetes-map-type: atomic
@@ -2231,7 +2051,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -2287,7 +2107,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -2309,7 +2129,7 @@ spec:
                                   configMapRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -2320,7 +2140,7 @@ spec:
                                   secretRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -2477,7 +2297,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -2584,7 +2404,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -2808,7 +2628,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -3272,7 +3092,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -3290,7 +3110,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -3321,7 +3141,7 @@ spec:
                                   type: array
                                   x-kubernetes-list-type: atomic
                                 name:
-                                  default: ''
+                                  default: ""
                                   type: string
                                 optional:
                                   type: boolean
@@ -3336,7 +3156,7 @@ spec:
                                 nodePublishSecretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -3538,7 +3358,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -3633,7 +3453,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -3753,7 +3573,7 @@ spec:
                                             type: array
                                             x-kubernetes-list-type: atomic
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -3843,7 +3663,7 @@ spec:
                                             type: array
                                             x-kubernetes-list-type: atomic
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -3905,7 +3725,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -3930,7 +3750,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -3985,7 +3805,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -4022,6 +3842,15 @@ spec:
                 type: object
               service:
                 type: boolean
+              shutdownPolicy:
+                default: Retain
+                enum:
+                - Delete
+                - Retain
+                type: string
+              shutdownTime:
+                format: date-time
+                type: string
               volumeClaimTemplates:
                 items:
                   properties:
@@ -4131,24 +3960,70 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              volumeClaimTemplatesPolicy:
-                default: Disallowed
-                enum:
-                - Disallowed
-                - Allowed
-                - Overrides
-                type: string
             required:
             - podTemplate
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              nodeName:
+                type: string
+              podIPs:
+                items:
+                  type: string
+                type: array
+              selector:
+                type: string
+              service:
+                type: string
+              serviceFQDN:
+                type: string
             type: object
         required:
         - spec
         type: object
     served: true
     storage: true
+    subresources:
+      status: {}
   - deprecated: true
-    deprecationWarning: extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate is deprecated;
-      use extensions.agents.x-k8s.io/v1beta1 SandboxTemplate instead
+    deprecationWarning: agents.x-k8s.io/v1alpha1 Sandbox is deprecated; use agents.x-k8s.io/v1beta1
+      Sandbox instead
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -4161,204 +4036,6 @@ spec:
             type: object
           spec:
             properties:
-              envVarsInjectionPolicy:
-                default: Disallowed
-                enum:
-                - Allowed
-                - Overrides
-                - Disallowed
-                type: string
-              networkPolicy:
-                properties:
-                  egress:
-                    items:
-                      properties:
-                        ports:
-                          items:
-                            properties:
-                              endPort:
-                                format: int32
-                                type: integer
-                              port:
-                                anyOf:
-                                - type: integer
-                                - type: string
-                                x-kubernetes-int-or-string: true
-                              protocol:
-                                type: string
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                        to:
-                          items:
-                            properties:
-                              ipBlock:
-                                properties:
-                                  cidr:
-                                    type: string
-                                  except:
-                                    items:
-                                      type: string
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                required:
-                                - cidr
-                                type: object
-                              namespaceSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                              podSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      type: object
-                    type: array
-                  ingress:
-                    items:
-                      properties:
-                        from:
-                          items:
-                            properties:
-                              ipBlock:
-                                properties:
-                                  cidr:
-                                    type: string
-                                  except:
-                                    items:
-                                      type: string
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                required:
-                                - cidr
-                                type: object
-                              namespaceSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                              podSelector:
-                                properties:
-                                  matchExpressions:
-                                    items:
-                                      properties:
-                                        key:
-                                          type: string
-                                        operator:
-                                          type: string
-                                        values:
-                                          items:
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: atomic
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-type: atomic
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    type: object
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                        ports:
-                          items:
-                            properties:
-                              endPort:
-                                format: int32
-                                type: integer
-                              port:
-                                anyOf:
-                                - type: integer
-                                - type: string
-                                x-kubernetes-int-or-string: true
-                              protocol:
-                                type: string
-                            type: object
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      type: object
-                    type: array
-                type: object
-              networkPolicyManagement:
-                default: Managed
-                enum:
-                - Managed
-                - Unmanaged
-                type: string
               podTemplate:
                 properties:
                   metadata:
@@ -4845,7 +4522,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -4901,7 +4578,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -4923,7 +4600,7 @@ spec:
                                   configMapRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -4934,7 +4611,7 @@ spec:
                                   secretRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -5091,7 +4768,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -5198,7 +4875,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -5422,7 +5099,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -5597,7 +5274,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -5653,7 +5330,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -5675,7 +5352,7 @@ spec:
                                   configMapRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -5686,7 +5363,7 @@ spec:
                                   secretRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -5843,7 +5520,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -5950,7 +5627,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -6174,7 +5851,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -6330,7 +6007,7 @@ spec:
                         items:
                           properties:
                             name:
-                              default: ''
+                              default: ""
                               type: string
                           type: object
                           x-kubernetes-map-type: atomic
@@ -6365,7 +6042,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -6421,7 +6098,7 @@ spec:
                                           key:
                                             type: string
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -6443,7 +6120,7 @@ spec:
                                   configMapRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -6454,7 +6131,7 @@ spec:
                                   secretRef:
                                     properties:
                                       name:
-                                        default: ''
+                                        default: ""
                                         type: string
                                       optional:
                                         type: boolean
@@ -6611,7 +6288,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -6718,7 +6395,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -6942,7 +6619,7 @@ spec:
                                       format: int32
                                       type: integer
                                     service:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   required:
                                   - port
@@ -7406,7 +7083,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -7424,7 +7101,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -7455,7 +7132,7 @@ spec:
                                   type: array
                                   x-kubernetes-list-type: atomic
                                 name:
-                                  default: ''
+                                  default: ""
                                   type: string
                                 optional:
                                   type: boolean
@@ -7470,7 +7147,7 @@ spec:
                                 nodePublishSecretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -7672,7 +7349,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -7767,7 +7444,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -7887,7 +7564,7 @@ spec:
                                             type: array
                                             x-kubernetes-list-type: atomic
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -7977,7 +7654,7 @@ spec:
                                             type: array
                                             x-kubernetes-list-type: atomic
                                           name:
-                                            default: ''
+                                            default: ""
                                             type: string
                                           optional:
                                             type: boolean
@@ -8039,7 +7716,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -8064,7 +7741,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -8119,7 +7796,7 @@ spec:
                                 secretRef:
                                   properties:
                                     name:
-                                      default: ''
+                                      default: ""
                                       type: string
                                   type: object
                                   x-kubernetes-map-type: atomic
@@ -8154,8 +7831,23 @@ spec:
                 required:
                 - spec
                 type: object
+              replicas:
+                default: 1
+                format: int32
+                maximum: 1
+                minimum: 0
+                type: integer
               service:
                 type: boolean
+              shutdownPolicy:
+                default: Retain
+                enum:
+                - Delete
+                - Retain
+                type: string
+              shutdownTime:
+                format: date-time
+                type: string
               volumeClaimTemplates:
                 items:
                   properties:
@@ -8268,19 +7960,73 @@ spec:
             required:
             - podTemplate
             type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              podIPs:
+                items:
+                  type: string
+                type: array
+              replicas:
+                format: int32
+                minimum: 0
+                type: integer
+              selector:
+                type: string
+              service:
+                type: string
+              serviceFQDN:
+                type: string
+            type: object
         required:
         - spec
         type: object
     served: true
     storage: false
-  conversion:
-    strategy: Webhook
-    webhook:
-      conversionReviewVersions:
-      - v1
-      - v1beta1
-      clientConfig:
-        service:
-          name: agent-sandbox-webhook-service
-          namespace: agent-sandbox-system
-          path: /convert
+    subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null

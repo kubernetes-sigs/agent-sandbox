@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -47,9 +48,11 @@ import (
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
-	sandboxControllerFieldOwner = "sandbox-controller"
-	immediateRequeueDelay       = time.Millisecond
+	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	// SandboxExposePortsAnnotation enables auto-populating Service ports from container ports when set to "true".
+	SandboxExposePortsAnnotation = "agents.x-k8s.io/auto-expose-ports"
+	sandboxControllerFieldOwner  = "sandbox-controller"
+	immediateRequeueDelay        = time.Millisecond
 )
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
@@ -463,6 +466,15 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 				needsUpdate = true
 			}
 
+			var desiredPorts []corev1.ServicePort
+			if shouldAutoExposePorts(sandbox) {
+				desiredPorts = buildServicePorts(&sandbox.Spec.PodTemplate.Spec)
+			}
+			if !reflect.DeepEqual(service.Spec.Ports, desiredPorts) {
+				service.Spec.Ports = desiredPorts
+				needsUpdate = true
+			}
+
 			if needsUpdate {
 				log.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
 				if err := r.Patch(ctx, service, patch); err != nil {
@@ -492,6 +504,14 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			},
 		},
 	}
+
+	if shouldAutoExposePorts(sandbox) {
+		ports := buildServicePorts(&sandbox.Spec.PodTemplate.Spec)
+		if len(ports) > 0 {
+			service.Spec.Ports = ports
+		}
+	}
+
 	service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 	if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 		log.Error(err, "Failed to set controller reference")
@@ -527,6 +547,79 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 func (r *SandboxReconciler) setServiceStatus(sandbox *sandboxv1alpha1.Sandbox, service *corev1.Service) {
 	sandbox.Status.Service = service.Name
 	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc." + r.ClusterDomain
+}
+
+func buildServicePorts(podSpec *corev1.PodSpec) []corev1.ServicePort {
+	if podSpec == nil {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	seenNames := map[string]struct{}{}
+	var ports []corev1.ServicePort
+
+	for _, container := range podSpec.Containers {
+		for _, containerPort := range container.Ports {
+			if containerPort.ContainerPort <= 0 {
+				continue
+			}
+
+			protocol := containerPort.Protocol
+			if protocol == "" {
+				protocol = corev1.ProtocolTCP
+			}
+
+			key := fmt.Sprintf("%d/%s", containerPort.ContainerPort, protocol)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+
+			port := corev1.ServicePort{
+				Port:       containerPort.ContainerPort,
+				Protocol:   protocol,
+				TargetPort: intstr.FromInt32(containerPort.ContainerPort),
+			}
+
+			name := containerPort.Name
+			if name == "" {
+				name = fmt.Sprintf("port-%d-%s", containerPort.ContainerPort, strings.ToLower(string(protocol)))
+			}
+			if _, exists := seenNames[name]; exists {
+				name = uniqueServicePortName(name, containerPort.ContainerPort, protocol)
+			}
+			port.Name = name
+			seenNames[name] = struct{}{}
+
+			ports = append(ports, port)
+			seen[key] = struct{}{}
+		}
+	}
+
+	return ports
+}
+
+// ServicePort.Name is validated as a DNS_LABEL (max 63 chars) in Kubernetes 1.32+.
+const maxServicePortNameLength = 63
+
+func shouldAutoExposePorts(sandbox *sandboxv1alpha1.Sandbox) bool {
+	if sandbox == nil {
+		return false
+	}
+	value, ok := sandbox.Annotations[SandboxExposePortsAnnotation]
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(value, "true")
+}
+
+func uniqueServicePortName(base string, port int32, protocol corev1.Protocol) string {
+	protocolLower := strings.ToLower(string(protocol))
+	suffix := fmt.Sprintf("-%d-%s", port, protocolLower)
+	maxBase := maxServicePortNameLength - len(suffix)
+	if len(base) > maxBase {
+		base = base[:maxBase]
+	}
+	return base + suffix
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {

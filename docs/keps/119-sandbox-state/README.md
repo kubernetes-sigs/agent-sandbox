@@ -6,13 +6,13 @@
     - [1. <code>Initialized</code>](#1-initialized)
     - [2. <code>Suspended</code>](#2-suspended)
     - [3. <code>Ready</code> (Root Condition)](#3-ready-root-condition)
-    - [Why "Initialized" matters](#why-initialized-matters)
-    - [Terminal States: Expired & Terminating](#terminal-states-expired--terminating)
+    - [Why &quot;Initialized&quot; matters](#why-initialized-matters)
+    - [Terminal States: Expired &amp; Terminating](#terminal-states-expired--terminating)
 - [Usage Examples](#usage-examples)
 - [Consumer Compatibility](#consumer-compatibility)
 - [Alternatives Considered](#alternatives-considered)
     - [1. Retaining the Legacy <code>status.phase</code> Field](#1-retaining-the-legacy-statusphase-field)
-    - [2. Utilizing a Single "Ready" Condition](#2-utilizing-a-single-ready-condition)
+    - [2. Utilizing a Single &quot;Ready&quot; Condition](#2-utilizing-a-single-ready-condition)
 <!-- /toc -->
 
 Currently, `Sandbox.Status` relies primarily on a single `Ready` condition.

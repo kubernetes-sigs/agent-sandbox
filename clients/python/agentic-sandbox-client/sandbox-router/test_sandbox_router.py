@@ -39,7 +39,7 @@ class TestProxyRequestValidation:
     def test_missing_sandbox_id_header(self, client):
         resp = client.post("/execute")
         assert resp.status_code == 400
-        assert "X-Sandbox-ID" in resp.json()["detail"]
+        assert "X-Sandbox-ID header is required" in resp.json()["detail"]
 
     def test_invalid_namespace_format(self, client):
         resp = client.post(
@@ -50,7 +50,7 @@ class TestProxyRequestValidation:
             },
         )
         assert resp.status_code == 400
-        assert "Invalid namespace" in resp.json()["detail"]
+        assert "Invalid namespace format." == resp.json()["detail"]
 
     def test_invalid_port_format(self, client):
         resp = client.post(
@@ -61,19 +61,26 @@ class TestProxyRequestValidation:
             },
         )
         assert resp.status_code == 400
-        assert "Invalid port" in resp.json()["detail"]
+        assert "Invalid port format." == resp.json()["detail"]
 
     def test_valid_namespace_with_hyphens(self, client):
-        """Namespaces like 'my-ns' should pass validation (connection will fail, not 400)."""
-        resp = client.post(
-            "/execute",
-            headers={
-                "X-Sandbox-ID": "my-sandbox",
-                "X-Sandbox-Namespace": "my-namespace",
-            },
-        )
-        # Should NOT be a 400 validation error; it will fail at connection level
-        assert resp.status_code != 400
+        """Namespaces like 'my-ns' should pass validation and result in a connection attempt."""
+        with patch.object(
+            sandbox_router.client,
+            "send",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("stop here")
+        ):
+            resp = client.post(
+                "/execute",
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "X-Sandbox-Namespace": "my-namespace",
+                },
+            )
+        # Expect 502 because the send is mocked to raise ConnectError
+        assert resp.status_code == 502
+        assert "Could not connect to the backend sandbox" in resp.json()["detail"]
 
 
 class TestProxyTimeout:
@@ -87,14 +94,13 @@ class TestProxyTimeout:
             assert sandbox_router.client.timeout.connect == 600.0
             assert sandbox_router.client.timeout.read == 600.0
 
-        # Restore default
         importlib.reload(sandbox_router)
+
     def test_default_when_env_var_unset(self):
         with patch.dict(os.environ, {}, clear=True):
             importlib.reload(sandbox_router)
             assert sandbox_router.proxy_timeout == 180.0
 
-        # Restore default
         importlib.reload(sandbox_router)
 
 
@@ -132,7 +138,7 @@ class TestProxyRouting:
                 },
             )
             built_request = mock_send.call_args
-            request_obj = built_request[0][0]  # first positional arg
+            request_obj = built_request[0][0]
             assert "test-box.prod.svc.cluster.local:9999/some/path" in str(
                 request_obj.url
             )
@@ -171,3 +177,35 @@ class TestProxyRouting:
             )
             assert captured_request.get("params", {}).get("cmd") == "ls"
             assert captured_request.get("params", {}).get("arg") == "-la"
+
+    @pytest.mark.asyncio
+    @patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock)
+    async def test_request_body_streamed(self, mock_send, client):
+        """Verify that the request body is passed as a stream to httpx."""
+        mock_resp = AsyncMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        async def _async_iter(items):
+            for item in items:
+                yield item
+        mock_resp.aiter_bytes.return_value = _async_iter([b"OK"])
+        mock_send.return_value = mock_resp
+
+        # Correctly create a larger payload
+        test_content = b'{"key": "value", "padding": "' + b"x" * 2048 + b'"}'
+        assert len(test_content) > 2048
+
+        with TestClient(sandbox_router.app) as test_client:
+            test_client.post(
+                "/execute",
+                headers={"X-Sandbox-ID": "test-sandbox"},
+                content=test_content,
+            )
+
+        mock_send.assert_called_once()
+        args, kwargs = mock_send.call_args
+        sent_request = args[0]
+
+        assert hasattr(
+            sent_request.stream, "__aiter__"
+        ), "Content should be an async iterable"

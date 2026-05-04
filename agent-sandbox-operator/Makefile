@@ -92,15 +92,20 @@ help: ## Display this help.
 
 ##@ Development
 
+# Parent k8s/ tree (repo root, one level above this module).
+K8S_ROOT ?= ../k8s
+
+.PHONY: copy-k8s-config
+copy-k8s-config: ## Copy ../k8s into config/ (CRDs, RBAC .generated.yaml → role names, extensions binding, support/manager).
+	mkdir -p config/crd/bases
+	cp $(K8S_ROOT)/crds/*.yaml config/crd/bases/
+	cp $(K8S_ROOT)/rbac.generated.yaml config/rbac/role.yaml
+	cp $(K8S_ROOT)/extensions-rbac.generated.yaml config/rbac/extensions_role.yaml
+	cp $(K8S_ROOT)/extensions.yaml config/rbac/extensions_role_binding.yaml
+	go run ./hack/sync-k8s-manifests -controller $(K8S_ROOT)/controller.yaml -extensions $(K8S_ROOT)/extensions.controller.yaml -support-out config/rbac/support.yaml -manager-out config/manager/manager.yaml
+
 .PHONY: manifests
-# Regenerate CRD/RBAC into config/crd/bases and config/rbac; assemble manager from ../k8s (same sources as k8s/*.yaml).
-manifests: controller-gen ## Generate CRDs and RBAC; refresh support/manager/extensions YAML from ../k8s.
-	$(CONTROLLER_GEN) crd:maxDescLen=0 paths="../api/..." output:crd:dir=config/crd/bases
-	$(CONTROLLER_GEN) crd:maxDescLen=0 paths="../extensions/..." output:crd:dir=config/crd/bases
-	$(CONTROLLER_GEN) paths="../controllers/..." output:rbac:dir=config/rbac rbac:roleName=agent-sandbox-controller,fileName=role.yaml
-	$(CONTROLLER_GEN) paths="../extensions/controllers/..." output:rbac:dir=config/rbac rbac:roleName=agent-sandbox-controller-extensions,fileName=extensions_role.yaml
-	go run ./hack/sync-k8s-manifests -controller ../k8s/controller.yaml -extensions ../k8s/extensions.controller.yaml -support-out config/rbac/support.yaml -manager-out config/manager/manager.yaml
-	cp ../k8s/extensions.yaml config/rbac/extensions_role_binding.yaml
+manifests: copy-k8s-config ## Refresh config/ YAML from $(K8S_ROOT) (same layout as manual copy from k8s/).
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

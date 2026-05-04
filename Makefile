@@ -46,6 +46,10 @@ kill-cloud-provider-kind:
 test-unit:
 	./dev/tools/test-unit
 
+.PHONY: test-langchain
+test-langchain:
+	uv run pytest clients/python/langchain-agent-sandbox/tests/ -v --junitxml=bin/langchain-backend-junit.xml
+
 .PHONY: test-e2e
 test-e2e:
 	RACE=$(RACE) ./dev/ci/presubmits/test-e2e

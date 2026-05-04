@@ -106,6 +106,23 @@ To interact with the agent-sandbox programmatically, you can use the Python SDK.
 
 For detailed installation and usage instructions, please refer to the [Python SDK README](clients/python/agentic-sandbox-client/README.md).
 
+### LangChain DeepAgents Integration
+
+The [langchain-agent-sandbox](clients/python/langchain-agent-sandbox/) package provides an official [DeepAgents](https://docs.langchain.com/deepagents) backend adapter. It implements `SandboxBackendProtocol` and supports session reattach, managed lifecycle, and policy enforcement.
+
+```python
+from k8s_agent_sandbox import SandboxClient
+from langchain_agent_sandbox import AgentSandboxBackend
+from deepagents import create_deep_agent
+
+client = SandboxClient()
+with AgentSandboxBackend.from_template(client, "python-sandbox") as backend:
+    agent = create_deep_agent(backend=backend)
+    result = agent.invoke("Run the analysis")
+```
+
+See the [LangChain adapter README](clients/python/langchain-agent-sandbox/README.md) for quickstart, session reattach, and policy usage.
+
 ## Configuration
 
 For advanced scale and concurrency tuning (e.g., API QPS and worker counts), please see the [Configuration Guide](docs/configuration.md).

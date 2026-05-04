@@ -44,14 +44,16 @@ import (
 )
 
 const (
-	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
-	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
+	sandboxTemplateRefHash     = "agents.x-k8s.io/sandbox-template-ref-hash"
+	warmPoolSandboxLabel       = "agents.x-k8s.io/warm-pool-sandbox"
+	warmPoolEvictionAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
 type SandboxWarmPoolReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme                 *runtime.Scheme
+	EnableWarmPoolEviction bool
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
@@ -334,6 +336,17 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
+
+	enableEviction := r.EnableWarmPoolEviction
+	if warmPool.Spec.EvictionPolicy != nil {
+		enableEviction = *warmPool.Spec.EvictionPolicy == extensionsv1alpha1.AlwaysSandboxWarmPoolEvictionPolicy
+	}
+
+	if enableEviction {
+		podAnnotations[warmPoolEvictionAnnotation] = "true"
+	} else {
+		delete(podAnnotations, warmPoolEvictionAnnotation)
+	}
 
 	replicas := int32(1)
 

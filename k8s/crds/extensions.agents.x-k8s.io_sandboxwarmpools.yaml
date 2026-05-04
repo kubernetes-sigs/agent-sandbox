@@ -35,6 +35,11 @@ spec:
             type: object
           spec:
             properties:
+              evictionPolicy:
+                enum:
+                - Always
+                - Never
+                type: string
               replicas:
                 format: int32
                 minimum: 0

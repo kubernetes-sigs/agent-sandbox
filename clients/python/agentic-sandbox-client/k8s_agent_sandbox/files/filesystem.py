@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import posixpath
 import urllib.parse
 from typing import List
 from k8s_agent_sandbox.connector import SandboxConnector
@@ -40,11 +41,48 @@ class Filesystem:
         if isinstance(content, str):
             content = content.encode('utf-8')
 
-        filename = os.path.basename(path)
-        files_payload = {'file': (filename, content)}
+        # The sandbox runtime uses the multipart ``filename`` field as a
+        # relative destination path under its base directory (e.g. /app).
+        # ``os.path.join`` on the server will honor absolute paths and
+        # ``..`` segments, so a caller could otherwise escape the
+        # confinement by sending filename='/etc/passwd' or '../etc/...'.
+        # Sanitize here to guarantee the filename is a normalized
+        # relative path with no upward traversal.
+        safe_path = self._safe_upload_path(path)
+        files_payload = {'file': (safe_path, content)}
         self.connector.send_request("POST", "upload",
                       files=files_payload, timeout=timeout)
-        logging.info(f"File '{filename}' uploaded successfully.")
+        logging.info(f"File '{path}' uploaded successfully.")
+
+    @staticmethod
+    def _safe_upload_path(path: str) -> str:
+        """Return a relative, ``..``-free filename safe to send as multipart filename.
+
+        Rejects NUL bytes and ASCII control characters before normalisation:
+        ``os.path.normpath`` preserves embedded NULs, and a NUL in the
+        filename truncates at the runtime's C/syscall layer. Without this
+        check ``foo\\x00../etc/passwd`` would survive the ``..`` split (no
+        part equals ``".."`` because the NUL-prefixed segment doesn't
+        match) yet resolve to ``foo`` on the filesystem — or worse,
+        something server-dependent.``.
+        """
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+            raise ValueError(
+                f"Upload path contains ASCII control characters: {path!r}"
+            )
+        stripped = path.strip()
+        if not stripped:
+            raise ValueError("Upload path cannot be empty.")
+
+        normalized = posixpath.normpath(stripped).lstrip("/")
+        if not normalized or normalized == ".":
+            raise ValueError(f"Upload path '{path}' does not name a file.")
+        parts = normalized.split("/")
+        if any(part == ".." for part in parts):
+            raise ValueError(
+                f"Upload path '{path}' escapes the sandbox root."
+            )
+        return normalized
 
     @trace_span("read")
     def read(self, path: str, timeout: int = 60) -> bytes:

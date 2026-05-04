@@ -215,5 +215,62 @@ class TestSandbox(unittest.TestCase):
 
         self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(self.claim_name, self.namespace)
 
+
+class TestSandboxTerminateIdempotent(unittest.TestCase):
+    """`Sandbox.terminate()` must be idempotent — a second call must not
+    issue a redundant DELETE that would return 404."""
+
+    @patch('k8s_agent_sandbox.sandbox.Filesystem')
+    @patch('k8s_agent_sandbox.sandbox.CommandExecutor')
+    @patch('k8s_agent_sandbox.sandbox.create_tracer_manager')
+    @patch('k8s_agent_sandbox.sandbox.SandboxConnector')
+    def _build_sandbox(self, mock_connector, mock_tracer, mock_cmd, mock_files):
+        mock_tracer.return_value = (MagicMock(), MagicMock())
+        from k8s_agent_sandbox.models import (
+            SandboxLocalTunnelConnectionConfig, SandboxTracerConfig,
+        )
+        k8s_helper = MagicMock()
+        return Sandbox(
+            claim_name="my-claim",
+            sandbox_id="my-claim",
+            namespace="demo",
+            connection_config=SandboxLocalTunnelConnectionConfig(),
+            tracer_config=SandboxTracerConfig(),
+            k8s_helper=k8s_helper,
+        ), k8s_helper
+
+    def test_second_terminate_does_not_redelete(self):
+        sandbox, helper = self._build_sandbox()
+
+        sandbox.terminate()
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
+        self.assertIsNone(sandbox.claim_name)
+
+        # Second call must be a no-op.
+        sandbox.terminate()
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
+
+    def test_failed_terminate_preserves_claim_name_for_retry(self):
+        """When delete_sandbox_claim raises, claim_name must NOT be cleared —
+        otherwise a transient 5xx / network blip would hide the error and
+        the caller would have no handle to retry or clean up manually."""
+        sandbox, helper = self._build_sandbox()
+
+        helper.delete_sandbox_claim.side_effect = RuntimeError("transient 500")
+
+        with self.assertRaisesRegex(RuntimeError, "transient 500"):
+            sandbox.terminate()
+
+        # claim_name must be preserved so the caller can retry.
+        self.assertEqual(sandbox.claim_name, "my-claim")
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
+
+        # Retry succeeds and clears the handle.
+        helper.delete_sandbox_claim.side_effect = None
+        sandbox.terminate()
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 2)
+        self.assertIsNone(sandbox.claim_name)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -485,9 +485,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             mock_response
         )
 
-        result = self.engine.list(
-            filter_by={"grouping_labels": {"test-label": "test-value"}}
-        )
+        result = self.engine.list()
 
         self.assertTrue(result.success)
         self.assertEqual(len(result.snapshots), 2)
@@ -499,7 +497,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             version=PODSNAPSHOT_API_VERSION,
             namespace="test-ns",
             plural=PODSNAPSHOT_PLURAL,
-            label_selector=f"{PODSNAPSHOT_POD_NAME_LABEL}=test-pod,test-label=test-value",
+            label_selector=f"{PODSNAPSHOT_POD_NAME_LABEL}=test-pod",
         )
 
     def test_snapshots_list_filter_empty(self):
@@ -670,15 +668,6 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             timeout=180,
         )
 
-    def test_snapshots_delete_all_invalid_strategy(self):
-        """Test delete_all raises ValueError for unsupported strategy."""
-        with self.assertRaises(ValueError) as context:
-            self.engine.delete_all(delete_by="invalid-strategy")
-        self.assertIn(
-            "Unsupported deletion strategy: invalid-strategy",
-            str(context.exception),
-        )
-
     @patch(
         "k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine.wait_for_snapshot_deletion"
     )
@@ -703,14 +692,12 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 {}
             )
 
-            result = self.engine.delete_all(
-                delete_by="labels", label_value={"foo": "bar"}
-            )
+            result = self.engine.delete_all()
 
             self.assertTrue(result.success)
             self.assertEqual(result.deleted_snapshots, ["snap-a"])
             mock_list.assert_called_once_with(
-                filter_by={"grouping_labels": {"foo": "bar"}, "ready_only": False}
+                filter_by={"ready_only": False}
             )
             self.mock_k8s_helper.custom_objects_api.delete_namespaced_custom_object.assert_called_once_with(
                 group=PODSNAPSHOT_API_GROUP,
@@ -872,17 +859,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             self.engine.delete_all()
             mock_execute.assert_called_once_with(scope="global", timeout=180)
 
-    def test_snapshots_delete_all_by_labels(self):
-        """Test delete_all calls _execute_deletion with labels."""
-        with patch.object(self.engine, "_execute_deletion") as mock_execute:
-            mock_execute.return_value = DeleteSnapshotResult(
-                success=True,
-                deleted_snapshots=["snap-x"],
-                error_reason="",
-                error_code=0,
-            )
-            self.engine.delete_all(delete_by="labels", label_value={"foo": "bar"})
-            mock_execute.assert_called_once_with(labels={"foo": "bar"}, timeout=180)
+
 
     def test_snapshots_delete_empty_fails(self):
         """Test delete raises TypeError if snapshot_uid is missing."""

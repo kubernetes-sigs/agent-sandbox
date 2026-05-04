@@ -163,7 +163,7 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     print(f"Snapshot '{suspend_third_snapshot_uid}' deleted successfully.")
 
     print(f"\nDeleting all snapshots for sandbox '{sandbox.sandbox_id}'...")
-    delete_result = sandbox.snapshots.delete_all(delete_by="all")
+    delete_result = sandbox.snapshots.delete_all()
     assert delete_result.success, delete_result.error_reason
     assert (
         len(delete_result.deleted_snapshots) == 2

@@ -55,7 +55,9 @@ def main():
         allow_error=True
     )
 
-    if not latest_tag:
+    has_latest_tag = bool(latest_tag)
+
+    if not has_latest_tag:
         print("⚠️  Unable to find any version tags in repository. Defaulting to v0.1.0 base.")
         latest_tag = "v0.1.0"
         new_tag = "v0.1.0"
@@ -84,7 +86,10 @@ def main():
             new_tag = f"v{major}.{minor}.{patch + 1}"
 
     # 3. Check for commits since latest tag
-    commits = run_command(["git", "log", f"{latest_tag}..HEAD", "--oneline"], capture_output=True)
+    if has_latest_tag:
+        commits = run_command(["git", "log", f"{latest_tag}..HEAD", "--oneline"], capture_output=True)
+    else:
+        commits = run_command(["git", "log", "HEAD", "--oneline"], capture_output=True)
     
     if not commits:
         print(f"ℹ️  No new commits since last release ({latest_tag}). Skipping release.")

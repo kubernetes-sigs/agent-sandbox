@@ -201,7 +201,8 @@ def generate_highlights(commits, breaking_changes, pr_descriptions, contributors
 - Summarize the highlights into a few key areas with bold titles describing the feature area (e.g., **Python SDK Advancements**, **Core Stability**).
 - Synthesize information from full commit messages and PR descriptions to describe changes accurately.
 - List all contributors as @handle from the verified contributors list below.
-- List **only** the verified new contributors (first-time contributors) under the "New Contributors" section by matching the verified new authors list below. If none of the contributors are in the new authors list, omit the "New Contributors" section entirely.
+- The verified contributors list and the verified first-time authors list use different identifier formats. Do not try to match or convert between them.
+- For the "New Contributors" section, list **only** the entries from the verified new authors list below, exactly as provided. If the verified new authors list is empty, omit the "New Contributors" section entirely.
 
 Verified Contributors:
 {contributors_str}

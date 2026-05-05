@@ -1,0 +1,50 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: simple-sandbox-template
+  namespace: default
+  labels:
+    app: my-app
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+      - name: simple-sandbox
+        image: <DOCKER_IMAGE_URL>
+        # 2. Reference the exact name of the volume claim here
+        volumeMounts:
+        - name: agent-data
+          mountPath: /data
+        ports:
+        - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+            ephemeral-storage: "512Mi"
+      restartPolicy: "OnFailure"
+  # 1. Define the dynamic volume configuration here
+  volumeClaimTemplates:
+  - metadata:
+      name: agent-data
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi

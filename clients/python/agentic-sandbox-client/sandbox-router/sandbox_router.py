@@ -96,7 +96,7 @@ async def proxy_request(request: Request, full_path: str):
             method=request.method,
             url=target_url,
             headers=headers,
-            content=await request.body()
+            content=request.stream()
         )
 
         resp = await client.send(req, stream=True)

@@ -8,6 +8,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
 - [**gemini-cu-sandbox**](./gemini-cu-sandbox): An example of a Python runtime sandbox for Gemini Computer Use Agent.
 - [**hello-world-sandbox**](./hello-world-sandbox): A simple "Hello World" sandbox example.
+- [**hpa-swp-scaling**](./hpa-swp-scaling): An example of scaling a SandboxWarmPool using Kubernetes Horizontal Pod Autoscaler (HPA).
 - [**jupyterlab**](./jupyterlab): An example of running JupyterLab on Agent-Sandbox.
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.

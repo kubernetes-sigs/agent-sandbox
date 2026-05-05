@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-ns
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-sa
+  namespace: sandbox-ns

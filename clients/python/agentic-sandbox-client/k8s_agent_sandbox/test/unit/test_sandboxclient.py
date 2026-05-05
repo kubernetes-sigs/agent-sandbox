@@ -26,7 +26,11 @@ from urllib3.util.retry import Retry
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+from k8s_agent_sandbox.models import (
+    SandboxDirectConnectionConfig,
+    SandboxInClusterConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+)
 from k8s_agent_sandbox.constants import POD_NAME_ANNOTATION
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
@@ -60,7 +64,7 @@ class TestSandboxClient(unittest.TestCase):
             
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
             
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None)
+            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None, warmpool=None)
             self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
@@ -202,6 +206,7 @@ class TestSandboxClient(unittest.TestCase):
                 "sandbox-claim-1234abcd", "test-template", "test-namespace",
                 labels={"agent": "code-agent", "team": "platform"},
                 lifecycle=None,
+                warmpool=None,
             )
 
     def test_create_claim_with_labels(self):
@@ -216,6 +221,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels={"agent": "code-agent"},
             lifecycle=None,
+            warmpool=None,
         )
 
     def test_create_claim(self):
@@ -229,6 +235,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels=None,
             lifecycle=None,
+            warmpool=None,
         )
 
     def test_validate_labels_rejects_invalid_value(self):
@@ -340,6 +347,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=lifecycle,
+            warmpool=None,
         )
 
     def test_create_claim_without_lifecycle(self):
@@ -353,6 +361,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=None,
+            warmpool=None,
         )
 
     def test_shutdown_after_seconds_validation_zero(self):
@@ -538,6 +547,39 @@ class TestK8sHelperWatchNoneEvents(unittest.TestCase):
         self.helper.custom_objects_api = MagicMock()
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_sandbox_ready_returns_pod_ip(self, mock_watch_cls):
+        """wait_for_sandbox_ready returns the first pod IP when present."""
+        mock_watch = MagicMock()
+        mock_watch_cls.return_value = mock_watch
+        mock_watch.stream.return_value = [{
+            "type": "MODIFIED",
+            "object": {
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "podIPs": ["10.244.0.5", "fd00::5"],
+                },
+            },
+        }]
+        result = self.helper.wait_for_sandbox_ready("test-sandbox", "default", timeout=10)
+        self.assertEqual(result, "10.244.0.5")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_sandbox_ready_returns_none_when_no_pod_ips(self, mock_watch_cls):
+        """wait_for_sandbox_ready returns None when podIPs is absent."""
+        mock_watch = MagicMock()
+        mock_watch_cls.return_value = mock_watch
+        mock_watch.stream.return_value = [{
+            "type": "MODIFIED",
+            "object": {
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                },
+            },
+        }]
+        result = self.helper.wait_for_sandbox_ready("test-sandbox", "default", timeout=10)
+        self.assertIsNone(result)
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_sandbox_ready_skips_none_events(self, mock_watch_cls):
         """None events from the watch stream should be skipped, not crash."""
         mock_watch = MagicMock()
@@ -586,6 +628,60 @@ class TestK8sHelperWatchNoneEvents(unittest.TestCase):
 
         ip = self.helper.wait_for_gateway_ip("test-gateway", "default", timeout=10)
         self.assertEqual(ip, "10.0.0.1")
+
+
+class TestSandboxClientInClusterConfig(unittest.TestCase):
+    """Tests that SandboxClient stores and propagates SandboxInClusterConnectionConfig."""
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_in_cluster_config_stored(self, _):
+        config = SandboxInClusterConnectionConfig()
+        sc = SandboxClient(connection_config=config)
+        self.assertIsInstance(sc.connection_config, SandboxInClusterConnectionConfig)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_default_config_is_local_tunnel(self, _):
+        sc = SandboxClient()
+        self.assertIsInstance(sc.connection_config, SandboxLocalTunnelConnectionConfig)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_in_cluster_config_custom_port(self, _):
+        config = SandboxInClusterConnectionConfig(server_port=9000)
+        sc = SandboxClient(connection_config=config)
+        self.assertEqual(sc.connection_config.server_port, 9000)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_in_cluster_config_default_port(self, _):
+        config = SandboxInClusterConnectionConfig()
+        sc = SandboxClient(connection_config=config)
+        self.assertEqual(sc.connection_config.server_port, 8888)
+
+    def _create_sandbox_with_in_cluster_config(self, namespace='default'):
+        with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'), \
+             patch('uuid.uuid4') as mock_uuid:
+            mock_uuid.return_value.hex = 'aabbccdd'
+            client = SandboxClient(connection_config=SandboxInClusterConnectionConfig())
+            client.k8s_helper.resolve_sandbox_name.return_value = 'my-sandbox'
+            mock_sandbox_class = MagicMock()
+            mock_sandbox_class.return_value = MagicMock()
+            client.sandbox_class = mock_sandbox_class
+            with patch.object(client, '_create_claim'), \
+                 patch.object(client, '_wait_for_sandbox_ready'):
+                client.create_sandbox('my-template', namespace=namespace)
+            return mock_sandbox_class.call_args.kwargs
+
+    def test_sandbox_created_with_in_cluster_config(self):
+        call_kwargs = self._create_sandbox_with_in_cluster_config()
+        self.assertIsInstance(call_kwargs['connection_config'], SandboxInClusterConnectionConfig)
+
+    def test_sandbox_namespace_passed_correctly(self):
+        call_kwargs = self._create_sandbox_with_in_cluster_config(namespace='prod')
+        self.assertEqual(call_kwargs['namespace'], 'prod')
+
+    def test_client_does_not_pass_pod_ip(self):
+        """SandboxClient no longer threads pod_ip — Sandbox resolves it internally."""
+        call_kwargs = self._create_sandbox_with_in_cluster_config()
+        self.assertNotIn('pod_ip', call_kwargs)
 
 
 if __name__ == '__main__':

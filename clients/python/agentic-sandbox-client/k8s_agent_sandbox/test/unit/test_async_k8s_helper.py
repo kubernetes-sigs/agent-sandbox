@@ -73,6 +73,31 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["metadata"]["labels"], {"agent": "test"})
         self.assertEqual(body["metadata"]["annotations"], {"key": "val"})
 
+    async def test_create_claim_with_warmpool_none(self):
+        await self.helper.create_sandbox_claim(
+            "test-claim", "test-template", "test-namespace", warmpool="none"
+        )
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        body = call_kwargs["body"]
+        self.assertEqual(body["spec"]["warmpool"], "none")
+
+    async def test_create_claim_with_specific_warmpool(self):
+        await self.helper.create_sandbox_claim(
+            "test-claim", "test-template", "test-namespace", warmpool="custom-pool"
+        )
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        body = call_kwargs["body"]
+        self.assertEqual(body["spec"]["warmpool"], "custom-pool")
+
+    async def test_create_claim_warmpool_omitted(self):
+        await self.helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        body = call_kwargs["body"]
+        self.assertNotIn("warmpool", body["spec"])
+
 
 class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
 
@@ -102,16 +127,16 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
                 }
             }
         }
-        
+
         async def mock_stream(*args, **kwargs):
             yield mock_event
-            
+
         mock_watch.stream = mock_stream
         mock_watch_class.return_value = mock_watch
-        
+
         with self.assertRaises(SandboxTemplateNotFoundError) as context:
             await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
-            
+
         self.assertIn("Template 'non-existent-template' not found", str(context.exception))
 
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
@@ -124,17 +149,68 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
                 "metadata": {"name": "test-claim"}
             }
         }
-        
+
         async def mock_stream(*args, **kwargs):
             yield mock_event
-            
+
         mock_watch.stream = mock_stream
         mock_watch_class.return_value = mock_watch
-        
+
         with self.assertRaises(SandboxMetadataError) as context:
             await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
-            
+
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+
+
+class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self):
+        self.helper = AsyncK8sHelper()
+        self.helper._initialized = True
+        self.helper.custom_objects_api = MagicMock()
+
+    async def test_returns_first_pod_ip_when_ready(self):
+        async def _async_gen(*args, **kwargs):
+            yield {
+                "type": "MODIFIED",
+                "object": {
+                    "status": {
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                        "podIPs": ["10.244.0.5", "fd00::5"],
+                    }
+                },
+            }
+
+        with patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch") as MockWatch:
+            mock_watch = MagicMock()
+            mock_watch.stream = _async_gen
+            mock_watch.close = AsyncMock()
+            MockWatch.return_value = mock_watch
+
+            result = await self.helper.wait_for_sandbox_ready("my-sandbox", "default", timeout=10)
+
+        self.assertEqual(result, "10.244.0.5")
+
+    async def test_returns_none_when_no_pod_ips(self):
+        async def _async_gen(*args, **kwargs):
+            yield {
+                "type": "MODIFIED",
+                "object": {
+                    "status": {
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                    }
+                },
+            }
+
+        with patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch") as MockWatch:
+            mock_watch = MagicMock()
+            mock_watch.stream = _async_gen
+            mock_watch.close = AsyncMock()
+            MockWatch.return_value = mock_watch
+
+            result = await self.helper.wait_for_sandbox_ready("my-sandbox", "default", timeout=10)
+
+        self.assertIsNone(result)
 
 if __name__ == "__main__":
     unittest.main()

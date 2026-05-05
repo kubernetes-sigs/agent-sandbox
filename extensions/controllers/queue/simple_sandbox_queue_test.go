@@ -61,6 +61,21 @@ func TestSimpleSandboxQueue_RemoveItem_GhostPodFix(t *testing.T) {
 	// Simulate the Kubelet deleting the middle pod (Ghost Pod scenario)
 	q.RemoveItem(hash, key2)
 
+	// Ensure RemoveItem does not retain stale references in backing array tail.
+	rawQueue, ok := q.queues.Load(hash)
+	if !ok {
+		t.Fatalf("Expected queue for %q to exist", hash)
+	}
+	sq := rawQueue.(*synchronizedQueue)
+	if cap(sq.items) > len(sq.items) {
+		backing := sq.items[:cap(sq.items)]
+		for i := len(sq.items); i < len(backing); i++ {
+			if backing[i] != (SandboxKey{}) {
+				t.Errorf("Expected backing array slot %d to be cleared, found %+v", i, backing[i])
+			}
+		}
+	}
+
 	// First pop should still be key1
 	got1, _ := q.Get(hash)
 	if got1 != key1 {
@@ -74,8 +89,8 @@ func TestSimpleSandboxQueue_RemoveItem_GhostPodFix(t *testing.T) {
 	}
 
 	// Queue should now be empty
-	_, ok := q.Get(hash)
-	if ok {
+	_, hasItem := q.Get(hash)
+	if hasItem {
 		t.Errorf("Expected queue to be empty after Ghost Pod removal")
 	}
 }

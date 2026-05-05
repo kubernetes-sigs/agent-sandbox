@@ -1,0 +1,84 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  annotations:
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/description: Prevents RoleBindings and ClusterRoleBindings
+      from being granted to ServiceAccounts that are actively used by Pods controlled
+      by a Sandbox CR (agents.x-k8s.io), blocking privilege escalation in sandboxed
+      environments.
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/title: Prevent Active Sandbox ServiceAccount Binding
+  name: prevent-sandbox-sa-binding
+spec:
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - rbac.authorization.k8s.io
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - rolebindings
+      - clusterrolebindings
+  validationActions:
+  - Deny
+  validations:
+  - expression: |-
+      !object.?subjects.orValue([]).exists(subject,
+        (
+          subject.kind == 'ServiceAccount' &&
+          subject.?namespace.orValue('') != '' &&
+          resource.List('v1', 'pods', subject.namespace).items.orValue([]).exists(pod,
+            pod.spec.?serviceAccountName.orValue('') == subject.name &&
+            pod.metadata.?ownerReferences.orValue([]).exists(owner,
+              owner.kind == 'Sandbox' &&
+              owner.apiVersion.startsWith('agents.x-k8s.io/')
+            )
+          )
+        ) ||
+        (
+          subject.kind == 'Group' &&
+          (
+            (
+              subject.name == 'system:serviceaccounts' &&
+              resource.List('v1', 'pods', '').items.orValue([]).exists(pod,
+                pod.metadata.?ownerReferences.orValue([]).exists(owner,
+                  owner.kind == 'Sandbox' &&
+                  owner.apiVersion.startsWith('agents.x-k8s.io/')
+                )
+              )
+            ) ||
+            (
+              subject.name.startsWith('system:serviceaccounts:') &&
+              resource.List('v1', 'pods', subject.name.substring(23)).items.orValue([]).exists(pod,
+                pod.metadata.?ownerReferences.orValue([]).exists(owner,
+                  owner.kind == 'Sandbox' &&
+                  owner.apiVersion.startsWith('agents.x-k8s.io/')
+                )
+              )
+            )
+          )
+        ) ||
+        (
+          subject.kind == 'User' &&
+          subject.name.startsWith('system:serviceaccount:') &&
+          resource.List('v1', 'pods', '').items.orValue([]).exists(pod,
+            subject.name == 'system:serviceaccount:' + pod.metadata.?namespace.orValue('') + ':' + pod.spec.?serviceAccountName.orValue('') &&
+            pod.metadata.?ownerReferences.orValue([]).exists(owner,
+              owner.kind == 'Sandbox' &&
+              owner.apiVersion.startsWith('agents.x-k8s.io/')
+            )
+          )
+        )
+      )
+    messageExpression: '''Binding denied: one or more subjects reference a ServiceAccount
+      or equivalent ServiceAccount identity (group/user form) that is actively
+      used by a Sandbox-owned Pod. ServiceAccounts in use by Pods controlled by
+      a Sandbox CR (agents.x-k8s.io) must not be granted additional RBAC
+      bindings to prevent privilege escalation in sandboxed environments.'''

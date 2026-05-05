@@ -35,7 +35,7 @@ The `extensions` module provides additional CRDs and controllers that build on t
 
 *   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
 *   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
-*   `SandboxWarmPool`: Manages a pool of pre-warmed Sandbox Pods that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
+*   `SandboxWarmPool`: Manages a pool of pre-warmed Sandboxes that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
 ## Architecture
 
@@ -52,18 +52,14 @@ flowchart LR
     Template[SandboxTemplate]
     Sandbox[Sandbox]
 
-    ClaimController[Claim Controller]
-    Controller[Sandbox Controller]
-
-    Pod[Sandbox Pod]
-    Runtime[Sandbox Runtime Environment]
+    Pod[Pod]
+    Runtime[Sandbox Runtime]
 
     WarmPool[SandboxWarmPool]
 
     subgraph Extensions[Extensions]
       Claim
       Template
-      ClaimController
       WarmPool
     end
 
@@ -73,19 +69,17 @@ flowchart LR
 
     %% Claim workflow
     Claim -->|references| Template
-    Claim -->|reconciled by| ClaimController
-    ClaimController -->|creates| Sandbox
+    Claim -->|adopts| Sandbox
 
     %% Pod handling
-    ClaimController -->|adopts pod from| WarmPool
-    Sandbox -->|reconciled by| Controller
-    Controller -->|creates Pod if needed| Pod
+    Claim -->|adopts sandboxes from| WarmPool
+    Sandbox -->|creates Pod| Pod
 
     %% Runtime
     Pod --> Runtime
 
     %% Warm pool
-    WarmPool -->|pre-warmed pods| Pod
+    WarmPool -->|pre-warms sandboxes| Sandbox
 ```
 
 ## Installation
@@ -188,8 +182,11 @@ Learn how to engage with the Kubernetes community on the [community page](http:/
 
 You can reach the maintainers of this project at:
 
-- [Slack](https://kubernetes.slack.com/messages/sig-apps)
-- [Mailing List](https://groups.google.com/a/kubernetes.io/g/sig-apps)
+- [#agent-sandbox Slack channel](https://kubernetes.slack.com/messages/agent-sandbox)
+  - If it's your first time joining the Kubernetes Slack, visit https://slack.k8s.io/ to get an invitation.
+  - Log in to [Kubernetes Slack](https://kubernetes.slack.com/) first before joining the channel.
+- [#sig-apps Slack channel](https://kubernetes.slack.com/messages/sig-apps) for general sig-apps discussions
+- [SIG Apps Mailing List](https://groups.google.com/a/kubernetes.io/g/sig-apps)
 
 Please feel free to open issues, suggest features, and contribute code!
 

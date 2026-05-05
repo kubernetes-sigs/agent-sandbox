@@ -139,6 +139,7 @@ def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_rou
         sandbox = client.create_sandbox(
             template=sandbox_template,
             namespace=temp_namespace,
+            warmpool="none",
         )
         print("\n--- Running SDK tests without warmpool ---")
         run_sdk_tests(sandbox)
@@ -183,6 +184,7 @@ def test_python_sdk_gateway_mode(
         sandbox = client.create_sandbox(
             template=sandbox_template,
             namespace=temp_namespace,
+            warmpool="none",
         )
         print("\n--- Running SDK tests without warmpool ---")
         run_sdk_tests(sandbox)

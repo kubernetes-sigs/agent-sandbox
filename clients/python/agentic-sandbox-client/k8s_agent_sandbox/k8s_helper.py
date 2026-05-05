@@ -40,7 +40,7 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 
-    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None):
+    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
         """Creates a SandboxClaim custom resource."""
         metadata = {
             "name": name,
@@ -56,6 +56,8 @@ class K8sHelper:
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
+        if warmpool:
+            spec["warmpool"] = warmpool
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
@@ -126,8 +128,12 @@ class K8sHelper:
                         w.stop()
                         return name
 
-    def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int):
-        """Waits for the Sandbox custom resource to have a 'Ready' status."""
+    def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
+        """Waits for the Sandbox custom resource to have a 'Ready' status.
+
+        Returns the first pod IP from the sandbox status when ready, or None if
+        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        """
         deadline = time.monotonic() + timeout
         logging.info(f"Watching for Sandbox {name} to become ready...")
         while True:
@@ -154,7 +160,8 @@ class K8sHelper:
                         if cond.get('type') == 'Ready' and cond.get('status') == 'True':
                             logging.info(f"Sandbox {name} is ready.")
                             w.stop()
-                            return
+                            pod_ips = status.get('podIPs', [])
+                            return pod_ips[0] if pod_ips else None
                 elif event["type"] == "DELETED":
                     logging.error(f"Sandbox {name} was deleted before becoming ready.")
                     w.stop()

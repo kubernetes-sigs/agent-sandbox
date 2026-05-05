@@ -25,6 +25,9 @@ import (
 const (
 	// ClaimExpiredReason is the reason used in conditions/events when a claim expires.
 	ClaimExpiredReason = "ClaimExpired"
+
+	// AssignedSandboxNameLabel is the label key applied to the claim to identify the adopted Sandbox name.
+	AssignedSandboxNameLabel = "agents.x-k8s.io/sandbox-name"
 )
 
 // WarmPoolPolicy describes the policy for using warm pools.
@@ -82,6 +85,12 @@ type Lifecycle struct {
 	// +kubebuilder:validation:Format="date-time"
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+
+	// ttlSecondsAfterFinished limits how long a finished claim is retained.
+	// The timer starts from the mirrored Finished condition's LastTransitionTime.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
 	// shutdownPolicy determines the behavior when the SandboxClaim expires.
 	// +kubebuilder:default=Retain

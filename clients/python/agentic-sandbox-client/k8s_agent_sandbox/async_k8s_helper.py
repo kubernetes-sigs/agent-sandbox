@@ -65,6 +65,7 @@ class AsyncK8sHelper:
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
+        warmpool: str | None = None,
     ):
         """Creates a SandboxClaim custom resource."""
         await self._ensure_initialized()
@@ -83,6 +84,8 @@ class AsyncK8sHelper:
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
+        if warmpool:
+            spec["warmpool"] = warmpool
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
@@ -158,8 +161,12 @@ class AsyncK8sHelper:
             finally:
                 await w.close()
 
-    async def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int):
-        """Waits for the Sandbox custom resource to have a 'Ready' status."""
+    async def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
+        """Waits for the Sandbox custom resource to have a 'Ready' status.
+
+        Returns the first pod IP from the sandbox status when ready, or None if
+        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        """
         await self._ensure_initialized()
 
         deadline = time.monotonic() + timeout
@@ -188,7 +195,8 @@ class AsyncK8sHelper:
                         for cond in conditions:
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
                                 logger.info(f"Sandbox {name} is ready.")
-                                return
+                                pod_ips = status.get("podIPs", [])
+                                return pod_ips[0] if pod_ips else None
                     elif event["type"] == "DELETED":
                         logger.error(f"Sandbox {name} was deleted before becoming ready.")
                         raise SandboxNotFoundError(

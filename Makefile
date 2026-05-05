@@ -5,9 +5,19 @@ all: fix-go-generate build lint-go lint-api test-unit toc-verify
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
+
+GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
+GIT_SHA     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE  ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
+	-X $(VERSION_PKG).gitSHA=$(GIT_SHA) \
+	-X $(VERSION_PKG).buildDate=$(BUILD_DATE)
+
 .PHONY: build
 build:
-	go build -o bin/manager cmd/agent-sandbox-controller/main.go
+	go build -ldflags "$(LD_FLAGS)" -o bin/manager cmd/agent-sandbox-controller/main.go
 
 KIND_CLUSTER=agent-sandbox
 
@@ -38,7 +48,11 @@ test-unit:
 
 .PHONY: test-e2e
 test-e2e:
-	./dev/ci/presubmits/test-e2e
+	RACE=$(RACE) ./dev/ci/presubmits/test-e2e
+
+.PHONY: test-e2e-race
+test-e2e-race:
+	RACE=1 ./dev/ci/presubmits/test-e2e
 
 .PHONY: test-e2e-benchmarks
 test-e2e-benchmarks:
@@ -65,22 +79,26 @@ K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
 # Default remote (can be overriden: make release-publish REMOTE=upstream ...)
 REMOTE_UPSTREAM ?= upstream
+REMOTE_FORK ?= origin
+
+# Gemini model for release notes generation
+GEMINI_MODEL ?= gemini-2.5-flash
 
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
 .PHONY: release-promote
 release-promote:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-promote TAG=vX.Y.Z)"; exit 1; fi
-	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR}
+	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK}
 
 # Publish a draft release to GitHub
-# Usage: make release-publish TAG=vX.Y.Z
+# Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-2.5-flash
 .PHONY: release-publish
 release-publish:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-publish TAG=vX.Y.Z)"; exit 1; fi
 	go mod tidy
 	go generate ./...
-	./dev/tools/release --tag=${TAG} --publish
+	./dev/tools/release --tag=${TAG} --publish --model=${GEMINI_MODEL}
 
 # Generate release manifests only
 # Usage: make release-manifests TAG=vX.Y.Z

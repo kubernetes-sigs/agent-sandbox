@@ -30,7 +30,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,8 @@ class AsyncSandboxClient(Generic[T]):
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
-                "Use SandboxDirectConnectionConfig or SandboxGatewayConnectionConfig. "
+                "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, or "
+                "SandboxInClusterConnectionConfig. "
                 "For local development with kubectl port-forward, use the synchronous SandboxClient."
             )
 
@@ -109,6 +110,7 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str = "default",
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
+        warmpool: str | None = None,
         *,
         shutdown_after_seconds: int | None = None,
     ) -> T:
@@ -119,6 +121,7 @@ class AsyncSandboxClient(Generic[T]):
             namespace: Kubernetes namespace for the claim.
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim.
+            warmpool: Optional warm pool policy for sandbox adoption (e.g. "default", "none", or custom).
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -142,7 +145,7 @@ class AsyncSandboxClient(Generic[T]):
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
         try:
-            await self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle)
+            await self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle, warmpool=warmpool)
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, sandbox_ready_timeout
@@ -317,6 +320,7 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str,
         labels: dict[str, str] | None = None,
         lifecycle: dict | None = None,
+        warmpool: str | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():
@@ -332,7 +336,7 @@ class AsyncSandboxClient(Generic[T]):
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
         await self.k8s_helper.create_sandbox_claim(
-            claim_name, template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle
+            claim_name, template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle, warmpool=warmpool
         )
 
     @async_trace_span("wait_for_sandbox_ready")

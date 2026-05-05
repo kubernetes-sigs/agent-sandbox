@@ -23,3 +23,9 @@ temp/
 # E2E test artifacts (generated during 'make test-e2e')
 test/e2e/artifacts/
 test/e2e/extensions/artifacts/
+
+# Running AI review automation scripts in a crontab
+ai-label
+ai-label.log
+ai-review
+ai-review.log

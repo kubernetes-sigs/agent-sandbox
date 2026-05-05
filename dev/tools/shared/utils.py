@@ -24,8 +24,18 @@ def git_describe():
         ["git", "describe", "--always", "--dirty"], text=True).strip()
 
 
+def git_sha():
+    """Gets the short git SHA for HEAD."""
+    return subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+
+
 def get_image_tag():
-    """Gets the image tag based on the date and git commit."""
+    """Gets the image tag from the IMAGE_TAG environment variable, falling back to a
+    generated value based on the date and git commit."""
+    tag = os.getenv("IMAGE_TAG")
+    if tag:
+        return tag
     day = datetime.today().strftime("%Y%m%d")
     return f"v{day}-{git_describe()}"
 

@@ -404,6 +404,77 @@ h1.text-center {
 }
 
 
+// --------------------------------------------------
+// Use Cases grid on homepage
+// --------------------------------------------------
+.use-cases-heading {
+  margin-top: 3rem;
+  margin-bottom: 1.5rem;
+  font-size: 2rem;
+  font-weight: 400;
+  text-align: center;
+}
+
+.use-cases-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.25rem;
+  width: 100%;
+  margin-bottom: 2rem;
+}
+
+.use-case-card {
+  all: unset;
+  width: calc(33.333% - 1rem);
+  max-width: calc(33.333% - 1rem);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 1.25rem;
+  padding: 1.5rem;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: background 0.2s ease, border-color 0.2s ease;
+
+  @include media-breakpoint-down(md) {
+    width: calc(50% - 1rem);
+    max-width: calc(50% - 1rem);
+  }
+
+  @include media-breakpoint-down(sm) {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  &:hover {
+    background: rgba($primary, 0.15);
+    border-color: rgba($primary, 0.5);
+  }
+
+  > .label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: $primary;
+    margin-bottom: 0.25rem;
+  }
+
+  > .title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  > .description {
+    font-size: 0.9rem;
+    font-weight: 300;
+    opacity: 0.8;
+    margin: 0;
+  }
+}
+
 .video-card {
   height: 400px;
   border: 1px solid;
@@ -517,6 +588,60 @@ h1.text-center {
     word-break: normal;
     background-color: #111;
     border-radius: 0.375rem;
+}
+
+// --------------------------------------------------
+// dark-themed tables matching site design
+// Override Docsy's Bootstrap table styles which use
+// .td-content table:not(.td-initial) > :not(caption) > * > *
+// --------------------------------------------------
+.td-content table:not(.td-initial) {
+  border-collapse: collapse !important;
+  border-spacing: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  overflow: visible !important;
+  margin: 1.5rem 0 !important;
+
+  > thead {
+    background-color: rgba(255, 255, 255, 0.08) !important;
+
+    > tr > th {
+      color: #fff !important;
+      background-color: transparent !important;
+      font-weight: 600 !important;
+      padding: 0.75rem 1rem !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.15) !important;
+      border-top: none !important;
+    }
+  }
+
+  > tbody {
+    > tr {
+      &:hover {
+        background-color: rgba(255, 255, 255, 0.04) !important;
+      }
+
+      &:last-child > td {
+        border-bottom: none !important;
+      }
+
+      > td {
+        color: rgba(255, 255, 255, 0.85) !important;
+        background-color: transparent !important;
+        padding: 0.75rem 1rem !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-top: none !important;
+      }
+    }
+  }
+
+  // Remove Docsy's striped row coloring
+  &.table-striped > tbody > tr:nth-of-type(2n+1) > * {
+    color: rgba(255, 255, 255, 0.85) !important;
+    background-color: transparent !important;
+    --bs-table-accent-bg: transparent !important;
+  }
 }
 
 .td-page-meta__lastmod {

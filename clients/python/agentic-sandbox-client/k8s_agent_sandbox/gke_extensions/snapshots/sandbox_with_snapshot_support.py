@@ -52,6 +52,7 @@ class SandboxWithSnapshotSupport(Sandbox):
             namespace=self.namespace,
             k8s_helper=self.k8s_helper,
             get_pod_name_func=self.get_pod_name,
+            get_sandbox_name_hash_func=self.get_sandbox_name_hash,
         )
 
     @property

@@ -24,15 +24,25 @@ from shared import utils
 def run_go_e2e_tests(repo_root, artifact_dir, env):
     """Runs the Go e2e tests"""
     print("========= Running Go E2E tests... =========")
+    race_enabled = env.get("RACE", "false").lower() in ("true", "1", "yes")
+    print(f"Race detector enabled: {race_enabled}")
+
+    go_test_args = [
+       "./test/e2e/...",
+       "--parallel=1",
+       "-v",
+    ]
+
+    if race_enabled:
+        go_test_args.append("-race")
+
     go_test_cmd = utils.go_tool_args(
         "gotestsum",
-        f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
-        f"--jsonfile={artifact_dir}/test-e2e.json",
-        "--",
-        "./test/e2e/...",
-        "--parallel=1",
-        "-v",
-    )
+         f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
+         f"--jsonfile={artifact_dir}/test-e2e.json",
+         "--",
+         *go_test_args,
+)
     print(f"Running command: {' '.join(go_test_cmd)}")
     return subprocess.run(go_test_cmd, env=env, cwd=repo_root).returncode
 
@@ -62,7 +72,25 @@ def run_go_e2e_benchmarks(repo_root, artifact_dir, env):
 
         process.wait()
 
-    return process.returncode
+    if process.returncode != 0:
+        print(f"Go E2E benchmarks process failed with exit code {process.returncode}")
+        return process.returncode
+
+    csv_file = os.path.join(artifact_dir, "benchmarks.csv")
+    benchstat_cmd = utils.go_tool_args(
+        "benchstat",
+        "-format", "csv",
+        benchmark_file
+    )
+    print(f"Running benchstat: {' '.join(benchstat_cmd)}")
+    with open(csv_file, "w") as f_csv:
+        benchstat_result = subprocess.run(benchstat_cmd, env=env, cwd=repo_root, stdout=f_csv)
+
+    if benchstat_result.returncode != 0:
+        print(f"benchstat failed with exit code {benchstat_result.returncode}")
+        return benchstat_result.returncode
+
+    return 0
 
 
 def setup_python_sdk(repo_root, env):

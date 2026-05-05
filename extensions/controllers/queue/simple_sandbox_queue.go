@@ -61,7 +61,8 @@ func (s *SimpleSandboxQueue) Get(templateHash string) (SandboxKey, bool) {
 // RemoveItem deletes a specific sandbox from a template's queue.
 func (s *SimpleSandboxQueue) RemoveItem(templateHash string, item SandboxKey) {
 	if q, ok := s.queues.Load(templateHash); ok {
-		q.(*synchronizedQueue).Remove(item)
+		sq := q.(*synchronizedQueue)
+		sq.Remove(item)
 	}
 }
 
@@ -78,8 +79,12 @@ func (q *synchronizedQueue) Remove(key SandboxKey) {
 
 	for i, k := range q.items {
 		if k == key {
-			// Delete from slice
-			q.items = append(q.items[:i], q.items[i+1:]...)
+			// Shift left and clear the tail slot so removed keys don't linger.
+			// Same pattern as Pop()
+			last := len(q.items) - 1
+			copy(q.items[i:], q.items[i+1:])
+			q.items[last] = SandboxKey{}
+			q.items = q.items[:last]
 			break
 		}
 	}

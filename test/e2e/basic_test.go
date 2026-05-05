@@ -79,7 +79,7 @@ func TestSimpleSandbox(t *testing.T) {
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      1,
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: "sandboxv1alpha1.SandboxNameHashLabel" + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Message:            "Pod is Ready; Service Exists",

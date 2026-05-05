@@ -121,7 +121,7 @@ steps:
       objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
     waits:
     - type: Deleted
-      labelSelector: "agents.x-k8s.io/sandbox-name-hash"
+      labelSelector: sandboxv1alpha1.SandboxNameHashLabel
 
 - name: Delete Warmpools and Templates
   phases:

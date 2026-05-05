@@ -461,54 +461,21 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	policyPtr := func(p extensionsv1alpha1.SandboxWarmPoolEvictionPolicy) *extensionsv1alpha1.SandboxWarmPoolEvictionPolicy {
-		return &p
-	}
-
 	testCases := []struct {
 		name                string
-		specEvictionPolicy  *extensionsv1alpha1.SandboxWarmPoolEvictionPolicy
 		controllerEnable    bool
 		templateAnnotations map[string]string
 		expectEviction      bool
 	}{
 		{
-			name:               "Spec Never overrides controller true",
-			specEvictionPolicy: policyPtr(extensionsv1alpha1.NeverSandboxWarmPoolEvictionPolicy),
-			controllerEnable:   true,
-			expectEviction:     false,
+			name:             "controller true sets eviction annotation",
+			controllerEnable: true,
+			expectEviction:   true,
 		},
 		{
-			name:               "Spec Always overrides controller false",
-			specEvictionPolicy: policyPtr(extensionsv1alpha1.AlwaysSandboxWarmPoolEvictionPolicy),
-			controllerEnable:   false,
-			expectEviction:     true,
-		},
-		{
-			name:               "Spec unset falls back to controller true",
-			specEvictionPolicy: nil,
-			controllerEnable:   true,
-			expectEviction:     true,
-		},
-		{
-			name:               "Spec unset falls back to controller false",
-			specEvictionPolicy: nil,
-			controllerEnable:   false,
-			expectEviction:     false,
-		},
-		{
-			name:                "EvictionPolicy Never removes annotation even if template has it",
-			specEvictionPolicy:  policyPtr(extensionsv1alpha1.NeverSandboxWarmPoolEvictionPolicy),
-			controllerEnable:    false,
-			templateAnnotations: map[string]string{warmPoolEvictionAnnotation: "true"},
-			expectEviction:      false,
-		},
-		{
-			name:                "EvictionPolicy Always overwrites template false",
-			specEvictionPolicy:  policyPtr(extensionsv1alpha1.AlwaysSandboxWarmPoolEvictionPolicy),
-			controllerEnable:    false,
-			templateAnnotations: map[string]string{warmPoolEvictionAnnotation: "false"},
-			expectEviction:      true,
+			name:             "controller false does not set eviction annotation",
+			controllerEnable: false,
+			expectEviction:   false,
 		},
 	}
 
@@ -525,7 +492,6 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{
 						Name: templateName,
 					},
-					EvictionPolicy: tc.specEvictionPolicy,
 				},
 			}
 

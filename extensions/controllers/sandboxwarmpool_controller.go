@@ -337,12 +337,7 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
 
-	enableEviction := r.EnableWarmPoolEviction
-	if warmPool.Spec.EvictionPolicy != nil {
-		enableEviction = *warmPool.Spec.EvictionPolicy == extensionsv1alpha1.AlwaysSandboxWarmPoolEvictionPolicy
-	}
-
-	if enableEviction {
+	if r.EnableWarmPoolEviction {
 		podAnnotations[warmPoolEvictionAnnotation] = "true"
 	} else {
 		delete(podAnnotations, warmPoolEvictionAnnotation)

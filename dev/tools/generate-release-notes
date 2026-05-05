@@ -149,7 +149,7 @@ def get_pr_descriptions(prs_data):
 
 
 def get_new_authors(prev_tag, current_tag):
-    """Returns the list of names for verified first-time contributors in this release."""
+    """Returns the list of Name <email> for verified first-time contributors in this release."""
     if not prev_tag:
         return []
     try:

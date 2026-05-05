@@ -24,7 +24,7 @@ def parse_version(tag_str):
     """Parses version tag into a sortable tuple: (major, minor, patch, rc_num, raw_tag).
     For official releases (non-RC), rc_num is set to 999999 to ensure it sorts higher than RC releases.
     """
-    match = re.match(r'^v?(\d+)\.(\d+)\.(\d+)(?:[-.]?rc\.?(\d+))?$', tag_str)
+    match = re.match(r'^v?(\d+)\.(\d+)\.(\d+)(?:[-.]?rc\.?(\d+))?(?:\.post\d+)?$', tag_str)
     if not match:
         return None
     major, minor, patch = map(int, match.groups()[:3])

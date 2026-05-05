@@ -26,6 +26,8 @@ import re
 def get_previous_release_tag(current_tag):
     """Queries the latest stable release tag directly from GitHub using the gh CLI."""
     try:
+        # Assumption: Currently only patching of the latest minor release happens. 
+        # TODO: Support patching older minor releases
         latest_stable = subprocess.run(
             [
                 "gh", "release", "list",

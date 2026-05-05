@@ -56,6 +56,7 @@ def main():
     )
 
     has_latest_tag = bool(latest_tag)
+    is_rc_to_stable_transition = False
 
     if not has_latest_tag:
         print("⚠️  Unable to find any version tags in repository. Defaulting to v0.1.0 base.")
@@ -80,6 +81,7 @@ def main():
             )
             if not stable_exists:
                 new_tag = stable_tag_name
+                is_rc_to_stable_transition = True
             else:
                 new_tag = f"v{major}.{minor}.{patch + 1}"
         else:
@@ -91,7 +93,7 @@ def main():
     else:
         commits = run_command(["git", "log", "HEAD", "--oneline"], capture_output=True)
     
-    if not commits:
+    if not commits and not is_rc_to_stable_transition:
         print(f"ℹ️  No new commits since last release ({latest_tag}). Skipping release.")
         if "GITHUB_OUTPUT" in os.environ:
             with open(os.environ["GITHUB_OUTPUT"], "a") as f:

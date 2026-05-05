@@ -73,7 +73,7 @@ def get_remote_name(cwd=None, preferred_remote=None, exclude_remote=None):
     )
 
 
-def check_environment():
+def check_environment(only_tagging=False):
     """Checks if the required tools are installed and authenticated."""
     print("🔍 Checking environment...")
 
@@ -86,15 +86,16 @@ def check_environment():
         print("❌ Not logged in to GitHub. Please run 'gh auth login'.")
         sys.exit(1)
 
-    # Check Google Cloud CLI (gcloud)
-    # Attempt to list tags for one of our staging images to verify authentication/scopes
-    test_image = f"{STAGING_REPO_BASE}/{IMAGES_TO_PROMOTE[0]}"
-    if run_command(["gcloud", "container", "images", "list-tags", test_image, "--limit=1"], 
-                  capture_output=True, allow_error=True) is None:
-        print(f"❌ Failed to access staging registry: {test_image}")
-        print("   Your current gcloud identity may not have the required permissions or scopes.")
-        print("   Run 'gcloud auth login' to authenticate.")
-        sys.exit(1)
+    # Check Google Cloud CLI (gcloud) only if not in only_tagging mode
+    if not only_tagging:
+        # Attempt to list tags for one of our staging images to verify authentication/scopes
+        test_image = f"{STAGING_REPO_BASE}/{IMAGES_TO_PROMOTE[0]}"
+        if run_command(["gcloud", "container", "images", "list-tags", test_image, "--limit=1"], 
+                      capture_output=True, allow_error=True) is None:
+            print(f"❌ Failed to access staging registry: {test_image}")
+            print("   Your current gcloud identity may not have the required permissions or scopes.")
+            print("   Run 'gcloud auth login' to authenticate.")
+            sys.exit(1)
 
 def get_gh_username():
     """Fetches the authenticated GitHub username."""
@@ -140,6 +141,8 @@ def main():
     parser.add_argument('--k8s-io-dir', default=DEFAULT_K8S_IO_DIR, help='Path to local k8s.io repository')
     parser.add_argument('--upstream-remote', default='upstream', help='Remote name for upstream repository')
     parser.add_argument('--fork-remote', default='origin', help='Remote name for fork repository')
+    parser.add_argument('--skip-tagging', action='store_true', help='Skip git tag creation and push')
+    parser.add_argument('--only-tagging', action='store_true', help='Only perform git tag creation and push, then exit')
     args = parser.parse_args()
     
     upstream_remote = args.upstream_remote
@@ -148,7 +151,7 @@ def main():
     tag = args.tag
     validate_tag(tag)
 
-    check_environment()
+    check_environment(only_tagging=args.only_tagging)
 
     k8s_io_dir = os.path.abspath(args.k8s_io_dir)
 
@@ -162,13 +165,25 @@ def main():
 
     # --- Pre-flight Check ---
     check_local_repo_state(remote_agent_sandbox)
+    if args.skip_tagging:
+        remote_tags = run_command(
+            ["git", "ls-remote", "--tags", remote_agent_sandbox, f"refs/tags/{tag}"], capture_output=True
+        )
+        if not remote_tags:
+            print(f"❌ Error: Tag {tag} does not exist on remote '{remote_agent_sandbox}', but --skip-tagging was specified.")
+            sys.exit(1)
     check_tag_exists(tag, remote=remote_agent_sandbox)
 
     # --- Step 1: Create and Push Tag ---
-    print(f"--- Step 1: Handling Git Tag {tag} and Publish to PyPI---")
-    create_and_push_tag(tag, remote=remote_agent_sandbox)
-
-    print("✅ Done! The 'pypi-publish' GitHub Action should now be running.")
+    if not args.skip_tagging:
+        print(f"--- Step 1: Handling Git Tag {tag} and Publish to PyPI---")
+        create_and_push_tag(tag, remote=remote_agent_sandbox)
+        print("✅ Done! The 'pypi-publish' GitHub Action should now be running.")
+        if args.only_tagging:
+            print("ℹ️ Exiting early (--only-tagging is active).")
+            sys.exit(0)
+    else:
+        print("ℹ️ Skipping tag creation and push (--skip-tagging is active).")
 
     # --- Step 2: Wait for Staging Images ---
     # CI job: https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images
@@ -224,29 +239,35 @@ def main():
         lines = f.readlines()
 
     new_lines = []
-    current_image_block = None
+    active_image_block = None
+    inserted_digests = set()
     
     # Iterate and inject digests
     for line in lines:
-        new_lines.append(line)
-        
         # Detect which image block we are inside
         if "- name:" in line:
             for img in IMAGES_TO_PROMOTE:
                 if f"- name: {img}" in line:
-                    current_image_block = img
+                    active_image_block = img
                     break
             else:
-                current_image_block = None
+                active_image_block = None
+
+        # If inside an active image block, skip old entries matching this tag to avoid duplicates
+        if active_image_block and (f'"{tag}"' in line or f"'{tag}'" in line):
+            print(f"   Removing old tag entry in {active_image_block}: {line.strip()}")
+            continue
+
+        new_lines.append(line)
         
-        # If inside a target block, look for 'dmap:' and append
-        if current_image_block and "dmap:" in line:
-             digest = collected_digests[current_image_block]
+        # If inside active block, look for 'dmap:' and append new digest
+        if active_image_block and "dmap:" in line and active_image_block not in inserted_digests:
+             digest = collected_digests[active_image_block]
              indent = line.find("dmap:") + 2 
              new_entry = f'{" " * indent}"{digest}": ["{tag}"]\n'
              new_lines.append(new_entry)
-             print(f"   Updated {current_image_block}")
-             current_image_block = None # Reset to avoid double insertion
+             inserted_digests.add(active_image_block)
+             print(f"   Updated {active_image_block}")
 
     with open(yaml_path, 'w') as f:
         f.writelines(new_lines)

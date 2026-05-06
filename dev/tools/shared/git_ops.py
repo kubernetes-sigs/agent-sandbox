@@ -89,21 +89,59 @@ def check_local_repo_state(remote):
         print("   Assuming this is a test release. Continuing...")
 
 
+def _get_tag_commit_sha(remote_tags_output, tag):
+    """Helper to extract the commit SHA from git ls-remote tag output.
+    Prefers the peeled tag commit SHA (refs/tags/<tag>^{}) if it exists, otherwise
+    falls back to the lightweight tag's SHA (refs/tags/<tag>).
+    """
+    if not remote_tags_output:
+        return None
+
+    lines = remote_tags_output.splitlines()
+    # 1. Search for peeled tag first
+    peeled_ref = f"refs/tags/{tag}^{{}}"
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2:
+            sha, ref = parts[0], parts[1]
+            if ref == peeled_ref:
+                return sha
+
+    # 2. Fallback to lightweight tag
+    exact_ref = f"refs/tags/{tag}"
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2:
+            sha, ref = parts[0], parts[1]
+            if ref == exact_ref:
+                return sha
+
+    return None
+
+
 def check_tag_exists(tag, remote):
     """Check if tag already exists on upstream to prevent overwriting existing releases"""
 
     print(f"🔍 Checking if tag {tag} already exists on {remote}...")
     remote_tags = run_command(
-        ["git", "ls-remote", "--tags", remote, f"refs/tags/{tag}"], capture_output=True
+        ["git", "ls-remote", "--tags", remote, f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}"], capture_output=True
     )
     if remote_tags:
+        remote_sha = _get_tag_commit_sha(remote_tags, tag)
+        local_sha = run_command(["git", "rev-parse", "HEAD"], capture_output=True)
+        if remote_sha == local_sha:
+            print(
+                f"ℹ️  Tag {tag} already exists on {remote} and points to the same commit ({local_sha}). "
+                f"Assuming this is a retry/resumed run. Proceeding."
+            )
+            return
+
         print(
-            f"❌ Tag {tag} already exists on {remote}. Aborting to prevent accidental overwrite."
-        )
-        print(
-            "   If you are resuming a failed run, please manually remove the tag from upstream and retry."
+            f"❌ Tag {tag} already exists on {remote} but points to a different commit "
+            f"({remote_sha} vs local {local_sha}). Aborting to prevent accidental overwrite."
         )
         sys.exit(1)
+
 
 
 def create_and_push_tag(tag, remote):

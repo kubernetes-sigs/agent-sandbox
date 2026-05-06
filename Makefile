@@ -89,7 +89,7 @@ GEMINI_MODEL ?= gemini-2.5-flash
 .PHONY: release-promote
 release-promote:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-promote TAG=vX.Y.Z)"; exit 1; fi
-	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK}
+	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK} $(if $(filter true,$(SKIP_TAGGING)),--skip-tagging) $(if $(filter true,$(ONLY_TAGGING)),--only-tagging)
 
 # Publish a draft release to GitHub
 # Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-2.5-flash

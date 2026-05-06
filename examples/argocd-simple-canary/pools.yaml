@@ -1,0 +1,21 @@
+# This file defines two SandboxWarmPools: python-pool-v1 (Stable) and python-pool-v2 (Canary).
+# The client-side SDK will route claims to these pools based on the weights in the ConfigMap.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: python-pool-v1
+  namespace: default
+spec:
+  sandboxTemplateRef:
+    name: sandbox-python-template-v1
+  replicas: 3
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: python-pool-v2
+  namespace: default
+spec:
+  sandboxTemplateRef:
+    name: sandbox-python-template-v2
+  replicas: 2

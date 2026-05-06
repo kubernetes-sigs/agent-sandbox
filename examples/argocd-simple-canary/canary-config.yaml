@@ -1,0 +1,13 @@
+# This file defines the ConfigMap used to control the canary rollout weights.
+# Argo CD manages this file. Updating the canary_percentage here will shift traffic in the SDK.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canary-routing-config
+  namespace: default
+data:
+  primary_pool: "python-pool-v1"
+  canary_pool: "python-pool-v2"
+  primary_template: "sandbox-python-template-v1"
+  canary_template: "sandbox-python-template-v2"
+  canary_percentage: "20" # Percentage of requests to route to canary (0-100)

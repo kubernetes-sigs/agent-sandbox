@@ -1,0 +1,36 @@
+# This file defines the SandboxTemplates used by the warm pools.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: sandbox-python-template-v1
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: python-runtime
+        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+        ports:
+        - containerPort: 8888
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: sandbox-python-template-v2
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: python-runtime
+        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+        ports:
+        - containerPort: 8888
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"

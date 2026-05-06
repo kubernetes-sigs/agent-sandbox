@@ -1,7 +1,7 @@
 ---
 title: "Filesystem"
 linkTitle: "Filesystem"
-weight: 15
+weight: 25
 description: >
   Read, write, list, and transfer files inside sandboxes using the Python SDK.
 ---
@@ -12,7 +12,7 @@ All file operations are also available as async methods via `AsyncSandboxClient`
 
 ## Prerequisites
 
-- A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/overview" >}}) installed.
+- A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
 - A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. A `SandboxTemplate` defines the pod spec (image, resources, probes, optional `runtimeClassName` for gVisor/Kata) used when a sandbox is created. It must exist in the target namespace before `create_sandbox(template=...)` will succeed — otherwise the call returns a `NotFound` error.

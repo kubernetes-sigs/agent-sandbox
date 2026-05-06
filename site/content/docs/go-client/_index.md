@@ -1,7 +1,7 @@
 ---
 title: "Go Client"
 linkTitle: "Go Client"
-weight: 26
+weight: 31
 description: >
   This section describes how to use the Go Client
 aliases:

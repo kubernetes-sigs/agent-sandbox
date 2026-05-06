@@ -38,7 +38,7 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
 
     **Option 2: Access with gVisor Enabled**
     If you enable gVisor by uncommenting `runtimeClassName: gvisor` in `openclaw-sandbox.yaml`, direct `kubectl port-forward` to the pod will fail (see [Issue #158](https://github.com/kubernetes-sigs/agent-sandbox/issues/158)).
-    
+
     To access the Web UI with gVisor, you must use an alternative method:
     - **Kubernetes Service**: Expose the sandbox pod via a `NodePort` or `LoadBalancer` service and access it via the service's endpoint.
     - **Router Architecture**: Use the `sandbox-router` to proxy traffic. See [agentic-sandbox-client](../../clients/python/agentic-sandbox-client) and [sandbox-router](../../clients/python/agentic-sandbox-client/sandbox-router) for instructions.

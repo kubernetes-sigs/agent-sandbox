@@ -27,19 +27,21 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
     sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" openclaw-sandbox.yaml | kubectl apply -f -
     ```
 
-4.  Verify the pod is running and port-forward to access the Gateway:
+4.  **Access the Web UI**:
+
+    **Option 1: Direct Port-Forward (Default, without gVisor)**
+    Verify the pod is running and port-forward to access it directly:
     ```bash
     kubectl port-forward pod/openclaw-sandbox 18789:18789
     ```
+    Then open [http://localhost:18789](http://localhost:18789) in your browser.
 
-> [!IMPORTANT]
-> **gVisor Limitation**: If you enable gVisor by uncommenting `runtimeClassName: gvisor` in `openclaw-sandbox.yaml`, direct `kubectl port-forward` to the pod will fail (see [Issue #158](https://github.com/kubernetes-sigs/agent-sandbox/issues/158)).
-> 
-> To access the Web UI with gVisor enabled, you have a few options:
-> - **Use a Kubernetes Service**: Expose the sandbox pod via a `NodePort` or `LoadBalancer` service.
-> - **Use the Router Architecture**: Use the `sandbox-router` to proxy traffic. See [agentic-sandbox-client](../../clients/python/agentic-sandbox-client) and [sandbox-router](../../clients/python/agentic-sandbox-client/sandbox-router) for more information.
-
-5.  **Access the Web UI**: Open [http://localhost:18789](http://localhost:18789) in your browser.
+    **Option 2: Access with gVisor Enabled**
+    If you enable gVisor by uncommenting `runtimeClassName: gvisor` in `openclaw-sandbox.yaml`, direct `kubectl port-forward` to the pod will fail (see [Issue #158](https://github.com/kubernetes-sigs/agent-sandbox/issues/158)).
+    
+    To access the Web UI with gVisor, you must use an alternative method:
+    - **Kubernetes Service**: Expose the sandbox pod via a `NodePort` or `LoadBalancer` service and access it via the service's endpoint.
+    - **Router Architecture**: Use the `sandbox-router` to proxy traffic. See [agentic-sandbox-client](../../clients/python/agentic-sandbox-client) and [sandbox-router](../../clients/python/agentic-sandbox-client/sandbox-router) for instructions.
 
 ## CLI Operations
 

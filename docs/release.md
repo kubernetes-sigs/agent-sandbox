@@ -21,11 +21,14 @@ To move an image from staging to the production registry, a **promotion process*
 2.  **Promotion PR**: A PR is submitted to the [kubernetes/k8s.io](https://github.com/kubernetes/k8s.io) repository. This PR updates the registry configuration (e.g., [`registry.k8s.io/images/k8s-staging-agent-sandbox/images.yaml`](https://github.com/kubernetes/k8s.io/blob/main/registry.k8s.io/images/k8s-staging-agent-sandbox/images.yaml)) with the image digest and its associated tag. See [example PR](https://github.com/kubernetes/k8s.io/pull/9230).
 3.  **Promotion**: Once the PR is merged, the image is automatically promoted to `registry.k8s.io`.
 
-This step can be automated by running `make release-promote TAG=vX.Y.Z`. This calls [`dev/tools/tag-promote-images`](../dev/tools/tag-promote-images) script which handles the promotion process. `IMAGES_TO_PROMOTE` variable in the script can be updated to include more images.
+This step can be automated by running `make release-promote TAG=vX.Y.Z`. This calls [`dev/tools/tag-promote-images`](../dev/tools/tag-promote-images) script which handles the promotion process.
+
+> [!IMPORTANT]
+> `make release-promote` by default also creates and pushes the git tag. You can use `SKIP_TAGGING=true` to skip tagging, or `ONLY_TAGGING=true` to only perform tagging. It requires `gh` and `gcloud` authentication.
 
 ## Automated Release Workflow
 
-The project uses a GitHub Action workflow to automate the release process: [`.github/workflows/release.yml`](../.github/workflows/release.yml).
+The project uses a GitHub Actions workflow to automate the release process: [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
 ### Overview
 

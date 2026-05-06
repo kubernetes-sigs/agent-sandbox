@@ -160,6 +160,8 @@ type SandboxClaimSpec struct {
 	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
 	// safeToEvict specifies the policy for cluster-autoscaler.kubernetes.io/safe-to-evict annotation.
+	// Note that if "true" or "false" values are desired, they must be quoted in the YAML manifest (e.g., safeToEvict: "false")
+	// because unquoted true/false values are parsed as booleans by YAML and will fail CRD string enum validation.
 	// +optional
 	SafeToEvict *SafeToEvictPolicy `json:"safeToEvict,omitempty"`
 

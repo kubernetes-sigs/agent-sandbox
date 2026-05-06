@@ -5,7 +5,7 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
 ## Prerequisites
 
 -   A Kubernetes cluster (e.g., Kind).
--   (Optional) Create nodes with gVisor or Kata Containers runtime class enabled in the cluster. This example is verified using gVisor. The `openclaw-sandbox.yaml` manifest includes a commented-out `runtimeClassName: gvisor` line. Uncomment it or update it if you are using a non-default runtime class (e.g., Kata Containers). See the [gVisor documentation](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/).
+-   (Optional) Ensure your cluster has a RuntimeClass (e.g., `gvisor`) configured and nodes support it. This example is verified using gVisor. The `openclaw-sandbox.yaml` manifest includes a commented-out `runtimeClassName: gvisor` line. Uncomment it or update it if you are using a non-default runtime class (e.g., Kata Containers). See the [gVisor documentation](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/).
 -   `agent-sandbox` controller installed.
 
 ## Usage
@@ -29,7 +29,7 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
 
 4.  **Access the Web UI**:
 
-    **Option 1: Direct Port-Forward (Default, without gVisor)**
+    **Option 1: Direct Port-Forward (Only if NOT using gVisor)**
     Verify the pod is running and port-forward to access it directly:
     ```bash
     kubectl port-forward pod/openclaw-sandbox 18789:18789

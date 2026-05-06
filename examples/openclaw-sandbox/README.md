@@ -32,12 +32,12 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
     kubectl port-forward pod/openclaw-sandbox 18789:18789
     ```
 
-**Important: gVisor Limitation**
-If you enable gVisor by uncommenting `runtimeClassName: gvisor` in `openclaw-sandbox.yaml`, direct `kubectl port-forward` to the pod will fail (see [Issue #158](https://github.com/kubernetes-sigs/agent-sandbox/issues/158)).
-
-To access the Web UI with gVisor enabled, you have a few options:
-- **Use a Kubernetes Service**: Expose the sandbox pod via a `NodePort` or `LoadBalancer` service.
-- **Use the Router Architecture**: Use the `sandbox-router` to proxy traffic. See [agentic-sandbox-client](../../clients/python/agentic-sandbox-client) and [sandbox-router](../../clients/python/agentic-sandbox-client/sandbox-router) for more information.
+> [!IMPORTANT]
+> **gVisor Limitation**: If you enable gVisor by uncommenting `runtimeClassName: gvisor` in `openclaw-sandbox.yaml`, direct `kubectl port-forward` to the pod will fail (see [Issue #158](https://github.com/kubernetes-sigs/agent-sandbox/issues/158)).
+> 
+> To access the Web UI with gVisor enabled, you have a few options:
+> - **Use a Kubernetes Service**: Expose the sandbox pod via a `NodePort` or `LoadBalancer` service.
+> - **Use the Router Architecture**: Use the `sandbox-router` to proxy traffic. See [agentic-sandbox-client](../../clients/python/agentic-sandbox-client) and [sandbox-router](../../clients/python/agentic-sandbox-client/sandbox-router) for more information.
 
 5.  **Access the Web UI**: Open [http://localhost:18789](http://localhost:18789) in your browser.
 

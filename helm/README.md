@@ -97,3 +97,5 @@ The following table lists the configurable parameters and their defaults.
 | `nodeSelector` | Node selector for the controller pod | `{}` |
 | `tolerations` | Tolerations for the controller pod | `[]` |
 | `affinity` | Affinity rules for the controller pod | `{}` |
+| `podSecurityContext` | Pod `securityContext`; only rendered when set (e.g. Kyverno / Pod Security) | `null` |
+| `containerSecurityContext` | Container `securityContext` for the controller; only rendered when set | `null` |

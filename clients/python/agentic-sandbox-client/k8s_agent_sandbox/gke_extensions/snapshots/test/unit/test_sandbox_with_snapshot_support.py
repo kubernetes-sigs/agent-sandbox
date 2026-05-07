@@ -14,6 +14,7 @@
 
 import unittest
 import logging
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch, call
 from kubernetes.client import ApiException
 
@@ -41,6 +42,7 @@ from k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine import (
     SnapshotDetail,
     DeleteSnapshotResult,
     SnapshotResponse,
+    SnapshotFilter,
 )
 
 logger = logging.getLogger(__name__)
@@ -593,6 +595,30 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(len(result.snapshots), 1)
         self.assertEqual(result.snapshots[0].snapshot_uid, "snap-mid")
+
+    def test_snapshots_list_filter_timezone_normalization(self):
+        """Test that SnapshotFilter normalizes naive datetimes and naive ISO strings to timezone-aware UTC."""
+        # Test naive ISO string
+        filter_naive_str = SnapshotFilter(created_after="2023-01-02T00:00:00")
+        self.assertIsNotNone(filter_naive_str.created_after.tzinfo)
+        self.assertEqual(filter_naive_str.created_after.tzinfo, timezone.utc)
+
+        # Test naive datetime object
+        naive_dt = datetime(2023, 1, 2, 0, 0, 0)
+        filter_naive_dt = SnapshotFilter(created_after=naive_dt)
+        self.assertIsNotNone(filter_naive_dt.created_after.tzinfo)
+        self.assertEqual(filter_naive_dt.created_after.tzinfo, timezone.utc)
+
+        # Test aware ISO string with Z
+        filter_aware_str_z = SnapshotFilter(created_after="2023-01-02T00:00:00Z")
+        self.assertIsNotNone(filter_aware_str_z.created_after.tzinfo)
+        self.assertEqual(filter_aware_str_z.created_after.tzinfo, timezone.utc)
+
+        # Test aware datetime object (e.g. UTC)
+        aware_dt = datetime(2023, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
+        filter_aware_dt = SnapshotFilter(created_after=aware_dt)
+        self.assertIsNotNone(filter_aware_dt.created_after.tzinfo)
+        self.assertEqual(filter_aware_dt.created_after.tzinfo, timezone.utc)
 
     def test_snapshots_list_filter_incorrect_arguments(self):
         """Test list snapshots with a incorrect arguments for filter_by."""

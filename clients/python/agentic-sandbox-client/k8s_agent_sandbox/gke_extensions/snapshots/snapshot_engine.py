@@ -18,7 +18,7 @@ import time
 from typing import Callable, Literal
 from datetime import datetime, timezone
 from kubernetes.client import ApiException
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from k8s_agent_sandbox.constants import (
     SANDBOX_NAME_HASH_LABEL,
@@ -83,6 +83,22 @@ class SnapshotFilter(BaseModel):
     ready_only: bool = True
     created_after: datetime | None = None
     created_before: datetime | None = None
+
+    @field_validator("created_after", "created_before", mode="before")
+    @classmethod
+    def normalize_datetime(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            except ValueError as e:
+                raise ValueError(f"Invalid ISO datetime string: {v}") from e
+        if isinstance(v, datetime):
+            if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+                return v.replace(tzinfo=timezone.utc)
+            return v
+        raise TypeError(f"Expected datetime or ISO format string, got {type(v)}")
 
 
 class SnapshotEngine:

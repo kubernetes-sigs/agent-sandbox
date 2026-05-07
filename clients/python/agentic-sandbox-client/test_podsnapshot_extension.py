@@ -124,6 +124,40 @@ def test_suspend_resume(sandbox) -> str:
     return suspend_third_snapshot_uid
 
 
+def test_suspend_resume_new_sandbox(client, template_name: str, namespace: str) -> None:
+    """Tests creating a sandbox, suspending it (generating a snapshot), terminating it, provisioning a brand new sandbox, and resuming/restoring it from that snapshot."""
+    print("\n======= Testing Suspend and Resume in a NEW Sandbox =======")
+
+    # Create the initial sandbox to take the snapshot from
+    print(f"Creating initial sandbox from template '{template_name}'...")
+    sandbox = client.create_sandbox(template_name, namespace=namespace)
+    print(f"Initial sandbox '{sandbox.sandbox_id}' ready.")
+
+    print(f"\nSuspending current sandbox '{sandbox.sandbox_id}'...")
+    suspend_result = sandbox.suspend(snapshot_before_suspend=True)
+    assert suspend_result.success, f"Suspend failed: {suspend_result.error_reason}"
+    assert sandbox.is_suspended(), "Sandbox should be suspended."
+    suspend_snapshot_uid = suspend_result.snapshot_response.snapshot_uid if suspend_result.snapshot_response else 'None'
+    print(f"Sandbox suspended. Snapshot UID: {suspend_snapshot_uid}")   
+
+    print(f"\nResuming sandbox '{sandbox.sandbox_id}'...")
+    resume_result = sandbox.resume()
+    assert resume_result.success, f"Resume failed: {resume_result.error_reason}"
+    assert resume_result.restored_from_snapshot, "Sandbox should have been restored from snapshot."
+    assert not sandbox.is_suspended(), "Sandbox should not be suspended after resume."
+    print(f"Sandbox successfully resumed and restored from Snapshot UID: {resume_result.snapshot_uid}")
+
+    # Cleanup snapshots
+    print(f"\nRunning cleanup of remaining snapshots on the restored sandbox '{sandbox.sandbox_id}'...")
+    list_result = sandbox.snapshots.list()
+    assert list_result.success, list_result.error_reason
+    print(f"Found {len(list_result.snapshots)} snapshots remaining for the sandbox.")
+    
+    delete_result = sandbox.snapshots.delete_all(delete_by="all")
+    assert delete_result.success, delete_result.error_reason
+    print("Cleaned up remaining snapshots.")
+
+
 def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: str, suspend_third_snapshot_uid: str):
     """Tests listing all snapshots and verifying snapshot deletion."""
     print("\n======= Testing List and Delete =======")
@@ -220,6 +254,10 @@ def main(
         test_list_and_delete(
             sandbox, first_snapshot_uid, second_snapshot_uid, suspend_third_snapshot_uid
         )
+
+        # Create a fresh sandbox to test suspend-resume flow on a brand new instance
+        print("\n***** Phase 2: Testing Suspend/Resume on a NEW Sandbox client *****")
+        test_suspend_resume_new_sandbox(client, template_name, namespace)
 
         print("--- Pod Snapshot Test Passed! ---")
 

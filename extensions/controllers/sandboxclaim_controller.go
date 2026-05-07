@@ -1089,17 +1089,21 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 				controllerRef := metav1.GetControllerOf(sandbox)
 				if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
 					// Still in warm pool. Try to complete adoption!
-					logger.Info("Sandbox found by label still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
+					logger.Info("Sandbox found by label still in warm pool, checking if it matches template", "sandbox", sbName, "claim", claim.Name)
 
-					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
-						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
-							logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
-						} else {
-							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
-						}
+					if err := verifySandboxCandidate(sandbox, claim); err != nil {
+						logger.Info("Sandbox recorded in label cannot be adopted, falling through", "sandbox", sbName, "claim", claim.Name, "reason", err.Error())
 					} else {
-						// If succeeded, return error to retry so next reconcile sees it controlled by us!
-						return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
+						if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
+							if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
+								logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
+							} else {
+								return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
+							}
+						} else {
+							// If succeeded, return error to retry so next reconcile sees it controlled by us!
+							return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
+						}
 					}
 				}
 

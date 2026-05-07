@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -322,7 +323,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
 
 	// Upfront validation of additional metadata to skip unnecessary processing
-	if err := validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
+	if err := r.validateAdditionalPodMetadata(ctx, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
@@ -359,7 +360,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 			mergedMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
 
-			if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+			if err := r.mergePodMetadata(ctx, &mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 				return nil, err
 			}
 
@@ -762,7 +763,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 		mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 
-		if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if err := r.mergePodMetadata(ctx, &mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
 
@@ -772,7 +773,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		// Fallback (just in case template is somehow missing)
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
 
-		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if err := r.mergePodMetadata(ctx, &adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
 	}
@@ -804,20 +805,53 @@ func isRestrictedDomain(domain string) bool {
 }
 
 // validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
-func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
+func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(_ context.Context, claimMeta *v1alpha1.PodMetadata) error {
 	if claimMeta == nil {
 		return nil
 	}
 
+	// Read allowed domains from mounted file
+	allowedDomains := []string{"sandbox.users.io"} // default
+	configPath := "/etc/sandbox-config/allowed-label-domains"
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		val := string(data)
+		if val != "" {
+			allowedDomains = strings.FieldsFunc(val, func(c rune) bool {
+				return c == ',' || c == '\n' || c == '\r'
+			})
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read configuration file %q: %w", configPath, err)
+	}
+
 	validate := func(key, value string, isLabel bool) error {
-		// Check restricted domains
 		parts := strings.SplitN(key, "/", 2)
 		domain := ""
 		if len(parts) > 1 {
 			domain = strings.ToLower(parts[0])
+		} else if isLabel {
+			return fmt.Errorf("label %q must have a domain prefix to prevent opting into unintended policy domains", key)
 		}
-		if isRestrictedDomain(domain) {
-			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+
+		if isLabel {
+			// Strict Allowlist for labels
+			allowed := false
+			for _, d := range allowedDomains {
+				d = strings.TrimSpace(d)
+				if domain == d || strings.HasSuffix(domain, "."+d) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("label domain %q is not in the allowlist", domain)
+			}
+		} else {
+			// For annotations, we use the blocklist
+			if isRestrictedDomain(domain) {
+				return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+			}
 		}
 
 		// Validate label values (annotations have less restrictions)
@@ -846,8 +880,8 @@ func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
 
 // mergePodMetadata merges labels and annotations from claimMeta into templateMeta,
 // rejecting overrides with different values.
-func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
-	if err := validateAdditionalPodMetadata(claimMeta); err != nil {
+func (r *SandboxClaimReconciler) mergePodMetadata(ctx context.Context, templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
+	if err := r.validateAdditionalPodMetadata(ctx, claimMeta); err != nil {
 		return err
 	}
 
@@ -955,7 +989,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
 
-	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+	if err := r.mergePodMetadata(ctx, &sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
 	}
 

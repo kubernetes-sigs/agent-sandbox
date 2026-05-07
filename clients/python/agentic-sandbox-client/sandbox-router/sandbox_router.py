@@ -48,7 +48,13 @@ def _get_proxy_timeout() -> float:
 proxy_timeout = _get_proxy_timeout()
 client = httpx.AsyncClient(timeout=proxy_timeout)
 
+ROUTER_AUTH_TOKEN = os.environ.get("ROUTER_AUTH_TOKEN")
+
 print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")
+if ROUTER_AUTH_TOKEN:
+    print("Authentication enabled: requests must include valid Bearer token.")
+else:
+    print("WARNING: Running in UNAUTHENTICATED mode. Anyone can use this proxy!")
 
 
 @app.get("/healthz")
@@ -63,10 +69,23 @@ async def proxy_request(request: Request, full_path: str):
     Receives all incoming requests, determines the target sandbox from headers,
     and asynchronously proxies the request to it.
     """
+    # Check authentication if enabled
+    if ROUTER_AUTH_TOKEN:
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
+        token = auth_header.split(" ")[1]
+        if token != ROUTER_AUTH_TOKEN:
+            raise HTTPException(status_code=401, detail="Invalid token.")
+
     sandbox_id = request.headers.get("X-Sandbox-ID")
     if not sandbox_id:
         raise HTTPException(
             status_code=400, detail="X-Sandbox-ID header is required.")
+
+    # Sanitize sandbox_id to prevent DNS injection and directory traversal style attacks
+    if not sandbox_id.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid sandbox ID format.")
 
     # Dynamic discovery via headers
     namespace = request.headers.get("X-Sandbox-Namespace", DEFAULT_NAMESPACE)

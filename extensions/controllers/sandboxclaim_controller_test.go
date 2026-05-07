@@ -3334,6 +3334,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			UID:       "adopted-sb-uid",
 			Labels: map[string]string{
 				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
+				sandboxTemplateRefHash:            sandboxcontrollers.NameHash("test-template"),
+				warmPoolSandboxLabel:              sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
@@ -3463,6 +3465,102 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	}
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
 		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
+	}
+}
+
+func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Labels: map[string]string{
+				"agents.x-k8s.io/sandbox-name": "wrong-template-sb",
+			},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "correct-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "correct-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	wrongTemplateSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "wrong-template-sb",
+			Namespace: "default",
+			UID:       "wrong-sb-uid",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("wrong-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, wrongTemplateSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: warmSandboxQueue,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected reconcile to succeed (fall through and create new sandbox), but failed: %v", err)
+	}
+
+	var sb sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "wrong-template-sb", Namespace: "default"}, &sb); err != nil {
+		t.Fatalf("failed to get sandbox: %v", err)
+	}
+	if _, ok := sb.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected wrong template sandbox to still have warm pool label, meaning it was not incorrectly adopted")
+	}
+
+	var newSb sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, &newSb); err != nil {
+		t.Fatalf("expected a new sandbox to be created with claim name, but got error: %v", err)
+	}
+
+	if newSb.UID == "wrong-sb-uid" {
+		t.Error("expected created sandbox to be a new one, not the wrong one from label")
 	}
 }
 

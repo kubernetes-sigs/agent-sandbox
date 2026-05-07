@@ -63,6 +63,16 @@ class TestProxyRequestValidation:
         assert resp.status_code == 400
         assert "Invalid port format." == resp.json()["detail"]
 
+    def test_invalid_sandbox_id_format(self, client):
+        resp = client.post(
+            "/execute",
+            headers={
+                "X-Sandbox-ID": "bad.sandbox.id",
+            },
+        )
+        assert resp.status_code == 400
+        assert "Invalid sandbox ID format." == resp.json()["detail"]
+
     def test_valid_namespace_with_hyphens(self, client):
         """Namespaces like 'my-ns' should pass validation and result in a connection attempt."""
         with patch.object(
@@ -112,6 +122,75 @@ class TestClusterDomain:
             importlib.reload(sandbox_router)
             assert sandbox_router.cluster_domain == "my.custom.domain"
 
+
+class TestAuthentication:
+    def test_auth_disabled_by_default(self, client):
+        # When ROUTER_AUTH_TOKEN is not set, requests should proceed (and fail with 502 because target is unreachable)
+        with patch.object(
+            sandbox_router.client,
+            "send",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("stop here")
+        ):
+            resp = client.post(
+                "/execute",
+                headers={"X-Sandbox-ID": "my-sandbox"},
+            )
+        assert resp.status_code == 502
+
+    def test_auth_enabled_valid_token(self):
+        with patch.dict(os.environ, {"ROUTER_AUTH_TOKEN": "secret-token"}):
+            importlib.reload(sandbox_router)
+            from fastapi.testclient import TestClient
+            client = TestClient(sandbox_router.app)
+            
+            with patch.object(
+                sandbox_router.client,
+                "send",
+                new_callable=AsyncMock,
+                side_effect=httpx.ConnectError("stop here")
+            ):
+                resp = client.post(
+                    "/execute",
+                    headers={
+                        "X-Sandbox-ID": "my-sandbox",
+                        "Authorization": "Bearer secret-token",
+                    },
+                )
+            assert resp.status_code == 502
+        
+        importlib.reload(sandbox_router)
+
+    def test_auth_enabled_missing_token(self):
+        with patch.dict(os.environ, {"ROUTER_AUTH_TOKEN": "secret-token"}):
+            importlib.reload(sandbox_router)
+            from fastapi.testclient import TestClient
+            client = TestClient(sandbox_router.app)
+            
+            resp = client.post(
+                "/execute",
+                headers={"X-Sandbox-ID": "my-sandbox"},
+            )
+            assert resp.status_code == 401
+            assert "Missing or invalid Authorization header." == resp.json()["detail"]
+            
+        importlib.reload(sandbox_router)
+
+    def test_auth_enabled_invalid_token(self):
+        with patch.dict(os.environ, {"ROUTER_AUTH_TOKEN": "secret-token"}):
+            importlib.reload(sandbox_router)
+            from fastapi.testclient import TestClient
+            client = TestClient(sandbox_router.app)
+            
+            resp = client.post(
+                "/execute",
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "Authorization": "Bearer wrong-token",
+                },
+            )
+            assert resp.status_code == 401
+            assert "Invalid token." == resp.json()["detail"]
         importlib.reload(sandbox_router)
 
 

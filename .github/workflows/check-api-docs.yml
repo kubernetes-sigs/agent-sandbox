@@ -1,0 +1,53 @@
+name: Check API Documentation
+
+on:
+  pull_request:
+    # Only run this workflow if Go files in the API directories or the config changes
+    paths:
+      - 'api/**/*.go'
+      - 'extensions/api/**/*.go'
+      - 'config.yaml'
+      - '.github/workflows/check-api-docs.yml'
+
+jobs:
+  check-api-docs:
+    name: Verify Generated API Docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.1.0
+        with:
+          # Automatically uses the Go version defined in the repo's go.mod
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install crd-ref-docs
+        run: go install github.com/elastic/crd-ref-docs@latest
+
+      - name: Generate API Documentation
+        run: |
+          echo "Running crd-ref-docs..."
+          crd-ref-docs \
+            --source-path=./ \
+            --config=./docs/crd-ref-docs.yaml \
+            --renderer=markdown \
+            --output-path=./docs/api.md \
+            --max-depth=10
+
+      - name: Verify no uncommitted changes
+        run: |
+          # Stage the file so git diff can check it
+          git add ./docs/api.md
+
+          # Check if there are any differences
+          if ! git diff --staged --exit-code; then
+            echo "::error::API documentation is out of date!"
+            echo "Please generate the API documentation locally and include it in your commit."
+            echo "You can view the diff below:"
+            git diff --staged
+            exit 1
+          fi
+          echo "API documentation is up to date!"

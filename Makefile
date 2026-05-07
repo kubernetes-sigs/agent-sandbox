@@ -5,6 +5,13 @@ all: fix-go-generate build lint-go lint-api test-unit toc-verify
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: generate-api-docs
+generate-api-docs: ## Generate API reference documentation
+	@echo "Generating API Docs..."
+	go install github.com/elastic/crd-ref-docs@latest
+	$(GOPATH)/bin/crd-ref-docs --source-path=./ --config=./docs/crd-ref-docs.yaml --renderer=markdown --output-path=./docs/api.md --max-depth=10
+	rm -rf ./tmp-api-source
+
 VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
 
 GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")

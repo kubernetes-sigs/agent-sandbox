@@ -182,5 +182,105 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
 
 
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperWaitForGatewayIP(unittest.TestCase):
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_gateway_ip_valid_ip(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        mock_watch = MagicMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "192.168.1.1"}]
+                }
+            }
+        }
+        mock_watch.stream.return_value = [mock_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+        self.assertEqual(ip, "192.168.1.1")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_gateway_ip_valid_hostname(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        mock_watch = MagicMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "gateway.example.com"}]
+                }
+            }
+        }
+        mock_watch.stream.return_value = [mock_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+        self.assertEqual(ip, "gateway.example.com")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_gateway_ip_invalid_address_special_chars(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        mock_watch = MagicMock()
+        mock_event_invalid = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "192.168.1.1/path"}]
+                }
+            }
+        }
+        mock_event_valid = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "192.168.1.1"}]
+                }
+            }
+        }
+        mock_watch.stream.return_value = [mock_event_invalid, mock_event_valid]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+        self.assertEqual(ip, "192.168.1.1")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_gateway_ip_invalid_hostname(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        mock_watch = MagicMock()
+        mock_event_invalid = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "bad_hostname"}]
+                }
+            }
+        }
+        mock_event_valid = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "192.168.1.1"}]
+                }
+            }
+        }
+        mock_watch.stream.return_value = [mock_event_invalid, mock_event_valid]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+        self.assertEqual(ip, "192.168.1.1")
+
+
 if __name__ == '__main__':
     unittest.main()

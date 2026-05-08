@@ -21,7 +21,7 @@ spec:
       containers:
       - name: playwright
         # my playwright sandbox
-        image: playwright-sandbox:latest 
+        image: playwright-sandbox:latest
         env:
         - name: TARGET_URL
           value: "https://example.com"
@@ -65,8 +65,9 @@ cat playwright-sandbox.yaml | envsubst | kubectl apply -f -
 
 ```bash
 kubectl get sandbox playwright-sandbox
-kubectl get pods
-kubectl logs playwright-sandbox -c playwright
+kubectl get pods -l app=playwright-sandbox
+POD=$(kubectl get pods -l app=playwright-sandbox -o jsonpath='{.items[0].metadata.name}')
+kubectl logs ${POD} -c playwright
 ```
 
 You should see output similar to:
@@ -80,7 +81,7 @@ content snippet: Example Domain This domain is for use in illustrative examples 
 
 ```bash
 # Find the pod name
-POD=$(kubectl get pods --selector=sandbox=playwright-sandbox -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl get pods -l app=playwright-sandbox -o jsonpath='{.items[0].metadata.name}')
 
 # Copy the screenshot to your local machine
 kubectl cp ${POD}:/home/playwright/screenshot.png ./screenshot.png

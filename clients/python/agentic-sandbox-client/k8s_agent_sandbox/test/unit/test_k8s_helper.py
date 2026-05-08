@@ -299,6 +299,56 @@ class TestK8sHelperWaitForGatewayIP(unittest.TestCase):
         ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
         self.assertEqual(ip, "192.168.1.1")
 
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_gateway_ip_multiple_addresses_in_event(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        mock_watch = MagicMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [
+                        {"value": "bad_hostname"},
+                        {"value": "192.168.1.2"},
+                    ]
+                }
+            }
+        }
+        mock_watch.stream.return_value = [mock_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+        self.assertEqual(ip, "192.168.1.2")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_gateway_ip_rejects_ipv6(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        mock_watch = MagicMock()
+        mock_event_ipv6 = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "2001:db8::1"}]
+                }
+            }
+        }
+        mock_event_ipv4 = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "192.168.1.1"}]
+                }
+            }
+        }
+        mock_watch.stream.return_value = [mock_event_ipv6, mock_event_ipv4]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+        self.assertEqual(ip, "192.168.1.1")
+
 
 if __name__ == '__main__':
     unittest.main()

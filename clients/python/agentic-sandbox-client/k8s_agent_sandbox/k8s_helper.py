@@ -266,29 +266,12 @@ class K8sHelper:
             raise
 
     def _is_valid_ip(self, s: str) -> bool:
-        import ipaddress
-        try:
-            ipaddress.ip_address(s)
-            return True
-        except ValueError:
-            return False
+        from .utils import is_valid_ip
+        return is_valid_ip(s)
 
     def _is_valid_gateway_hostname(self, s: str) -> bool:
-        if not s or len(s) > 253:
-            return False
-        for i, c in enumerate(s):
-            if 'a' <= c <= 'z' or 'A' <= c <= 'Z' or '0' <= c <= '9':
-                continue
-            elif c == '-':
-                if i == 0 or s[i-1] == '.':
-                    return False
-            elif c == '.':
-                if i == 0 or s[i-1] == '.' or s[i-1] == '-':
-                    return False
-            else:
-                return False
-        last = s[-1]
-        return last != '-' and last != '.'
+        from .utils import is_valid_gateway_hostname
+        return is_valid_gateway_hostname(s)
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
@@ -314,18 +297,26 @@ class K8sHelper:
                     gateway_object = event['object']
                     status = gateway_object.get('status') or {}
                     addresses = status.get('addresses', [])
-                    if addresses:
-                        ip_address = addresses[0].get('value')
-                        if ip_address:
-                            # Validate the address to prevent SSRF via a compromised Gateway resource.
-                            if any(c in ip_address for c in "/?#@"):
-                                logging.warning(f"Gateway address rejected by validation (contains special chars): {ip_address}")
-                                continue
-                            
-                            if not self._is_valid_ip(ip_address) and not self._is_valid_gateway_hostname(ip_address):
-                                logging.warning(f"Gateway address rejected by validation: {ip_address}")
-                                continue
-                                
-                            logging.info(f"Gateway ready. IP: {ip_address}")
-                            w.stop()
-                            return ip_address
+                    for address in addresses:
+                        ip_address = address.get('value')
+                        if not ip_address:
+                            continue
+                        
+                        # Validate the address to prevent SSRF via a compromised Gateway resource.
+                        if any(c in ip_address for c in "/?#@"):
+                            logging.warning(
+                                "Gateway address rejected by validation (contains special chars): %r",
+                                ip_address,
+                            )
+                            continue
+                        
+                        if not self._is_valid_ip(ip_address) and not self._is_valid_gateway_hostname(ip_address):
+                            logging.warning(
+                                "Gateway address rejected by validation: %r",
+                                ip_address,
+                            )
+                            continue
+                        
+                        logging.info(f"Gateway ready. IP: {ip_address}")
+                        w.stop()
+                        return ip_address

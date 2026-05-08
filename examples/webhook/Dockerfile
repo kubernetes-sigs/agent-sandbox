@@ -2,7 +2,7 @@
 # docker push us-docker.pkg.dev/<project-id>/<repo-name>/webhook-image:latest
 
 # Build go binary
-FROM golang:1.26.1 AS builder
+FROM golang:1.26.2 AS builder
 
 WORKDIR /workspace
 
@@ -10,6 +10,7 @@ WORKDIR /workspace
 COPY main.go ./
 
 # Alternatively run `go mod tidy` locally, copy go.sum in and use download instead of tidy command.
+# go.sum is not included to reduce the amount of unnecessary files in the examples directory.
 # COPY go.mod go.sum ./
 # RUN go mod download
 COPY go.mod ./

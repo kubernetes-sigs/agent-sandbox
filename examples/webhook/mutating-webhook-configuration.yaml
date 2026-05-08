@@ -19,4 +19,5 @@ webhooks:
         resources: ["sandboxclaims"]
     admissionReviewVersions: ["v1"]
     sideEffects: None
+    failurePolicy: Ignore
     timeoutSeconds: 5

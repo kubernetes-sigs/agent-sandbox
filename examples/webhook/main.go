@@ -22,6 +22,7 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 )
@@ -45,9 +46,12 @@ func main() {
 func handleMutate(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	if r.Body != nil {
-		if data, err := io.ReadAll(r.Body); err == nil {
-			body = data
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("could not read body: %v", err), http.StatusBadRequest)
+			return
 		}
+		body = data
 	}
 
 	if len(body) == 0 {
@@ -65,20 +69,37 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 	arResponse := admissionv1.AdmissionReview{
 		TypeMeta: ar.TypeMeta,
 		Response: &admissionv1.AdmissionResponse{
-			UID:     ar.Request.UID,
 			Allowed: true,
 		},
 	}
 
-	// Check if annotation already exists
 	var rawObj map[string]interface{}
+	hasAnnotation := false
+	hasAnnotationsMap := false
+
+	if ar.Request == nil {
+		arResponse.Response.Allowed = false
+		arResponse.Response.Result = &metav1.Status{
+			Message: "request is missing",
+		}
+		goto writeResponse
+	}
+
+	arResponse.Response.UID = ar.Request.UID
+
+	if len(ar.Request.Object.Raw) == 0 {
+		arResponse.Response.Allowed = false
+		arResponse.Response.Result = &metav1.Status{
+			Message: "request object is missing",
+		}
+		goto writeResponse
+	}
+
+	// Check if annotation already exists
 	if err := json.Unmarshal(ar.Request.Object.Raw, &rawObj); err != nil {
 		http.Error(w, fmt.Sprintf("could not unmarshal raw object: %v", err), http.StatusBadRequest)
 		return
 	}
-
-	hasAnnotation := false
-	hasAnnotationsMap := false
 	if metadata, ok := rawObj["metadata"].(map[string]interface{}); ok {
 		if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
 			hasAnnotationsMap = true
@@ -92,20 +113,45 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 		// Create JSON Patch to add annotation
 		now := time.Now().Format(time.RFC3339Nano)
 
-		var patchStr string
-		if hasAnnotationsMap {
-			// Path /metadata/annotations exists, add specific key
-			patchStr = fmt.Sprintf(`[{"op": "add", "path": "/metadata/annotations/agents.x-k8s.io~1webhook-first-observed-at", "value": "%s"}]`, now)
-		} else {
-			// Path /metadata/annotations does not exist, create it with the key
-			patchStr = fmt.Sprintf(`[{"op": "add", "path": "/metadata/annotations", "value": {"agents.x-k8s.io/webhook-first-observed-at": "%s"}}]`, now)
+		type patchOperation struct {
+			Op    string      `json:"op"`
+			Path  string      `json:"path"`
+			Value interface{} `json:"value,omitempty"`
 		}
 
-		arResponse.Response.Patch = []byte(patchStr)
+		var patches []patchOperation
+		if hasAnnotationsMap {
+			// Path /metadata/annotations exists, add specific key
+			patches = []patchOperation{
+				{
+					Op:    "add",
+					Path:  "/metadata/annotations/agents.x-k8s.io~1webhook-first-observed-at",
+					Value: now,
+				},
+			}
+		} else {
+			// Path /metadata/annotations does not exist, create it with the key
+			patches = []patchOperation{
+				{
+					Op:    "add",
+					Path:  "/metadata/annotations",
+					Value: map[string]string{"agents.x-k8s.io/webhook-first-observed-at": now},
+				},
+			}
+		}
+
+		patchBytes, err := json.Marshal(patches)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("could not encode patch: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		arResponse.Response.Patch = patchBytes
 		patchType := admissionv1.PatchTypeJSONPatch
 		arResponse.Response.PatchType = &patchType
 	}
 
+writeResponse:
 	resp, err := json.Marshal(arResponse)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("could not encode response: %v", err), http.StatusInternalServerError)

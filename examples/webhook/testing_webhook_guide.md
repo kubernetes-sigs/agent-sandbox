@@ -133,7 +133,7 @@ kubectl get pods -n cert-manager
 > kubectl apply -f -
 > ```
 >
-> And apply the provided role and binding in [cert-manager-autopilot-rbac.yaml](./cert-manager-autopilot-rbac.yaml)
+> And apply the provided role and binding in [cert-manager-rbac.yaml](./cert-manager-rbac.yaml)
 > to grant lease permissions in the `cert-manager` namespace:
 >
 > ```bash

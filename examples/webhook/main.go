@@ -91,7 +91,7 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 	if !hasAnnotation {
 		// Create JSON Patch to add annotation
 		now := time.Now().Format(time.RFC3339Nano)
-		
+
 		var patchStr string
 		if hasAnnotationsMap {
 			// Path /metadata/annotations exists, add specific key
@@ -100,7 +100,7 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 			// Path /metadata/annotations does not exist, create it with the key
 			patchStr = fmt.Sprintf(`[{"op": "add", "path": "/metadata/annotations", "value": {"agents.x-k8s.io/webhook-first-observed-at": "%s"}}]`, now)
 		}
-		
+
 		arResponse.Response.Patch = []byte(patchStr)
 		patchType := admissionv1.PatchTypeJSONPatch
 		arResponse.Response.PatchType = &patchType
@@ -111,8 +111,7 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("could not encode response: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(resp)
 }
-

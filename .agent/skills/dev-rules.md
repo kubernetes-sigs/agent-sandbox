@@ -1,12 +1,12 @@
 ---
-name: agent-sandbox-dev-rules
-description: Enforces agent-sandbox project specific development rules and conventions.
+name: dev-rules
+description: Enforces project specific development rules and conventions.
 ---
 
-# Agent Sandbox Development Rules
+# Development Rules
 
 ## Purpose
-This skill ensures that AI agents contributing to `agent-sandbox` follow project-specific rules regarding code review and style to maintain compliance and quality.
+This skill ensures that AI agents contributing to this project follow project-specific rules regarding code review and style to maintain compliance and quality.
 
 ## Instructions
 1.  **Go Development**: Follow standard Kubernetes Go patterns and best practices.

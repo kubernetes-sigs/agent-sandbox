@@ -9,7 +9,7 @@ description: Guides the agent to follow Kubernetes API conventions for OSS stand
 This skill ensures that all Custom Resource Definitions (CRDs) generated or modified in this project follow the established conventions defined by the Kubernetes community.
 
 ## Instructions
-1.  **CRDs as First-Class APIs**: Adhere to the guidelines in the official Kubernetes API conventions. CRDs must follow the same conventions regarding field naming (camelCase), types, and structure (Spec/Status separation) as core Kubernetes resources.
+1.  **CRDs as First-Class APIs**: Adhere to the guidelines in the official Kubernetes API conventions. CRDs must follow the same conventions regarding field naming, types, and structure (Spec/Status separation) as core Kubernetes resources.
 2.  **Review References**: Before creating or modifying any CRD definitions in this project, review the linked community guidelines.
 3.  **Commonly Missed Conventions ("Gotchas")**: Pay special attention to the following design points derived from internal experience, which automated linters often miss:
     *   **Label Values**: Do NOT put full resource names in label values. Resource names can exceed the label value size limit (63 characters).

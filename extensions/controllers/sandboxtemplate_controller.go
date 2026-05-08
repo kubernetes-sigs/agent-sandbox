@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
+
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
@@ -101,7 +101,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		desiredSpec = networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash(template.Name),
+					sandboxTemplateRefHash: SandboxTemplateRefHash(template.Name),
 				},
 			},
 			PolicyTypes: []networkingv1.PolicyType{
@@ -160,7 +160,7 @@ func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPoli
 	return networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				sandboxTemplateRefHash: sandboxcontrollers.NameHash(templateName),
+				sandboxTemplateRefHash: SandboxTemplateRefHash(templateName),
 			},
 		},
 		PolicyTypes: []networkingv1.PolicyType{

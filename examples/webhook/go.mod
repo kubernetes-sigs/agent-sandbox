@@ -1,6 +1,6 @@
-module webhook
+module sigs.k8s.io/agent-sandbox/examples/webhook
 
-go 1.26.1
+go 1.26.2
 
 require (
 	k8s.io/api v0.35.3

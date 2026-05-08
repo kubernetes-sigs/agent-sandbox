@@ -65,6 +65,9 @@ var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 // ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
 var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
 
+// ErrConfigReadFailure indicates a controller config read failure.
+var ErrConfigReadFailure = errors.New("controller config read failure")
+
 // ErrSandboxNotOwned indicates the Sandbox exists but is not controlled by this claim.
 var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 
@@ -324,6 +327,9 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 	// Upfront validation of additional metadata to skip unnecessary processing
 	if err := r.validateAdditionalPodMetadata(ctx, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if errors.Is(err, ErrConfigReadFailure) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
@@ -819,22 +825,41 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(_ context.Context
 		return nil
 	}
 
-	// Read allowed domains from mounted file
 	allowedDomains := []string{"sandbox.users.io"} // default
-	configPath := "/etc/sandbox-config/allowed-label-domains"
-	data, err := os.ReadFile(configPath)
-	if err == nil {
-		val := string(data)
-		if val != "" {
-			allowedDomains = strings.FieldsFunc(val, func(c rune) bool {
-				return c == ',' || c == '\n' || c == '\r'
-			})
+	if len(claimMeta.Labels) > 0 {
+		// Read allowed domains from mounted file only when there are labels to validate
+		configPath := "/etc/sandbox-config/allowed-label-domains"
+		data, err := os.ReadFile(configPath)
+		if err == nil {
+			val := strings.TrimSpace(string(data))
+			if val != "" {
+				var domains []string
+				for _, d := range strings.FieldsFunc(val, func(c rune) bool {
+					return c == ',' || c == '\n' || c == '\r'
+				}) {
+					d = strings.ToLower(strings.TrimSpace(d))
+					if d != "" {
+						domains = append(domains, d)
+					}
+				}
+				if len(domains) > 0 {
+					allowedDomains = domains
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("%w: failed to read configuration file %q: %w", ErrConfigReadFailure, configPath, err)
 		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read configuration file %q: %w", configPath, err)
 	}
 
 	validate := func(key, value string, isLabel bool) error {
+		if errs := validation.IsQualifiedName(key); len(errs) > 0 {
+			kind := "annotation"
+			if isLabel {
+				kind = "label"
+			}
+			return fmt.Errorf("invalid %s key: %q: %s", kind, key, strings.Join(errs, "; "))
+		}
+
 		parts := strings.SplitN(key, "/", 2)
 		domain := ""
 		if len(parts) > 1 {
@@ -847,7 +872,6 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(_ context.Context
 			// Strict Allowlist for labels
 			allowed := false
 			for _, d := range allowedDomains {
-				d = strings.TrimSpace(d)
 				if domain == d || strings.HasSuffix(domain, "."+d) {
 					allowed = true
 					break

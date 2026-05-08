@@ -602,7 +602,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Spec: extensionsv1beta1.SandboxClaimSpec{
 					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
 					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
-						Labels: map[string]string{"user-label": "a-very-long-value-that-exceeds-sixty-three-characters-limit-which-is-sixty-four"},
+						Labels: map[string]string{"sandbox.users.io/user-label": "a-very-long-value-that-exceeds-sixty-three-characters-limit-which-is-sixty-four"},
 					},
 				},
 			},
@@ -620,7 +620,25 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Spec: extensionsv1beta1.SandboxClaimSpec{
 					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
 					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
-						Labels: map[string]string{"user-label": "invalid@value"},
+						Labels: map[string]string{"sandbox.users.io/user-label": "invalid@value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+			},
+		},
+		{
+			name: "claim with invalid label key is rejected",
+			claimToReconcile: &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-invalid-key", Namespace: "default", UID: "uid-invalid-key"},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{"sandbox.users.io/invalid@key": "value"},
 					},
 				},
 			},

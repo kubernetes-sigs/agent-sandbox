@@ -15,7 +15,7 @@ This skill ensures that all Custom Resource Definitions (CRDs) generated or modi
     *   **Label Values**: Do NOT put full resource names in label values. Resource names can exceed the label value size limit (63 characters).
     *   **Preview Features**: Do NOT use annotations for alpha/preview features. Use new API fields instead, to avoid migration difficulties later.
     *   **Status Properties**: Use `conditions` instead of `phase` for tracking state.
-    *   **Mutating Spec**: The primary CR spec is user-owned and should not be persisted/rewritten by the reconciler. Controllers may, however, update the spec of secondary/derived objects, or explicitly controller-owned fields when that is part of the API contract.
+    *   **Mutating Spec**: The `spec` of the primary Custom Resource (CR) being reconciled is user-owned and should not be modified and saved back to the API server by the reconciler. This avoids mutating user intent. Controllers may, however, create and update the `spec` of **secondary or target** objects (for example, the HPA controller updating a Deployment's `spec.replicas`).
     *   **Zero vs. Unset**: Use pointers for fields where it is important to distinguish between a zero value (e.g., `0`) and the field being unset.
     *   **Scalability**: Avoid storing unbounded lists of items in the API (etcd has size limits). Consider aggregating or summarizing lists in `status`.
     *   **Think twice about booleans**: Avoid booleans for fields that might evolve to have more states in the future. Use enums or string fields instead.

@@ -20,6 +20,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+os.environ["ALLOW_UNAUTHENTICATED_ROUTER"] = "true"
 import sandbox_router
 
 
@@ -94,19 +95,32 @@ class TestProxyRequestValidation:
 
 
 class TestAuthentication:
-    def test_auth_disabled_by_default(self, client):
-        # When ROUTER_AUTH_TOKEN is not set, requests should proceed (and fail with 502 because target is unreachable)
-        with patch.object(
-            sandbox_router.client,
-            "send",
-            new_callable=AsyncMock,
-            side_effect=httpx.ConnectError("stop here")
-        ):
-            resp = client.post(
-                "/execute",
-                headers={"X-Sandbox-ID": "my-sandbox"},
-            )
-        assert resp.status_code == 502
+    def test_auth_required_by_default_raises(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(RuntimeError, match="ROUTER_AUTH_TOKEN must be set"):
+                importlib.reload(sandbox_router)
+
+        importlib.reload(sandbox_router)
+
+    def test_auth_disabled_by_default(self):
+        with patch.dict(os.environ, {"ALLOW_UNAUTHENTICATED_ROUTER": "true"}, clear=True):
+            importlib.reload(sandbox_router)
+            from fastapi.testclient import TestClient
+            client = TestClient(sandbox_router.app)
+
+            with patch.object(
+                sandbox_router.client,
+                "send",
+                new_callable=AsyncMock,
+                side_effect=httpx.ConnectError("stop here")
+            ):
+                resp = client.post(
+                    "/execute",
+                    headers={"X-Sandbox-ID": "my-sandbox"},
+                )
+            assert resp.status_code == 502
+
+        importlib.reload(sandbox_router)
 
     def test_auth_enabled_valid_token(self):
         with patch.dict(os.environ, {"ROUTER_AUTH_TOKEN": "secret-token"}):
@@ -179,7 +193,7 @@ class TestProxyTimeout:
         importlib.reload(sandbox_router)
 
     def test_default_when_env_var_unset(self):
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"ALLOW_UNAUTHENTICATED_ROUTER": "true"}, clear=True):
             importlib.reload(sandbox_router)
             assert sandbox_router.proxy_timeout == 180.0
 
@@ -244,6 +258,24 @@ class TestProxyRouting:
             forwarded_host = captured_request.get("headers", {}).get("host", "")
             assert "evil.example.com" not in forwarded_host
 
+    def test_authorization_header_not_forwarded(self, client):
+        """The 'authorization' header should not be forwarded to the sandbox."""
+        captured_request = {}
+
+        async def capture_send(req, **kwargs):
+            captured_request["headers"] = dict(req.headers)
+            raise httpx.ConnectError("stop here")
+
+        with patch.object(sandbox_router.client, "send", side_effect=capture_send):
+            client.post(
+                "/execute",
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "Authorization": "Bearer secret-token",
+                },
+            )
+            assert "authorization" not in captured_request.get("headers", {})
+
     def test_query_parameters_forwarded(self, client):
         """Query parameters should be preserved in the proxied request."""
         captured_request = {}
@@ -260,9 +292,8 @@ class TestProxyRouting:
             assert captured_request.get("params", {}).get("cmd") == "ls"
             assert captured_request.get("params", {}).get("arg") == "-la"
 
-    @pytest.mark.asyncio
     @patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock)
-    async def test_request_body_streamed(self, mock_send, client):
+    def test_request_body_streamed(self, mock_send, client):
         """Verify that the request body is passed as a stream to httpx."""
         mock_resp = AsyncMock(spec=httpx.Response)
         mock_resp.status_code = 200

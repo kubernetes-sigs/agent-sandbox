@@ -975,11 +975,14 @@ func TestReconcilePod(t *testing.T) {
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
 					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
-								Name: "foo",
+								Name: "test-container",
 							},
 						},
 					},
@@ -1005,7 +1008,7 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name: "foo",
+							Name: "test-container",
 						},
 					},
 				},
@@ -1083,7 +1086,7 @@ func TestReconcilePod(t *testing.T) {
 			wantPod: nil,
 		},
 		{
-			name: "adopts existing pod via annotation - pod gets label and owner reference",
+			name: "refuses to adopt existing unowned pod without provenance or matching spec",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1095,6 +1098,52 @@ func TestReconcilePod(t *testing.T) {
 						Containers: []corev1.Container{
 							{
 								Name: "existing-container",
+							},
+						},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "test-container",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantPod:   nil,
+			expectErr: true,
+		},
+		{
+			name: "adopts existing unowned pod with valid provenance and matching spec",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "adopted-pod-name",
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
 							},
 						},
 					},
@@ -1135,7 +1184,7 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name: "existing-container",
+							Name: "test-container",
 						},
 					},
 				},

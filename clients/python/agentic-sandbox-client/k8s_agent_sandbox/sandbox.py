@@ -83,12 +83,6 @@ class Sandbox:
         self._pod_name = None
         self._sandbox_name_hash = None
         
-        # Cache the sandbox name hash while sandbox is running/active
-        try:
-            self.get_sandbox_name_hash()
-        except Exception as e:
-            logging.warning(f"Could not fetch sandbox name hash during initialization: {e}")
-        
     def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
         if self._pod_name is not None:

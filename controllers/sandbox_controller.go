@@ -905,7 +905,15 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 			case resourceUnowned:
-				log.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				hasProvenance := pvc.Labels != nil && pvc.Labels[sandboxLabel] == nameHash
+				if !hasProvenance || !equality.Semantic.DeepEqual(&pvc.Spec, &pvcTemplate.Spec) {
+					log.Info("Refusing to adopt PVC: PVC lacks provenance or fails spec validation",
+						"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
+						"hasProvenance", hasProvenance)
+					return fmt.Errorf("cannot adopt unowned PVC %q: lacks provenance or fails spec validation", pvcName)
+				}
+
+				log.Info("Adopting unowned PVC with valid provenance and spec", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}

@@ -2198,13 +2198,35 @@ func TestReconcilePVCs(t *testing.T) {
 			errContains: "is owned by",
 		},
 		{
-			name: "adopts unowned PVC",
+			name: "refuses to adopt existing unowned PVC without provenance or matching spec",
 			initialObjs: []runtime.Object{
 				&corev1.PersistentVolumeClaim{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      pvcName,
 						Namespace: sandboxNs,
-						// No owner references.
+					},
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name: "adopts existing unowned PVC with valid provenance and matching spec",
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							sandboxLabel: NameHash(sandboxName),
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("1Gi"),
+							},
+						},
 					},
 				},
 			},

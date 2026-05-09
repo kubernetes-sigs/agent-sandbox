@@ -3283,7 +3283,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			Name:      "test-claim",
 			Namespace: "default",
 			UID:       "claim-uid-123",
-			Labels: map[string]string{
+			Annotations: map[string]string{
 				"agents.x-k8s.io/sandbox-name": "adopted-sb",
 			},
 		},

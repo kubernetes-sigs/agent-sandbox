@@ -661,10 +661,10 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			logger.Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
 			// Update claim to record adoption (optimistic lock)
-			if claim.Labels == nil {
-				claim.Labels = make(map[string]string)
+			if claim.Annotations == nil {
+				claim.Annotations = make(map[string]string)
 			}
-			claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel] = adopted.Name
+			claim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation] = adopted.Name
 			if err := r.Update(ctx, claim); err != nil {
 				r.WarmSandboxQueue.Add(templateHash, adoptedKey)
 				if k8errors.IsConflict(err) {
@@ -1075,44 +1075,44 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		}
 	}
 
-	// Check if a previously adopted sandbox is recorded in claim labels
-	if claim.Labels != nil {
-		if sbName := claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel]; sbName != "" {
-			logger.V(1).Info("Checking labels for sandbox name", "label", sbName, "claim", claim.Name)
+	// Check if a previously adopted sandbox is recorded in claim annotations
+	if claim.Annotations != nil {
+		if sbName := claim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation]; sbName != "" {
+			logger.V(1).Info("Checking annotations for sandbox name", "annotation", sbName, "claim", claim.Name)
 			sandbox := &v1alpha1.Sandbox{}
 			if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 				if metav1.IsControlledBy(sandbox, claim) {
-					logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
+					logger.Info("Found existing adopted sandbox from annotations", "sandbox", sandbox.Name, "claim", claim.Name)
 					return sandbox, nil
 				}
 
 				controllerRef := metav1.GetControllerOf(sandbox)
 				if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
 					// Still in warm pool. Try to complete adoption!
-					logger.Info("Sandbox found by label still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
+					logger.Info("Sandbox found by annotation still in warm pool, trying to complete adoption", "sandbox", sandbox.Name, "claim", claim.Name)
 
 					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
 						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
-							logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
+							logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sandbox.Name, "claim", claim.Name)
 						} else {
-							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
+							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sandbox.Name, err)
 						}
 					} else {
 						// If succeeded, return error to retry so next reconcile sees it controlled by us!
-						return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
+						return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sandbox.Name)
 					}
 				}
 
-				logger.Info("Sandbox recorded in label belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
+				logger.Info("Sandbox recorded in annotation belongs to another claim, falling through", "sandbox", sandbox.Name, "claim", claim.Name)
 			} else if k8errors.IsNotFound(err) {
-				logger.Info("Sandbox recorded in label not found, removing stale label", "sandbox", sbName, "claim", claim.Name)
+				logger.Info("Sandbox recorded in annotation not found, removing stale annotation", "sandboxName", sbName, "claim", claim.Name)
 				patch := client.MergeFrom(claim.DeepCopy())
-				delete(claim.Labels, extensionsv1alpha1.AssignedSandboxNameLabel)
+				delete(claim.Annotations, extensionsv1alpha1.AssignedSandboxNameAnnotation)
 				if err := r.Patch(ctx, claim, patch); err != nil {
-					return nil, fmt.Errorf("failed to remove stale sandbox label: %w", err)
+					return nil, fmt.Errorf("failed to remove stale sandbox annotation: %w", err)
 				}
 			} else {
-				return nil, fmt.Errorf("failed to get sandbox %q from labels: %w", sbName, err)
+				return nil, fmt.Errorf("failed to get sandbox %q for annotation lookup: %w", sbName, err)
 			}
 		}
 	}

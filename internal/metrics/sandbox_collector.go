@@ -89,20 +89,16 @@ func (c *SandboxCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect fetches sandboxes, calculates labels, and sends metrics to the channel.
-// Note: Using client.List to fetch all sandboxes in the cluster on every metrics scrape
-// introduces O(N) memory allocation and CPU overhead due to deep-copying thousands of objects.
-// While updating a GaugeVec in the Reconcile loop might be slightly harder to manage,
-// it operates in O(1) memory during scrapes and is generally more performant.
-// This is a known performance trade-off to keep the Reconcile loop simpler.
+// UnsafeDisableDeepCopy avoids O(N) deep-copy overhead on every scrape; safe here because
+// Collect only reads fields for label aggregation and never mutates or retains the objects.
+// A GaugeVec updated in the Reconcile loop would be more performant (O(1) per scrape),
+// but this is a known trade-off to keep the Reconcile loop simpler.
 func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 	var sandboxList sandboxv1alpha1.SandboxList
 	ctx, cancel := context.WithTimeout(context.Background(), metricsCollectTimeout)
 	defer cancel()
 
-	// TODO(chw120): The current O(N) List call during metrics collection poses a scalability concern.
-	// In large clusters, frequent scrapes could lead to high CPU usage or OOM.
-	// This should be replaced with a more efficient implementation.
-	if err := c.client.List(ctx, &sandboxList); err != nil {
+	if err := c.client.List(ctx, &sandboxList, client.UnsafeDisableDeepCopy); err != nil {
 		c.logger.Error(err, "Failed to list sandboxes for metrics collection")
 		return
 	}

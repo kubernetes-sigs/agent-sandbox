@@ -147,6 +147,7 @@ _Appears in:_
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the number of desired replicas.<br />The only allowed values are 0 and 1.<br />Defaults to 1. | 1 | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+| `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for this Sandbox.<br />When unset (nil), the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 
 
 #### SandboxStatus

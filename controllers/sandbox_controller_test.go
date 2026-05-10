@@ -310,9 +310,60 @@ func TestReconcile(t *testing.T) {
 		expectSandboxDeleted bool
 	}{
 		{
+			name: "minimal sandbox spec creates Pod but not Service by default",
+			// Input sandbox spec
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+			},
+			// Verify Sandbox status
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Replicas:      1,
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "DependenciesNotReady",
+						Message:            "Pod exists with phase: ",
+					},
+				},
+			},
+			wantObjs: []client.Object{
+				// Verify Pod
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "minimal sandbox spec with Pod and Service",
 			// Input sandbox spec
 			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				Service: new(true),
 				PodTemplate: sandboxv1alpha1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -383,6 +434,7 @@ func TestReconcile(t *testing.T) {
 			name: "sandbox spec with PVC, Pod, and Service",
 			// Input sandbox spec
 			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				Service: new(true),
 				PodTemplate: sandboxv1alpha1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -537,6 +589,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				Service: new(true),
 				PodTemplate: sandboxv1alpha1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container"}},
@@ -576,6 +629,51 @@ func TestReconcile(t *testing.T) {
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
 						},
 						ClusterIP: "None",
+					},
+				},
+			},
+		},
+		{
+			name: "sandbox with existing ready pod becomes Ready without Service by default",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sandboxName,
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{
+						PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}},
+						Phase:  corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			},
+			sandboxSpec: sandboxv1alpha1.SandboxSpec{
+				PodTemplate: sandboxv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			wantStatus: sandboxv1alpha1.SandboxStatus{
+				Replicas:      1,
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				PodIPs:        []string{"10.244.0.5"},
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             "DependenciesReady",
+						Message:            "Pod is Ready",
 					},
 				},
 			},
@@ -1699,6 +1797,7 @@ func TestReconcileService(t *testing.T) {
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
 			Replicas: new(int32(1)),
+			Service:  new(true),
 		},
 	}
 
@@ -1709,11 +1808,13 @@ func TestReconcileService(t *testing.T) {
 		wantService           *corev1.Service
 		expectErr             bool
 		errContains           string // substring that must appear in the error
+		wantNilService        bool
+		wantServiceDeleted    bool
 		wantStatusService     string
 		wantStatusServiceFQDN string
 	}{
 		{
-			name:    "creates a new headless service when none exists",
+			name:    "creates a new headless service when none exists and service is true",
 			sandbox: sandboxObj,
 			wantService: &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1736,7 +1837,7 @@ func TestReconcileService(t *testing.T) {
 			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
 		},
 		{
-			name: "uses existing service owned by this sandbox",
+			name: "uses existing service owned by this sandbox when service is true",
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1753,7 +1854,7 @@ func TestReconcileService(t *testing.T) {
 		},
 
 		{
-			name: "repairs selector and label drift on service owned by this sandbox",
+			name: "repairs selector and label drift on service owned by this sandbox when service is true",
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1795,8 +1896,7 @@ func TestReconcileService(t *testing.T) {
 		},
 
 		{
-			name: "refuses to use service owned by a different controller",
-
+			name: "refuses to use service owned by a different controller when service is true",
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1821,7 +1921,7 @@ func TestReconcileService(t *testing.T) {
 			expectErr:   true,
 		},
 		{
-			name: "adopts unowned service and sets controller reference",
+			name: "adopts unowned service and sets controller reference when service is true",
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1852,7 +1952,7 @@ func TestReconcileService(t *testing.T) {
 			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
 		},
 		{
-			name: "refuses to adopt unowned service with non-headless ClusterIP",
+			name: "refuses to adopt unowned service with non-headless ClusterIP when service is true",
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1871,7 +1971,7 @@ func TestReconcileService(t *testing.T) {
 			errContains: "immutable",
 		},
 		{
-			name: "adopts unowned headless service and overwrites wrong selector",
+			name: "adopts unowned headless service and overwrites wrong selector when service is true",
 			initialObjs: []runtime.Object{
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1908,6 +2008,149 @@ func TestReconcileService(t *testing.T) {
 			wantStatusService:     sandboxName,
 			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
 		},
+		{
+			name: "does not create service when service is nil",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+				},
+			},
+			wantNilService:        true,
+			wantStatusService:     "",
+			wantStatusServiceFQDN: "",
+		},
+		{
+			name: "preserves and reconciles owned service when service is nil",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "None",
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+				},
+			},
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "ignores unowned service when service is nil",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "None",
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+				},
+			},
+			wantNilService:        true,
+			wantStatusService:     "",
+			wantStatusServiceFQDN: "",
+		},
+		{
+			name: "deletes owned service when service is explicitly false",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+					Service:  new(false),
+				},
+			},
+			wantNilService:        true,
+			wantServiceDeleted:    true,
+			wantStatusService:     "",
+			wantStatusServiceFQDN: "",
+		},
+		{
+			name: "ignores unowned service when service is explicitly false",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+					Service:  new(false),
+				},
+			},
+			wantNilService:        true,
+			wantStatusService:     "",
+			wantStatusServiceFQDN: "",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1928,11 +2171,15 @@ func TestReconcileService(t *testing.T) {
 				}
 			} else {
 				require.NoError(t, err)
-				require.NotNil(t, svc)
+				if tc.wantNilService {
+					require.Nil(t, svc)
+				} else {
+					require.NotNil(t, svc)
+				}
 			}
 
 			// Verify status was set correctly
-			if tc.wantStatusService != "" {
+			if !tc.expectErr {
 				require.Equal(t, tc.wantStatusService, tc.sandbox.Status.Service)
 				require.Equal(t, tc.wantStatusServiceFQDN, tc.sandbox.Status.ServiceFQDN)
 			}
@@ -1947,6 +2194,12 @@ func TestReconcileService(t *testing.T) {
 				if diff := cmp.Diff(tc.wantService, liveSvc, cmpopts.IgnoreFields(metav1.TypeMeta{}, "APIVersion", "Kind")); diff != "" {
 					t.Errorf("live service mismatch (-want +got):\n%s", diff)
 				}
+			} else if tc.wantServiceDeleted {
+				liveSvc := &corev1.Service{}
+				err = r.Get(t.Context(), types.NamespacedName{
+					Name: sandboxName, Namespace: sandboxNs,
+				}, liveSvc)
+				require.True(t, k8serrors.IsNotFound(err), "expected service to be deleted but it still exists")
 			}
 		})
 	}
@@ -2286,6 +2539,7 @@ func TestSandboxShutdownExpiryUsesTwoPassAndPreservesFinishedCondition(t *testin
 					Generation: 1,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
+					Service: new(true),
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},

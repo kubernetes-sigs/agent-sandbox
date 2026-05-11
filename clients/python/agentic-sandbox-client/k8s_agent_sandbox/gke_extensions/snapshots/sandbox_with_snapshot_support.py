@@ -162,7 +162,6 @@ class SandboxWithSnapshotSupport(Sandbox):
             )
 
         # Ensure the sandbox name hash is fetched and cached before we scale down to 0 replicas.
-        # If it failed during client init (transient error), retry fetching now while sandbox is still active.
         try:
             sandbox_name_hash = self.get_sandbox_name_hash()
             if not sandbox_name_hash:

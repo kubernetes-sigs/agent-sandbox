@@ -269,7 +269,7 @@ def main(
         )
 
         # Create a fresh sandbox to test suspend-resume flow on a brand new instance
-        print("\n***** Phase 2: Testing Suspend/Resume on a NEW Sandbox client *****")
+        print("\n***** Phase 2: Testing Suspend/Resume on a new Sandbox *****")
         test_suspend_resume_new_sandbox(client, template_name, namespace)
 
         print("--- Pod Snapshot Test Passed! ---")

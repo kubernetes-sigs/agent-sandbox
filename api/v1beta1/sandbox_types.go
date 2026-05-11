@@ -17,6 +17,7 @@ package v1beta1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // ConditionType is a type of condition for a resource.
@@ -253,5 +254,8 @@ type SandboxList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&Sandbox{}, &SandboxList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &Sandbox{}, &SandboxList{})
+		return nil
+	})
 }

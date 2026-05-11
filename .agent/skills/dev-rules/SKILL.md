@@ -1,6 +1,6 @@
 ---
 name: dev-rules
-description: Enforces project specific development rules and conventions.
+description: Enforces project-specific development rules and conventions.
 ---
 
 # Development Rules
@@ -20,4 +20,4 @@ This skill ensures that AI agents contributing to this project follow project-sp
     *   **Release Notes**: Fill out the `release-note` block. Note that automated release notes are generated from the description in the first section, so ensure it is comprehensive. For breaking changes, describe required actions and ask the maintainers to label the PR with `release-note-action-required`.
 
 ## References
-- Project rules (as documented in [`CONTRIBUTING.md`](../../CONTRIBUTING.md))
+- Project rules (as documented in [`CONTRIBUTING.md`](../../../CONTRIBUTING.md))

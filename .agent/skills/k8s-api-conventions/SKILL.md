@@ -22,4 +22,4 @@ This skill ensures that all Custom Resource Definitions (CRDs) generated or modi
     *   **Declarative Field Names**: Ensure field names describe the desired state, not an action (e.g., use `suspended` instead of `suspend`).
 
 ## References
-- [Kubernetes API Conventions](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md)
+- [Kubernetes API Conventions](references/api-conventions.md)

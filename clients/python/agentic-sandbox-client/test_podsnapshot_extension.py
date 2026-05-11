@@ -125,7 +125,10 @@ def test_suspend_resume(sandbox) -> str:
 
 
 def test_suspend_resume_new_sandbox(client, template_name: str, namespace: str) -> None:
-    """Tests creating a sandbox, suspending it (generating a snapshot), terminating it, provisioning a brand new sandbox, and resuming/restoring it from that snapshot."""
+    """
+    Tests creating a sandbox, suspending it (generating a snapshot), terminating it, 
+    provisioning a sandbox handle for the same sandbox, and resuming the sandbox from that snapshot.
+    """
     print("\n======= Testing Suspend and Resume in a NEW Sandbox =======")
 
     # Create the initial sandbox to take the snapshot from
@@ -140,20 +143,30 @@ def test_suspend_resume_new_sandbox(client, template_name: str, namespace: str) 
     suspend_snapshot_uid = suspend_result.snapshot_response.snapshot_uid if suspend_result.snapshot_response else 'None'
     print(f"Sandbox suspended. Snapshot UID: {suspend_snapshot_uid}")   
 
-    print(f"\nResuming sandbox '{sandbox.sandbox_id}'...")
-    resume_result = sandbox.resume()
+    print(f"Waiting for suspend snapshot '{suspend_snapshot_uid}' to become ready...")
+    wait_for_snapshot_ready(sandbox, suspend_snapshot_uid)
+
+    claim_name = sandbox.claim_name
+    print("Closing connection for the old sandbox handle...")
+    sandbox.close_connection()
+
+    print(f"\nRe-attaching to sandbox claim '{claim_name}' to get a fresh handle...")
+    new_sandbox_handle = client.get_sandbox(claim_name, namespace=namespace)
+
+    print(f"\nResuming sandbox '{new_sandbox_handle.sandbox_id}'...")
+    resume_result = new_sandbox_handle.resume()
     assert resume_result.success, f"Resume failed: {resume_result.error_reason}"
     assert resume_result.restored_from_snapshot, "Sandbox should have been restored from snapshot."
-    assert not sandbox.is_suspended(), "Sandbox should not be suspended after resume."
+    assert not new_sandbox_handle.is_suspended(), "Sandbox should not be suspended after resume."
     print(f"Sandbox successfully resumed and restored from Snapshot UID: {resume_result.snapshot_uid}")
 
     # Cleanup snapshots
-    print(f"\nRunning cleanup of remaining snapshots on the restored sandbox '{sandbox.sandbox_id}'...")
-    list_result = sandbox.snapshots.list()
+    print(f"\nRunning cleanup of remaining snapshots on the restored sandbox '{new_sandbox_handle.sandbox_id}'...")
+    list_result = new_sandbox_handle.snapshots.list()
     assert list_result.success, list_result.error_reason
     print(f"Found {len(list_result.snapshots)} snapshots remaining for the sandbox.")
     
-    delete_result = sandbox.snapshots.delete_all(delete_by="all")
+    delete_result = new_sandbox_handle.snapshots.delete_all(delete_by="all")
     assert delete_result.success, delete_result.error_reason
     print("Cleaned up remaining snapshots.")
 

@@ -954,10 +954,10 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_code=0,
             )
             self.engine.delete_all()
-            mock_execute.assert_called_once_with(scope="global", created_after=None, created_before=None, timeout=180)
+            mock_execute.assert_called_once_with(scope="global", timeout=180)
 
-    def test_snapshots_delete_all_by_timestamp(self):
-        """Test delete_all passes created_after and created_before down to _execute_deletion."""
+    def test_snapshots_delete_all_by_created_after(self):
+        """Test delete_all with created_after strategy."""
         with patch.object(self.engine, "_execute_deletion") as mock_execute:
             mock_execute.return_value = DeleteSnapshotResult(
                 success=True,
@@ -965,13 +965,52 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_reason="",
                 error_code=0,
             )
-            self.engine.delete_all(created_after="2023-01-01T00:00:00Z", created_before="2023-01-02T00:00:00Z")
+            self.engine.delete_all(delete_by="created_after", timestamp="2023-01-01T00:00:00Z")
             mock_execute.assert_called_once_with(
                 scope="global",
                 created_after="2023-01-01T00:00:00Z",
+                timeout=180,
+            )
+
+    def test_snapshots_delete_all_by_created_before(self):
+        """Test delete_all with created_before strategy."""
+        with patch.object(self.engine, "_execute_deletion") as mock_execute:
+            mock_execute.return_value = DeleteSnapshotResult(
+                success=True,
+                deleted_snapshots=["snap-x"],
+                error_reason="",
+                error_code=0,
+            )
+            self.engine.delete_all(delete_by="created_before", timestamp="2023-01-02T00:00:00Z")
+            mock_execute.assert_called_once_with(
+                scope="global",
                 created_before="2023-01-02T00:00:00Z",
                 timeout=180,
             )
+
+    def test_snapshots_delete_all_by_all_strategy(self):
+        """Test delete_all(delete_by='all') executes normally."""
+        with patch.object(self.engine, "_execute_deletion") as mock_execute:
+            mock_execute.return_value = DeleteSnapshotResult(
+                success=True,
+                deleted_snapshots=["snap-x"],
+                error_reason="",
+                error_code=0,
+            )
+            self.engine.delete_all(delete_by="all")
+            mock_execute.assert_called_once_with(
+                scope="global",
+                timeout=180,
+            )
+
+    def test_snapshots_delete_all_invalid_strategy(self):
+        """Test delete_all raises ValueError for strategies other than expected literals."""
+        with self.assertRaises(ValueError) as context:
+            self.engine.delete_all(delete_by="invalid")
+        self.assertIn(
+            "Unsupported deletion strategy: invalid",
+            str(context.exception),
+        )
 
 
 

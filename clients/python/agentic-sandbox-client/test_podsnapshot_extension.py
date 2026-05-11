@@ -170,7 +170,7 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     print(
         f"\nDeleting snapshots created after '{creation_time_2}' of the sandbox '{sandbox.sandbox_id}'..."
     )
-    delete_result = sandbox.snapshots.delete_all(created_after=creation_time_2)
+    delete_result = sandbox.snapshots.delete_all(delete_by="created_after", timestamp=creation_time_2)
     assert delete_result.success, delete_result.error_reason
     assert len(delete_result.deleted_snapshots) >= 1
     assert suspend_third_snapshot_uid in delete_result.deleted_snapshots

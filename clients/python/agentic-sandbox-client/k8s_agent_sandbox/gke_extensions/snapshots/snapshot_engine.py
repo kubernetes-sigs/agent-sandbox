@@ -95,7 +95,7 @@ class SnapshotFilter(BaseModel):
             except ValueError as e:
                 raise ValueError(f"Invalid ISO datetime string: {v}") from e
         if isinstance(v, datetime):
-            if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+            if v.tzinfo is None or v.utcoffset() is None:
                 return v.replace(tzinfo=timezone.utc)
             return v
         raise TypeError(f"Expected datetime or ISO format string, got {type(v)}")
@@ -540,15 +540,31 @@ class SnapshotEngine:
 
     def delete_all(
         self,
-        created_after: datetime | str | None = None,
-        created_before: datetime | str | None = None,
+        delete_by: Literal["all", "created_after", "created_before"] = "all",
+        timestamp: datetime | str | None = None,
         timeout: int = 180,
     ) -> DeleteSnapshotResult:
         """Deletes all snapshots for this pod within an optional time range."""
-        logger.info("Deleting every snapshot for this pod...")
-        return self._execute_deletion(
-            scope="global",
-            created_after=created_after,
-            created_before=created_before,
-            timeout=timeout,
-        )
+        match delete_by:
+            case "all":
+                logger.info("Deleting every snapshot for this pod...")
+                return self._execute_deletion(scope="global", timeout=timeout)
+
+            case "created_after":
+                if not isinstance(timestamp, (datetime, str)):
+                    raise ValueError(
+                        "timestamp must be a datetime/str when deleting by created_after"
+                    )
+                logger.info(f"Deleting snapshots after timestamp: {timestamp}")
+                return self._execute_deletion(scope="global", created_after=timestamp, timeout=timeout)
+
+            case "created_before":
+                if not isinstance(timestamp, (datetime, str)):
+                    raise ValueError(
+                        "timestamp must be a datetime/str when deleting by created_before"
+                    )
+                logger.info(f"Deleting snapshots before timestamp: {timestamp}")
+                return self._execute_deletion(scope="global", created_before=timestamp, timeout=timeout)
+
+            case _:
+                raise ValueError(f"Unsupported deletion strategy: {delete_by}")

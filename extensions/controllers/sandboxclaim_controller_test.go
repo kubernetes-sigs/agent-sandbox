@@ -3273,7 +3273,7 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 }
 
 // TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag verifies that during informer cache lag,
-// the assigned sandbox label on the claim is used to identify the previously adopted Sandbox,
+// the assigned sandbox annotation on the claim is used to identify the previously adopted Sandbox,
 // preventing duplicate adoptions from the warm pool.
 func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	scheme := newScheme(t)
@@ -3284,7 +3284,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			Namespace: "default",
 			UID:       "claim-uid-123",
 			Annotations: map[string]string{
-				"agents.x-k8s.io/sandbox-name": "adopted-sb",
+				extensionsv1alpha1.AssignedSandboxNameAnnotation: "adopted-sb",
 			},
 		},
 		Spec: extensionsv1alpha1.SandboxClaimSpec{

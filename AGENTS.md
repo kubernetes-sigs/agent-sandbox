@@ -37,7 +37,7 @@ Welcome, AI assistant! This file provides context and instructions for you to co
 When in doubt about ownership, check the nearest `OWNERS` file.
 
 ## Agent Skills
-You **MUST** discover and load the skills in the [`.agents/skills/`](.agents/skills/) directory before proceeding with tasks involving code modification or API design. These directories contain specific instructions and references (e.g., for code style and API conventions) that you must follow.
+This repository provides specialized instructions for AI agents in the standard [`.agents/skills/`](.agents/skills/) directory, following the Agent Skills specification.
 
 ## Build, test, lint
 

@@ -559,6 +559,7 @@ func TestReconcile(t *testing.T) {
 						Namespace: sandboxNs,
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+							sandboxv1alpha1.SandboxPoolLabel:    "true",
 						},
 					},
 					Spec: corev1.PodSpec{

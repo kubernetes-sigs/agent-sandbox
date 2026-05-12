@@ -975,6 +975,9 @@ func TestReconcilePod(t *testing.T) {
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxv1alpha1.SandboxPoolLabel: "true",
+						},
 					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -994,6 +997,7 @@ func TestReconcilePod(t *testing.T) {
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"custom-label":                      "label-val",
+						sandboxv1alpha1.SandboxPoolLabel:    "true",
 					},
 					Annotations: map[string]string{
 						"custom-annotation":                      "anno-val",
@@ -1090,6 +1094,9 @@ func TestReconcilePod(t *testing.T) {
 						Name:            "adopted-pod-name",
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxv1alpha1.SandboxPoolLabel: "true",
+						},
 					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -1128,7 +1135,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxLabel:                     nameHash,
+						sandboxv1alpha1.SandboxPoolLabel: "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1623,6 +1631,42 @@ func TestReconcilePod(t *testing.T) {
 				sandboxv1alpha1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
+		{
+			name: "refuses to adopt unowned pod that lacks pool authorization label",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "adopted-pod-name",
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "existing-container"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name",
+					},
+				},
+				Spec: sandboxv1alpha1.SandboxSpec{
+					Replicas: new(int32(1)),
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					},
+				},
+			},
+			wantPod:                nil,
+			expectErr:              true,
+			wantSandboxAnnotations: map[string]string{sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name"},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1828,6 +1872,9 @@ func TestReconcileService(t *testing.T) {
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxv1alpha1.SandboxPoolLabel: "true",
+						},
 					},
 				},
 			},
@@ -1839,6 +1886,7 @@ func TestReconcileService(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1alpha1.SandboxPoolLabel:    "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1859,6 +1907,9 @@ func TestReconcileService(t *testing.T) {
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxv1alpha1.SandboxPoolLabel: "true",
+						},
 					},
 					Spec: corev1.ServiceSpec{
 						ClusterIP: "10.96.0.100",
@@ -1878,6 +1929,9 @@ func TestReconcileService(t *testing.T) {
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxv1alpha1.SandboxPoolLabel: "true",
+						},
 					},
 					Spec: corev1.ServiceSpec{
 						ClusterIP: "None",
@@ -1895,6 +1949,7 @@ func TestReconcileService(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1alpha1.SandboxPoolLabel:    "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1907,6 +1962,21 @@ func TestReconcileService(t *testing.T) {
 			},
 			wantStatusService:     sandboxName,
 			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "refuses to adopt unowned service that lacks pool authorization label",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+					},
+				},
+			},
+			sandbox:     sandboxObj,
+			wantService: nil,
+			expectErr:   true,
 		},
 	}
 
@@ -2155,11 +2225,25 @@ func TestReconcilePVCs(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      pvcName,
 						Namespace: sandboxNs,
-						// No owner references.
+						Labels: map[string]string{
+							sandboxv1alpha1.SandboxPoolLabel: "true",
+						},
 					},
 				},
 			},
 			expectErr: false,
+		},
+		{
+			name: "refuses to adopt unowned PVC that lacks pool authorization label",
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+					},
+				},
+			},
+			expectErr: true,
 		},
 	}
 

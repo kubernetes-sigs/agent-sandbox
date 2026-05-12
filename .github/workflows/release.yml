@@ -2,8 +2,8 @@ name: Scheduled Release Automation
 
 on:
   # Version tag is incremented by patch update
-  # schedule:
-  #   - cron: '0 6 * * 5' # Every Friday at 06:00 UTC
+  schedule:
+    - cron: "30 13 * * 5" # Every Friday at 05:30 AM PST (13:30 UTC)
   # For Major/Minor version updates, enter tag manually
   workflow_dispatch:
     inputs:
@@ -78,7 +78,6 @@ jobs:
     if: needs.tag-release.outputs.run_release == 'true'
     runs-on: ubuntu-latest
     environment: release
-    timeout-minutes: 180
     outputs:
       pr_url: ${{ steps.extract-pr.outputs.pr_url }}
       run_release: ${{ needs.tag-release.outputs.run_release }}
@@ -133,7 +132,7 @@ jobs:
           # Use a Fine-Grained PAT scoped to kubernetes/k8s.io with contents:write and pull_requests:write
           GH_TOKEN: ${{ secrets.K8S_IO_PAT }}
           # Use the Fork token for Git pushing
-          FORK_TOKEN: ${{ secrets.FORK_K8S_IO_PAT }}
+          FORK_TOKEN: ${{ secrets.K8S_IO_PAT }}
         run: |
           # Update the git remote for the fork to use the FORK_TOKEN
           GH_USER=$(gh api user --jq .login)
@@ -224,11 +223,22 @@ jobs:
         with:
           python-version: "3.10"
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          # TODO: Use workload identity instead
+          # workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
+          # service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+
       - name: Generate Draft Release and Manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GCP_PROJECT: "ai-on-gke" # Alternatively, use a GitHub secret: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_LOCATION: "us-central1"
           GEMINI_MODEL: gemini-2.5-flash
         run: |
+          pip install google-genai pyopenssl
+
           # This finally publishes the draft for your review
           make release-publish TAG="${{ needs.promote-images.outputs.new_tag }}"

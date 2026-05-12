@@ -18,6 +18,7 @@ import requests
 from .trace_manager import create_tracer_manager, trace_span, trace
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
+from .k8s_helper import K8sHelper
 from .models import (
     SandboxConnectionConfig,
     SandboxInClusterConnectionConfig,
@@ -46,7 +47,7 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
-    ):
+    ) -> None:
         # Sandbox Related Configuration
         self.claim_name = claim_name
         self.sandbox_id = sandbox_id
@@ -165,7 +166,7 @@ class Sandbox:
         """
         return not self._is_closed and self._commands is not None and self._files is not None
 
-    def close_connection(self):
+    def close_connection(self) -> None:
         """
         Closes the client-side connection and disables execution engines locally,
         but leaves the remote Kubernetes Sandbox infrastructure running.

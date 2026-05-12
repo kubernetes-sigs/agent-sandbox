@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from typing import Any
 from kubernetes.client import ApiException
 from .snapshot_engine import SnapshotEngine, SnapshotResponse
 from k8s_agent_sandbox.sandbox import Sandbox
@@ -46,7 +47,7 @@ class ResumeResponse(BaseModel):
     error_code: int = 0
 
 class SandboxWithSnapshotSupport(Sandbox):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._snapshots = SnapshotEngine(
             namespace=self.namespace,
@@ -122,14 +123,14 @@ class SandboxWithSnapshotSupport(Sandbox):
             logger.error(f"Failed to check if Sandbox '{self.sandbox_id}' is suspended: {e}")
             return False
 
-    def _set_replicas(self, replicas: int):
+    def _set_replicas(self, replicas: int) -> None:
         self.k8s_helper.custom_objects_api.patch_namespaced_custom_object(
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             namespace=self.namespace,
             plural=SANDBOX_PLURAL_NAME,
             name=self.sandbox_id,
-            body={"spec": {"replicas": replicas}}
+            body={"spec": {"replicas": replicas}},
         )
 
     def _get_latest_snapshot_uid(self) -> str | None:
@@ -158,7 +159,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 success=True,
                 snapshot_response=None,
                 error_reason="",
-                error_code=SUCCESS_CODE
+                error_code=SUCCESS_CODE,
             )
 
         # Ensure the sandbox name hash is fetched and cached before we scale down to 0 replicas.
@@ -315,7 +316,7 @@ class SandboxWithSnapshotSupport(Sandbox):
             error_code=ERROR_CODE
         )
     
-    def terminate(self):
+    def terminate(self) -> None:
         """
         Cleans up the manually generated trigger resources and terminates the Sandbox.
         """

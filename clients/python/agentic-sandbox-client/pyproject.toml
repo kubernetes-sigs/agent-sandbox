@@ -18,6 +18,7 @@ dependencies = [
     "requests",
     "pydantic",
     "prometheus-client",
+    "httpx>=0.28.1",
 ]
 
 [project.urls]
@@ -36,6 +37,9 @@ exclude = [
     "k8s_agent_sandbox.test*",
     "k8s_agent_sandbox.*.test*"
 ]
+
+[tool.setuptools.package-data]
+k8s_agent_sandbox = ["py.typed"]
 
 [tool.setuptools.exclude-package-data]
 # setuptools_scm automatically bundles tracked files as package data.

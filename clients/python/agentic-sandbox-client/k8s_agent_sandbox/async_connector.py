@@ -14,7 +14,7 @@
 
 import asyncio
 import logging
-from typing import Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -51,7 +51,7 @@ class AsyncSandboxConnector:
         connection_config: SandboxConnectionConfig,
         k8s_helper: AsyncK8sHelper,
         get_pod_ip: Callable[[], Awaitable[str | None]] | None = None,
-    ):
+    ) -> None:
         if isinstance(connection_config, SandboxLocalTunnelConnectionConfig):
             raise ValueError(
                 "AsyncSandboxConnector does not support SandboxLocalTunnelConnectionConfig. "
@@ -119,7 +119,9 @@ class AsyncSandboxConnector:
 
         return self._base_url
 
-    async def send_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
+    async def send_request(
+        self, method: str, endpoint: str, **kwargs: Any
+    ) -> httpx.Response:
         base_url = await self._resolve_base_url()
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
@@ -135,8 +137,11 @@ class AsyncSandboxConnector:
                 response = await self.client.request(
                     method, url, headers=headers, **kwargs
                 )
-                if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
-                    delay = BACKOFF_FACTOR * (2 ** attempt)
+                if (
+                    response.status_code in RETRYABLE_STATUS_CODES
+                    and attempt < MAX_RETRIES
+                ):
+                    delay = BACKOFF_FACTOR * (2**attempt)
                     logger.warning(
                         f"Retryable status {response.status_code} from {url}, "
                         f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
@@ -178,7 +183,7 @@ class AsyncSandboxConnector:
             response=last_response,
         )
 
-    async def close(self):
+    async def close(self) -> None:
         await self.client.aclose()
         if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
             self._base_url = None

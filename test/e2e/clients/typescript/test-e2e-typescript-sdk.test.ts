@@ -151,6 +151,21 @@ async function runSdkTests(sandbox: Sandbox): Promise<void> {
   console.log(`Reading content from '${filePath}'...`);
   const readContent = await sandbox.files.read(filePath);
   expect(readContent.toString("utf-8")).toBe(fileContent);
+
+  console.log(`Checking if '${filePath}' exists...`);
+  await expect(sandbox.files.exists(filePath)).resolves.toBe(true);
+
+  console.log("Checking that a missing file does not exist...");
+  await expect(sandbox.files.exists("missing.txt")).resolves.toBe(false);
+
+  console.log("Listing files in '.'...");
+  const files = await sandbox.files.list(".");
+  const fileEntry = files.find((file) => file.name === filePath);
+  expect(fileEntry).toBeDefined();
+  expect(fileEntry?.size).toBe(Buffer.byteLength(fileContent));
+  expect(fileEntry?.type).toBe("file");
+  expect(fileEntry?.modTime).toEqual(expect.any(Number));
+  expect(fileEntry?.modTime).toBeGreaterThan(0);
 }
 
 describe("TypeScript SDK E2E", () => {

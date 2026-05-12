@@ -16,6 +16,7 @@ Welcome, AI assistant! This file provides context and instructions for you to co
 
 | Path | What lives there |
 | --- | --- |
+| [**.agents/skills/**](.agents/skills/) | Specialized instructions for you (AI agents). See "Agent Skills" section below. |
 | [api/v1alpha1/](api/v1alpha1/) | Core `Sandbox` types and kubebuilder markers. |
 | [extensions/api/v1alpha1/](extensions/api/v1alpha1/) | `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` types. |
 | [controllers/](controllers/) | Core `Sandbox` reconciler + tests. |
@@ -32,7 +33,6 @@ Welcome, AI assistant! This file provides context and instructions for you to co
 | [dev/ci/](dev/ci/) | Prow presubmit/periodic scripts. |
 | [docs/](docs/) | Development, testing, configuration docs and KEPs ([docs/keps/](docs/keps/)). |
 | [site/](site/) | Hugo + Docsy source for https://agent-sandbox.sigs.k8s.io. Many pages are thin wrappers that `include-file` from the repo via mounts in [site/hugo.yaml](site/hugo.yaml) — see "Docs site mounts" below. Native page sources (lifecycle, snapshots, use-cases, runtime-templates, getting started, etc.) live only here. |
-| [**.agents/skills/**](.agents/skills/) | Specialized instructions for you (AI agents). See "Agent Skills" section below. |
 
 When in doubt about ownership, check the nearest `OWNERS` file.
 

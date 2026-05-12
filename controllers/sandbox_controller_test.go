@@ -1626,6 +1626,17 @@ func TestReconcilePod(t *testing.T) {
 			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
 			if tc.expectErr {
 				require.Error(t, err)
+				// Verify that any initially unowned Pod remains unowned (never adopted)
+				for _, obj := range tc.initialObjs {
+					if initialPod, ok := obj.(*corev1.Pod); ok {
+						if len(initialPod.OwnerReferences) == 0 {
+							livePod := &corev1.Pod{}
+							err = r.Get(t.Context(), types.NamespacedName{Name: initialPod.Name, Namespace: initialPod.Namespace}, livePod)
+							require.NoError(t, err)
+							require.Empty(t, livePod.OwnerReferences, "expected Pod %q to remain unowned after failed reconcile", livePod.Name)
+						}
+					}
+				}
 			} else {
 				require.NoError(t, err)
 			}
@@ -2073,6 +2084,17 @@ func TestReconcileService(t *testing.T) {
 				if tc.errContains != "" {
 					require.Contains(t, err.Error(), tc.errContains)
 				}
+				// Verify that any initially unowned Service remains unowned (never adopted)
+				for _, obj := range tc.initialObjs {
+					if initialSvc, ok := obj.(*corev1.Service); ok {
+						if len(initialSvc.OwnerReferences) == 0 {
+							liveSvc := &corev1.Service{}
+							err = r.Get(t.Context(), types.NamespacedName{Name: initialSvc.Name, Namespace: initialSvc.Namespace}, liveSvc)
+							require.NoError(t, err)
+							require.Empty(t, liveSvc.OwnerReferences, "expected Service %q to remain unowned after failed reconcile", liveSvc.Name)
+						}
+					}
+				}
 			} else {
 				require.NoError(t, err)
 				if tc.wantNilService {
@@ -2347,6 +2369,17 @@ func TestReconcilePVCs(t *testing.T) {
 				require.Error(t, err)
 				if tc.errContains != "" {
 					require.Contains(t, err.Error(), tc.errContains)
+				}
+				// Verify that any initially unowned PVC remains unowned (never adopted)
+				for _, obj := range tc.initialObjs {
+					if initialPVC, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+						if len(initialPVC.OwnerReferences) == 0 {
+							livePVC := &corev1.PersistentVolumeClaim{}
+							err = r.Get(t.Context(), types.NamespacedName{Name: initialPVC.Name, Namespace: initialPVC.Namespace}, livePVC)
+							require.NoError(t, err)
+							require.Empty(t, livePVC.OwnerReferences, "expected PVC %q to remain unowned after failed reconcile", livePVC.Name)
+						}
+					}
 				}
 				return
 			}

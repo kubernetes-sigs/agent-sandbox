@@ -18,7 +18,8 @@ Welcome, AI assistant! This file provides context and instructions for you to co
 - **`.agents/skills/`**: Specialized instructions for you!
 
 ## Setup & Verification Commands
-Pulling useful commands from [`docs/development.md`](docs/development.md) and [`docs/testing.md`](docs/testing.md):
+
+Useful commands for development and testing:
 
 ### Environment Setup
 - Create a local `kind` cluster: `make deploy-kind`
@@ -29,7 +30,7 @@ Pulling useful commands from [`docs/development.md`](docs/development.md) and [`
 - Build controller binary: `make build` (creates `bin/manager`)
 - Run unit tests: `make test-unit`
 - Run e2e tests: `make test-e2e`
-- Run linter: `make lint`
+- Run linter: `make lint-go` and `make lint-api`
 
 ## Agent Skills
 You **MUST** discover and load the skills in the [`.agents/skills/`](.agents/skills/) directory before proceeding with tasks involving code modification or API design. These directories contain specific instructions and references (e.g., for code style and API conventions) that you must follow.

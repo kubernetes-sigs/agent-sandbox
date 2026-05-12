@@ -14,7 +14,7 @@
 
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 from kubernetes.client import ApiException
 from kubernetes import watch
 from pydantic import BaseModel
@@ -79,7 +79,7 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
 
 
 def wait_for_snapshot_to_be_completed(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     trigger_name: str,
     podsnapshot_timeout: int,
@@ -143,7 +143,7 @@ def wait_for_snapshot_to_be_completed(
 
 
 def check_pod_restored_from_snapshot(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     pod_name: str,
     snapshot_uid: str,
@@ -211,7 +211,7 @@ def check_pod_restored_from_snapshot(
 
 
 def wait_for_snapshot_deletion(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     snapshot_uid: str,
     timeout: int = 180,
@@ -270,10 +270,10 @@ def wait_for_snapshot_deletion(
 
 
 def wait_for_pod_termination(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
-    pod_name: str,
-    pod_uid: str,
+    pod_name: str | None,
+    pod_uid: str | None,
     timeout: int = 180,
 ) -> bool:
     """Waits until the specified pod is terminated."""
@@ -295,9 +295,9 @@ def wait_for_pod_termination(
 
 
 def wait_for_pod_ready(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
-    get_pod_name_func,
+    get_pod_name_func: Callable[[], str | None],
     timeout: int = 180,
 ) -> bool:
     """Waits until a newly created pod is ready."""

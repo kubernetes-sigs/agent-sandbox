@@ -15,3 +15,11 @@ spec:
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+          failureThreshold: 30
+          timeoutSeconds: 2

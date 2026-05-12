@@ -78,6 +78,7 @@ jobs:
     if: needs.tag-release.outputs.run_release == 'true'
     runs-on: ubuntu-latest
     environment: release
+    timeout-minutes: 180
     outputs:
       pr_url: ${{ steps.extract-pr.outputs.pr_url }}
       run_release: ${{ needs.tag-release.outputs.run_release }}

@@ -1,5 +1,6 @@
 > [!NOTE]
-> This document is a local copy of the official Kubernetes API Conventions, fetched from `https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md`. It is included here to ensure self-containment for tools without internet access.
+> This document is a local copy of the official Kubernetes API Conventions, fetched on 2026-05-11 from `https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md`. It is included here to ensure self-containment for tools without internet access.
+> The original content is subject to the Apache License 2.0.
 
 API Conventions
 ===============
@@ -501,8 +502,7 @@ Some resources in the v1 API contain fields called **`phase`**, and associated
 deprecated. Newer API types should use conditions instead. Phase was
 essentially a state-machine enumeration field, that contradicted [system-design
 principles](https://git.k8s.io/design-proposals-archive/architecture/principles.md#control-logic) and
-hampered evolution, since [adding new enum values breaks backward
-compatibility](api_changes.md). Rather than encouraging clients to infer
+hampered evolution, since [adding new enum values breaks backward compatibility](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api_changes.md). Rather than encouraging clients to infer
 implicit properties from phases, we prefer to explicitly expose the individual
 conditions that clients need to monitor. Conditions also have the benefit that
 it is possible to create some conditions with uniform meaning across all

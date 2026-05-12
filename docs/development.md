@@ -134,6 +134,16 @@ For a faster feedback loop, you can run the controller directly on your host mac
 
 The controller will now be running on your host machine and will be connected to the `kind` cluster. You can now use a debugger like Delve to debug the controller.
 
+## AI-Assisted Development
+
+To improve productivity and maintain consistency, this project supports the use of AI coding assistants. We provide a set of instructions and guidelines for AI agents in the [`.agents/skills/`](../.agents/skills/) directory located at the repository root.
+
+These skills cover:
+*   **Kubernetes API Conventions**: Guidelines for creating and modifying CRDs.
+*   **Development Rules**: Project-specific rules like Go style and CLA considerations.
+
+If you are using an AI assistant to contribute, please reference these skills to ensure your contributions align with project standards.
+
 ## CI/CD with Prow
 
 The project uses [Prow](https://prow.k8s.io) for CI/CD. 

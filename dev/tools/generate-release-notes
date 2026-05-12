@@ -290,8 +290,7 @@ def main():
             commits, "\n".join(breaking_changes), pr_descriptions, contributors, new_authors, tag, model=args.model
         )
         if not highlights:
-            print("❌ Error: Failed to generate release highlights using Gemini.", file=sys.stderr)
-            sys.exit(1)
+            print("⚠️ Warning: Failed to generate release highlights using Gemini. Proceeding best-effort.", file=sys.stderr)
 
     installation_notes = f"""
 ### Installation

@@ -3,7 +3,7 @@ name: Scheduled Release Automation
 on:
   # Version tag is incremented by patch update
   schedule:
-    - cron: "30 13 * * 5" # Every Friday at 05:30 AM PST (13:30 UTC)
+    - cron: "0 17 * * 4" # Every Thursday at 17:00 UTC
   # For Major/Minor version updates, enter tag manually
   workflow_dispatch:
     inputs:
@@ -235,11 +235,11 @@ jobs:
       - name: Generate Draft Release and Manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GCP_PROJECT: "ai-on-gke" # Alternatively, use a GitHub secret: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
           GCP_LOCATION: "us-central1"
           GEMINI_MODEL: gemini-2.5-flash
         run: |
-          pip install google-genai pyopenssl
+          pip install google-genai==1.30.0 pyopenssl==25.1.0
 
           # This finally publishes the draft for your review
           make release-publish TAG="${{ needs.promote-images.outputs.new_tag }}"

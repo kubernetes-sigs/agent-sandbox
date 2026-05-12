@@ -217,7 +217,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default owned_by:Warmpool ready_condition:true sandbox_template:unknown": 1,
+				"expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 	}

@@ -2,7 +2,7 @@
 
 Welcome, AI assistant! This file provides context and instructions for you to contribute effectively to the `agent-sandbox` project.
 
-*Note to human contributors: This file is optimized for AI agents. Human contributors should read [`CONTRIBUTING.md`](CONTRIBUTING.md) and files under [`docs/`](docs/), which are the source of truth.*
+
 
 ## Project summary
 

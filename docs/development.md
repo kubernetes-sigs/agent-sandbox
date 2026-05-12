@@ -136,7 +136,7 @@ The controller will now be running on your host machine and will be connected to
 
 ## AI-Assisted Development
 
-To improve productivity and maintain consistency, this project supports the use of AI coding assistants. We provide a set of instructions and guidelines for AI agents in the [`.agent/skills/`](../.agent/skills/) directory located at the repository root.
+To improve productivity and maintain consistency, this project supports the use of AI coding assistants. We provide a set of instructions and guidelines for AI agents in the [`.agents/skills/`](../.agents/skills/) directory located at the repository root.
 
 These skills cover:
 *   **Kubernetes API Conventions**: Guidelines for creating and modifying CRDs.

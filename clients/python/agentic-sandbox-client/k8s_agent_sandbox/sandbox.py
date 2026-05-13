@@ -18,7 +18,6 @@ import requests
 from .trace_manager import create_tracer_manager, trace_span, trace
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
-from .k8s_helper import K8sHelper
 from .models import (
     SandboxConnectionConfig,
     SandboxInClusterConnectionConfig,

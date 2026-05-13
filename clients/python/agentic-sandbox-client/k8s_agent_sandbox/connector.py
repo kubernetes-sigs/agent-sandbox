@@ -23,7 +23,6 @@ from abc import ABC, abstractmethod
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .k8s_helper import K8sHelper
 from .metrics import sandbox_client_discovery_latency_ms
 from .models import (
     SandboxConnectionConfig,

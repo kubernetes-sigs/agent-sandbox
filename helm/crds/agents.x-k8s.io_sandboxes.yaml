@@ -3836,6 +3836,8 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
+              service:
+                type: boolean
               shutdownPolicy:
                 default: Retain
                 enum:

@@ -39,6 +39,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 	sandboxObj := &sandboxv1alpha1.Sandbox{}
 	sandboxObj.Name = "vct-sandbox"
 	sandboxObj.Namespace = ns.Name
+	sandboxObj.Spec.Service = new(true)
 	sandboxObj.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{

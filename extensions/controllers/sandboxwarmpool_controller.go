@@ -346,6 +346,7 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
 			Replicas: &replicas,
+			Service:  new(true),
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
 				ObjectMeta: sandboxv1alpha1.PodMetadata{

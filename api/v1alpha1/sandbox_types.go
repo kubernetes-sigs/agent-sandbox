@@ -137,6 +137,15 @@ type SandboxSpec struct {
 	// +kubebuilder:default=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// service controls whether the controller should automatically create a
+	// headless Service for this Sandbox.
+	// When unset (nil), the controller preserves existing Services for backward
+	// compatibility but does not create new ones. Set to true to enable or false
+	// to explicitly disable and remove the Service.
+	//nolint:kubeapilinter
+	// +optional
+	Service *bool `json:"service,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

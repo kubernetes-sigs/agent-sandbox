@@ -37,6 +37,9 @@ exclude = [
     "k8s_agent_sandbox.*.test*"
 ]
 
+[tool.setuptools.package-data]
+"k8s_agent_sandbox" = ["py.typed"]
+
 [tool.setuptools.exclude-package-data]
 # setuptools_scm automatically bundles tracked files as package data.
 # We need to explicitly exclude test directories and files from being bundled.
@@ -56,6 +59,7 @@ test = [
     "pytest-asyncio",
     "httpx",
     "kubernetes_asyncio",
+    "mypy",
 ]
 tracing = [
     "opentelemetry-api~=1.39.0",
@@ -66,3 +70,15 @@ tracing = [
 
 [tool.pytest.ini_options]
 testpaths = ["k8s_agent_sandbox"]
+
+[tool.mypy]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+  "yaml",
+]
+ignore_missing_imports = true

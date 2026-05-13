@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from typing import Any
 from kubernetes.client import ApiException
 from .snapshot_engine import SnapshotEngine, SnapshotResponse
 from k8s_agent_sandbox.sandbox import Sandbox
@@ -46,9 +47,9 @@ class ResumeResponse(BaseModel):
     error_code: int = 0
 
 class SandboxWithSnapshotSupport(Sandbox):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._snapshots = SnapshotEngine(
+        self._snapshots: SnapshotEngine | None = SnapshotEngine(
             namespace=self.namespace,
             k8s_helper=self.k8s_helper,
             get_pod_name_func=self.get_pod_name,
@@ -122,14 +123,14 @@ class SandboxWithSnapshotSupport(Sandbox):
             logger.error(f"Failed to check if Sandbox '{self.sandbox_id}' is suspended: {e}")
             return False
 
-    def _set_replicas(self, replicas: int):
+    def _set_replicas(self, replicas: int) -> None:
         self.k8s_helper.custom_objects_api.patch_namespaced_custom_object(
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             namespace=self.namespace,
             plural=SANDBOX_PLURAL_NAME,
             name=self.sandbox_id,
-            body={"spec": {"replicas": replicas}}
+            body={"spec": {"replicas": replicas}},
         )
 
     def _get_latest_snapshot_uid(self) -> str | None:
@@ -158,7 +159,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 success=True,
                 snapshot_response=None,
                 error_reason="",
-                error_code=SUCCESS_CODE
+                error_code=SUCCESS_CODE,
             )
 
         # Ensure the sandbox name hash is fetched and cached before we scale down to 0 replicas.
@@ -211,21 +212,30 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_code=ERROR_CODE
             )
 
-        if wait_for_pod_termination(self.k8s_helper, self.namespace, pod_name_to_wait, pod_uid_to_wait, wait_timeout):
-            logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")
+        if pod_name_to_wait and pod_uid_to_wait:
+            if wait_for_pod_termination(self.k8s_helper, self.namespace, pod_name_to_wait, str(pod_uid_to_wait), wait_timeout):
+                logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")
+                return SuspendResponse(
+                    success=True,
+                    snapshot_response=snapshot_response,
+                    error_reason="",
+                    error_code=SUCCESS_CODE
+                )
+            
+            logger.warning(f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to terminate.")
             return SuspendResponse(
-                success=True,
+                success=False,
                 snapshot_response=snapshot_response,
-                error_reason="",
-                error_code=SUCCESS_CODE
+                error_reason="Timed out waiting for pod to terminate.",
+                error_code=ERROR_CODE
             )
-        
-        logger.warning(f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to terminate.")
+
+        logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated (no pod to wait for).")
         return SuspendResponse(
-            success=False,
+            success=True,
             snapshot_response=snapshot_response,
-            error_reason="Timed out waiting for pod to terminate.",
-            error_code=ERROR_CODE
+            error_reason="",
+            error_code=SUCCESS_CODE
         )
 
     def resume(self, wait_timeout: int = 180) -> ResumeResponse:
@@ -315,7 +325,7 @@ class SandboxWithSnapshotSupport(Sandbox):
             error_code=ERROR_CODE
         )
     
-    def terminate(self):
+    def terminate(self) -> None:
         """
         Cleans up the manually generated trigger resources and terminates the Sandbox.
         """

@@ -45,7 +45,7 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
-    ):
+    ) -> None:
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandbox. "
@@ -76,22 +76,24 @@ class AsyncSandbox:
         self.trace_service_name = self.tracer_config.trace_service_name
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self._commands = AsyncCommandExecutor(
+        self._commands: AsyncCommandExecutor | None = AsyncCommandExecutor(
             self.connector, self.tracer, self.trace_service_name
         )
-        self._files = AsyncFilesystem(
+        self._files: AsyncFilesystem | None = AsyncFilesystem(
             self.connector, self.tracer, self.trace_service_name
         )
 
         self._is_closed = False
-        self._pod_name = None
+        self._pod_name: str | None = None
 
     async def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
         if self._pod_name is not None:
             return self._pod_name
 
-        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        sandbox_object = (
+            await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        )
         metadata = sandbox_object.get("metadata") or {}
         annotations = metadata.get("annotations") or {}
         pod_name = annotations.get(POD_NAME_ANNOTATION)
@@ -121,7 +123,7 @@ class AsyncSandbox:
     def is_active(self) -> bool:
         return not self._is_closed and self._commands is not None and self._files is not None
 
-    async def _close_connection(self):
+    async def _close_connection(self) -> None:
         """Closes the client-side connection and disables execution engines."""
         if self._is_closed:
             return
@@ -140,7 +142,7 @@ class AsyncSandbox:
         self._is_closed = True
         logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
 
-    async def terminate(self):
+    async def terminate(self) -> None:
         """Permanent deletion of all server side infrastructure and client side connection."""
         await self._close_connection()
         await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)

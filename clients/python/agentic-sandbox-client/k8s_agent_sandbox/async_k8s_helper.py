@@ -15,11 +15,9 @@
 import asyncio
 import logging
 import time
+from typing import Any
 
 from kubernetes_asyncio import client, config, watch
-
-logger = logging.getLogger(__name__)
-
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -31,18 +29,23 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
 )
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .exceptions import (
+    SandboxMetadataError,
+    SandboxNotFoundError,
+    SandboxTemplateNotFoundError,
+)
+logger = logging.getLogger(__name__)
 
 
 class AsyncK8sHelper:
     """Async helper class for Kubernetes API interactions using kubernetes_asyncio."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._api_client: client.ApiClient | None = None
 
-    async def _ensure_initialized(self):
+    async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
         async with self._init_lock:
@@ -62,11 +65,11 @@ class AsyncK8sHelper:
         name: str,
         template: str,
         namespace: str,
-        annotations: dict | None = None,
-        labels: dict | None = None,
-        lifecycle: dict | None = None,
+        annotations: dict[str, Any] | None = None,
+        labels: dict[str, str] | None = None,
+        lifecycle: dict[str, str] | None = None,
         warmpool: str | None = None,
-    ):
+    ) -> None:
         """Creates a SandboxClaim custom resource."""
         await self._ensure_initialized()
 
@@ -77,7 +80,7 @@ class AsyncK8sHelper:
         if labels:
             metadata["labels"] = labels
 
-        spec = {
+        spec: dict[str, Any] = {
             "sandboxTemplateRef": {
                 "name": template,
             }
@@ -104,7 +107,9 @@ class AsyncK8sHelper:
             body=manifest,
         )
 
-    async def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
+    async def resolve_sandbox_name(
+        self, claim_name: str, namespace: str, timeout: int
+    ) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
@@ -205,7 +210,7 @@ class AsyncK8sHelper:
             finally:
                 await w.close()
 
-    async def delete_sandbox_claim(self, name: str, namespace: str):
+    async def delete_sandbox_claim(self, name: str, namespace: str) -> None:
         """Deletes a SandboxClaim custom resource."""
         await self._ensure_initialized()
 
@@ -223,7 +228,7 @@ class AsyncK8sHelper:
                 logger.error(f"Error terminating sandbox {name}: {e}")
                 raise
 
-    async def get_sandbox(self, name: str, namespace: str):
+    async def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""
         await self._ensure_initialized()
 
@@ -295,7 +300,7 @@ class AsyncK8sHelper:
             finally:
                 await w.close()
 
-    async def close(self):
+    async def close(self) -> None:
         """Closes the shared Kubernetes API client session."""
         if self._api_client:
             await self._api_client.close()

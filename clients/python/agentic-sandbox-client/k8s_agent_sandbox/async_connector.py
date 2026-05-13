@@ -14,11 +14,10 @@
 
 import asyncio
 import logging
-from typing import Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 import httpx
 
-logger = logging.getLogger(__name__)
 
 from .async_k8s_helper import AsyncK8sHelper
 from .exceptions import SandboxRequestError
@@ -29,6 +28,8 @@ from .models import (
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
 )
+
+logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 MAX_RETRIES = 5
@@ -51,7 +52,7 @@ class AsyncSandboxConnector:
         connection_config: SandboxConnectionConfig,
         k8s_helper: AsyncK8sHelper,
         get_pod_ip: Callable[[], Awaitable[str | None]] | None = None,
-    ):
+    ) -> None:
         if isinstance(connection_config, SandboxLocalTunnelConnectionConfig):
             raise ValueError(
                 "AsyncSandboxConnector does not support SandboxLocalTunnelConnectionConfig. "
@@ -69,6 +70,9 @@ class AsyncSandboxConnector:
         self._base_url: str | None = None
         self._pod_ip_resolved = False
         self._cached_pod_ip_url: str | None = None
+        
+        self._dns_url: str | None = None
+        self._server_port: int | None = None
         if isinstance(connection_config, SandboxInClusterConnectionConfig):
             self._dns_url = (
                 f"http://{sandbox_id}.{namespace}"
@@ -92,13 +96,13 @@ class AsyncSandboxConnector:
         if isinstance(self.connection_config, SandboxInClusterConnectionConfig):
             if self._get_pod_ip:
                 if self._pod_ip_resolved:
-                    return self._cached_pod_ip_url or self._dns_url
+                    return self._cached_pod_ip_url or self._dns_url or ""
                 pod_ip = await self._get_pod_ip()
                 if pod_ip:
                     self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
                     self._pod_ip_resolved = True
                     return self._cached_pod_ip_url
-            return self._dns_url
+            return self._dns_url or ""
 
         if self._base_url:
             return self._base_url
@@ -119,7 +123,9 @@ class AsyncSandboxConnector:
 
         return self._base_url
 
-    async def send_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
+    async def send_request(
+        self, method: str, endpoint: str, **kwargs: Any
+    ) -> httpx.Response:
         base_url = await self._resolve_base_url()
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
@@ -135,8 +141,11 @@ class AsyncSandboxConnector:
                 response = await self.client.request(
                     method, url, headers=headers, **kwargs
                 )
-                if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
-                    delay = BACKOFF_FACTOR * (2 ** attempt)
+                if (
+                    response.status_code in RETRYABLE_STATUS_CODES
+                    and attempt < MAX_RETRIES
+                ):
+                    delay = BACKOFF_FACTOR * (2**attempt)
                     logger.warning(
                         f"Retryable status {response.status_code} from {url}, "
                         f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
@@ -178,7 +187,7 @@ class AsyncSandboxConnector:
             response=last_response,
         )
 
-    async def close(self):
+    async def close(self) -> None:
         await self.client.aclose()
         if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
             self._base_url = None

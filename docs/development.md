@@ -40,6 +40,14 @@ make all
 # which runs dev/tools/fix-go-generate
 ```
 
+### Regenerate API documentation
+
+Whenever any changes are made to the `api/` folder or the `extensions/`, you may need to regenerate API documentation to keep it up-to-date. You will probably need to rebase your branch.
+
+```sh
+make generate-api-docs
+```
+
 ## Deploying to cluster
 
 #### Deploying to local `kind` cluster
@@ -126,6 +134,16 @@ For a faster feedback loop, you can run the controller directly on your host mac
 
 The controller will now be running on your host machine and will be connected to the `kind` cluster. You can now use a debugger like Delve to debug the controller.
 
+## AI-Assisted Development
+
+To improve productivity and maintain consistency, this project supports the use of AI coding assistants. We provide a set of instructions and guidelines for AI agents in the [`.agents/skills/`](../.agents/skills/) directory located at the repository root.
+
+These skills cover:
+*   **Kubernetes API Conventions**: Guidelines for creating and modifying CRDs.
+*   **Development Rules**: Project-specific rules like Go style and CLA considerations.
+
+If you are using an AI assistant to contribute, please reference these skills to ensure your contributions align with project standards.
+
 ## CI/CD with Prow
 
 The project uses [Prow](https://prow.k8s.io) for CI/CD. 
@@ -146,23 +164,6 @@ This repo uses squash merge by default. If you need to retain separate commits i
 
 @k8s-ci-robot doesn't handle GitHub Actions in presubmits, so [GitHub Workflows](../.github/workflows) should contain only non-presubmit jobs.
 
-### Image Registries and Promotion
+### Release Process
 
-The project uses Google Artifact Registry (GAR) for container image storage and distribution.
-
-#### Registries
-
--   **Staging Registry**: `us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox`.
-    This is where all intermediate and development images are pushed as postsubmits. See [post-agent-sandbox-push-images job history](https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images).
--   **Production Registry**: `registry.k8s.io/agent-sandbox`.
-    Official releases are served from this registry.
-
-#### Promotion Process
-
-To move an image from staging to the production registry, a **promotion process** is required:
-
-1.  **Staging**: Images are built and pushed to the staging registry.
-2.  **Promotion PR**: A PR is submitted to the [kubernetes/k8s.io](https://github.com/kubernetes/k8s.io) repository. This PR updates the registry configuration (e.g., [`registry.k8s.io/images/k8s-staging-agent-sandbox/images.yaml`](https://github.com/kubernetes/k8s.io/blob/main/registry.k8s.io/images/k8s-staging-agent-sandbox/images.yaml)) with the image digest and its associated tag. See [example PR](https://github.com/kubernetes/k8s.io/pull/9230).
-3.  **Promotion**: Once the PR is merged, the image is automatically promoted to `registry.k8s.io`.
-
-This step can be automated by running `make release-promote TAG=vX.Y.Z`. This calls `dev/tools/tag-promote-images` script which handles the promotion process. `IMAGES_TO_PROMOTE` variable in the script can be updated to include more images.
+For information about image registries, image promotion, and the automated release workflow, see the [Release Guide](release.md).

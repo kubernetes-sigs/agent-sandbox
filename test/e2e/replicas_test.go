@@ -79,7 +79,7 @@ func TestSandboxReplicas(t *testing.T) {
 			Service:       "my-sandbox",
 			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
 			Replicas:      0,
-			LabelSelector: "",
+			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Message:            "Pod does not exist, replicas is 0; Service Exists",

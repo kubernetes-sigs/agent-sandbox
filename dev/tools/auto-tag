@@ -20,60 +20,87 @@ import re
 # The directory containing this script is automatically in sys.path
 from shared.git_ops import run_command
 
-def increment_patch(version_str):
-    """Calculates the next release candidate tag.
-    - If already an RC (e.g., v0.1.0rc1), increments the RC counter (v0.1.0rc2).
-    - Otherwise, increments the patch version and starts at rc1 (e.g., v0.1.0 -> v0.1.1rc1).
-    
-    TODO: Remove the rc suffix for official releases before switching to final patch versions.
+def parse_version(tag_str):
+    """Parses version tag into a sortable tuple: (major, minor, patch, rc_num, raw_tag).
+    For official releases (non-RC), rc_num is set to 999999 to ensure it sorts higher than RC releases.
     """
-    rc_match = re.match(r'^v?(\d+\.\d+\.\d+)rc(\d+)$', version_str)
-    if rc_match:
-        version = rc_match.group(1)
-        rc_num = int(rc_match.group(2))
-        return f"v{version}rc{rc_num + 1}"
-
-    clean_version = re.match(r'^v?(\d+\.\d+\.\d+)', version_str)
-    if clean_version:
-        version_to_parse = f"v{clean_version.group(1)}"
-    else:
-        parts = re.findall(r'\d+', version_str)
-        while len(parts) < 3:
-            parts.append("0")
-        version_to_parse = f"v{'.'.join(parts[:3])}"
-
-    match = re.match(r'^v(\d+)\.(\d+)\.(\d+)$', version_to_parse)
-    major, minor, patch = map(int, match.groups())
-    patch += 1
-
-    return f"v{major}.{minor}.{patch}rc0"
-
+    match = re.match(r'^v?(\d+)\.(\d+)\.(\d+)(?:[-.]?rc\.?(\d+))?(?:\.post\d+)?$', tag_str)
+    if not match:
+        return None
+    major, minor, patch = map(int, match.groups()[:3])
+    rc_str = match.group(4)
+    rc_num = int(rc_str) if rc_str is not None else 999999
+    return (major, minor, patch, rc_num, tag_str)
 
 def main():
+    # 1. Check for Restart (HEAD already tagged with a valid version tag)
+    head_tag = run_command(["git", "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, allow_error=True)
+    if head_tag:
+        parsed_head = parse_version(head_tag)
+        if parsed_head:
+            print(f"⚠️  HEAD is already tagged as {head_tag}. Resuming/restarting release process...")
+            if "GITHUB_OUTPUT" in os.environ:
+                with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                    f.write("run_release=true\n")
+                    f.write(f"new_tag={head_tag}\n")
+            print(f"SUCCESS: Auto-patched to tag {head_tag}")
+            sys.exit(0)
+
     print("🔍 Checking for new commits since last release...")
     
-    # Get latest tag
-    # We look for tags matching 'v*'
-    latest_tag = run_command(["git", "describe", "--tags", "--abbrev=0", "--match=v*"], capture_output=True, allow_error=True)
-    if not latest_tag:
-        print("⚠️  Unable to determine latest tag from git describe. Defaulting to v0.1.0 base.")
+    # 2. Get only the single latest tag reachable from HEAD
+    latest_tag = run_command(
+        ["git", "describe", "--tags", "--abbrev=0", "--match=v*"],
+        capture_output=True,
+        allow_error=True
+    )
+
+    has_latest_tag = bool(latest_tag)
+    is_rc_to_stable_transition = False
+
+    if not has_latest_tag:
+        print("⚠️  Unable to find any version tags in repository. Defaulting to v0.1.0 base.")
         latest_tag = "v0.1.0"
+        new_tag = "v0.1.0"
+    else:
+        print(f"Found latest tag: {latest_tag}")
+        parsed = parse_version(latest_tag)
+        if not parsed:
+            print(f"❌ Error: Failed to parse latest tag: {latest_tag}")
+            sys.exit(1)
+        
+        major, minor, patch, rc_num, raw = parsed
+
+        if rc_num < 999999: # Highest tag is an RC version (e.g. v0.4.5rc2)
+            # Targeted check: Does the corresponding stable tag (e.g. v0.4.5) exist on HEAD?
+            stable_tag_name = f"v{major}.{minor}.{patch}"
+            stable_exists = run_command(
+                ["git", "tag", "--list", stable_tag_name, "--merged", "HEAD"],
+                capture_output=True,
+                allow_error=True
+            )
+            if not stable_exists:
+                new_tag = stable_tag_name
+                is_rc_to_stable_transition = True
+            else:
+                new_tag = f"v{major}.{minor}.{patch + 1}"
+        else:
+            new_tag = f"v{major}.{minor}.{patch + 1}"
+
+    # 3. Check for commits since latest tag
+    if has_latest_tag:
+        commits = run_command(["git", "log", f"{latest_tag}..HEAD", "--oneline"], capture_output=True)
+    else:
+        commits = run_command(["git", "log", "HEAD", "--oneline"], capture_output=True)
     
-    print(f"Found latest tag: {latest_tag}")
-    
-    # Check for commits since latest tag
-    commits = run_command(["git", "log", f"{latest_tag}..HEAD", "--oneline"], capture_output=True)
-    
-    if not commits:
-        print("ℹ️  No new commits since last release. Skipping release.")
+    if not commits and not is_rc_to_stable_transition:
+        print(f"ℹ️  No new commits since last release ({latest_tag}). Skipping release.")
         if "GITHUB_OUTPUT" in os.environ:
             with open(os.environ["GITHUB_OUTPUT"], "a") as f:
                 f.write("run_release=false\n")
         sys.exit(0)
         
     print(f"Found new commits since {latest_tag}:\n{commits}")
-    
-    new_tag = increment_patch(latest_tag)
     print(f"🚀 Proposing new tag: {new_tag}")
     
     # Set output for GitHub Actions

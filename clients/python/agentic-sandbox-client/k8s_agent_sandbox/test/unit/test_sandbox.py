@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import unittest
+
 from unittest.mock import MagicMock, patch
+
 
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig, SandboxTracerConfig
@@ -214,6 +216,42 @@ class TestSandbox(unittest.TestCase):
             mock_close.assert_called_once()
 
         self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(self.claim_name, self.namespace)
+
+    def test_get_sandbox_name_hash_from_k8s(self):
+        """Tests retrieving sandbox name hash from status.selector when it is present."""
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "selector": "agents.x-k8s.io/sandbox-name-hash=abc12345"
+            }
+        }
+        # Verify it returns correct parsed hash
+        self.assertEqual(self.sandbox.get_sandbox_name_hash(), "abc12345")
+        self.mock_k8s_helper.get_sandbox.assert_called_once_with(self.sandbox_id, self.namespace)
+
+    def test_get_sandbox_name_hash_returns_none_when_selector_missing(self):
+        """Tests that get_sandbox_name_hash returns None when status.selector is missing."""
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {}
+        }
+        self.assertIsNone(self.sandbox.get_sandbox_name_hash())
+        self.mock_k8s_helper.get_sandbox.assert_called_once_with(self.sandbox_id, self.namespace)
+
+
+    def test_get_sandbox_name_hash_caching(self):
+        """Tests that sandbox name hash is cached and does not query Kubernetes repeatedly."""
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "selector": "agents.x-k8s.io/sandbox-name-hash=mycachedhash"
+            }
+        }
+        # Call it once to populate cache
+        self.assertEqual(self.sandbox.get_sandbox_name_hash(), "mycachedhash")
+        
+        # Reset mock and call again - it should return cached value without querying K8s helper again
+        self.mock_k8s_helper.get_sandbox.reset_mock()
+        self.assertEqual(self.sandbox.get_sandbox_name_hash(), "mycachedhash")
+        self.mock_k8s_helper.get_sandbox.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

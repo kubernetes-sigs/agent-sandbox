@@ -5,6 +5,13 @@ all: fix-go-generate build lint-go lint-api test-unit toc-verify
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: generate-api-docs
+generate-api-docs: ## Generate API reference documentation
+	@echo "Generating API Docs..."
+	go install github.com/elastic/crd-ref-docs@latest
+	$(GOPATH)/bin/crd-ref-docs --source-path=./ --config=./docs/crd-ref-docs.yaml --renderer=markdown --output-path=./docs/api.md --max-depth=10
+	rm -rf ./tmp-api-source
+
 VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
 
 GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
@@ -89,7 +96,7 @@ GEMINI_MODEL ?= gemini-2.5-flash
 .PHONY: release-promote
 release-promote:
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-promote TAG=vX.Y.Z)"; exit 1; fi
-	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK}
+	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK} $(if $(filter true,$(SKIP_TAGGING)),--skip-tagging) $(if $(filter true,$(ONLY_TAGGING)),--only-tagging)
 
 # Publish a draft release to GitHub
 # Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-2.5-flash

@@ -15,8 +15,9 @@
 package e2e
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"hash/fnv"
 	"testing"
 	"time"
 
@@ -28,16 +29,11 @@ import (
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-// NameHash generates an FNV-1a hash from a string and returns
-// it as a fixed-length hexadecimal string.
+// NameHash generates a SHA-256 hash from a string and returns
+// it as a 32-character hexadecimal string using memory-efficient slice encoding.
 func NameHash(objectName string) string {
-	h := fnv.New32a()
-	h.Write([]byte(objectName))
-	hashValue := h.Sum32()
-
-	// Convert the uint32 to a hexadecimal string.
-	// This results in an 8-character string (e.g., "a5b3c2d1").
-	return fmt.Sprintf("%08x", hashValue)
+	hash := sha256.Sum256([]byte(objectName))
+	return hex.EncodeToString(hash[:16])
 }
 
 func simpleSandbox(ns string) *sandboxv1alpha1.Sandbox {

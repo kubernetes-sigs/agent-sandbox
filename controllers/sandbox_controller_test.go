@@ -494,7 +494,7 @@ func TestReconcile(t *testing.T) {
 				&corev1.PersistentVolumeClaim{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-pvc-sandbox-name",
-						Namespace:       sandboxNs,
+						Namespace: sandboxNs,
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": nameHash,
 							"custom-label":                      "label-val",

@@ -2,8 +2,6 @@
 
 Welcome, AI assistant! This file provides context and instructions for you to contribute effectively to the `agent-sandbox` project.
 
-
-
 ## Project summary
 
 `agent-sandbox` is a Kubernetes controller that provides the `Sandbox` CRD: a stateful, singleton, pod-backed workload with a stable identity, intended for AI agent runtimes, dev environments, notebooks, and similar use cases. It is a SIG Apps subproject (`sigs.k8s.io/agent-sandbox`) and follows Kubernetes / `controller-runtime` conventions.

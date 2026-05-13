@@ -59,7 +59,13 @@ try:
     print("Resuming sandbox...")
     resume_response = sandbox.resume()
     if resume_response.success:
-        print(f"Sandbox resumed! Restored from snapshot: {resume_response.restored_from_snapshot}")
+        print(f"Sandbox resumed! Restored from snapshot: {resume_response.snapshot_uid}")
+        
+    # Restore the sandbox to a specific previous snapshot
+    print("Restoring sandbox to a specific snapshot...")
+    restore_response = sandbox.restore(snapshot_uid=response.snapshot_uid)
+    if restore_response.success:
+        print(f"Sandbox restored! Restored from snapshot: {restore_response.snapshot_uid}")
 finally:
     sandbox.terminate()
 ```
@@ -70,13 +76,10 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
 
 ### Test Phases:
 
-1.  **Phase 1: Starting Counter Sandbox & Snapshotting**:
-    *   Starts a sandbox with a counter application.
-    *   Takes a snapshot (`test-snapshot-10`) after ~10 seconds.
-    *   Takes a snapshot (`test-snapshot-20`) after ~20 seconds.
-2.  **Phase 2: Restoring from Recent Snapshot**:
-    *   Restores a sandbox from the second snapshot.
-    *   Verifies that the sandbox has been restored from the recent snapshot. 
+1.  **Manual Snapshots**: Starts a sandbox and creates manual snapshots.
+2.  **Suspend & Resume**: Suspends the sandbox (with optional snapshot) and resumes it, verifying it restores from the latest snapshot.
+3.  **Restore from Previous Snapshot**: Restores the sandbox targeting a specific earlier snapshot UID and verifies successful state restoration.
+4.  **List & Delete**: Lists available snapshots and verifies deletion capabilities.
 
 ### Prerequisites
 

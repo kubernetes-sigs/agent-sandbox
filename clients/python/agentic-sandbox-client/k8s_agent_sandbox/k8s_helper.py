@@ -198,6 +198,32 @@ class K8sHelper:
                 return None
             raise
 
+    def get_sandbox_claim(self, name: str, namespace: str):
+        """Gets a SandboxClaim custom resource."""
+        try:
+            return self.custom_objects_api.get_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME,
+                name=name
+            )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def patch_sandbox_claim(self, name: str, namespace: str, body: dict):
+        """Patches a SandboxClaim custom resource."""
+        return self.custom_objects_api.patch_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            name=name,
+            body=body
+        )
+
     def list_sandbox_claims(self, namespace: str) -> List[str]:
         """Lists all SandboxClaim custom resources in a namespace."""
         try:

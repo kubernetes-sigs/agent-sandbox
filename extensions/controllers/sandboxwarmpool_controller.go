@@ -316,6 +316,7 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	sandboxLabels := map[string]string{
 		warmPoolSandboxLabel:                        poolNameHash,
 		sandboxTemplateRefHash:                      sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name),
+		sandboxv1alpha1.SandboxLaunchTypeLabel:      sandboxv1alpha1.SandboxLaunchTypeWarm,
 		sandboxv1alpha1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
 	}
 

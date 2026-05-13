@@ -37,10 +37,16 @@ const (
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
 
-	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
+	// SandboxPodNameAnnotation is the annotation used to track the pod name bound to a Sandbox.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
+	// SandboxLaunchTypeLabel is the label used to track whether the Sandbox was cold-created or warm-adopted.
+	SandboxLaunchTypeLabel = "agents.x-k8s.io/launch-type"
+	// SandboxLaunchTypeCold indicates the Sandbox was cold-created.
+	SandboxLaunchTypeCold = "cold"
+	// SandboxLaunchTypeWarm indicates the Sandbox was warm-adopted from a SandboxWarmPool.
+	SandboxLaunchTypeWarm = "warm"
 	// SandboxPodTemplateHashLabel is the label used to track the pod template hash.
 	SandboxPodTemplateHashLabel = "agents.x-k8s.io/sandbox-pod-template-hash"
 	// SandboxPropagatedLabelsAnnotation is the annotation used to track the labels explicitly propagated from sandbox spec to pod.

@@ -1568,8 +1568,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				Namespace:         "default",
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
-					warmPoolSandboxLabel:   poolNameHash,
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					warmPoolSandboxLabel:                   poolNameHash,
+					sandboxTemplateRefHash:                 sandboxcontrollers.NameHash("test-template"),
+					sandboxv1alpha1.SandboxLaunchTypeLabel: sandboxv1alpha1.SandboxLaunchTypeWarm,
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -1868,6 +1869,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				if _, exists := adoptedSandbox.Labels[sandboxTemplateRefHash]; exists {
 					t.Errorf("expected template ref label to be removed from adopted sandbox")
 				}
+				if val := adoptedSandbox.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeWarm {
+					t.Errorf("expected adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeWarm, val, adoptedSandbox.Labels)
+				}
 
 				// 2. Verify SandboxID label was added to pod template
 				expectedUID := string(types.UID("claim-uid"))
@@ -1898,6 +1902,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 				if err != nil {
 					t.Fatalf("expected sandbox to be created but got error: %v", err)
+				}
+				if val := sandbox.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeCold {
+					t.Errorf("expected new sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeCold, val, sandbox.Labels)
 				}
 			}
 		})
@@ -2323,6 +2330,55 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 			t.Errorf("expected metric count 1, got %v", val)
 		}
 	})
+}
+
+func TestGetLaunchType(t *testing.T) {
+	testCases := []struct {
+		name    string
+		sandbox *sandboxv1alpha1.Sandbox
+		want    string
+	}{
+		{
+			name: "nil sandbox is unknown",
+			want: asmetrics.LaunchTypeUnknown,
+		},
+		{
+			name: "warm launch label is warm",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						sandboxv1alpha1.SandboxLaunchTypeLabel: sandboxv1alpha1.SandboxLaunchTypeWarm,
+					},
+				},
+			},
+			want: asmetrics.LaunchTypeWarm,
+		},
+		{
+			name: "cold launch label with pod name annotation remains cold",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						sandboxv1alpha1.SandboxLaunchTypeLabel: sandboxv1alpha1.SandboxLaunchTypeCold,
+					},
+					Annotations: map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "sandbox-cold",
+					},
+				},
+			},
+			want: asmetrics.LaunchTypeCold,
+		},
+		{
+			name:    "missing launch label defaults cold",
+			sandbox: &sandboxv1alpha1.Sandbox{},
+			want:    asmetrics.LaunchTypeCold,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, getLaunchType(tc.sandbox))
+		})
+	}
 }
 
 func newScheme(t *testing.T) *runtime.Scheme {

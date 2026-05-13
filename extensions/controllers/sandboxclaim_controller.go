@@ -724,6 +724,10 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	delete(adopted.Labels, warmPoolSandboxLabel)
 	delete(adopted.Labels, sandboxTemplateRefHash)
 	delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
+	if adopted.Labels == nil {
+		adopted.Labels = make(map[string]string)
+	}
+	adopted.Labels[v1alpha1.SandboxLaunchTypeLabel] = v1alpha1.SandboxLaunchTypeWarm
 
 	// Transfer ownership from SandboxWarmPool to SandboxClaim
 	adopted.OwnerReferences = nil
@@ -953,6 +957,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// (KEP-0174 only propagates to pod template labels; platform's informer reads
 	// Sandbox.metadata.labels).
 	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
+	sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel] = v1alpha1.SandboxLaunchTypeCold
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash(template.Name)
 
@@ -1327,7 +1332,7 @@ func getLaunchType(sandbox *v1alpha1.Sandbox) string {
 	if sandbox == nil {
 		return asmetrics.LaunchTypeUnknown
 	}
-	if sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] != "" {
+	if sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel] == v1alpha1.SandboxLaunchTypeWarm {
 		return asmetrics.LaunchTypeWarm
 	}
 	return asmetrics.LaunchTypeCold

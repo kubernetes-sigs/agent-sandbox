@@ -1,0 +1,10 @@
+title: Suspend and Resume API for Beta
+kep-number: 694
+authors:
+  - "@SHRUTI6991"
+status: implementable
+creation-date: 2026-05-14
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

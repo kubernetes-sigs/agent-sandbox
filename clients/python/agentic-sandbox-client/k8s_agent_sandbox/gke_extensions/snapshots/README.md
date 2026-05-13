@@ -55,13 +55,12 @@ try:
     else:
         print(f"Snapshot failed: {response.error_reason}")
 
-    # Suspend the sandbox (automatically takes a snapshot and scales to 0 replicas)
+    # Suspend the sandbox (automatically takes a snapshot and sets operatingMode to Suspended)
     print("Suspending sandbox...")
     suspend_response = sandbox.suspend(snapshot_before_suspend=True)
     if suspend_response.success:
         print("Sandbox suspended successfully.")
-
-    # Resume the sandbox (scales to 1 replica and restores from the latest snapshot)
+    # Resume the sandbox (sets operatingMode to Running and restores from the latest snapshot)
     print("Resuming sandbox...")
     resume_response = sandbox.resume()
     if resume_response.success:

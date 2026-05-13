@@ -126,6 +126,16 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec"`
 }
 
+// SandboxOperatingMode defines the desired operational state of the Sandbox.
+type SandboxOperatingMode string
+
+const (
+	// SandboxOperatingModeRunning indicates the sandbox should be actively running.
+	SandboxOperatingModeRunning SandboxOperatingMode = "Running"
+	// SandboxOperatingModeSuspended indicates the sandbox should be suspended.
+	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
+)
+
 // SandboxSpec defines the desired state of Sandbox.
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
@@ -145,14 +155,12 @@ type SandboxSpec struct {
 	// +optional
 	Lifecycle `json:",inline"`
 
-	// replicas is the number of desired replicas.
-	// The only allowed values are 0 and 1.
-	// Defaults to 1.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1
-	// +kubebuilder:default=1
+	// operatingMode specifies the desired operational state of the Sandbox.
+	// Defaults to Running if not specified.
+	// +kubebuilder:default=Running
+	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
-	Replicas *int32 `json:"replicas,omitempty"`
+	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
 
 	// service controls whether the controller should automatically create a
 	// headless Service for this Sandbox.
@@ -206,11 +214,6 @@ type SandboxStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// replicas is the number of actual replicas.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
-
 	// selector is the label selector for pods.
 	// +optional
 	LabelSelector string `json:"selector,omitempty"`
@@ -224,7 +227,6 @@ type SandboxStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {

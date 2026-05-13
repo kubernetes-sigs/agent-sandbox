@@ -242,7 +242,6 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 	if pod == nil {
 		sandbox.Status.Replicas = 0
-		sandbox.Status.LabelSelector = ""
 		sandbox.Status.PodIPs = nil
 	} else {
 		sandbox.Status.Replicas = 1

@@ -24,12 +24,20 @@ cd "${SCRIPT_ROOT}"
 CMD="go run -modfile=tools.mod k8s.io/code-generator"
 API_PKG="sigs.k8s.io/agent-sandbox/api/v1beta1"
 CLIENT_PKG="sigs.k8s.io/agent-sandbox/clients/k8s"
+APPLYCONFIG_PKG="${CLIENT_PKG}/applyconfiguration"
+
+echo "Generating apply configurations..."
+${CMD}/cmd/applyconfiguration-gen \
+  --output-dir "clients/k8s/applyconfiguration" \
+  --output-pkg "${APPLYCONFIG_PKG}" \
+  "${API_PKG}"
 
 echo "Generating clientset..."
 ${CMD}/cmd/client-gen \
   --output-dir "clients/k8s/clientset" \
   --output-pkg "${CLIENT_PKG}/clientset" \
   --clientset-name "versioned" \
+  --apply-configuration-package "${APPLYCONFIG_PKG}" \
   --input-base "" \
   --input "${API_PKG}"
 
@@ -50,12 +58,20 @@ ${CMD}/cmd/informer-gen \
 
 EXT_API_PKG="sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 EXT_CLIENT_PKG="sigs.k8s.io/agent-sandbox/clients/k8s/extensions"
+EXT_APPLYCONFIG_PKG="${EXT_CLIENT_PKG}/applyconfiguration"
+
+echo "Generating extensions apply configurations..."
+${CMD}/cmd/applyconfiguration-gen \
+  --output-dir "clients/k8s/extensions/applyconfiguration" \
+  --output-pkg "${EXT_APPLYCONFIG_PKG}" \
+  "${EXT_API_PKG}"
 
 echo "Generating extensions clientset..."
 ${CMD}/cmd/client-gen \
   --output-dir "clients/k8s/extensions/clientset" \
   --output-pkg "${EXT_CLIENT_PKG}/clientset" \
   --clientset-name "versioned" \
+  --apply-configuration-package "${EXT_APPLYCONFIG_PKG}" \
   --input-base "" \
   --input "${EXT_API_PKG}"
 

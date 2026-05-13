@@ -16,9 +16,10 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"maps"
 	"reflect"
 	"slices"
@@ -444,17 +445,23 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	return nil
 }
 
-// GetNumericHash generates a raw FNV-1a hash value.
-func GetNumericHash(input string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(input))
-	return h.Sum32()
+func isSystemLabel(key string) bool {
+	return key == sandboxLabel || key == sandboxv1alpha1.SandboxPodTemplateHashLabel
 }
 
-// NameHash generates an FNV-1a hash from a string and returns
-// it as a fixed-length hexadecimal string.
+func isSystemAnnotation(key string) bool {
+	return key == sandboxv1alpha1.SandboxPodNameAnnotation ||
+		key == sandboxv1alpha1.SandboxTemplateRefAnnotation ||
+		key == sandboxv1alpha1.SandboxPropagatedLabelsAnnotation ||
+		key == sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation ||
+		key == "opentelemetry.io/trace-context"
+}
+
+// NameHash generates a SHA-256 hash from a string and returns
+// it as a 32-character hexadecimal string using memory-efficient slice encoding.
 func NameHash(objectName string) string {
-	return fmt.Sprintf("%08x", GetNumericHash(objectName))
+	hash := sha256.Sum256([]byte(objectName))
+	return hex.EncodeToString(hash[:16])
 }
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
@@ -784,18 +791,24 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Create new Pod
 	logger.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
-	podLabels := map[string]string{
-		sandboxLabel: nameHash,
-	}
+	podLabels := make(map[string]string)
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if isSystemLabel(k) {
+			continue
+		}
 		podLabels[k] = v
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
+	podLabels[sandboxLabel] = nameHash
+
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+		if isSystemAnnotation(k) {
+			continue
+		}
 		annotations[k] = v
 		managedAnnotationKeys = append(managedAnnotationKeys, k)
 	}
@@ -877,6 +890,9 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if isSystemLabel(k) {
+			continue
+		}
 		if pod.Labels[k] != v {
 			pod.Labels[k] = v
 			updated = true
@@ -888,7 +904,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
 		for k := range propagatedLabels {
-			if k == "" {
+			if k == "" || isSystemLabel(k) {
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
@@ -904,6 +920,9 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 			pod.Annotations = make(map[string]string)
 		}
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+			if isSystemAnnotation(k) {
+				continue
+			}
 			if pod.Annotations[k] != v {
 				pod.Annotations[k] = v
 				updated = true
@@ -916,7 +935,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	if propagatedAnnotationsStr != "" {
 		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
 		for k := range propagatedAnnotations {
-			if k == "" {
+			if k == "" || isSystemAnnotation(k) {
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {

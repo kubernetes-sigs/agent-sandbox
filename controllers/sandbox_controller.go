@@ -384,7 +384,7 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 }
 
 func isSystemLabel(key string) bool {
-	return key == sandboxLabel || key == sandboxv1alpha1.SandboxPodTemplateHashLabel
+	return key == sandboxLabel
 }
 
 func isSystemAnnotation(key string) bool {
@@ -892,15 +892,28 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 			case resourceUnowned:
 				log.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				if pvc.Labels == nil {
+					pvc.Labels = make(map[string]string)
+				}
+				pvc.Labels[sandboxLabel] = nameHash
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}
 				if err := r.Update(ctx, pvc); err != nil {
-					return fmt.Errorf("failed to update PVC with owner reference: %w", err)
+					return fmt.Errorf("failed to update PVC with owner reference and labels: %w", err)
 				}
 
 			case resourceOwnedBySandbox:
-				// Already owned by this sandbox — no action needed.
+				if pvc.Labels == nil {
+					pvc.Labels = make(map[string]string)
+				}
+				if pvc.Labels[sandboxLabel] != nameHash {
+					pvc.Labels[sandboxLabel] = nameHash
+					if err := r.Update(ctx, pvc); err != nil {
+						return fmt.Errorf("failed to update PVC labels: %w", err)
+					}
+					log.Info("Updated owned PVC labels", "PVC.Name", pvcName)
+				}
 			}
 			continue
 		}

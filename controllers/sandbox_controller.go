@@ -392,7 +392,7 @@ func isSystemAnnotation(key string) bool {
 		key == sandboxv1alpha1.SandboxTemplateRefAnnotation ||
 		key == sandboxv1alpha1.SandboxPropagatedLabelsAnnotation ||
 		key == sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation ||
-		key == "opentelemetry.io/trace-context"
+		key == asmetrics.TraceContextAnnotation
 }
 
 // NameHash generates a SHA-256 hash from a string and returns

@@ -37,10 +37,11 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.pas
 
 ## Step 2: Setup the Routing Configuration and Pools
 
-In a real-world scenario, you would hook the files into an Argo CD `Application`. For this localized example, apply them directly using `kubectl`:
+In a real-world scenario, you would hook the files into an Argo CD `Application`. For this localized example, specify the runtime image using the `IMAGE` environment variable and apply them using `kubectl`:
 
 ```bash
-kubectl apply -f templates.yaml
+export IMAGE="python:3.11-slim" # Or your preferred runtime image
+cat templates.yaml | envsubst | kubectl apply -f -
 kubectl apply -f pools.yaml
 kubectl apply -f canary-config.yaml
 ```

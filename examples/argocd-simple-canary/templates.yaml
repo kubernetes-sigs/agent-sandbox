@@ -9,7 +9,7 @@ spec:
     spec:
       containers:
       - name: python-runtime
-        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+        image: ${IMAGE}
         ports:
         - containerPort: 8888
         resources:
@@ -27,7 +27,7 @@ spec:
     spec:
       containers:
       - name: python-runtime
-        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+        image: ${IMAGE}
         ports:
         - containerPort: 8888
         resources:

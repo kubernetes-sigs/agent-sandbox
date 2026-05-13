@@ -272,6 +272,9 @@ class SandboxConnector:
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
+        self._pod_ip: str | None = None
+        self._pod_ip_resolved = False
+        self._pod_ip_auth_failed = False
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
@@ -307,6 +310,8 @@ class SandboxConnector:
         return self.strategy.connect()
 
     def close(self):
+        self._pod_ip_resolved = False
+        self._pod_ip = None
         self.strategy.close()
         if self.session:
             self.session.close()
@@ -327,6 +332,22 @@ class SandboxConnector:
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
                 headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+                if self._get_pod_ip and not self._pod_ip_auth_failed:
+                    if not self._pod_ip_resolved:
+                        try:
+                            pod_ip = self._get_pod_ip()
+                            if pod_ip:
+                                self._pod_ip = pod_ip
+                                self._pod_ip_resolved = True
+                        except Exception as e:
+                            status_code = getattr(getattr(e, "response", None), "status_code", None)
+                            if status_code in (401, 403):
+                                self._pod_ip_auth_failed = True
+                                logging.debug(f"K8s API auth failed ({status_code}). Permanently disabling direct pod IP routing for this client instance.")
+                            else:
+                                logging.debug(f"Transient failure resolving pod IP for direct routing: {e}")
+                    if self._pod_ip:
+                        headers["X-Sandbox-Pod-IP"] = self._pod_ip
             kwargs["headers"] = headers
 
             # Send the request
@@ -341,6 +362,8 @@ class SandboxConnector:
             status_code = resp.status_code if resp is not None else None
 
             logging.error(f"Request to sandbox failed: {e}")
+            self._pod_ip_resolved = False
+            self._pod_ip = None
             self.close()
             raise SandboxRequestError(
                 f"Failed to communicate with the sandbox at {url}.",

@@ -143,6 +143,30 @@ class TestProxyRouting:
                 request_obj.url
             )
 
+    def test_target_url_pod_ip_construction(self, client):
+        """Verify the router builds the correct URL when X-Sandbox-Pod-IP is provided."""
+        with patch.object(
+            sandbox_router.client,
+            "send",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("expected"),
+        ) as mock_send:
+            client.post(
+                "/some/path",
+                headers={
+                    "X-Sandbox-ID": "test-box",
+                    "X-Sandbox-Namespace": "prod",
+                    "X-Sandbox-Port": "9999",
+                    "X-Sandbox-Pod-IP": "10.20.30.40",
+                },
+            )
+            built_request = mock_send.call_args
+            request_obj = built_request[0][0]
+            assert "10.20.30.40:9999/some/path" in str(
+                request_obj.url
+            )
+
+
     def test_original_host_header_not_forwarded(self, client):
         """The original 'host' header should not be forwarded to the sandbox."""
         captured_request = {}

@@ -80,8 +80,13 @@ async def proxy_request(request: Request, full_path: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid port format.")
 
-    # Construct the K8s internal DNS name
-    target_host = f"{sandbox_id}.{namespace}.svc.cluster.local"
+    # Dynamic routing: route by Pod IP if provided by client, otherwise fallback to DNS name
+    pod_ip = request.headers.get("X-Sandbox-Pod-IP")
+    if pod_ip:
+        target_host = pod_ip
+    else:
+        target_host = f"{sandbox_id}.{namespace}.svc.cluster.local"
+
     target_url = str(
         request.url.replace(scheme="http", hostname=target_host, port=port)
     )

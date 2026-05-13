@@ -388,6 +388,9 @@ class AsyncSandboxHandler(BaseHTTPRequestHandler):
 
 
 class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
+    port: int
+    server: HTTPServer
+    server_thread: Thread
 
     @classmethod
     def setUpClass(cls):

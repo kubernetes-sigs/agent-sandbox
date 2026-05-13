@@ -57,8 +57,8 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
             and condition.get("reason") == "Complete"
         ):
             snapshot_created = status.get("snapshotCreated") or {}
-            snapshot_uid = snapshot_created.get("name")
-            snapshot_timestamp = condition.get("lastTransitionTime")
+            snapshot_uid = snapshot_created.get("name") or ""
+            snapshot_timestamp = condition.get("lastTransitionTime") or ""
             return SnapshotResult(
                 snapshot_uid=snapshot_uid,
                 snapshot_timestamp=snapshot_timestamp,

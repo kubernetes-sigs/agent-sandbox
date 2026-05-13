@@ -344,7 +344,7 @@ class SnapshotEngine:
                 try:
                     valid_snapshots.append(
                         SnapshotDetail(
-                            snapshot_uid=metadata.get("name"),
+                            snapshot_uid=metadata.get("name") or "",
                             source_pod=metadata.get("annotations", {}).get(
                                 PODSNAPSHOT_POD_NAME_ANNOTATION, "Unknown"
                             ),

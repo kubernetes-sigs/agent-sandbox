@@ -87,7 +87,7 @@ except ImportError:
         def set_span_in_context(span: Any, context: Any = None) -> None:
             """Mock set_span_in_context."""
 
-    class TraceContextTextMapPropagator:
+    class TraceContextTextMapPropagator:  # type: ignore[no-redef]
         """Mock class for OpenTelemetry TraceContextTextMapPropagator."""
 
         def inject(

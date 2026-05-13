@@ -21,8 +21,6 @@ from k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support im
     SandboxWithSnapshotSupport,
     SUCCESS_CODE,
     ERROR_CODE,
-    SuspendResponse,
-    ResumeResponse,
 )
 from k8s_agent_sandbox.constants import (
     SANDBOX_NAME_HASH_LABEL,
@@ -30,7 +28,6 @@ from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
-    POD_NAME_ANNOTATION,
     PODSNAPSHOT_PLURAL,
     SANDBOX_API_GROUP,
     SANDBOX_API_VERSION,

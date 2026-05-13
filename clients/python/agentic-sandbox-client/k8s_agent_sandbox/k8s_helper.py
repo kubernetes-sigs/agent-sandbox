@@ -59,7 +59,7 @@ class K8sHelper:
         if labels:
             metadata["labels"] = labels
 
-        spec = {
+        spec: dict[str, Any] = {
             "sandboxTemplateRef": {
                 "name": template
             }

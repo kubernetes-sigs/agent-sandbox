@@ -32,7 +32,6 @@ from .models import (
     SandboxLocalTunnelConnectionConfig,
 )
 from .k8s_helper import K8sHelper
-from .metrics import sandbox_client_discovery_latency_ms
 from .exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,

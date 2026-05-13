@@ -72,10 +72,10 @@ class AsyncSandbox:
         self.trace_service_name = self.tracer_config.trace_service_name
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self._commands = AsyncCommandExecutor(
+        self._commands: AsyncCommandExecutor | None = AsyncCommandExecutor(
             self.connector, self.tracer, self.trace_service_name
         )
-        self._files = AsyncFilesystem(
+        self._files: AsyncFilesystem | None = AsyncFilesystem(
             self.connector, self.tracer, self.trace_service_name
         )
 

@@ -26,6 +26,10 @@ const (
 	// ClaimExpiredReason is the reason used in conditions/events when a claim expires.
 	ClaimExpiredReason = "ClaimExpired"
 
+	// DeprecatedAssignedSandboxNameLabel is the legacy label key applied to the claim to identify the adopted Sandbox name.
+	// Deprecated: Use AssignedSandboxNameAnnotation instead.
+	DeprecatedAssignedSandboxNameLabel = "agents.x-k8s.io/sandbox-name"
+
 	// AssignedSandboxNameAnnotation is the annotation key applied to the claim to identify the adopted Sandbox Name.
 	AssignedSandboxNameAnnotation = "agents.x-k8s.io/sandbox-name"
 )

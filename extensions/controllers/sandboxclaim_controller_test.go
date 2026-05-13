@@ -3831,3 +3831,94 @@ func TestMapTemplateToClaims(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim-legacy",
+			Namespace: "default",
+			UID:       "claim-uid-legacy",
+			Labels: map[string]string{
+				extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel: "adopted-sb-legacy",
+			},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	adoptedSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sb-legacy",
+			Namespace: "default",
+			UID:       "adopted-sb-legacy-uid",
+			Labels: map[string]string{
+				extensionsv1alpha1.SandboxIDLabel: "claim-uid-legacy",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxClaim",
+				Name:       "test-claim-legacy",
+				UID:        "claim-uid-legacy",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						extensionsv1alpha1.SandboxIDLabel: "claim-uid-legacy",
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, adoptedSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim-legacy", Namespace: "default"}}
+
+	// Run reconcile
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected reconcile to succeed, but got error: %v", err)
+	}
+
+	// Verify that the claim was migrated: DeprecatedAssignedSandboxNameLabel removed, AssignedSandboxNameAnnotation added
+	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+
+	if _, ok := updatedClaim.Labels[extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel]; ok {
+		t.Error("expected legacy label to be removed after migration")
+	}
+	if updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation] != "adopted-sb-legacy" {
+		t.Errorf("expected annotation to be set to 'adopted-sb-legacy', got %q", updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation])
+	}
+}

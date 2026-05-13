@@ -34,10 +34,16 @@ def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
             apiServer:
               extraArgs:
                 enable-admission-plugins: "NodeRestriction,OwnerReferencesPermissionEnforcement"
+                feature-gates: "InPlacePodVerticalScaling=true"
+            controllerManager:
+              extraArgs:
+                feature-gates: "InPlacePodVerticalScaling=true"
           - |
             kind: KubeletConfiguration
             logging:
               verbosity: {kubelet_verbosity}
+            featureGates:
+              InPlacePodVerticalScaling: true
         """)
     if containerd_loglevel:
         config += textwrap.dedent(f"""\

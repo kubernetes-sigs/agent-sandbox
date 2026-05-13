@@ -29,7 +29,7 @@ from k8s_agent_sandbox.constants import (
     PODSNAPSHOTMANUALTRIGGER_API_KIND,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
 )
-from .utils import wait_for_snapshot_to_be_completed, wait_for_snapshot_deletion
+from .utils import wait_for_snapshot_to_be_completed, wait_for_snapshot_deletion, normalize_datetime
 
 SNAPSHOT_SUCCESS_CODE = 0
 SNAPSHOT_ERROR_CODE = 1
@@ -86,19 +86,8 @@ class SnapshotFilter(BaseModel):
 
     @field_validator("created_after", "created_before", mode="before")
     @classmethod
-    def normalize_datetime(cls, v):
-        if v is None:
-            return None
-        if isinstance(v, str):
-            try:
-                v = datetime.fromisoformat(v.replace("Z", "+00:00"))
-            except ValueError as e:
-                raise ValueError(f"Invalid ISO datetime string: {v}") from e
-        if isinstance(v, datetime):
-            if v.tzinfo is None or v.utcoffset() is None:
-                return v.replace(tzinfo=timezone.utc)
-            return v
-        raise TypeError(f"Expected datetime or ISO format string, got {type(v)}")
+    def validate_datetime(cls, v):
+        return normalize_datetime(v)
 
 
 class SnapshotEngine:

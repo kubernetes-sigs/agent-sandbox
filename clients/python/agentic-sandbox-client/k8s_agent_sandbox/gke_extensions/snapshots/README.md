@@ -1,6 +1,6 @@
 # Agentic Sandbox Pod Snapshot Extension
 
-This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger snapshots of a running sandbox and restore the sandbox from a recently created snapshot upon resumption.
+This directory contains the Python client extension for interacting with the Agentic Sandbox to manage Pod Snapshots. This extension allows you to trigger snapshots of a running sandbox, suspend it, and resume it from the suspended state.
 
 ## Components
 

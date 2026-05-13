@@ -171,6 +171,29 @@ def test_suspend_resume_new_sandbox(client, template_name: str, namespace: str) 
     print("Cleaned up remaining snapshots.")
 
 
+def test_timestamp_based_listing_and_deletion(sandbox, creation_time, suspend_third_snapshot_uid):
+    """Helper to verify listing and deleting snapshots by timestamp."""
+    print(f"\nListing snapshots created after '{creation_time}'...")
+    # Test listing with timestamp filter
+    list_after = sandbox.snapshots.list(filter_by={"created_after": creation_time})
+    assert list_after.success
+    assert len(list_after.snapshots) >= 1
+    assert list_after.snapshots[0].snapshot_uid == suspend_third_snapshot_uid
+    for snap in list_after.snapshots:
+        print(
+            f"Snapshot UID: {snap.snapshot_uid}, Source Pod: {snap.source_pod}, Creation Time: {snap.creation_timestamp}"
+        )
+
+    print(
+        f"\nDeleting snapshots created after '{creation_time}' of the sandbox '{sandbox.sandbox_id}'..."
+    )
+    delete_result = sandbox.snapshots.delete_all(delete_by="created_after", timestamp=creation_time)
+    assert delete_result.success, delete_result.error_reason
+    assert len(delete_result.deleted_snapshots) >= 1
+    assert suspend_third_snapshot_uid in delete_result.deleted_snapshots
+    print(f"Snapshots deleted successfully: {delete_result.deleted_snapshots}")
+
+
 def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: str, suspend_third_snapshot_uid: str):
     """Tests listing all snapshots and verifying snapshot deletion."""
     print("\n======= Testing List and Delete =======")
@@ -202,26 +225,7 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     print(f"Snapshot '{second_snapshot_uid}' deleted successfully.")
 
     creation_time_2 = list_result.snapshots[1].creation_timestamp
-
-    print(f"\nListing snapshots created after '{creation_time_2}'...")
-    # Test listing with timestamp filter
-    list_after = sandbox.snapshots.list(filter_by={"created_after": creation_time_2})
-    assert list_after.success
-    assert len(list_after.snapshots) >= 1
-    assert list_after.snapshots[0].snapshot_uid == suspend_third_snapshot_uid
-    for snap in list_after.snapshots:
-        print(
-            f"Snapshot UID: {snap.snapshot_uid}, Source Pod: {snap.source_pod}, Creation Time: {snap.creation_timestamp}"
-        )
-
-    print(
-        f"\nDeleting snapshots created after '{creation_time_2}' of the sandbox '{sandbox.sandbox_id}'..."
-    )
-    delete_result = sandbox.snapshots.delete_all(delete_by="created_after", timestamp=creation_time_2)
-    assert delete_result.success, delete_result.error_reason
-    assert len(delete_result.deleted_snapshots) >= 1
-    assert suspend_third_snapshot_uid in delete_result.deleted_snapshots
-    print(f"Snapshots deleted successfully: {delete_result.deleted_snapshots}")
+    test_timestamp_based_listing_and_deletion(sandbox, creation_time_2, suspend_third_snapshot_uid)
 
     print(f"\nDeleting all remaining snapshots for sandbox '{sandbox.sandbox_id}'...")
     delete_result = sandbox.snapshots.delete_all()

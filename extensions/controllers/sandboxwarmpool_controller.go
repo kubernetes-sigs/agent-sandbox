@@ -178,13 +178,19 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		sandboxesToCreate := min(desiredReplicas-currentReplicas, maxBatchSize)
 		logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 
-		// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
-		_, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
-			return r.createPoolSandbox(ctx, warmPool, poolNameHash, template, currentPodTemplateHash)
-		})
-		if createErr != nil {
-			logger.Error(createErr, "Failed to create pool sandboxes")
-			allErrors = errors.Join(allErrors, createErr)
+		sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash)
+		if err != nil {
+			logger.Error(err, "Failed to build sandbox CR blueprint")
+			allErrors = errors.Join(allErrors, err)
+		} else {
+			// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
+			_, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
+				return r.createPoolSandbox(ctx, warmPool, sandboxCR)
+			})
+			if createErr != nil {
+				logger.Error(createErr, "Failed to create pool sandboxes")
+				allErrors = errors.Join(allErrors, createErr)
+			}
 		}
 	}
 
@@ -321,11 +327,8 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	return template, currentPodTemplateHash, tmplErr
 }
 
-// createPoolSandbox creates a full Sandbox CR (with pod template and volume claim templates) for the warm pool.
-func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string) error {
-	logger := log.FromContext(ctx)
-
-	// Build labels for the Sandbox CR
+// buildSandboxCR constructs the base Sandbox CR (with pod template and volume claim templates) for the warm pool.
+func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string) (*sandboxv1alpha1.Sandbox, error) {
 	sandboxLabels := map[string]string{
 		warmPoolSandboxLabel:                        poolNameHash,
 		sandboxTemplateRefHash:                      SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
@@ -383,9 +386,16 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 
 	// Set controller reference so the Sandbox is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, sandbox, r.Scheme); err != nil {
-		return fmt.Errorf("SetControllerReference for Sandbox failed: %w", err)
+		return nil, fmt.Errorf("SetControllerReference for Sandbox failed: %w", err)
 	}
 
+	return sandbox, nil
+}
+
+// createPoolSandbox creates a full Sandbox CR for the warm pool using a pre-built sandboxCR.
+func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, sandboxCR *sandboxv1alpha1.Sandbox) error {
+	logger := log.FromContext(ctx)
+	sandbox := sandboxCR.DeepCopy()
 	if err := r.Create(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to create pool sandbox")
 		return err

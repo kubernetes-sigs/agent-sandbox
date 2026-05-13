@@ -272,8 +272,8 @@ def wait_for_snapshot_deletion(
 def wait_for_pod_termination(
     k8s_helper: Any,
     namespace: str,
-    pod_name: str | None,
-    pod_uid: str | None,
+    pod_name: str ,
+    pod_uid: str ,
     timeout: int = 180,
 ) -> bool:
     """Waits until the specified pod is terminated."""

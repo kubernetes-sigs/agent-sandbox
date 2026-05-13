@@ -49,7 +49,7 @@ class ResumeResponse(BaseModel):
 class SandboxWithSnapshotSupport(Sandbox):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._snapshots = SnapshotEngine(
+        self._snapshots: SnapshotEngine | None = SnapshotEngine(
             namespace=self.namespace,
             k8s_helper=self.k8s_helper,
             get_pod_name_func=self.get_pod_name,
@@ -212,21 +212,30 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_code=ERROR_CODE
             )
 
-        if wait_for_pod_termination(self.k8s_helper, self.namespace, pod_name_to_wait, pod_uid_to_wait, wait_timeout):
-            logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")
+        if pod_name_to_wait and pod_uid_to_wait:
+            if wait_for_pod_termination(self.k8s_helper, self.namespace, pod_name_to_wait, str(pod_uid_to_wait), wait_timeout):
+                logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")
+                return SuspendResponse(
+                    success=True,
+                    snapshot_response=snapshot_response,
+                    error_reason="",
+                    error_code=SUCCESS_CODE
+                )
+            
+            logger.warning(f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to terminate.")
             return SuspendResponse(
-                success=True,
+                success=False,
                 snapshot_response=snapshot_response,
-                error_reason="",
-                error_code=SUCCESS_CODE
+                error_reason="Timed out waiting for pod to terminate.",
+                error_code=ERROR_CODE
             )
-        
-        logger.warning(f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to terminate.")
+
+        logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated (no pod to wait for).")
         return SuspendResponse(
-            success=False,
+            success=True,
             snapshot_response=snapshot_response,
-            error_reason="Timed out waiting for pod to terminate.",
-            error_code=ERROR_CODE
+            error_reason="",
+            error_code=SUCCESS_CODE
         )
 
     def resume(self, wait_timeout: int = 180) -> ResumeResponse:

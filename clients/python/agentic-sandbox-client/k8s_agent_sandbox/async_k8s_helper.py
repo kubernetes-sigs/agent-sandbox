@@ -18,9 +18,6 @@ import time
 from typing import Any
 
 from kubernetes_asyncio import client, config, watch
-
-logger = logging.getLogger(__name__)
-
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -37,6 +34,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxTemplateNotFoundError,
 )
+logger = logging.getLogger(__name__)
 
 
 class AsyncK8sHelper:
@@ -82,7 +80,7 @@ class AsyncK8sHelper:
         if labels:
             metadata["labels"] = labels
 
-        spec = {
+        spec: dict[str, Any] = {
             "sandboxTemplateRef": {
                 "name": template,
             }

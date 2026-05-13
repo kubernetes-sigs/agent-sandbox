@@ -75,13 +75,13 @@ class Sandbox:
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         # Initialisation of namespaced engines
-        self._commands = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
-        self._files = Filesystem(self.connector, self.tracer, self.trace_service_name)
+        self._commands: CommandExecutor | None = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
+        self._files: Filesystem | None = Filesystem(self.connector, self.tracer, self.trace_service_name)
         
         # Internal state tracking
         self._is_closed = False
-        self._pod_name = None
-        self._sandbox_name_hash = None
+        self._pod_name: str | None = None
+        self._sandbox_name_hash: str | None = None
         
     def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""

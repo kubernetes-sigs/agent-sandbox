@@ -21,6 +21,14 @@ The `agent-sandbox-controller` exposes several flags that directly affect throug
 | `--kube-api-qps` | `-1` (no client-side throttling) | Disables client-side rate limiting to the Kubernetes API server. Server-side throttling (API Priority and Fairness) still applies. When setting a positive value, use at least the sum of all `--*-concurrent-workers` flags to avoid starving reconcile loops. |
 | `--kube-api-burst` | `10` | Max burst for API server throttle requests. Ignored when `--kube-api-qps` is `-1`. When `--kube-api-qps` is set to a positive value, set this to equal or greater than `--kube-api-qps`. |
 
+### Choosing worker counts
+
+Each `--*-concurrent-workers` flag controls the number of independent goroutines the corresponding controller runs. For example, setting `--sandbox-claim-concurrent-workers=10` allows the SandboxClaim controller to process up to 10 SandboxClaims in parallel.
+
+A good starting point is to size each value to the expected steady-state object count for that type, or to a calculated fraction of your maximum burst load. A cluster with a single WarmPool only needs `--sandbox-warm-pool-concurrent-workers=1`.
+
+**Important caveat:** increasing worker counts only improves throughput when the controller itself is the bottleneck. If the bottleneck is the kube-apiserver or the container runtime (e.g., slow pod startup), adding more workers can actually *increase* latency by creating additional API server contention. Use the metrics in the [Metrics Collected](#metrics-collected) section and APF dashboards to confirm where the bottleneck lies before tuning these values.
+
 ### Applying Flags
 
 **Via manifest** — edit the relevant manifest for your deployment:
@@ -263,11 +271,11 @@ For maximum throughput testing, consider raising controller concurrency alongsid
 ```yaml
 args:
 - --kube-api-qps=1000
-- --kube-api-burst=1000
-- --sandbox-concurrent-workers=1000
-- --sandbox-claim-concurrent-workers=1000
-- --sandbox-warm-pool-concurrent-workers=1000
-- --sandbox-template-concurrent-workers=1000
+- --kube-api-burst=2000
+- --sandbox-concurrent-workers=400
+- --sandbox-claim-concurrent-workers=400
+- --sandbox-warm-pool-concurrent-workers=10
+- --sandbox-template-concurrent-workers=2
 ```
 
 #### Output
@@ -292,7 +300,7 @@ Measures the end-to-end time from SandboxClaim creation to the underlying pod be
 
 ### SandboxClaim controller startup latency
 
-Measures the time the controller spends processing each SandboxClaim reconcile loop.
+Measures the time from when the SandboxClaim controller's informer first observes the SandboxClaim creation to when the controller marks it as Ready. Because the informer sees the resource only after it has been persisted by the API server, this is a subset of the `agent_sandbox_claim_startup_latency_ms_bucket` metric — the delta between the two represents time spent in the kube-apiserver plus network propagation delay (plus or minus any clock skew). This metric has no clock skew of its own, since both the start and end timestamps are recorded by the same controller. Unlike `agent_sandbox_claim_startup_latency_ms_bucket`, this metric requires no webhook and works out of the box.
 
 | Metric | Prometheus query | Default threshold |
 |--------|-----------------|-------------------|

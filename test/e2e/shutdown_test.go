@@ -45,7 +45,6 @@ func TestSandboxShutdownTime(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
@@ -82,7 +81,6 @@ func TestSandboxShutdownTime(t *testing.T) {
 			// Service/ServiceFQDN should be cleared from status when the Service is deleted
 			Service:     "",
 			ServiceFQDN: "",
-			Replicas:    0,
 			Conditions: []metav1.Condition{
 				{
 					Message:            "Sandbox has expired",
@@ -150,7 +148,7 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 		if err != nil || !finishedReasonMatches {
 			return false
 		}
-		return current.Status.Service == "" && current.Status.ServiceFQDN == "" && current.Status.Replicas == 0
+		return current.Status.Service == "" && current.Status.ServiceFQDN == ""
 	}, 60*time.Second, time.Second)
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace}}

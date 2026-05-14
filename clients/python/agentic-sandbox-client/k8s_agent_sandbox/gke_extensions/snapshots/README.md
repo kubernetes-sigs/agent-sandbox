@@ -11,10 +11,10 @@ The main entry point for the snapshot extension. It inherits from the base `Sand
 
 ### `SandboxWithSnapshotSupport`
 This class wraps the base `Sandbox` to seamlessly provide snapshot capabilities. It manages the sandbox lifecycle while granting access to the underlying snapshot operations via the `.snapshots` property.
-*   **Suspend**: Scales the sandbox down to 0 replicas, temporarily pausing execution. It can optionally take a snapshot immediately before suspending (enabled by default).
-*   **Resume**: Scales the sandbox back up to 1 replica, automatically restoring its state from the most recent available snapshot.
+*   **Suspend**: Sets the sandbox mode to Suspended, temporarily pausing execution. It can optionally take a snapshot immediately before suspending (enabled by default).
+*   **Resume**: Sets the sandbox mode to Running, automatically restoring its state from the most recent available snapshot.
 *   **Is Restored From Snapshot**: Checks if the current sandbox was successfully restored from a specific snapshot UID.
-*   **Is Suspended**: Checks if the sandbox is currently suspended (i.e., scaled down to 0 replicas).
+*   **Is Suspended**: Checks if the sandbox is currently suspended (i.e., mode set to Suspended).
 
 ### `SnapshotEngine`
 The core engine responsible for interacting with the GKE Pod Snapshot Controller.
@@ -49,13 +49,13 @@ try:
     else:
         print(f"Snapshot failed: {response.error_reason}")
         
-    # Suspend the sandbox (automatically takes a snapshot and scales to 0 replicas)
+    # Suspend the sandbox (automatically takes a snapshot and sets mode to Suspended)
     print("Suspending sandbox...")
     suspend_response = sandbox.suspend(snapshot_before_suspend=True)
     if suspend_response.success:
         print("Sandbox suspended successfully.")
         
-    # Resume the sandbox (scales to 1 replica and restores from the latest snapshot)
+    # Resume the sandbox (sets mode to Running and restores from the latest snapshot)
     print("Resuming sandbox...")
     resume_response = sandbox.resume()
     if resume_response.success:

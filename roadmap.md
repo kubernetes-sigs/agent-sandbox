@@ -10,7 +10,7 @@ High-level overview of our main strategic priorities for 2026:
 - Expand Sandbox use cases - Computer use case, browser use case, and base images
 - Decouple API from Runtime - enable full customization of runtime environment without breaking API
 - Implement GO Client [[#227](https://github.com/kubernetes-sigs/agent-sandbox/issues/227)]
-- Scale-down / Resume PVC based - Pause resume preserving PVC only, when replicas scale to 0, PVC is saved, when sandbox scales back PVC is restored
+- Scale-down / Resume PVC based - Pause resume preserving PVC only, when mode is set to Suspended, PVC is saved, when mode is set to Running PVC is restored
 - Add complete CR, SDK and template support
 - API Support for Multi-Sandbox per Pod - Extend API to support multiple sandboxes in a Pod
 - Startup Actions [[#58](https://github.com/kubernetes-sigs/agent-sandbox/issues/58)] - Allow users to specify actions at startup, like immediately pausing the sandbox or pausing it at a specific time

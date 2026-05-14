@@ -325,7 +325,6 @@ func TestReconcile(t *testing.T) {
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1alpha1.SandboxStatus{
-				Replicas:      1,
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
 				Conditions: []metav1.Condition{
 					{
@@ -378,7 +377,6 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1alpha1.SandboxStatus{
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
-				Replicas:      1,
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450", // Pre-computed hash of "sandbox-name"
 				Conditions: []metav1.Condition{
 					{
@@ -474,7 +472,6 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1alpha1.SandboxStatus{
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
-				Replicas:      1,
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450", // Pre-computed hash of "sandbox-name"
 				Conditions: []metav1.Condition{
 					{
@@ -599,7 +596,6 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1alpha1.SandboxStatus{
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
-				Replicas:      1,
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
 				PodIPs:        []string{"10.244.0.5", "fd00::5"},
 				Conditions: []metav1.Condition{
@@ -664,7 +660,6 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			wantStatus: sandboxv1alpha1.SandboxStatus{
-				Replicas:      1,
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
 				PodIPs:        []string{"10.244.0.5"},
 				Conditions: []metav1.Condition{
@@ -1035,7 +1030,7 @@ func TestReconcilePod(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: new(int32(1)),
+			Mode: sandboxv1alpha1.SandboxModeRunning,
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -1144,7 +1139,7 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
-			name: "delete pod if replicas is 0",
+			name: "delete pod if mode is Suspended",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1162,20 +1157,20 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(0)),
+					Mode: sandboxv1alpha1.SandboxModeSuspended,
 				},
 			},
 			wantPod: nil,
 		},
 		{
-			name: "no-op if replicas is 0 and pod does not exist",
+			name: "no-op if mode is Suspended and pod does not exist",
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(0)),
+					Mode: sandboxv1alpha1.SandboxModeSuspended,
 				},
 			},
 			wantPod: nil,
@@ -1208,7 +1203,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Mode: sandboxv1alpha1.SandboxModeRunning,
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1317,7 +1312,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Mode: sandboxv1alpha1.SandboxModeRunning,
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						ObjectMeta: sandboxv1alpha1.PodMetadata{
 							Annotations: map[string]string{
@@ -1384,7 +1379,7 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
-			name:        "annotated pod missing with replicas=1: clears annotation and recreates pod",
+			name:        "annotated pod missing with mode=Running: clears annotation and recreates pod",
 			initialObjs: []runtime.Object{},
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1396,7 +1391,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Mode: sandboxv1alpha1.SandboxModeRunning,
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						ObjectMeta: sandboxv1alpha1.PodMetadata{
 							Annotations: map[string]string{
@@ -1441,7 +1436,7 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
-			name:        "annotated pod missing with replicas=0: clears annotation and does not recreate pod",
+			name:        "annotated pod missing with mode=Suspended: clears annotation and does not recreate pod",
 			initialObjs: []runtime.Object{},
 			sandbox: &sandboxv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1454,7 +1449,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32),
+					Mode: sandboxv1alpha1.SandboxModeSuspended,
 				},
 			},
 			wantPod:   nil,
@@ -1497,7 +1492,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(0)),
+					Mode: sandboxv1alpha1.SandboxModeSuspended,
 				},
 			},
 			wantPod:                nil,
@@ -1529,7 +1524,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(0)),
+					Mode: sandboxv1alpha1.SandboxModeSuspended,
 				},
 			},
 			wantPod:                nil,
@@ -1563,7 +1558,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(0)),
+					Mode: sandboxv1alpha1.SandboxModeSuspended,
 				},
 			},
 			wantPod:                nil,
@@ -1603,7 +1598,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Mode: sandboxv1alpha1.SandboxModeRunning,
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
@@ -1616,7 +1611,7 @@ func TestReconcilePod(t *testing.T) {
 			wantSandboxAnnotations: map[string]string{},
 		},
 		{
-			name: "refuses to delete unowned annotated pod and removes annotation when replicas is 0",
+			name: "refuses to delete unowned annotated pod and removes annotation when mode is Suspended",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1636,7 +1631,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(0)),
+					Mode: sandboxv1alpha1.SandboxModeSuspended,
 				},
 			},
 			wantPod:                nil,
@@ -1679,7 +1674,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Mode: sandboxv1alpha1.SandboxModeRunning,
 					PodTemplate: sandboxv1alpha1.PodTemplate{
 						ObjectMeta: sandboxv1alpha1.PodMetadata{
 							Labels: map[string]string{
@@ -1796,8 +1791,8 @@ func TestReconcileService(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: new(int32(1)),
-			Service:  new(true),
+			Mode:    sandboxv1alpha1.SandboxModeRunning,
+			Service: new(true),
 		},
 	}
 
@@ -2016,9 +2011,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
-				},
+				Spec: sandboxv1alpha1.SandboxSpec{},
 			},
 			wantNilService:        true,
 			wantStatusService:     "",
@@ -2045,9 +2038,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
-				},
+				Spec: sandboxv1alpha1.SandboxSpec{},
 			},
 			wantService: &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2089,9 +2080,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
-				},
+				Spec: sandboxv1alpha1.SandboxSpec{},
 			},
 			wantNilService:        true,
 			wantStatusService:     "",
@@ -2116,8 +2105,7 @@ func TestReconcileService(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
-					Service:  new(false),
+					Service: new(false),
 				},
 			},
 			wantNilService:        true,
@@ -2143,8 +2131,7 @@ func TestReconcileService(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1alpha1.SandboxSpec{
-					Replicas: new(int32(1)),
-					Service:  new(false),
+					Service: new(false),
 				},
 			},
 			wantNilService:        true,

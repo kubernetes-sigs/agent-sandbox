@@ -114,7 +114,7 @@ class Sandbox:
         """Fetches the first pod IP from the Sandbox status.
 
         Always queries the K8s API for the latest IP — the pod IP can change
-        after a pod restart (e.g. when spec.replicas is scaled to 0 and back).
+        after a pod restart (e.g. when spec.mode is set to Suspended and back to Running).
         Returns None if the controller does not populate podIPs.
         """
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}

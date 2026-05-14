@@ -45,7 +45,6 @@ func newTestScheme() *runtime.Scheme {
 }
 
 func createPoolSandbox(poolName, namespace, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, suffix string) *sandboxv1alpha1.Sandbox {
-	replicas := int32(1)
 	templateRefHash := ""
 	var podTemplateHash string
 	var podSpec corev1.PodSpec
@@ -86,7 +85,7 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 			},
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: &replicas,
+			Mode: sandboxv1alpha1.SandboxModeRunning,
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				ObjectMeta: sandboxv1alpha1.PodMetadata{
 					Labels: map[string]string{

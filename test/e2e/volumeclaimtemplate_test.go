@@ -80,7 +80,6 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "vct-sandbox",
 			ServiceFQDN:   fmt.Sprintf("vct-sandbox.%s.svc.cluster.local", ns.Name),
-			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{

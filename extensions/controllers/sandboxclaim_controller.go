@@ -1028,9 +1028,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		}
 	}
 
-	// TODO: this is a workaround, remove replica assignment related issue #202
-	replicas := int32(1)
-	sandbox.Spec.Replicas = &replicas
+	sandbox.Spec.Mode = v1alpha1.SandboxModeRunning
 
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)

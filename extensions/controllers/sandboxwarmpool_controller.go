@@ -335,8 +335,6 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
 
-	replicas := int32(1)
-
 	sandbox := &sandboxv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-", warmPool.Name),
@@ -345,8 +343,8 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 			Annotations:  sandboxAnnotations,
 		},
 		Spec: sandboxv1alpha1.SandboxSpec{
-			Replicas: &replicas,
-			Service:  template.Spec.Service,
+			Service: template.Spec.Service,
+			Mode:    sandboxv1alpha1.SandboxModeRunning,
 			PodTemplate: sandboxv1alpha1.PodTemplate{
 				Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
 				ObjectMeta: sandboxv1alpha1.PodMetadata{

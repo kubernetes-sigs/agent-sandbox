@@ -8,8 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
 // limitations under the License.
 
 package e2e
@@ -25,7 +23,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-func TestSandboxReplicas(t *testing.T) {
+func TestSandboxMode(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
 	// Set up a namespace
@@ -34,7 +32,7 @@ func TestSandboxReplicas(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 	// Create a Sandbox Object
 	sandboxObj := simpleSandbox(ns.Name)
-	sandboxObj.Spec.Replicas = new(int32(1))
+	sandboxObj.Spec.Mode = sandboxv1alpha1.SandboxModeRunning
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
 	nameHash := NameHash(sandboxObj.Name)
@@ -43,7 +41,6 @@ func TestSandboxReplicas(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
-			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
@@ -68,9 +65,9 @@ func TestSandboxReplicas(t *testing.T) {
 	service.Namespace = "my-sandbox-ns"
 	tc.MustExist(service)
 
-	// Set replicas to zero
+	// Set mode to Suspended
 	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1alpha1.Sandbox) {
-		obj.Spec.Replicas = new(int32(0))
+		obj.Spec.Mode = sandboxv1alpha1.SandboxModeSuspended
 	})
 
 	// Wait for sandbox status to reflect new state
@@ -78,11 +75,10 @@ func TestSandboxReplicas(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
-			Replicas:      0,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod does not exist, replicas is 0; Service Exists",
+					Message:            "Pod does not exist, mode is Suspended; Service Exists",
 					ObservedGeneration: 2,
 					Reason:             "DependenciesReady",
 					Status:             "True",

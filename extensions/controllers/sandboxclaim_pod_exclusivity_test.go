@@ -79,7 +79,7 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 				}},
 			},
 			Spec: sandboxv1alpha1.SandboxSpec{
-				Replicas: new(int32(1)),
+				Mode: sandboxv1alpha1.SandboxModeRunning,
 				PodTemplate: sandboxv1alpha1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "c", Image: "img"}},

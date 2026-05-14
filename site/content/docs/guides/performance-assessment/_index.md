@@ -258,8 +258,8 @@ chmod +x run_rapid_burst.sh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BURST_SIZE` | `1000` | SandboxClaims created per burst iteration |
-| `QPS` | `1000` | Max creation rate (queries per second) |
+| `BURST_SIZE` | `400` | SandboxClaims created per burst iteration |
+| `QPS` | `400` | Max creation rate (queries per second) |
 | `TOTAL_BURSTS` | `10` | Total number of burst iterations |
 | `WARMPOOL_SIZE` | `1000` | Pre-warmed sandboxes to maintain |
 | `RUNTIME_CLASS` | `""` (none) | RuntimeClassName for the SandboxTemplate — set to `gvisor` if your cluster supports it |

@@ -18,8 +18,8 @@ The `agent-sandbox-controller` exposes several flags that directly affect throug
 | `--sandbox-claim-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxClaim controller |
 | `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller |
 | `--sandbox-template-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxTemplate controller |
-| `--kube-api-qps` | `-1` (unlimited) | Max QPS sent to the Kubernetes API server |
-| `--kube-api-burst` | `10` | Max burst for API server throttle requests |
+| `--kube-api-qps` | `-1` (no client-side throttling) | Disables client-side rate limiting to the Kubernetes API server. Server-side throttling (API Priority and Fairness) still applies. When setting a positive value, use at least the sum of all `--*-concurrent-workers` flags to avoid starving reconcile loops. |
+| `--kube-api-burst` | `10` | Max burst for API server throttle requests. Ignored when `--kube-api-qps` is `-1`. When `--kube-api-qps` is set to a positive value, set this to equal or greater than `--kube-api-qps`. |
 
 ### Applying Flags
 

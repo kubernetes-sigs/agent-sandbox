@@ -733,13 +733,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Create new Pod
 	logger.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
-	labels := map[string]string{
+	podLabels := map[string]string{
 		sandboxLabel: nameHash,
 	}
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-		labels[k] = v
+		podLabels[k] = v
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
 	annotations := map[string]string{}
@@ -777,7 +777,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sandbox.Name,
 			Namespace:   sandbox.Namespace,
-			Labels:      labels,
+			Labels:      podLabels,
 			Annotations: annotations,
 		},
 		Spec: *mutatedSpec,

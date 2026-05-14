@@ -1074,6 +1074,13 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
+				launchType := v1alpha1.SandboxLaunchTypeCold
+				if claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel] == statusName || statusName != claim.Name {
+					launchType = v1alpha1.SandboxLaunchTypeWarm
+				}
+				if err := r.ensureSandboxLaunchTypeLabel(ctx, sandbox, launchType); err != nil {
+					return nil, fmt.Errorf("failed to ensure launch type label on sandbox %q: %w", sandbox.Name, err)
+				}
 				return sandbox, nil
 			}
 		} else if !k8errors.IsNotFound(err) {
@@ -1089,6 +1096,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 				if metav1.IsControlledBy(sandbox, claim) {
 					logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
+					if err := r.ensureSandboxLaunchTypeLabel(ctx, sandbox, v1alpha1.SandboxLaunchTypeWarm); err != nil {
+						return nil, fmt.Errorf("failed to ensure launch type label on sandbox %q: %w", sandbox.Name, err)
+					}
 					return sandbox, nil
 				}
 
@@ -1145,6 +1155,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			logger.Error(err, "Sandbox controller mismatch")
 			return nil, err
 		}
+		if err := r.ensureSandboxLaunchTypeLabel(ctx, sandbox, v1alpha1.SandboxLaunchTypeCold); err != nil {
+			return nil, fmt.Errorf("failed to ensure launch type label on sandbox %q: %w", sandbox.Name, err)
+		}
 		return sandbox, nil
 	}
 
@@ -1173,6 +1186,19 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	// No warm pool sandbox available; caller decides whether to create
 	return nil, nil
+}
+
+func (r *SandboxClaimReconciler) ensureSandboxLaunchTypeLabel(ctx context.Context, sandbox *v1alpha1.Sandbox, launchType string) error {
+	if sandbox.Labels != nil && sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel] == launchType {
+		return nil
+	}
+
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Labels == nil {
+		sandbox.Labels = make(map[string]string)
+	}
+	sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel] = launchType
+	return r.Patch(ctx, sandbox, patch)
 }
 
 func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*extensionsv1alpha1.SandboxTemplate, error) {

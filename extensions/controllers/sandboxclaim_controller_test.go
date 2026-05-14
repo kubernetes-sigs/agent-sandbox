@@ -2061,6 +2061,14 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
 		t.Error("pool sandbox should still have warm pool label (should not have been adopted)")
 	}
+
+	var updatedAdopted sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &updatedAdopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+	if val := updatedAdopted.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeWarm {
+		t.Errorf("expected previously adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeWarm, val, updatedAdopted.Labels)
+	}
 }
 
 func TestRecordCreationLatencyMetric(t *testing.T) {
@@ -3487,6 +3495,13 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	}
 	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
 		t.Errorf("expected claim status to be updated with 'adopted-sb' on 2nd pass, got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &adopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+	if val := adopted.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeWarm {
+		t.Errorf("expected assigned adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeWarm, val, adopted.Labels)
 	}
 
 	// Verify that the extra warm sandbox was STILL NOT adopted (it should still have its warm pool labels)

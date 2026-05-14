@@ -939,7 +939,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Annotations[v1alpha1.SandboxTemplateRefAnnotation] = template.Name
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	sandbox.Spec.Service = new(true)
+	sandbox.Spec.Service = template.Spec.Service
 	// Copy volumeClaimTemplates from template to sandbox
 	if len(template.Spec.VolumeClaimTemplates) > 0 {
 		sandbox.Spec.VolumeClaimTemplates = make([]v1alpha1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))

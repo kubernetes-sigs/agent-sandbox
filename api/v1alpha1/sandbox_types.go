@@ -140,10 +140,11 @@ type SandboxSpec struct {
 
 	// service controls whether the controller should automatically create a
 	// headless Service for this Sandbox.
-	// When unset (nil), the controller preserves existing Services for backward
+	// When unset, the controller preserves existing Services for backward
 	// compatibility but does not create new ones. Set to true to enable or false
 	// to explicitly disable and remove the Service.
 	//nolint:kubeapilinter
+	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
 }

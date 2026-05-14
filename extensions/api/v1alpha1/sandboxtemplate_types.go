@@ -126,6 +126,16 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:default=Disallowed
 	// +optional
 	EnvVarsInjectionPolicy EnvVarsInjectionPolicy `json:"envVarsInjectionPolicy,omitempty"`
+
+	// service controls whether the controller should automatically create a
+	// headless Service for Sandboxes created from this template.
+	// When unset, the controller preserves existing Services for backward
+	// compatibility but does not create new ones. Set to true to enable or false
+	// to explicitly disable and remove the Service.
+	//nolint:kubeapilinter
+	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	// +optional
+	Service *bool `json:"service,omitempty"`
 }
 
 // SandboxTemplateStatus defines the observed state of Sandbox.

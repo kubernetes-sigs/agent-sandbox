@@ -83,6 +83,38 @@ class TestProxyRequestValidation:
         assert "Could not connect to the backend sandbox" in resp.json()["detail"]
 
 
+class TestClusterDomain:
+    def test_default_cluster_domain(self):
+        assert sandbox_router.DEFAULT_CLUSTER_DOMAIN == "cluster.local"
+
+    def test_default_when_env_var_unset(self):
+        env = {k: v for k, v in os.environ.items() if k != "CLUSTER_DOMAIN"}
+        with patch.dict(os.environ, env, clear=True):
+            assert sandbox_router._get_cluster_domain() == "cluster.local"
+
+    def test_env_var_overrides_cluster_domain(self):
+        with patch.dict(os.environ, {"CLUSTER_DOMAIN": "my.custom.domain"}):
+            assert sandbox_router._get_cluster_domain() == "my.custom.domain"
+
+    def test_empty_env_var_falls_back_to_default(self, capsys):
+        with patch.dict(os.environ, {"CLUSTER_DOMAIN": ""}):
+            result = sandbox_router._get_cluster_domain()
+        assert result == "cluster.local"
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.out
+        assert "CLUSTER_DOMAIN" in captured.out
+
+    def test_module_level_cluster_domain_default(self):
+        assert sandbox_router.cluster_domain == "cluster.local"
+
+    def test_env_var_sets_module_level_cluster_domain(self):
+        with patch.dict(os.environ, {"CLUSTER_DOMAIN": "my.custom.domain"}):
+            importlib.reload(sandbox_router)
+            assert sandbox_router.cluster_domain == "my.custom.domain"
+
+        importlib.reload(sandbox_router)
+
+
 class TestProxyTimeout:
     def test_default_timeout(self):
         assert sandbox_router.DEFAULT_PROXY_TIMEOUT == 180.0
@@ -166,6 +198,27 @@ class TestProxyRouting:
                 request_obj.url
             )
 
+    def test_target_url_uses_custom_cluster_domain(self, client):
+        """Module-level cluster_domain should be used when constructing the target URL."""
+        with patch.object(sandbox_router, "cluster_domain", "custom.domain"):
+            with patch.object(
+                sandbox_router.client,
+                "send",
+                new_callable=AsyncMock,
+                side_effect=httpx.ConnectError("expected"),
+            ) as mock_send:
+                client.post(
+                    "/some/path",
+                    headers={
+                        "X-Sandbox-ID": "test-box",
+                        "X-Sandbox-Namespace": "prod",
+                        "X-Sandbox-Port": "9999",
+                    },
+                )
+                request_obj = mock_send.call_args[0][0]
+                assert "test-box.prod.svc.custom.domain:9999/some/path" in str(
+                    request_obj.url
+                )
 
     def test_original_host_header_not_forwarded(self, client):
         """The original 'host' header should not be forwarded to the sandbox."""

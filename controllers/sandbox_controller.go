@@ -26,6 +26,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -702,6 +703,37 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 		case resourceUnowned:
+			// Validate provenance and spec before adopting an unowned pod.
+			hasProvenance := pod.Labels != nil && pod.Labels[sandboxLabel] == nameHash
+
+			expectedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
+			var pvcVolumes []corev1.Volume
+			for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
+				pvcName := pvcTemplate.Name + "-" + sandbox.Name
+				pvcVolumes = append(pvcVolumes, corev1.Volume{
+					Name: pvcTemplate.Name,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: pvcName,
+						},
+					},
+				})
+			}
+			expectedSpec.Volumes = MergeVolumeClaimVolumes(expectedSpec.Volumes, pvcVolumes)
+
+			if !hasProvenance || !equality.Semantic.DeepEqual(&pod.Spec, expectedSpec) {
+				log.Info("Refusing to adopt pod: pod lacks provenance or fails spec validation",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+					"hasProvenance", hasProvenance)
+
+				if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+					return nil, err
+				}
+
+				return nil, fmt.Errorf("cannot adopt unowned pod %q: lacks provenance or fails spec validation", pod.Name)
+			}
+
+			log.Info("Adopting unowned pod with valid provenance and spec", "Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
@@ -710,7 +742,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			// No additional action needed — label applied below.
 		}
 
-		updated := r.updatePodMetadata(pod, sandbox, nameHash)
+		updated := r.updatePodMetadata(pod, sandbox, nameHash) || ownership == resourceUnowned
 		if updated {
 			if err := r.Update(ctx, pod); err != nil {
 				return nil, fmt.Errorf("failed to update pod: %w", err)
@@ -915,7 +947,15 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 			case resourceUnowned:
-				log.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				hasProvenance := pvc.Labels != nil && pvc.Labels[sandboxLabel] == nameHash
+				if !hasProvenance || !equality.Semantic.DeepEqual(&pvc.Spec, &pvcTemplate.Spec) {
+					log.Info("Refusing to adopt PVC: PVC lacks provenance or fails spec validation",
+						"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
+						"hasProvenance", hasProvenance)
+					return fmt.Errorf("cannot adopt unowned PVC %q: lacks provenance or fails spec validation", pvcName)
+				}
+
+				log.Info("Adopting unowned PVC with valid provenance and spec", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}

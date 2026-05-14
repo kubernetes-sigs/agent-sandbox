@@ -217,7 +217,19 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
 		return err
 	}
+	setWarmLaunchTypeLabelIfNeeded(sb)
 	return r.Update(ctx, sb)
+}
+
+func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1alpha1.Sandbox) bool {
+	if sb.Labels == nil {
+		sb.Labels = make(map[string]string)
+	}
+	if sb.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel] == sandboxv1alpha1.SandboxLaunchTypeWarm {
+		return false
+	}
+	sb.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel] = sandboxv1alpha1.SandboxLaunchTypeWarm
+	return true
 }
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
@@ -266,6 +278,14 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 					log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
 				}
+				continue
+			}
+		}
+
+		if isControlledByPool && setWarmLaunchTypeLabelIfNeeded(&sb) {
+			if err := r.Update(ctx, &sb); err != nil {
+				log.Error(err, "Failed to update sandbox launch type label", "sandbox", sb.Name)
+				allErrors = errors.Join(allErrors, err)
 				continue
 			}
 		}

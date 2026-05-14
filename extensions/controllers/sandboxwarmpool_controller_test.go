@@ -354,6 +354,8 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 					controllerRef := metav1.GetControllerOf(&sb)
 					if controllerRef != nil && controllerRef.UID == warmPool.UID {
 						ownedCount++
+						require.Equal(t, sandboxv1alpha1.SandboxLaunchTypeWarm, sb.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel],
+							"sandbox %s should have warm launch type label", sb.Name)
 					}
 				}
 			}

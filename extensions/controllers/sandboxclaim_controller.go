@@ -1089,11 +1089,11 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	if sbName != "" {
-		logger.V(1).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
+		logger.V(1).Info("Checking assigned sandbox name", "sandboxName", sbName, "claim", claim.Name)
 		sandbox := &v1alpha1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
-				logger.Info("Found existing adopted sandbox", "sandbox", sandbox.Name, "fromLabel", fromLabel, "claim", claim.Name)
+				logger.Info("Found existing adopted sandbox", "sandbox", sbName, "claim", claim.Name)
 				if fromLabel {
 					patch := client.MergeFrom(claim.DeepCopy())
 					if claim.Annotations == nil {
@@ -1113,12 +1113,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			controllerRef := metav1.GetControllerOf(sandbox)
 			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
 				// Still in warm pool. Try to complete adoption!
-				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sandbox.Name, "fromLabel", fromLabel, "claim", claim.Name)
+				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
 				if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
 					if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
-						logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sandbox.Name, "claim", claim.Name)
+						logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
 					} else {
-						return nil, fmt.Errorf("failed to complete adoption of %q: %w", sandbox.Name, err)
+						return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 					}
 				} else {
 					if fromLabel {
@@ -1133,12 +1133,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						}
 					}
 					// If succeeded, return error to retry so next reconcile sees it controlled by us!
-					return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sandbox.Name)
+					return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
 				}
 			}
-			logger.Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sandbox.Name, "claim", claim.Name)
+			logger.Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
 		} else if k8errors.IsNotFound(err) {
-			logger.Info("Sandbox recorded in claim metadata not found, removing stale reference", "sandboxName", sbName, "from claim metadata", claim.Name)
+			logger.Info("Sandbox recorded in claim metadata not found, removing stale reference", "sandboxName", sbName, "claim", claim.Name)
 			patch := client.MergeFrom(claim.DeepCopy())
 			if fromLabel {
 				delete(claim.Labels, extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel)

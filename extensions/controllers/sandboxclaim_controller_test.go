@@ -1892,6 +1892,15 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					}
 				}
 
+				// 5. Verify the claim records the assigned sandbox annotation
+				var updatedClaim extensionsv1alpha1.SandboxClaim
+				if err := fakeClient.Get(ctx, req.NamespacedName, &updatedClaim); err != nil {
+					t.Fatalf("failed to get updated claim: %v", err)
+				}
+				if val := updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation]; val != tc.expectedAdoptedSandbox {
+					t.Errorf("expected claim to have assigned sandbox annotation %q, got %q", tc.expectedAdoptedSandbox, val)
+				}
+
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
 				var sandbox sandboxv1alpha1.Sandbox

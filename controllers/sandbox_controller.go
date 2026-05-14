@@ -146,12 +146,12 @@ type SandboxReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.14.1/pkg/reconcile
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	sandbox := &sandboxv1alpha1.Sandbox{}
 	if err := r.Get(ctx, req.NamespacedName, sandbox); err != nil {
 		if k8serrors.IsNotFound(err) {
-			log.Info("sandbox resource not found. Ignoring since object must be deleted")
+			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -167,7 +167,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.DeletionTimestamp.IsZero() {
-		log.Info("Sandbox is being deleted")
+		logger.Info("Sandbox is being deleted")
 		return ctrl.Result{}, nil
 	}
 
@@ -204,7 +204,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 		}
 
-		log.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
+		logger.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
 		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
 	} else {
 		err = r.reconcileChildResources(ctx, sandbox)
@@ -380,14 +380,14 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 }
 
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
 		return nil
 	}
 
 	if err := r.Status().Update(ctx, sandbox); err != nil {
-		log.Error(err, "Failed to update sandbox status")
+		logger.Error(err, "Failed to update sandbox status")
 		return err
 	}
 
@@ -409,18 +409,18 @@ func NameHash(objectName string) string {
 }
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	desired := sandbox.Spec.Service
 
 	service := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
 		if !k8serrors.IsNotFound(err) {
-			log.Error(err, "Failed to get Service")
+			logger.Error(err, "Failed to get Service")
 			return nil, fmt.Errorf("service get failed: %w", err)
 		}
 		// Service does not exist, and desired is true — create service
 		if desired != nil && *desired {
-			log.Info("Creating a new Headless Service", "Service.Namespace", sandbox.Namespace, "Service.Name", sandbox.Name)
+			logger.Info("Creating a new Headless Service", "Service.Namespace", sandbox.Namespace, "Service.Name", sandbox.Name)
 			service = &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandbox.Name,
@@ -438,12 +438,12 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			}
 			service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 			if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
-				log.Error(err, "Failed to set controller reference")
+				logger.Error(err, "Failed to set controller reference")
 				return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 			}
 			err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner))
 			if err != nil {
-				log.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+				logger.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
 				return nil, err
 			}
 			r.setServiceStatus(sandbox, service)
@@ -455,14 +455,14 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	}
 
 	// Service exists
-	log.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+	logger.Info("Found Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
 
 	ownership, controllerRef := checkOwnership(service, sandbox)
 
 	if desired != nil && !*desired {
 		// desired is false — delete owned service
 		if ownership == resourceOwnedBySandbox {
-			log.Info("Deleting owned service because service is disabled",
+			logger.Info("Deleting owned service because service is disabled",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 			if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
 				return nil, fmt.Errorf("failed to delete service: %w", err)
@@ -475,7 +475,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	// desired == nil or true
 	switch ownership {
 	case resourceOwnedByOther:
-		log.Info("Refusing to use service: service is owned by a different controller",
+		logger.Info("Refusing to use service: service is owned by a different controller",
 			"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
 			"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 		return nil, fmt.Errorf("service %q is owned by %s/%s (UID: %s), not by sandbox %q",
@@ -489,14 +489,14 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 		// desired is true + unowned service — adopt
 		if service.Spec.ClusterIP != corev1.ClusterIPNone && service.Spec.ClusterIP != "" {
-			log.Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
+			logger.Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
 				"Service.ClusterIP", service.Spec.ClusterIP)
 			return nil, fmt.Errorf("cannot adopt service %q: ClusterIP is %q (expected %q, field is immutable)",
 				service.Name, service.Spec.ClusterIP, corev1.ClusterIPNone)
 		}
 
-		log.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
+		logger.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 
 		if service.Labels == nil {
 			service.Labels = make(map[string]string)
@@ -533,7 +533,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 
 		if needsUpdate {
-			log.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
+			logger.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
 			if err := r.Patch(ctx, service, patch); err != nil {
 				return nil, fmt.Errorf("failed to patch owned service: %w", err)
 			}
@@ -549,13 +549,13 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 	if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; !exists {
 		return nil
 	}
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	patch := client.MergeFrom(sandbox.DeepCopy())
 	delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
 		return fmt.Errorf("failed to clear pod name annotation: %w", err)
 	}
-	log.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
+	logger.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 	return nil
 }
 
@@ -572,7 +572,7 @@ func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1alpha1.Sandbox)
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
@@ -589,29 +589,29 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		LabelSelector: labelSelector,
 		Namespace:     sandbox.Namespace,
 	}); err != nil {
-		log.Error(err, "Failed to list pods")
+		logger.Error(err, "Failed to list pods")
 	}
 
 	if len(podList.Items) > 1 {
-		log.Info("Multiple pods found for sandbox, this should not happen", "Sandbox", sandbox.Name, "PodCount", len(podList.Items))
+		logger.Info("Multiple pods found for sandbox, this should not happen", "Sandbox", sandbox.Name, "PodCount", len(podList.Items))
 	}
 
 	// Determine the pod name to look up
 	podName := resolvePodName(sandbox)
 	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]
 	if podName != sandbox.Name {
-		log.Info("Using tracked pod name from sandbox annotation", "podName", podName)
+		logger.Info("Using tracked pod name from sandbox annotation", "podName", podName)
 	}
 
 	pod := &corev1.Pod{}
 	err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod)
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
-			log.Error(err, "Failed to get Pod")
+			logger.Error(err, "Failed to get Pod")
 			return nil, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
-			log.Info("Pod referenced by annotation not found, clearing annotation to recover state", "podName", podName)
+			logger.Info("Pod referenced by annotation not found, clearing annotation to recover state", "podName", podName)
 			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
 				return nil, err
 			}
@@ -625,18 +625,18 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			switch ownership {
 			case resourceOwnedBySandbox:
 				if pod.DeletionTimestamp.IsZero() {
-					log.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					logger.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
 						return nil, fmt.Errorf("failed to delete pod: %w", err)
 					}
 				} else {
-					log.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					logger.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
 			case resourceUnowned:
-				log.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
+				logger.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
 			case resourceOwnedByOther:
-				log.Info("Refusing to delete pod: pod is owned by a different controller",
+				logger.Info("Refusing to delete pod: pod is owned by a different controller",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 			}
@@ -661,7 +661,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 
 		if annotatedPodName != "" {
-			log.Info("Skipping pod name annotation update because sandbox already tracks a different pod", "trackedPodName", annotatedPodName, "podName", podName)
+			logger.Info("Skipping pod name annotation update because sandbox already tracks a different pod", "trackedPodName", annotatedPodName, "podName", podName)
 			return nil
 		}
 
@@ -678,7 +678,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, error) {
-		log.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		logger.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
 		if r.Tracer.IsRecording(ctx) {
 			r.Tracer.AddEvent(ctx, "ExistingPodStatusObserved", map[string]string{
@@ -690,7 +690,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
 		case resourceOwnedByOther:
-			log.Info("Refusing to adopt pod: pod is owned by a different controller",
+			logger.Info("Refusing to adopt pod: pod is owned by a different controller",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
@@ -732,14 +732,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	// Create new Pod
-	log.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
-	labels := map[string]string{
+	logger.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
+	podLabels := map[string]string{
 		sandboxLabel: nameHash,
 	}
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
-		labels[k] = v
+		podLabels[k] = v
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
 	annotations := map[string]string{}
@@ -777,7 +777,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sandbox.Name,
 			Namespace:   sandbox.Namespace,
-			Labels:      labels,
+			Labels:      podLabels,
 			Annotations: annotations,
 		},
 		Spec: *mutatedSpec,
@@ -788,7 +788,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 		if k8serrors.IsAlreadyExists(err) {
-			log.Info("Pod already exists, fetching existing pod",
+			logger.Info("Pod already exists, fetching existing pod",
 				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 			existingPod := &corev1.Pod{}
 			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
@@ -796,7 +796,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			}
 			return reconcileExistingPod(existingPod)
 		}
-		log.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
 
@@ -894,7 +894,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 }
 
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePVCs", nil)
@@ -908,14 +908,14 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			ownership, controllerRef := checkOwnership(pvc, sandbox)
 			switch ownership {
 			case resourceOwnedByOther:
-				log.Info("Refusing to use PVC: PVC is owned by a different controller",
+				logger.Info("Refusing to use PVC: PVC is owned by a different controller",
 					"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
 					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 				return fmt.Errorf("PVC %q is owned by %s/%s (UID: %s), not by sandbox %q",
 					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 			case resourceUnowned:
-				log.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}
@@ -930,7 +930,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 		}
 
 		if !k8serrors.IsNotFound(err) {
-			log.Error(err, "Failed to get PVC")
+			logger.Error(err, "Failed to get PVC")
 			return fmt.Errorf("PVC Get Failed: %w", err)
 		}
 
@@ -940,7 +940,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 		}
 		pvcLabels[sandboxLabel] = nameHash
 
-		log.Info("Creating a new PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
+		logger.Info("Creating a new PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
 		pvc = &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        pvcName,
@@ -954,7 +954,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 		}
 		if err := r.Create(ctx, pvc, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
-			log.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
+			logger.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
 			return err
 		}
 	}
@@ -963,7 +963,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed.
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	var allErrors error
 
 	// Delete pod only if owned by this sandbox
@@ -981,10 +981,10 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete pod: %w", err))
 			}
 		case resourceUnowned:
-			log.Info("Skipping pod deletion during expiry: pod has no controllerRef pointing to this sandbox",
+			logger.Info("Skipping pod deletion during expiry: pod has no controllerRef pointing to this sandbox",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
 		case resourceOwnedByOther:
-			log.Info("Skipping pod deletion during expiry: pod is owned by a different controller",
+			logger.Info("Skipping pod deletion during expiry: pod is owned by a different controller",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 		}
@@ -1004,10 +1004,10 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
 			}
 		case resourceUnowned:
-			log.Info("Skipping service deletion during expiry: service has no controllerRef pointing to this sandbox",
+			logger.Info("Skipping service deletion during expiry: service has no controllerRef pointing to this sandbox",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 		case resourceOwnedByOther:
-			log.Info("Skipping service deletion during expiry: service is owned by a different controller",
+			logger.Info("Skipping service deletion during expiry: service is owned by a different controller",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 		}

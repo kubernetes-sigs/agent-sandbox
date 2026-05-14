@@ -57,7 +57,15 @@ func TestSandboxTemplateRefHash(t *testing.T) {
 	}
 
 	// Check that different inputs produce different hashes
-	if results["simple template ref name"] == results["a different template ref name"] {
-		t.Errorf("SandboxTemplateRefHash produced same hash for different inputs: %q", results["simple template ref name"])
+	for descA, resultA := range results {
+		for descB, resultB := range results {
+			if descA == descB {
+				continue
+			}
+
+			if resultA == resultB {
+				t.Errorf("SandboxTemplateRefHash produced same hash for different inputs: case '%q' and case '%q'", descA, descB)
+			}
+		}
 	}
 }

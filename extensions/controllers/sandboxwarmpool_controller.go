@@ -61,22 +61,22 @@ type SandboxWarmPoolReconciler struct {
 
 // Reconcile implements the reconciliation loop for SandboxWarmPool.
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Fetch the SandboxWarmPool instance
 	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
 	if err := r.Get(ctx, req.NamespacedName, warmPool); err != nil {
 		if k8serrors.IsNotFound(err) {
-			log.Info("SandboxWarmPool resource not found. Ignoring since object must be deleted")
+			logger.Info("SandboxWarmPool resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to get SandboxWarmPool")
+		logger.Error(err, "Failed to get SandboxWarmPool")
 		return ctrl.Result{}, err
 	}
 
 	// Handle deletion
 	if !warmPool.DeletionTimestamp.IsZero() {
-		log.Info("SandboxWarmPool is being deleted")
+		logger.Info("SandboxWarmPool is being deleted")
 		return ctrl.Result{}, nil
 	}
 
@@ -90,7 +90,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Update status if it has changed
 	if err := r.updateStatus(ctx, oldStatus, warmPool); err != nil {
-		log.Error(err, "Failed to update SandboxWarmPool status")
+		logger.Error(err, "Failed to update SandboxWarmPool status")
 		return ctrl.Result{}, err
 	}
 
@@ -99,7 +99,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
 func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Compute hash of the warm pool name for the pool label
 	poolNameHash := sandboxcontrollers.NameHash(warmPool.Name)
@@ -114,7 +114,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		LabelSelector: labelSelector,
 		Namespace:     warmPool.Namespace,
 	}); err != nil {
-		log.Error(err, "Failed to list sandboxes")
+		logger.Error(err, "Failed to list sandboxes")
 		return err
 	}
 
@@ -130,11 +130,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	var healthySandboxes []sandboxv1alpha1.Sandbox
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() && now.Sub(sb.CreationTimestamp.Time) > warmPoolReadinessGracePeriod {
-			log.Info("Deleting stuck warm pool sandbox",
+			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
 				"age", now.Sub(sb.CreationTimestamp.Time).Round(time.Second))
 			if err := r.Delete(ctx, &sb); err != nil {
-				log.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
+				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
 			}
 			continue
@@ -146,7 +146,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	desiredReplicas := warmPool.Spec.Replicas
 	currentReplicas := int32(len(activeSandboxes))
 
-	log.Info("Pool status",
+	logger.Info("Pool status",
 		"desired", desiredReplicas,
 		"current", currentReplicas,
 		"poolName", warmPool.Name,
@@ -167,11 +167,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// Create new sandboxes if we need more
 	if currentReplicas < desiredReplicas && tmplErr == nil {
 		sandboxesToCreate := desiredReplicas - currentReplicas
-		log.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
+		logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 
 		for range sandboxesToCreate {
 			if err := r.createPoolSandbox(ctx, warmPool, poolNameHash, template, currentPodTemplateHash); err != nil {
-				log.Error(err, "Failed to create pool sandbox")
+				logger.Error(err, "Failed to create pool sandbox")
 				allErrors = errors.Join(allErrors, err)
 			}
 		}
@@ -180,7 +180,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// Delete excess sandboxes if we have too many
 	if currentReplicas > desiredReplicas {
 		sandboxesToDelete := currentReplicas - desiredReplicas
-		log.Info("Deleting excess sandboxes", "count", sandboxesToDelete)
+		logger.Info("Deleting excess sandboxes", "count", sandboxesToDelete)
 
 		// Prioritize deleting unready sandboxes before ready ones,
 		// then newest first within each group.
@@ -199,7 +199,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		for i := int32(0); i < sandboxesToDelete && i < int32(len(activeSandboxes)); i++ {
 			sb := &activeSandboxes[i]
 			if err := r.Delete(ctx, sb); err != nil {
-				log.Error(err, "Failed to delete sandbox", "sandbox", sb.Name)
+				logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
 			}
 		}
@@ -222,7 +222,7 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
 func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, sandboxes []sandboxv1alpha1.Sandbox, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string, tmplErr error) ([]sandboxv1alpha1.Sandbox, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	var activeSandboxes []sandboxv1alpha1.Sandbox
 	var allErrors error
 
@@ -241,7 +241,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 	case extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType, "":
 		updateStrategy = extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType
 	default:
-		log.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", updateStrategyType)
+		logger.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", updateStrategyType)
 		updateStrategy = extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType
 	}
 
@@ -255,15 +255,15 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
 
 		if !isOrphan && !isControlledByPool {
-			log.Info("Ignoring sandbox with different controller", "sandbox", sb.Name, "controller", controllerRef.Name)
+			logger.Info("Ignoring sandbox with different controller", "sandbox", sb.Name, "controller", controllerRef.Name)
 			continue
 		}
 
 		if tmplErr == nil && (updateStrategy == extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType || isOrphan) {
 			if r.isSandboxStale(ctx, &sb, template, currentPodTemplateHash, vettedHashes) {
-				log.Info("Deleting stale sandbox", "sandbox", sb.Name, "isOrphan", isOrphan)
+				logger.Info("Deleting stale sandbox", "sandbox", sb.Name, "isOrphan", isOrphan)
 				if err := r.Delete(ctx, &sb); err != nil {
-					log.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
+					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
 				}
 				continue
@@ -271,9 +271,9 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 		}
 
 		if isOrphan {
-			log.Info("Adopting orphaned sandbox", "sandbox", sb.Name)
+			logger.Info("Adopting orphaned sandbox", "sandbox", sb.Name)
 			if err := r.adoptSandbox(ctx, warmPool, &sb); err != nil {
-				log.Error(err, "Failed to adopt sandbox", "sandbox", sb.Name)
+				logger.Error(err, "Failed to adopt sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
 				continue
 			}
@@ -295,7 +295,7 @@ func computePodTemplateHash(template *extensionsv1alpha1.SandboxTemplate) (strin
 
 // fetchTemplateAndHash fetches the sandbox template and computes its hash.
 func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool) (*extensionsv1alpha1.SandboxTemplate, string, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	template, tmplErr := r.getTemplate(ctx, warmPool)
 	var currentPodTemplateHash string
 	if tmplErr == nil {
@@ -303,14 +303,14 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	}
 
 	if tmplErr != nil {
-		log.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
+		logger.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
 	}
 	return template, currentPodTemplateHash, tmplErr
 }
 
 // createPoolSandbox creates a full Sandbox CR (with pod template, service, etc.) for the warm pool.
 func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1alpha1.SandboxWarmPool, poolNameHash string, template *extensionsv1alpha1.SandboxTemplate, currentPodTemplateHash string) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Build labels for the Sandbox CR
 	sandboxLabels := map[string]string{
@@ -374,17 +374,17 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {
-		log.Error(err, "Failed to create pool sandbox")
+		logger.Error(err, "Failed to create pool sandbox")
 		return err
 	}
 
-	log.Info("Created new pool sandbox", "sandbox", sandbox.Name, "poolName", warmPool.Name)
+	logger.Info("Created new pool sandbox", "sandbox", sandbox.Name, "poolName", warmPool.Name)
 	return nil
 }
 
 // updateStatus updates the status of the SandboxWarmPool if it has changed.
 func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1alpha1.SandboxWarmPoolStatus, warmPool *extensionsv1alpha1.SandboxWarmPool) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Check if status has changed
 	if equality.Semantic.DeepEqual(oldStatus, &warmPool.Status) {
@@ -404,11 +404,11 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 	}
 
 	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil { //nolint:staticcheck // SA1019: client.Apply requires generated apply configurations
-		log.Error(err, "Failed to apply SandboxWarmPool status via SSA")
+		logger.Error(err, "Failed to apply SandboxWarmPool status via SSA")
 		return err
 	}
 
-	log.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
+	logger.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
 	return nil
 }
 
@@ -517,7 +517,7 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 
 // findWarmPoolsForTemplate returns a list of reconcile.Requests for all SandboxWarmPools that reference the template.
 func (r *SandboxWarmPoolReconciler) findWarmPoolsForTemplate(ctx context.Context, obj client.Object) []reconcile.Request {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
 	if !ok {
 		return nil
@@ -525,7 +525,7 @@ func (r *SandboxWarmPoolReconciler) findWarmPoolsForTemplate(ctx context.Context
 
 	warmPools := &extensionsv1alpha1.SandboxWarmPoolList{}
 	if err := r.List(ctx, warmPools, client.InNamespace(template.Namespace), client.MatchingFields{extensionsv1alpha1.TemplateRefField: template.Name}); err != nil {
-		log.Error(err, "Failed to list warm pools for template", "template", template.Name)
+		logger.Error(err, "Failed to list warm pools for template", "template", template.Name)
 		return nil
 	}
 

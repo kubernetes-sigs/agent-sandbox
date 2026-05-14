@@ -81,6 +81,12 @@ spec:
               warmpool:
                 default: default
                 type: string
+              warmpoolMaxRetries:
+                default: 3
+                format: int32
+                maximum: 10
+                minimum: 1
+                type: integer
             required:
             - sandboxTemplateRef
             type: object

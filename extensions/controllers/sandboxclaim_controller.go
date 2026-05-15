@@ -651,7 +651,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		if adopted == nil {
 			// Try with old hash
 			oldHash := HashUsingSandboxTemplateRefName(claim.Spec.TemplateRef.Name)
-			logger.V(1).Info("Failed to find candidate with new hash, trying old hash", "newHash", templateHash, "oldHash", oldHash)
+			logger.V(1).Info("Failed to find candidate with namespace-aware hash, trying namespace-agnostic hash", "newHash", templateHash, "oldHash", oldHash)
 			templateHashUsed = oldHash
 			adopted, adoptedKey, err = r.getCandidate(ctx, claim, oldHash)
 			if err != nil {

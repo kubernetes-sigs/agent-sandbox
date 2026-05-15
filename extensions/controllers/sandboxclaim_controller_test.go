@@ -1812,7 +1812,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				claim,
 				func() client.Object {
 					sb := createWarmPoolSandbox("pool-sb-legacy", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
-					sb.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash("test-template")
+					sb.Labels[sandboxTemplateRefHash] = HashUsingSandboxTemplateRefName("test-template")
 					return sb
 				}(),
 			},

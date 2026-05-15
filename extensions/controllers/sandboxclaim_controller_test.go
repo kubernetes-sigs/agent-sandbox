@@ -2031,24 +2031,18 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 
 				// 4. Verify the adopted sandbox records the adopted pod name
-				if val := adoptedSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; val != adoptedSandbox.Name {
-					t.Errorf("expected adopted sandbox to have %q annotation %q, got %q; annotations=%v", sandboxv1beta1.SandboxPodNameAnnotation, adoptedSandbox.Name, val, adoptedSandbox.Annotations)
-				}
+				require.Equal(t, adoptedSandbox.Name, adoptedSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
 
 				for key, expected := range tc.expectedAnnotations {
-					if val := adoptedSandbox.Annotations[key]; val != expected {
-						t.Errorf("expected adopted sandbox to preserve annotation %q=%q, got %q; annotations=%v", key, expected, val, adoptedSandbox.Annotations)
-					}
+					require.Equal(t, expected, adoptedSandbox.Annotations[key])
 				}
 
 				// 5. Verify the claim records the assigned sandbox annotation
-				var updatedClaim extensionsv1alpha1.SandboxClaim
+				var updatedClaim extensionsv1beta1.SandboxClaim
 				if err := fakeClient.Get(ctx, req.NamespacedName, &updatedClaim); err != nil {
 					t.Fatalf("failed to get updated claim: %v", err)
 				}
-				if val := updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation]; val != tc.expectedAdoptedSandbox {
-					t.Errorf("expected claim to have assigned sandbox annotation %q, got %q", tc.expectedAdoptedSandbox, val)
-				}
+				require.Equal(t, tc.expectedAdoptedSandbox, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
 
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
@@ -3441,7 +3435,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			Namespace: "default",
 			UID:       "claim-uid-123",
 			Annotations: map[string]string{
-				extensionsv1alpha1.AssignedSandboxNameAnnotation: "adopted-sb",
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "adopted-sb",
 			},
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
@@ -3535,7 +3529,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	// Run reconcile
 	_, err := reconciler.Reconcile(context.Background(), req)
-	expectedErr := "triggered adoption completion for \"adopted-sb\": retrying"
+	expectedErr := "triggered adoption completion for sandbox adopted-sb, retry"
 	if err == nil {
 		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
 	} else if err.Error() != expectedErr {
@@ -3844,24 +3838,24 @@ func TestMapTemplateToClaims(t *testing.T) {
 func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 	scheme := newScheme(t)
 
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim-legacy",
 			Namespace: "default",
 			UID:       "claim-uid-legacy",
 			Labels: map[string]string{
-				extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel: "adopted-sb-legacy",
+				extensionsv1beta1.DeprecatedAssignedSandboxNameLabel: "adopted-sb-legacy",
 			},
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
 		},
 	}
 
-	template := &extensionsv1alpha1.SandboxTemplate{
+	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "c", Image: "img"}},
 				},
@@ -3869,27 +3863,27 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 		},
 	}
 
-	adoptedSandbox := &sandboxv1alpha1.Sandbox{
+	adoptedSandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "adopted-sb-legacy",
 			Namespace: "default",
 			UID:       "adopted-sb-legacy-uid",
 			Labels: map[string]string{
-				extensionsv1alpha1.SandboxIDLabel: "claim-uid-legacy",
+				extensionsv1beta1.SandboxIDLabel: "claim-uid-legacy",
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
 				Kind:       "SandboxClaim",
 				Name:       "test-claim-legacy",
 				UID:        "claim-uid-legacy",
 				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
-		Spec: sandboxv1alpha1.SandboxSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
-				ObjectMeta: sandboxv1alpha1.PodMetadata{
+		Spec: sandboxv1beta1.SandboxSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				ObjectMeta: sandboxv1beta1.PodMetadata{
 					Labels: map[string]string{
-						extensionsv1alpha1.SandboxIDLabel: "claim-uid-legacy",
+						extensionsv1beta1.SandboxIDLabel: "claim-uid-legacy",
 					},
 				},
 			},
@@ -3919,15 +3913,11 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 	}
 
 	// Verify that the claim was migrated: DeprecatedAssignedSandboxNameLabel removed, AssignedSandboxNameAnnotation added
-	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim); err != nil {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 
-	if _, ok := updatedClaim.Labels[extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel]; ok {
-		t.Error("expected legacy label to be removed after migration")
-	}
-	if updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation] != "adopted-sb-legacy" {
-		t.Errorf("expected annotation to be set to 'adopted-sb-legacy', got %q", updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation])
-	}
+	require.NotContains(t, updatedClaim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
+	require.Equal(t, "adopted-sb-legacy", updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
 }

@@ -53,7 +53,7 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 	var podSpec corev1.PodSpec
 
 	if template != nil {
-		templateRefHash = sandboxcontrollers.NameHash(template.Name)
+		templateRefHash = SandboxTemplateRefHash(template.Namespace, template.Name)
 		podSpec = *template.Spec.PodTemplate.Spec.DeepCopy()
 		ApplySandboxSecureDefaults(template, &podSpec)
 		// If template has a version label, we could use it as part of the hash placeholder
@@ -443,7 +443,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 		for _, sb := range list.Items {
 			require.Equal(t, expectedPoolNameHash, sb.Labels[warmPoolSandboxLabel],
 				"sandbox %s should have correct warm pool label", sb.Name)
-			require.Equal(t, sandboxcontrollers.NameHash(templateName), sb.Labels[sandboxTemplateRefHash],
+			require.Equal(t, SandboxTemplateRefHash(template.Namespace, templateName), sb.Labels[sandboxTemplateRefHash],
 				"sandbox %s should have correct template ref label", sb.Name)
 
 			// Verify pod template labels are propagated into the sandbox's pod template
@@ -1130,7 +1130,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 	for _, sb := range sandboxes.Items {
 		// Sandboxes should be recreated (new names) because TemplateRef changed
 		require.False(t, initialSandboxNames[sb.Name], "Sandbox should have been recreated with new name")
-		require.Equal(t, sandboxcontrollers.NameHash(templateName2), sb.Labels[sandboxTemplateRefHash], "Sandbox should have updated template ref hash label")
+		require.Equal(t, SandboxTemplateRefHash(warmPool.Namespace, templateName2), sb.Labels[sandboxTemplateRefHash], "Sandbox should have updated template ref hash label")
 		// The pod spec is identical, so the image remains image-v1
 		require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image since spec is identical")
 	}

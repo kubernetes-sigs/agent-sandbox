@@ -1010,8 +1010,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				if templateName == "" {
 					t.Fatalf("expected sandbox to have template ref annotation, but it was missing")
 				}
-				expectedHash := SandboxTemplateRefHash(templateName)
-				if val, exists := sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash]; !exists || val != expectedHash {
+				oldHash := HashUsingSandboxTemplateRefName(templateName)
+				newHash := SandboxTemplateRefHash("default", templateName)
+				if val, exists := sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash]; !exists || (val != oldHash && val != newHash) {
 					t.Errorf("expected Sandbox PodTemplate to have label '%s' with value %q, got %q", sandboxTemplateRefHash, expectedHash, val)
 				}
 			}
@@ -1793,7 +1794,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
 					warmPoolSandboxLabel:                  poolNameHash,
-					sandboxTemplateRefHash:                sandboxcontrollers.NameHash("test-template"),
+					sandboxTemplateRefHash:                SandboxTemplateRefHash("default", "test-template"),
 					sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm,
 				},
 				OwnerReferences: []metav1.OwnerReference{
@@ -2081,6 +2082,21 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectSandboxAdoption:   false,
 			expectNewSandboxCreated: true,
+		},
+		{
+			name: "adopts sandbox with legacy hash",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-legacy", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash("test-template")
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "pool-sb-legacy",
+			expectNewSandboxCreated: false,
 		},
 	}
 

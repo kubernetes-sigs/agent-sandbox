@@ -21,19 +21,38 @@ import (
 func TestSandboxTemplateRefHash(t *testing.T) {
 	testCases := []struct {
 		desc            string
+		namespace       string
 		templateRefName string
 	}{
 		{
 			desc:            "simple template ref name",
+			namespace:       "default",
 			templateRefName: "sandbox-name",
 		},
 		{
 			desc:            "a different template ref name",
+			namespace:       "default",
 			templateRefName: "other-template",
 		},
 		{
 			desc:            "empty template ref name",
+			namespace:       "default",
 			templateRefName: "",
+		},
+		{
+			desc:            "same name different namespace",
+			namespace:       "other-namespace",
+			templateRefName: "sandbox-name",
+		},
+		{
+			desc:            "swapped name and namespace A",
+			namespace:       "string1",
+			templateRefName: "string2",
+		},
+		{
+			desc:            "swapped name and namespace B",
+			namespace:       "string2",
+			templateRefName: "string1",
 		},
 	}
 
@@ -41,15 +60,15 @@ func TestSandboxTemplateRefHash(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			hash1 := SandboxTemplateRefHash(tc.templateRefName)
-			hash2 := SandboxTemplateRefHash(tc.templateRefName)
+			hash1 := SandboxTemplateRefHash(tc.namespace, tc.templateRefName)
+			hash2 := SandboxTemplateRefHash(tc.namespace, tc.templateRefName)
 
 			if len(hash1) != 8 {
-				t.Errorf("SandboxTemplateRefHash(%q) length = %d, want 8", tc.templateRefName, len(hash1))
+				t.Errorf("SandboxTemplateRefHash(%q, %q) length = %d, want 8", tc.namespace, tc.templateRefName, len(hash1))
 			}
 
 			if hash1 != hash2 {
-				t.Errorf("SandboxTemplateRefHash(%q) is not deterministic: %q != %q", tc.templateRefName, hash1, hash2)
+				t.Errorf("SandboxTemplateRefHash(%q, %q) is not deterministic: %q != %q", tc.namespace, tc.templateRefName, hash1, hash2)
 			}
 
 			results[tc.desc] = hash1

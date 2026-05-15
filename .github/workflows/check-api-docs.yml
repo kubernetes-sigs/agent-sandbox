@@ -9,6 +9,9 @@ on:
       - 'config.yaml'
       - '.github/workflows/check-api-docs.yml'
 
+permissions:
+  contents: read
+
 jobs:
   check-api-docs:
     name: Verify Generated API Docs

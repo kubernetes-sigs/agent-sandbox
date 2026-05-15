@@ -14,6 +14,8 @@
 
 
 import os
+import re
+import secrets
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -45,10 +47,40 @@ def _get_proxy_timeout() -> float:
     return value
 
 
+DNS_LABEL_REGEX = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+
+
+def _is_valid_dns_label(label: str) -> bool:
+    if not label or len(label) > 63:
+        return False
+    return bool(DNS_LABEL_REGEX.match(label))
+
+
+def _env_var_is_truthy(name: str) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
 proxy_timeout = _get_proxy_timeout()
 client = httpx.AsyncClient(timeout=proxy_timeout)
 
+ROUTER_AUTH_TOKEN = os.environ.get("ROUTER_AUTH_TOKEN")
+ALLOW_UNAUTHENTICATED_ROUTER = _env_var_is_truthy("ALLOW_UNAUTHENTICATED_ROUTER")
+
 print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")
+if ROUTER_AUTH_TOKEN:
+    print("Authentication enabled: requests must include valid Bearer token.")
+elif ALLOW_UNAUTHENTICATED_ROUTER:
+    print("WARNING: Running in UNAUTHENTICATED mode because "
+          "ALLOW_UNAUTHENTICATED_ROUTER is enabled. Anyone can use this proxy!")
+else:
+    raise RuntimeError(
+        "ROUTER_AUTH_TOKEN must be set to start the sandbox router securely. "
+        "If you intentionally need unauthenticated mode for local development or testing, "
+        "set ALLOW_UNAUTHENTICATED_ROUTER=true explicitly."
+    )
 
 
 @app.get("/healthz")
@@ -63,16 +95,37 @@ async def proxy_request(request: Request, full_path: str):
     Receives all incoming requests, determines the target sandbox from headers,
     and asynchronously proxies the request to it.
     """
+    # Check authentication if enabled
+    if ROUTER_AUTH_TOKEN:
+        auth_header = request.headers.get("Authorization")
+        if not auth_header:
+            raise HTTPException(
+                status_code=401,
+                detail="Missing or invalid Authorization header.",
+            )
+        parts = auth_header.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise HTTPException(
+                status_code=401,
+                detail="Missing or invalid Authorization header.",
+            )
+        if not secrets.compare_digest(parts[1], ROUTER_AUTH_TOKEN):
+            raise HTTPException(status_code=401, detail="Invalid token.")
+
     sandbox_id = request.headers.get("X-Sandbox-ID")
     if not sandbox_id:
         raise HTTPException(
             status_code=400, detail="X-Sandbox-ID header is required.")
 
+    # Sanitize sandbox_id to prevent DNS injection and directory traversal style attacks
+    if not _is_valid_dns_label(sandbox_id):
+        raise HTTPException(status_code=400, detail="Invalid sandbox ID format.")
+
     # Dynamic discovery via headers
     namespace = request.headers.get("X-Sandbox-Namespace", DEFAULT_NAMESPACE)
     
     # Sanitize namespace to prevent DNS injection
-    if not namespace.replace("-", "").isalnum():
+    if not _is_valid_dns_label(namespace):
         raise HTTPException(status_code=400, detail="Invalid namespace format.")
 
     try:
@@ -94,8 +147,11 @@ async def proxy_request(request: Request, full_path: str):
     print(f"Proxying request for sandbox '{sandbox_id}' to URL: {target_url}")
 
     try:
-        headers = {key: value for (
-            key, value) in request.headers.items() if key.lower() != 'host'}
+        headers = {
+            key: value
+            for (key, value) in request.headers.items()
+            if key.lower() not in {"host", "authorization"}
+        }
 
         req = client.build_request(
             method=request.method,
@@ -115,7 +171,9 @@ async def proxy_request(request: Request, full_path: str):
         print(
             f"ERROR: Connection to sandbox at {target_url} failed. Error: {e}")
         raise HTTPException(
-            status_code=502, detail=f"Could not connect to the backend sandbox: {sandbox_id}")
+            status_code=502,
+            detail=f"Could not connect to the backend sandbox: {sandbox_id}",
+        )
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(

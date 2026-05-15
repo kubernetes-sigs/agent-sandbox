@@ -386,7 +386,6 @@ SandboxTemplate is the Schema for the sandbox template API.
 | `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  | Optional: \{\} <br /> |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 | `spec` _[SandboxTemplateSpec](#sandboxtemplatespec)_ | spec defines the desired state of Sandbox |  | Required: \{\} <br /> |
-| `status` _[SandboxTemplateStatus](#sandboxtemplatestatus)_ | status defines the observed state of Sandbox |  | Optional: \{\} <br /> |
 
 
 #### SandboxTemplateRef
@@ -425,19 +424,6 @@ _Appears in:_
 | `networkPolicyManagement` _[NetworkPolicyManagement](#networkpolicymanagement)_ | networkPolicyManagement defines whether the controller manages the NetworkPolicy.<br />Valid values are "Managed" (default) or "Unmanaged". | Managed | Enum: [Managed Unmanaged] <br />Optional: \{\} <br /> |
 | `envVarsInjectionPolicy` _[EnvVarsInjectionPolicy](#envvarsinjectionpolicy)_ | envVarsInjectionPolicy allows a SandboxClaim to inject or override environment variables defined in the template.<br />If set to Disallowed, the SandboxClaim will be rejected if it specifies any environment variables. | Disallowed | Enum: [Allowed Overrides Disallowed] <br />Optional: \{\} <br /> |
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for Sandboxes created from this template.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
-
-
-#### SandboxTemplateStatus
-
-
-
-SandboxTemplateStatus defines the observed state of Sandbox.
-
-
-
-_Appears in:_
-- [SandboxTemplate](#sandboxtemplate)
-
 
 
 #### SandboxWarmPool

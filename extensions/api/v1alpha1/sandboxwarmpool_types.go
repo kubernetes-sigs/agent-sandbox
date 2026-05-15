@@ -39,7 +39,7 @@ type SandboxWarmPoolSpec struct {
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
 	// +required
-	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
 
 	// updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes
 	// +optional

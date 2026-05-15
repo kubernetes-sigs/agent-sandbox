@@ -37,8 +37,6 @@ type SandboxTemplatesGetter interface {
 type SandboxTemplateInterface interface {
 	Create(ctx context.Context, sandboxTemplate *apiv1alpha1.SandboxTemplate, opts v1.CreateOptions) (*apiv1alpha1.SandboxTemplate, error)
 	Update(ctx context.Context, sandboxTemplate *apiv1alpha1.SandboxTemplate, opts v1.UpdateOptions) (*apiv1alpha1.SandboxTemplate, error)
-	// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-	UpdateStatus(ctx context.Context, sandboxTemplate *apiv1alpha1.SandboxTemplate, opts v1.UpdateOptions) (*apiv1alpha1.SandboxTemplate, error)
 	Delete(ctx context.Context, name string, opts v1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error
 	Get(ctx context.Context, name string, opts v1.GetOptions) (*apiv1alpha1.SandboxTemplate, error)

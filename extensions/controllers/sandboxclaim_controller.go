@@ -357,7 +357,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 				mergedMeta.Labels = make(map[string]string)
 			}
 			mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
-			mergedMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+			mergedMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Namespace, template.Name)
 
 			if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 				return nil, err
@@ -638,17 +638,29 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*v1alpha1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	templateHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
+	templateHash := SandboxTemplateRefHash(claim.Namespace, claim.Spec.TemplateRef.Name)
+	var templateHashUsed string
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
 	for range 3 {
+		templateHashUsed = templateHash
 		adopted, adoptedKey, err := r.getCandidate(ctx, claim, templateHash)
 		if err != nil {
 			return nil, err
 		}
 		if adopted == nil {
-			logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
-			return nil, nil // Warm pool is truly empty, fall completely to cold start
+			// Try with old hash
+			oldHash := HashUsingSandboxTemplateRefName(claim.Spec.TemplateRef.Name)
+			logger.V(1).Info("Failed to find candidate with new hash, trying old hash", "newHash", templateHash, "oldHash", oldHash)
+			templateHashUsed = oldHash
+			adopted, adoptedKey, err = r.getCandidate(ctx, claim, oldHash)
+			if err != nil {
+				return nil, err
+			}
+			if adopted == nil {
+				logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
+				return nil, nil // Warm pool is truly empty, fall completely to cold start
+			}
 		}
 
 		// Wrap the API logic in a closure
@@ -666,7 +678,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel] = adopted.Name
 			if err := r.Update(ctx, claim); err != nil {
-				r.WarmSandboxQueue.Add(templateHash, adoptedKey)
+				r.WarmSandboxQueue.Add(templateHashUsed, adoptedKey)
 				if k8errors.IsConflict(err) {
 					// Conflict means someone else updated the claim. We fail and retry.
 					return false, err
@@ -680,7 +692,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				if k8errors.IsNotFound(err) {
 					return false, nil
 				}
-				r.WarmSandboxQueue.Add(templateHash, adoptedKey)
+				r.WarmSandboxQueue.Add(templateHashUsed, adoptedKey)
 				if k8errors.IsConflict(err) {
 					return false, nil
 				}
@@ -750,7 +762,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 
 	// Fetch the template to construct the mergedMeta that reconcileActive will build.
-	templateHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
+	templateHash := SandboxTemplateRefHash(claim.Namespace, claim.Spec.TemplateRef.Name)
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr == nil && template != nil {
 		var mergedMeta v1alpha1.PodMetadata
@@ -954,7 +966,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Sandbox.metadata.labels).
 	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Namespace, template.Name)
 
 	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
@@ -1484,9 +1496,13 @@ func verifySandboxCandidate(candidate *v1alpha1.Sandbox, claim *extensionsv1alph
 		return err
 	}
 
-	templateHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
-	if candidate.Labels[sandboxTemplateRefHash] != templateHash {
-		return fmt.Errorf("incorrect template hash, expected %v, got %v", templateHash, candidate.Labels[sandboxTemplateRefHash])
+	oldHash := HashUsingSandboxTemplateRefName(claim.Spec.TemplateRef.Name)
+	newHash := SandboxTemplateRefHash(claim.Namespace, claim.Spec.TemplateRef.Name)
+	actualHash := candidate.Labels[sandboxTemplateRefHash]
+
+	// TODO remove old hash case after a deprecation period
+	if actualHash != oldHash && actualHash != newHash {
+		return fmt.Errorf("incorrect template hash, expected %v or %v, got %v", newHash, oldHash, actualHash)
 	}
 	return nil
 }
@@ -1548,10 +1564,12 @@ func (h *templateEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 		return
 	}
 
-	templateHash := SandboxTemplateRefHash(template.Name)
+	newHash := SandboxTemplateRefHash(template.Namespace, template.Name)
+	oldHash := HashUsingSandboxTemplateRefName(template.Name)
 	logger := log.FromContext(ctx)
-	logger.Info("SandboxTemplate deleted, cleaning up memory queue", "template", template.Name, "hash", templateHash)
+	logger.Info("SandboxTemplate deleted, cleaning up memory queues", "template", template.Name, "newHash", newHash, "oldHash", oldHash)
 
-	// Actively drop the entire queue from memory
-	h.sandboxQueue.RemoveQueue(templateHash)
+	// Actively drop both queues from memory
+	h.sandboxQueue.RemoveQueue(newHash)
+	h.sandboxQueue.RemoveQueue(oldHash)
 }

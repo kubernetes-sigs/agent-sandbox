@@ -220,7 +220,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 			return false
 		}
 
-		_, hasSandboxLabel := adoptedPod.Labels["agents.x-k8s.io/sandbox-name-hash"]
+		_, hasSandboxLabel := adoptedPod.Labels[sandboxv1alpha1.SandboxNameHashLabel]
 		return hasSandboxLabel
 	}, 30*time.Second, 500*time.Millisecond, "sandbox controller should adopt the pod before deletion")
 

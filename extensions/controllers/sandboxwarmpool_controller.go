@@ -446,9 +446,17 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 		return true
 	}
 
-	// If hashes match, it's fresh.
-	if sandboxHash != "" && sandboxHash == currentPodTemplateHash {
-		return false
+	// Check if the sandbox is unowned (orphaned).
+	controllerRef := metav1.GetControllerOf(sandbox)
+	isOrphan := controllerRef == nil
+
+	// If the sandbox is controlled by the warm pool, we can safely use the hash shortcut.
+	// Unowned sandboxes must bypass the hash shortcut to prevent label spoofing attacks.
+	if !isOrphan {
+		// If hashes match, it's fresh.
+		if sandboxHash != "" && sandboxHash == currentPodTemplateHash {
+			return false
+		}
 	}
 
 	// If currentPodTemplateHash is empty, it means we failed to compute it.
@@ -460,7 +468,8 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	}
 
 	// Check if we've already evaluated this specific old version.
-	if sandboxHash != "" {
+	// Unowned sandboxes must bypass the cache to ensure full semantic comparison.
+	if !isOrphan && sandboxHash != "" {
 		if isStale, found := vettedHashes[sandboxHash]; found {
 			return isStale
 		}
@@ -471,8 +480,9 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	// used during creation to avoid false positives from controller-injected fields.
 	isStale := !r.comparePodSpecs(template, &sandbox.Spec.PodTemplate.Spec)
 
-	// Save the result for the next sandbox with this same hash.
-	if sandboxHash != "" {
+	// Save the result for the next sandbox with this same hash,
+	// but only for pool-controlled sandboxes where the hash is trustworthy.
+	if !isOrphan && sandboxHash != "" {
 		vettedHashes[sandboxHash] = isStale
 	}
 

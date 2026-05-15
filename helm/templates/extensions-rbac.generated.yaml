@@ -67,7 +67,6 @@ rules:
   - sandboxclaims/finalizers
   - sandboxclaims/status
   - sandboxtemplates/finalizers
-  - sandboxtemplates/status
   - sandboxwarmpools/finalizers
   - sandboxwarmpools/status
   verbs:

@@ -71,14 +71,14 @@ type PodMetadata struct {
 	// and services.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
 	// +optional
-	Labels map[string]string `json:"labels,omitempty" protobuf:"bytes,1,rep,name=labels"`
+	Labels map[string]string `json:"labels,omitempty"`
 
 	// annotations is an unstructured key value map stored with a resource that may be
 	// set by external tools to store and retrieve arbitrary metadata. They are not
 	// queryable and should be preserved when modifying objects.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations
 	// +optional
-	Annotations map[string]string `json:"annotations,omitempty" protobuf:"bytes,2,rep,name=annotations"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type EmbeddedObjectMetadata struct {
@@ -89,41 +89,41 @@ type EmbeddedObjectMetadata struct {
 	// Cannot be updated.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names#names
 	// +optional
-	Name string `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
+	Name string `json:"name,omitempty"`
 
 	// labels defines the map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers
 	// and services.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
 	// +optional
-	Labels map[string]string `json:"labels,omitempty" protobuf:"bytes,1,rep,name=labels"`
+	Labels map[string]string `json:"labels,omitempty"`
 
 	// annotations is an unstructured key value map stored with a resource that may be
 	// set by external tools to store and retrieve arbitrary metadata. They are not
 	// queryable and should be preserved when modifying objects.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations
 	// +optional
-	Annotations map[string]string `json:"annotations,omitempty" protobuf:"bytes,2,rep,name=annotations"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type PodTemplate struct {
 	// spec is the Pod's spec
 	// +required
-	Spec corev1.PodSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
+	Spec corev1.PodSpec `json:"spec"`
 
 	// metadata is the Pod's metadata. Only labels and annotations are used.
 	// +optional
-	ObjectMeta PodMetadata `json:"metadata" protobuf:"bytes,3,opt,name=metadata"`
+	ObjectMeta PodMetadata `json:"metadata"`
 }
 
 type PersistentVolumeClaimTemplate struct {
 	// metadata is the PVC's metadata.
 	// +optional
-	EmbeddedObjectMetadata `json:"metadata" protobuf:"bytes,3,opt,name=metadata"`
+	EmbeddedObjectMetadata `json:"metadata"`
 
 	// spec is the PVC's spec
 	// +required
-	Spec corev1.PersistentVolumeClaimSpec `json:"spec" protobuf:"bytes,3,opt,name=spec"`
+	Spec corev1.PersistentVolumeClaimSpec `json:"spec"`
 }
 
 // SandboxSpec defines the desired state of Sandbox.
@@ -133,13 +133,13 @@ type SandboxSpec struct {
 
 	// podTemplate describes the pod spec that will be used to create an agent sandbox.
 	// +required
-	PodTemplate PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+	PodTemplate PodTemplate `json:"podTemplate"`
 
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
 	// +optional
 	// +listType=atomic
-	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
+	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.
 	// +optional

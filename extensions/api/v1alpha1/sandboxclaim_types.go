@@ -102,7 +102,7 @@ type Lifecycle struct {
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
 	// +required
-	Name string `json:"name,omitempty" protobuf:"bytes,1,name=name"`
+	Name string `json:"name,omitempty"`
 }
 
 // EnvVar represents a custom environment variable key-value pair.
@@ -125,7 +125,7 @@ type EnvVar struct {
 type SandboxClaimSpec struct {
 	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
 	// +required
-	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty" protobuf:"bytes,3,name=sandboxTemplateRef"`
+	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
 
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
@@ -154,11 +154,11 @@ type SandboxClaimSpec struct {
 type SandboxClaimStatus struct {
 	// conditions represent the latest available observations of a Sandbox's current state.
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty" protobuf:"bytes,1,rep,name=conditions"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// sandbox defines the state of Sandbox
 	// +optional
-	SandboxStatus SandboxStatus `json:"sandbox,omitempty" protobuf:"bytes,2,opt,name=sandboxStatus"`
+	SandboxStatus SandboxStatus `json:"sandbox,omitempty"`
 }
 
 type SandboxStatus struct {

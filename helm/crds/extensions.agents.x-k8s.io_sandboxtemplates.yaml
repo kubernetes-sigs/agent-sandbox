@@ -4142,12 +4142,8 @@ spec:
             required:
             - podTemplate
             type: object
-          status:
-            type: object
         required:
         - spec
         type: object
     served: true
     storage: true
-    subresources:
-      status: {}

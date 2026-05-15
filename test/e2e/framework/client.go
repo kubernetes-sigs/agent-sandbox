@@ -486,7 +486,13 @@ func (cl *ClusterClient) MustWaitForObject(obj client.Object, p ...predicates.Ob
 func (cl *ClusterClient) WaitForObjectNotFound(ctx context.Context, obj client.Object) error {
 	cl.Helper()
 	// Static 1 minute timeout, this can be adjusted if needed
-	timeoutCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
+	timeout := DefaultTimeout
+	// Namespaces can take a while to clean up due to cascading deletion of resources.
+	if _, isNamespace := obj.(*corev1.Namespace); isNamespace {
+		timeout = 3 * time.Minute
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 
 	defer cancel()
 	start := time.Now()

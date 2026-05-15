@@ -253,17 +253,61 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
-	// compute and set overall Ready condition
-	readyCondition := r.computeReadyCondition(sandbox, allErrors, svc, pod)
-	meta.SetStatusCondition(&sandbox.Status.Conditions, readyCondition)
+	// compute and set overall conditions
+	conditions := r.computeConditions(sandbox, allErrors, svc, pod)
+	hasFinished := false
+	for _, condition := range conditions {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
+		if condition.Type == string(sandboxv1alpha1.SandboxConditionFinished) {
+			hasFinished = true
+		}
+	}
 
-	if finishedCondition := r.computeFinishedCondition(sandbox, pod); finishedCondition != nil {
-		meta.SetStatusCondition(&sandbox.Status.Conditions, *finishedCondition)
-	} else {
+	if !hasFinished {
 		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionFinished))
 	}
 
 	return allErrors
+}
+
+func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) []metav1.Condition {
+	var conditions []metav1.Condition
+
+	if suspended := r.computeSuspendedCondition(sandbox, pod); suspended != nil {
+		conditions = append(conditions, *suspended)
+	}
+
+	if finished := r.computeFinishedCondition(sandbox, pod); finished != nil {
+		conditions = append(conditions, *finished)
+	}
+
+	conditions = append(conditions, r.computeReadyCondition(sandbox, err, svc, pod))
+
+	return conditions
+}
+
+func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1alpha1.Sandbox, pod *corev1.Pod) *metav1.Condition {
+	replicaCountZero := sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0
+	if !replicaCountZero {
+		return nil
+	}
+
+	suspended := metav1.Condition{
+		Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
+		ObservedGeneration: sandbox.Generation,
+	}
+	if pod == nil {
+		// Mark Suspended condition as True
+		suspended.Status = metav1.ConditionTrue
+		suspended.Reason = sandboxv1alpha1.SandboxReasonSuspendedPodTerminated
+		suspended.Message = "Pod has been terminated. Sandbox is not operational."
+	} else {
+		suspended.Status = metav1.ConditionFalse
+		suspended.Reason = sandboxv1alpha1.SandboxReasonSuspendedPodNotTerminated
+		suspended.Message = "Pod has not been terminated. Sandbox is operational."
+	}
+
+	return &suspended
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
@@ -272,12 +316,23 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 		ObservedGeneration: sandbox.Generation,
 		Message:            "",
 		Status:             metav1.ConditionFalse,
-		Reason:             "DependenciesNotReady",
+		Reason:             sandboxv1alpha1.SandboxReasonDependenciesNotReady,
 	}
 
 	if err != nil {
 		readyCondition.Reason = "ReconcilerError"
 		readyCondition.Message = "Error seen: " + err.Error()
+		return readyCondition
+	}
+
+	replicaCountZero := sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0
+	if replicaCountZero {
+		readyCondition.Reason = sandboxv1alpha1.SandboxReasonSuspended
+		if pod != nil {
+			readyCondition.Message = "Sandbox is suspending"
+		} else {
+			readyCondition.Message = "Sandbox is suspended"
+		}
 		return readyCondition
 	}
 
@@ -303,13 +358,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 			}
 		}
 	} else {
-		if sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0 {
-			message = "Pod does not exist, replicas is 0"
-			// This is intended behaviour. So marking it ready.
-			podReady = true
-		} else {
-			message = "Pod does not exist"
-		}
+		message = "Pod does not exist"
 	}
 
 	// svcRequired: true if the sandbox explicitly requests a service or if a
@@ -336,7 +385,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 	readyCondition.Message = message
 	if podReady && svcReady {
 		readyCondition.Status = metav1.ConditionTrue
-		readyCondition.Reason = "DependenciesReady"
+		readyCondition.Reason = sandboxv1alpha1.SandboxReasonDependenciesReady
 	}
 
 	return readyCondition
@@ -1074,7 +1123,7 @@ func setSandboxExpiredCondition(sandbox *sandboxv1alpha1.Sandbox) {
 // sandboxMarkedExpired checks if the sandbox is already marked as expired.
 func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
-	return cond != nil && cond.Reason == sandboxv1alpha1.SandboxReasonExpired
+	return cond != nil && (cond.Reason == sandboxv1alpha1.SandboxReasonExpired)
 }
 
 // SetupWithManager sets up the controller with the Manager.

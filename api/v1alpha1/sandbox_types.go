@@ -25,17 +25,33 @@ type ConditionType string
 func (c ConditionType) String() string { return string(c) }
 
 const (
+	// SandboxConditionSuspended indicates the sandbox is administratively suspended.
+	SandboxConditionSuspended ConditionType = "Suspended"
+	// SandboxReasonSuspendedPodTerminated indicates that the pod has been terminated.
+	SandboxReasonSuspendedPodTerminated = "PodTerminated"
+	// SandboxReasonSuspendedPodNotTerminated indicates the pod has not been terminated yet.
+	SandboxReasonSuspendedPodNotTerminated = "PodNotTerminated"
+
 	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"
+	// SandboxReasonDependenciesReady indicates the sandbox is fully operational.
+	SandboxReasonDependenciesReady = "DependenciesReady"
+	// SandboxReasonDependenciesNotReady indicates the Sandbox is expected to be running
+	// but its underlying dependencies are not fully provisioned or ready yet.
+	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
+	// SandboxReasonSuspended indicates the Sandbox has been administratively suspended
+	// (i.e., intentional action by the user to suspend the Sandbox).
+	SandboxReasonSuspended = "SandboxSuspended"
+
 	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
 	SandboxConditionFinished ConditionType = "Finished"
-
-	// SandboxReasonExpired indicates expired state for Sandbox.
-	SandboxReasonExpired = "SandboxExpired"
 	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
 	SandboxReasonPodSucceeded = "PodSucceeded"
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
+
+	// SandboxReasonExpired indicates expired state for Sandbox.
+	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"

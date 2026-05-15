@@ -49,11 +49,11 @@ func TestSandboxShutdownTime(t *testing.T) {
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod is Ready; Service Exists",
-					ObservedGeneration: 1,
-					Reason:             "DependenciesReady",
-					Status:             "True",
 					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1alpha1.SandboxReasonDependenciesReady,
+					Message:            "Pod is Ready; Service Exists",
 				},
 			},
 		}),
@@ -85,11 +85,11 @@ func TestSandboxShutdownTime(t *testing.T) {
 			Replicas:    0,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Sandbox has expired",
+					Type:               string(sandboxv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
-					Reason:             "SandboxExpired",
-					Status:             "False",
-					Type:               "Ready",
+					Reason:             sandboxv1alpha1.SandboxReasonExpired,
+					Message:            "Sandbox has expired",
 				},
 			},
 		}),

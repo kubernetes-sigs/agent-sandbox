@@ -241,6 +241,7 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		Tracer:        instrumenter,
 		ClusterDomain: clusterDomain,
+		Recorder:      mgr.GetEventRecorder("sandbox-controller"),
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

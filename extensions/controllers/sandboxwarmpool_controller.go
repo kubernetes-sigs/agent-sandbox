@@ -503,6 +503,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	newHash := SandboxTemplateRefHash(template.Namespace, template.Name)
 	actualHash := sandbox.Labels[sandboxTemplateRefHash]
 
+	// If the templateRefHash doesn't match, it's stale.
 	// TODO remove old hash case after a deprecation period
 	if actualHash != oldHash && actualHash != newHash {
 		return true

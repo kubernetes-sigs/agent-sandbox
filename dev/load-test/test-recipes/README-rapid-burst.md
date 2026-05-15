@@ -81,6 +81,16 @@ artifacts.
 
 Note that you may need to first run `chmod +x run_rapid_burst.sh` once.
 
+### Running with HPA and CapacityBuffer Scaling
+
+You can enable Horizontal Pod Autoscaler (HPA) and GKE CapacityBuffer scaling by setting environment variables before running the script. This allows the system to dynamically scale the pre-warmed sandbox pool as demand spikes and ensure underlying standby node capacity is provisioned.
+
+```bash
+ENABLE_HPA=true ENABLE_CAPACITY_BUFFER=true WARMPOOL_SIZE=10 ./run_rapid_burst.sh
+```
+
+When `ENABLE_CAPACITY_BUFFER=true` is set, the test automatically introduces a 5-minute pause after creating the `CapacityBuffer` resource to allow GKE node auto-provisioning to spin up the required standby nodes before initiating the rapid burst loops.
+
 ## Configuration
 
 The primary test parameters can be modified by editing the variables at the top of the
@@ -93,6 +103,18 @@ The primary test parameters can be modified by editing the variables at the top 
 - **`RUNTIME_CLASS`**: The RuntimeClassName for the SandboxTemplate such as `gvisor`.
 
 The total number of claims created by the test will be `BURST_SIZE * TOTAL_BURSTS`.
+
+### Autoscaling & Capacity Buffer Parameters
+
+For more details on HPA configuration and scaling behavior, refer to the [HPA SandboxWarmPool Scaling Example](../../../examples/hpa-swp-scaling/README.md).
+
+- **`ENABLE_HPA`**: Set to `true` to deploy a HorizontalPodAutoscaler targeting the SandboxWarmPool (default: `false`).
+- **`HPA_MIN_REPLICAS`**: The minimum number of pre-warmed sandboxes for the HPA (default: `10`).
+- **`HPA_MAX_REPLICAS`**: The maximum ceiling for the HPA (default: `500`).
+- **`HPA_TARGET_VALUE`**: The target creation rate of SandboxClaims per second (default: `0.5`).
+- **`ENABLE_CAPACITY_BUFFER`**: Set to `true` to deploy a GKE `CapacityBuffer` resource (default: `false`).
+- **`BUFFER_PERCENTAGE`**: The percentage of extra capacity to maintain in standby (default: `200`).
+- **`PROVISIONING_STRATEGY`**: The GKE provisioning strategy for standby capacity (default: `buffer.gke.io/standby-capacity`).
 
 ## Output
 

@@ -1103,9 +1103,8 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 					delete(claim.Labels, extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel)
 					if err := r.Patch(ctx, claim, patch); err != nil {
 						logger.Error(err, "Failed to migrate legacy sandbox label to annotation (non-fatal)", "claim", claim.Name)
-					} else {
-						logger.Info("Successfully migrated legacy sandbox label to annotation", "claim", claim.Name)
 					}
+					logger.Info("Successfully migrated legacy sandbox label to annotation", "claim", claim.Name)
 				}
 				return sandbox, nil
 			}
@@ -1131,9 +1130,11 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						if err := r.Patch(ctx, claim, patch); err != nil {
 							logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 						}
+						logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 					}
 					// If succeeded, return error to retry so next reconcile sees it controlled by us!
-					return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
+					logger.Info("Triggered adoption completion for sandbox, retry", "sandbox", sbName, "claim", claim.Name)
+					return nil, fmt.Errorf("triggered adoption completion for sandbox %s, retry", sbName)
 				}
 			}
 			logger.Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
@@ -1148,6 +1149,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if err := r.Patch(ctx, claim, patch); err != nil {
 				return nil, fmt.Errorf("failed to remove stale sandbox reference from claim metadata: %w", err)
 			}
+			logger.Info("Successfully removed stale sandbox reference from claim metadata", "sandbox", sbName, "claim", claim.Name)
 		} else {
 			return nil, fmt.Errorf("failed to get sandbox %q for sandbox name lookup: %w", sbName, err)
 		}

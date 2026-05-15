@@ -1882,14 +1882,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 
 				// 4. Verify the adopted sandbox records the adopted pod name
-				if val := adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; val != adoptedSandbox.Name {
-					t.Errorf("expected adopted sandbox to have %q annotation %q, got %q; annotations=%v", sandboxv1alpha1.SandboxPodNameAnnotation, adoptedSandbox.Name, val, adoptedSandbox.Annotations)
-				}
+				require.Equal(t, adoptedSandbox.Name, adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation])
 
 				for key, expected := range tc.expectedAnnotations {
-					if val := adoptedSandbox.Annotations[key]; val != expected {
-						t.Errorf("expected adopted sandbox to preserve annotation %q=%q, got %q; annotations=%v", key, expected, val, adoptedSandbox.Annotations)
-					}
+					require.Equal(t, expected, adoptedSandbox.Annotations[key])
 				}
 
 				// 5. Verify the claim records the assigned sandbox annotation
@@ -1897,9 +1893,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				if err := fakeClient.Get(ctx, req.NamespacedName, &updatedClaim); err != nil {
 					t.Fatalf("failed to get updated claim: %v", err)
 				}
-				if val := updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation]; val != tc.expectedAdoptedSandbox {
-					t.Errorf("expected claim to have assigned sandbox annotation %q, got %q", tc.expectedAdoptedSandbox, val)
-				}
+				require.Equal(t, tc.expectedAdoptedSandbox, updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation])
 
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
@@ -3385,7 +3379,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	// Run reconcile
 	_, err := reconciler.Reconcile(context.Background(), req)
-	expectedErr := "triggered adoption completion for \"adopted-sb\": retrying"
+	expectedErr := "triggered adoption completion for sandbox adopted-sb, retry"
 	if err == nil {
 		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
 	} else if err.Error() != expectedErr {
@@ -3678,10 +3672,6 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 
-	if _, ok := updatedClaim.Labels[extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel]; ok {
-		t.Error("expected legacy label to be removed after migration")
-	}
-	if updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation] != "adopted-sb-legacy" {
-		t.Errorf("expected annotation to be set to 'adopted-sb-legacy', got %q", updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation])
-	}
+	require.NotContains(t, updatedClaim.Labels, extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel)
+	require.Equal(t, "adopted-sb-legacy", updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation])
 }

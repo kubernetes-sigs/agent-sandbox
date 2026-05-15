@@ -2716,3 +2716,81 @@ func TestMergeVolumeClaimVolumes(t *testing.T) {
 		require.NotNil(t, result[0].EmptyDir)
 	})
 }
+
+// TestSandboxReconcile_ConditionsDoNotAccumulate verifies that reconciling a
+// ready sandbox many times does not grow the conditions slice. A bug
+// that appends instead of upserts the Ready condition will cause unbounded
+// status growth.
+func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
+	sbName := "no-grow-sandbox"
+	sbNs := "default"
+	nameHash := NameHash(sbName)
+
+	sandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sbName, Namespace: sbNs,
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			Replicas: ptr.To[int32](1),
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sbName, Namespace: sbNs,
+			Labels:          map[string]string{sandboxLabel: nameHash},
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sbName)},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Image: "img"}},
+		},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}},
+		},
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sbName, Namespace: sbNs,
+			Labels:          map[string]string{sandboxLabel: nameHash},
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sbName)},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Selector:  map[string]string{sandboxLabel: nameHash},
+		},
+	}
+
+	fc := newFakeClient(sandbox, pod, svc)
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sbName, Namespace: sbNs}}
+
+	const iters = 20
+	for i := range iters {
+		_, err := r.Reconcile(ctx, req)
+		require.NoError(t, err, "reconcile iteration %d", i)
+	}
+
+	var got sandboxv1alpha1.Sandbox
+	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
+	require.Len(t, got.Status.Conditions, 1,
+		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}

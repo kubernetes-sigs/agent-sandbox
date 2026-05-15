@@ -88,3 +88,124 @@ func TestSandboxTemplateRefHash(t *testing.T) {
 		}
 	}
 }
+
+func TestHashUsingSandboxTemplateRefName(t *testing.T) {
+	testCases := []struct {
+		desc            string
+		templateRefName string
+	}{
+		{
+			desc:            "simple template ref name",
+			templateRefName: "sandbox-name",
+		},
+		{
+			desc:            "a different template ref name",
+			templateRefName: "other-template",
+		},
+		{
+			desc:            "empty template ref name",
+			templateRefName: "",
+		},
+	}
+
+	results := make(map[string]string)
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			hash1 := HashUsingSandboxTemplateRefName(tc.templateRefName)
+			hash2 := HashUsingSandboxTemplateRefName(tc.templateRefName)
+
+			if len(hash1) != 8 {
+				t.Errorf("HashUsingSandboxTemplateRefName(%q) length = %d, want 8", tc.templateRefName, len(hash1))
+			}
+
+			if hash1 != hash2 {
+				t.Errorf("HashUsingSandboxTemplateRefName(%q) is not deterministic: %q != %q", tc.templateRefName, hash1, hash2)
+			}
+
+			results[tc.desc] = hash1
+		})
+	}
+
+	for descA, resultA := range results {
+		for descB, resultB := range results {
+			if descA == descB {
+				continue
+			}
+
+			if resultA == resultB {
+				t.Errorf("HashUsingSandboxTemplateRefName produced same hash for different inputs: case '%q' and case '%q'", descA, descB)
+			}
+		}
+	}
+}
+
+func TestHashUsingNamespaceAndSandboxTemplateRefName(t *testing.T) {
+	testCases := []struct {
+		desc            string
+		namespace       string
+		templateRefName string
+	}{
+		{
+			desc:            "simple template ref name",
+			namespace:       "default",
+			templateRefName: "sandbox-name",
+		},
+		{
+			desc:            "a different template ref name",
+			namespace:       "default",
+			templateRefName: "other-template",
+		},
+		{
+			desc:            "empty template ref name",
+			namespace:       "default",
+			templateRefName: "",
+		},
+		{
+			desc:            "same name different namespace",
+			namespace:       "other-namespace",
+			templateRefName: "sandbox-name",
+		},
+		{
+			desc:            "swapped name and namespace A",
+			namespace:       "string1",
+			templateRefName: "string2",
+		},
+		{
+			desc:            "swapped name and namespace B",
+			namespace:       "string2",
+			templateRefName: "string1",
+		},
+	}
+
+	results := make(map[string]string)
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			hash1 := HashUsingNamespaceAndSandboxTemplateRefName(tc.namespace, tc.templateRefName)
+			hash2 := HashUsingNamespaceAndSandboxTemplateRefName(tc.namespace, tc.templateRefName)
+
+			if len(hash1) != 8 {
+				t.Errorf("HashUsingNamespaceAndSandboxTemplateRefName(%q, %q) length = %d, want 8", tc.namespace, tc.templateRefName, len(hash1))
+			}
+
+			if hash1 != hash2 {
+				t.Errorf("HashUsingNamespaceAndSandboxTemplateRefName(%q, %q) is not deterministic: %q != %q", tc.namespace, tc.templateRefName, hash1, hash2)
+			}
+
+			results[tc.desc] = hash1
+		})
+	}
+
+	for descA, resultA := range results {
+		for descB, resultB := range results {
+			if descA == descB {
+				continue
+			}
+
+			if resultA == resultB {
+				t.Errorf("HashUsingNamespaceAndSandboxTemplateRefName produced same hash for different inputs: case '%q' and case '%q'", descA, descB)
+			}
+		}
+	}
+}

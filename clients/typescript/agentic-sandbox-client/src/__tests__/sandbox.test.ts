@@ -1,0 +1,1835 @@
+// Copyright 2025 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+import type { Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// ---------- hoisted mock fns ----------
+
+const {
+  mockDeleteNamespacedCustomObject,
+  mockGetNamespacedCustomObject,
+  mockWatchFn,
+  mockSpawn,
+  mockCreateServer,
+  mockCreateConnection,
+} = vi.hoisted(() => ({
+  mockDeleteNamespacedCustomObject: vi.fn(),
+  mockGetNamespacedCustomObject: vi.fn(),
+  mockWatchFn: vi.fn(),
+  mockSpawn: vi.fn(),
+  mockCreateServer: vi.fn(),
+  mockCreateConnection: vi.fn(),
+}));
+
+// ---------- mock: @kubernetes/client-node ----------
+
+vi.mock("@kubernetes/client-node", () => {
+  const KubeConfig = vi.fn().mockImplementation(() => ({
+    loadFromDefault: vi.fn(),
+    makeApiClient: vi.fn().mockReturnValue({
+      deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+      getNamespacedCustomObject: mockGetNamespacedCustomObject,
+    }),
+  }));
+
+  const CustomObjectsApi = vi.fn();
+
+  const Watch = vi.fn().mockImplementation(() => ({
+    watch: mockWatchFn,
+  }));
+
+  return { KubeConfig, CustomObjectsApi, Watch };
+});
+
+// ---------- mock: node:child_process ----------
+
+vi.mock("node:child_process", () => ({
+  spawn: mockSpawn,
+  ChildProcess: vi.fn(),
+}));
+
+// ---------- mock: node:net ----------
+
+vi.mock("node:net", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      createServer: mockCreateServer,
+      createConnection: mockCreateConnection,
+    },
+    createServer: mockCreateServer,
+    createConnection: mockCreateConnection,
+  };
+});
+
+// ---------- import SUT after mocks ----------
+
+import {
+  BACKOFF_FACTOR,
+  CLAIM_API_GROUP,
+  CLAIM_API_VERSION,
+  CLAIM_PLURAL_NAME,
+  HEADER_REQUEST_ID,
+  MAX_BACKOFF_MS,
+  MAX_DRAIN_BYTES,
+  MAX_RETRIES,
+  MAX_UPLOAD_SIZE,
+  PER_ATTEMPT_TIMEOUT_MS,
+  RETRY_STATUS_CODES,
+} from "../constants.js";
+import {
+  SandboxPortForwardError,
+  SandboxRequestError,
+  SandboxTimeoutError,
+} from "../exceptions.js";
+import type { SandboxInit } from "../sandbox.js";
+import { fetchWithRetry, Sandbox } from "../sandbox.js";
+
+/**
+ * Test helper: exposes protected members for test assertions.
+ */
+class TestableSandbox extends Sandbox {
+  get _baseUrl(): string | undefined {
+    return this.baseUrl;
+  }
+  set _baseUrl(value: string | undefined) {
+    this.baseUrl = value;
+  }
+
+  get _portForwardProcess() {
+    return this.portForwardProcess;
+  }
+  set _portForwardProcess(value) {
+    this.portForwardProcess = value;
+  }
+
+  get _serverPort(): number {
+    return this.serverPort;
+  }
+
+  get testReconnectPromise(): Promise<void> | null {
+    return this._reconnectPromise;
+  }
+  set testReconnectPromise(value: Promise<void> | null) {
+    this._reconnectPromise = value;
+  }
+}
+
+// ---------- helpers ----------
+
+function makeMockK8sClients() {
+  return {
+    deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+    getNamespacedCustomObject: mockGetNamespacedCustomObject,
+  };
+}
+
+function makeMockKubeConfig() {
+  return {
+    loadFromDefault: vi.fn(),
+    makeApiClient: vi.fn().mockReturnValue(makeMockK8sClients()),
+  } as unknown as import("@kubernetes/client-node").KubeConfig;
+}
+
+function createTestInit(overrides: Partial<SandboxInit> = {}): SandboxInit {
+  return {
+    claimName: "test-claim",
+    sandboxName: "test-sandbox",
+    podName: "test-pod",
+    namespace: "default",
+    annotations: {},
+    serverPort: 8888,
+    apiUrl: "http://localhost:9999",
+    kubeConfig: makeMockKubeConfig(),
+    customObjectsApi: makeMockK8sClients() as never,
+    traceServiceName: "sandbox-client",
+    tracer: null,
+    tracingManager: null,
+    ...overrides,
+  };
+}
+
+function createReadySandbox(
+  overrides: Partial<SandboxInit> = {},
+): TestableSandbox {
+  const sandbox = new TestableSandbox(createTestInit(overrides));
+  sandbox._baseUrl = "http://localhost:9999";
+  return sandbox;
+}
+
+/** Returns a fake socket that always emits an ECONNREFUSED error. */
+function makeFakeSocketAlwaysError() {
+  return {
+    destroy: vi.fn(),
+    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      if (event === "error") {
+        process.nextTick(() =>
+          handler(
+            Object.assign(new Error("connect ECONNREFUSED"), {
+              code: "ECONNREFUSED",
+            }),
+          ),
+        );
+      }
+    }),
+  };
+}
+
+/** Returns a fake socket whose destroy/on are no-ops (connect listener fires externally). */
+function makeFakeSocketConnects() {
+  return {
+    destroy: vi.fn(),
+    on: vi.fn(),
+  };
+}
+
+// ---------- tests ----------
+
+describe("Sandbox", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // ===== isActive =====
+
+  describe("isActive", () => {
+    it("returns true after construction", () => {
+      const sandbox = new TestableSandbox(createTestInit());
+      expect(sandbox.isActive).toBe(true);
+    });
+
+    it("returns false after close()", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = createReadySandbox();
+      expect(sandbox.isActive).toBe(true);
+      await sandbox.close();
+      expect(sandbox.isActive).toBe(false);
+    });
+  });
+
+  // ===== commands / files getters =====
+
+  describe("commands / files after close()", () => {
+    it("commands throws after close()", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = createReadySandbox();
+      await sandbox.close();
+      expect(() => sandbox.commands).toThrow(
+        "Sandbox connection has been closed.",
+      );
+    });
+
+    it("files throws after close()", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = createReadySandbox();
+      await sandbox.close();
+      expect(() => sandbox.files).toThrow(
+        "Sandbox connection has been closed.",
+      );
+    });
+
+    it("pre-captured commands reference cannot make requests after sandbox.close()", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = createReadySandbox();
+
+      // Capture reference before close
+      const cmd = sandbox.commands;
+
+      await sandbox.close();
+
+      // Expected: cmd.run() throws without calling fetch.
+      // Current behavior: baseUrl is still set on the Sandbox, so the pre-captured
+      // CommandExecutor's request() call proceeds and fetch is invoked.
+      await expect(cmd.run("ls")).rejects.toThrow();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("pre-captured files reference cannot make requests after sandbox.close()", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = createReadySandbox();
+
+      // Capture reference before close
+      const files = sandbox.files;
+
+      await sandbox.close();
+
+      // Expected: files.exists() throws without calling fetch.
+      await expect(files.exists("test.txt")).rejects.toThrow();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===== connect() =====
+
+  describe("connect()", () => {
+    it("direct mode: sets baseUrl from apiUrl", async () => {
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: "http://direct-api:8080" }),
+      );
+      await sandbox.connect();
+      expect(sandbox._baseUrl).toBe("http://direct-api:8080");
+    });
+
+    it("gateway mode: fetches gateway IP", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        body: { status: { addresses: [{ value: "10.0.0.42" }] } },
+      });
+      mockCreateConnection.mockImplementation(
+        (_opts: unknown, cb?: () => void) => {
+          const sock = makeFakeSocketConnects();
+          process.nextTick(() => cb?.());
+          return sock;
+        },
+      );
+
+      const sandbox = new TestableSandbox(
+        createTestInit({
+          apiUrl: undefined,
+          gatewayName: "kind-gateway",
+          gatewayNamespace: "default",
+        }),
+      );
+      await sandbox.connect();
+      expect(sandbox._baseUrl).toBe("http://10.0.0.42");
+    });
+
+    it("tunnel mode: starts port-forward and sets baseUrl", async () => {
+      const fakeServer = {
+        listen: vi.fn((_port: number, _host: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 12345 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      const fakeProcess = {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn(),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProcess);
+
+      // Force crash to abort tunnel (we just want to verify spawn was called)
+      fakeProcess.exitCode = 1;
+
+      const sandbox = new TestableSandbox(
+        createTestInit({
+          apiUrl: undefined,
+          portForwardReadyTimeout: 1,
+        }),
+      );
+
+      await sandbox.connect().catch(() => {});
+      expect(mockSpawn).toHaveBeenCalledWith(
+        "kubectl",
+        expect.arrayContaining(["port-forward"]),
+        expect.any(Object),
+      );
+    });
+
+    it("gateway mode: wraps IPv6 address in brackets for baseUrl", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        body: { status: { addresses: [{ value: "2001:db8::1" }] } },
+      });
+      mockCreateConnection.mockImplementation(
+        (_opts: unknown, cb?: () => void) => {
+          const sock = makeFakeSocketConnects();
+          process.nextTick(() => cb?.());
+          return sock;
+        },
+      );
+
+      const sandbox = new TestableSandbox(
+        createTestInit({
+          apiUrl: undefined,
+          gatewayName: "kind-gateway",
+          gatewayNamespace: "default",
+        }),
+      );
+      await sandbox.connect();
+      // Expected: "http://[2001:db8::1]" — IPv6 must be wrapped in brackets.
+      // Current implementation inserts the raw value without brackets,
+      // producing invalid URL "http://2001:db8::1".
+      expect(sandbox._baseUrl).toMatch(/\[2001:db8::1\]/);
+    });
+
+    it("tunnel mode: spawn 'error' event throws SandboxPortForwardError without closing sandbox", async () => {
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 54321 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      const spawnError = new Error("ENOENT: kubectl not found");
+      const fakeProc = {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        // Register 'error' event handler — fires on the next tick
+        on: vi.fn((event: string, handler: (err?: Error) => void) => {
+          if (event === "error") {
+            process.nextTick(() => handler(spawnError));
+          }
+        }),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProc);
+      mockCreateConnection.mockImplementation(() =>
+        makeFakeSocketAlwaysError(),
+      );
+
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 0.05 }),
+      );
+
+      // Expected: SandboxPortForwardError wrapping the spawn error is thrown
+      // quickly (before the 50ms timeout), AND isActive stays true because
+      // closeLocal() is not called.
+      // Current behavior: 'error' event is not listened to. The polling loop
+      // runs until the 50ms timeout, then calls closeLocal() → isActive = false.
+      await expect(sandbox.connect()).rejects.toBeInstanceOf(
+        SandboxPortForwardError,
+      );
+
+      // isActive must remain true — spawn error is a transport error, not a logical close.
+      // Current behavior: isActive = false (timeout path called closeLocal()).
+      expect(sandbox.isActive).toBe(true);
+    });
+  });
+
+  // ===== closeLocal() =====
+
+  describe("closeLocal()", () => {
+    it("kills port-forward and marks sandbox inactive WITHOUT deleting the SandboxClaim", async () => {
+      const fakeProcess = {
+        kill: vi.fn(),
+        on: vi.fn((_event: string, cb: () => void) => {
+          if (_event === "exit") setTimeout(cb, 0);
+        }),
+        exitCode: null,
+        signalCode: null,
+      };
+
+      const sandbox = createReadySandbox();
+      sandbox._portForwardProcess = fakeProcess as never;
+
+      await sandbox.closeLocal();
+
+      expect(fakeProcess.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(sandbox.isActive).toBe(false);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("is idempotent: second call does not kill a null process or call K8s", async () => {
+      const sandbox = createReadySandbox();
+      await sandbox.closeLocal();
+      await sandbox.closeLocal(); // second call should be a no-op
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===== close() =====
+
+  describe("close()", () => {
+    it("kills port-forward then deletes the SandboxClaim", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+
+      const fakeProcess = {
+        kill: vi.fn(),
+        on: vi.fn((_event: string, cb: () => void) => {
+          if (_event === "exit") setTimeout(cb, 0);
+        }),
+        exitCode: null,
+        signalCode: null,
+      };
+
+      const sandbox = createReadySandbox();
+      sandbox._portForwardProcess = fakeProcess as never;
+
+      await sandbox.close();
+
+      expect(fakeProcess.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      const args = mockDeleteNamespacedCustomObject.mock.calls[0][0];
+      expect(args.group).toBe(CLAIM_API_GROUP);
+      expect(args.version).toBe(CLAIM_API_VERSION);
+      expect(args.plural).toBe(CLAIM_PLURAL_NAME);
+      expect(args.name).toBe("test-claim");
+    });
+
+    it("does not throw when claim is 404", async () => {
+      mockDeleteNamespacedCustomObject.mockRejectedValueOnce(
+        new Error("HTTP response code was 404"),
+      );
+
+      const sandbox = createReadySandbox();
+      await expect(sandbox.close()).resolves.toBeUndefined();
+    });
+  });
+
+  // ===== commands.run =====
+
+  describe("commands.run", () => {
+    it("parses command execution results", async () => {
+      const sandbox = createReadySandbox();
+
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ stdout: "hello\n", stderr: "", exit_code: 0 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+      const result = await sandbox.commands.run("echo hello");
+
+      expect(result).toEqual({ stdout: "hello\n", stderr: "", exitCode: 0 });
+
+      const [url, opts] = (fetch as Mock).mock.calls[0];
+      expect(url).toBe("http://localhost:9999/execute");
+      expect(opts.method).toBe("POST");
+      expect(JSON.parse(opts.body as string)).toEqual({
+        command: "echo hello",
+      });
+      expect(opts.headers["X-Sandbox-ID"]).toBe("test-sandbox");
+      expect(opts.headers["X-Sandbox-Namespace"]).toBe("default");
+      expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
+    });
+
+    it("throws when sandbox is not connected", async () => {
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined }),
+      );
+      // baseUrl not set (connect() not called)
+      await expect(sandbox.commands.run("ls")).rejects.toThrow(
+        "Sandbox is not ready for communication.",
+      );
+    });
+  });
+
+  // ===== files.write =====
+
+  describe("files.write", () => {
+    it("uploads string content", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("ok", { status: 200 }),
+      );
+
+      await sandbox.files.write("test.txt", "file content");
+
+      const [url, opts] = (fetch as Mock).mock.calls[0];
+      expect(url).toBe("http://localhost:9999/upload");
+      expect(opts.method).toBe("POST");
+      const file = (opts.body as FormData).get("file") as File;
+      expect(file.name).toBe("test.txt");
+      expect(await file.text()).toBe("file content");
+    });
+
+    it("uploads Buffer content", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("ok", { status: 200 }),
+      );
+
+      const buf = Buffer.from("binary data");
+      await sandbox.files.write("output.bin", buf);
+
+      const [, opts] = (fetch as Mock).mock.calls[0];
+      const file = (opts.body as FormData).get("file") as File;
+      expect(file.name).toBe("output.bin");
+      expect(Buffer.from(await file.arrayBuffer()).toString()).toBe(
+        "binary data",
+      );
+    });
+
+    it.each([
+      ["sub/foo.txt"],
+      ["./foo.txt"],
+      ["../foo.txt"],
+      ["/abs/foo.txt"],
+      ["."],
+      [".."],
+      ["/"],
+    ])("rejects non-plain filename: %s", async (filePath) => {
+      const sandbox = createReadySandbox();
+      await expect(sandbox.files.write(filePath, "data")).rejects.toThrow(
+        /is not a plain filename/,
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects when content exceeds MAX_UPLOAD_SIZE", async () => {
+      const sandbox = createReadySandbox();
+      const bigContent = Buffer.alloc(MAX_UPLOAD_SIZE + 1);
+
+      await expect(
+        sandbox.files.write("big.bin", bigContent),
+      ).rejects.toBeInstanceOf(SandboxRequestError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===== files.read =====
+
+  describe("files.read", () => {
+    it("returns downloaded content as Buffer", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("downloaded content", { status: 200 }),
+      );
+
+      const result = await sandbox.files.read("tmp/hello.txt");
+
+      expect(Buffer.isBuffer(result)).toBe(true);
+      expect(result.toString()).toBe("downloaded content");
+
+      const [url] = (fetch as Mock).mock.calls[0];
+      expect(url).toBe("http://localhost:9999/download/tmp%2Fhello.txt");
+    });
+
+    it("fully encodes RFC 3986 sub-delimiters in path (!, ', (, ), *)", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("data", { status: 200 }),
+      );
+
+      await sandbox.files.read("a!b'c(d)e*f");
+
+      const [url] = (fetch as Mock).mock.calls[0];
+      // encodeURIComponent leaves ! ' ( ) * unencoded; encodePathSegment must encode them
+      expect(url).toBe("http://localhost:9999/download/a%21b%27c%28d%29e%2Af");
+    });
+  });
+
+  // ===== files.list =====
+
+  describe("files.list", () => {
+    it("returns parsed FileEntry array", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { name: "file.txt", size: 100, type: "file", mod_time: 1700000000 },
+            {
+              name: "subdir",
+              size: 4096,
+              type: "directory",
+              mod_time: 1700000001,
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+      const entries = await sandbox.files.list("tmp");
+
+      expect(entries).toEqual([
+        { name: "file.txt", size: 100, type: "file", modTime: 1700000000 },
+        { name: "subdir", size: 4096, type: "directory", modTime: 1700000001 },
+      ]);
+    });
+
+    it("rejects with SandboxRequestError when server returns null instead of array", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify(null), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await expect(sandbox.files.list("empty-dir")).rejects.toBeInstanceOf(
+        SandboxRequestError,
+      );
+    });
+  });
+
+  // ===== files.exists =====
+
+  describe("files.exists", () => {
+    it("returns true when file exists", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      expect(await sandbox.files.exists("tmp/file.txt")).toBe(true);
+      expect((fetch as Mock).mock.calls[0][0]).toBe(
+        "http://localhost:9999/exists/tmp%2Ffile.txt",
+      );
+    });
+
+    it("returns false when file does not exist", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      expect(await sandbox.files.exists("tmp/missing.txt")).toBe(false);
+    });
+
+    it("fully encodes RFC 3986 sub-delimiters in exists path", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), { status: 200 }),
+      );
+
+      await sandbox.files.exists("dir/file!name.txt");
+
+      const [url] = (fetch as Mock).mock.calls[0];
+      expect(url).toBe("http://localhost:9999/exists/dir%2Ffile%21name.txt");
+    });
+  });
+
+  // ===== POST /execute is not retried =====
+
+  describe("POST /execute is not retried", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("fetch called once only on 500 — not retried", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(
+        new Response("server error", { status: 500 }),
+      );
+
+      const runPromise = sandbox.commands.run("echo test");
+      // Attach rejection handler before advancing timers to prevent
+      // Node.js from flagging the rejection as unhandled
+      const settled = runPromise.catch(() => {});
+
+      // Flush all retry delays (MAX_RETRIES=5, backoff starts at 500ms)
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settled;
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== response body drain before retry =====
+
+  describe("response body drain before retry", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("drains body before retrying on 503 (bounded read, no response.text() call)", async () => {
+      const sandbox = createReadySandbox();
+
+      // 503 response with body
+      const errorResponse = new Response("service unavailable", {
+        status: 503,
+      });
+      const textSpy = vi.spyOn(errorResponse, "text");
+      const okResponse = new Response(JSON.stringify({ exists: true }), {
+        status: 200,
+      });
+      (fetch as Mock)
+        .mockResolvedValueOnce(errorResponse)
+        .mockResolvedValueOnce(okResponse);
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      const settled = existsPromise.catch(() => {});
+
+      // Flush the backoff delay
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled;
+
+      // Bounded reader is used; text() must NOT be called
+      expect(textSpy).not.toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ===== overall timeout stops retry =====
+
+  describe("overall timeout stops retry loop", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("aborts retry loop when overall request timeout fires", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockRejectedValue(
+        Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      );
+
+      // list() uses GET (retryable); timeout = 0.1 s = 100 ms
+      const listPromise = sandbox.files.list(".", 0.1);
+      const settled = listPromise.catch(() => {});
+
+      // Advance 200 ms — past the 100 ms overall timeout but before the
+      // first 500 ms backoff sleep completes
+      await vi.advanceTimersByTimeAsync(200);
+      await settled;
+
+      // The overall timeout fired during the backoff sleep, stopping the loop
+      // after the very first attempt — fetch should be called exactly once
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== SandboxRequestError includes body and operation =====
+
+  describe("SandboxRequestError includes HTTP body and operation", () => {
+    it("sets body and operation fields on non-2xx response", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response('{"error":"not found"}', { status: 404 }),
+      );
+
+      const err = await sandbox.commands.run("cat missing").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.statusCode).toBe(404);
+      expect(err.body).toBe('{"error":"not found"}');
+      expect(err.operation).toBe("POST execute");
+    });
+
+    it("truncates body to MAX_ERROR_BODY_BYTES (512)", async () => {
+      const sandbox = createReadySandbox();
+      const longBody = "x".repeat(1000);
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(longBody, { status: 500 }),
+      );
+
+      const err = await sandbox.commands.run("big output").catch((e) => e);
+
+      expect(err.body).toHaveLength(512);
+    });
+
+    it("does not pull entire large error body from stream (bounded reader)", async () => {
+      const sandbox = createReadySandbox();
+      const CHUNK_SIZE = 256;
+      const CHUNK_COUNT = 400; // 100 KB total — far beyond MAX_ERROR_BODY_BYTES
+      let pulledBytes = 0;
+      let chunkIdx = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (chunkIdx >= CHUNK_COUNT) {
+            controller.close();
+            return;
+          }
+          const chunk = new Uint8Array(CHUNK_SIZE);
+          chunk.fill(0x78); // 'x'
+          pulledBytes += chunk.byteLength;
+          chunkIdx++;
+          controller.enqueue(chunk);
+        },
+      });
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(stream, { status: 500 }),
+      );
+
+      const err = await sandbox.commands.run("huge output").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.body).toHaveLength(512);
+      // Should pull at most MAX_ERROR_BODY_BYTES + one extra chunk before
+      // cancelling — not the full 100 KB body.
+      expect(pulledBytes).toBeLessThanOrEqual(512 + CHUNK_SIZE);
+    });
+
+    it("does not throw on non-UTF-8 binary error body", async () => {
+      const sandbox = createReadySandbox();
+      // Bytes that are not valid UTF-8 sequences on their own.
+      const nonUtf8 = new Uint8Array([0xff, 0xfe, 0xfd, 0xfc, 0x80, 0x81]);
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(nonUtf8, { status: 502 }),
+      );
+
+      const err = await sandbox.commands.run("binary err").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.statusCode).toBe(502);
+      // Body is best-effort utf-8 decoded; the key invariant is that the
+      // original HTTP error is not masked by a decode-side exception.
+      expect(typeof err.body).toBe("string");
+    });
+
+    it("skips arrayBuffer fallback when content-length exceeds limit", async () => {
+      const sandbox = createReadySandbox();
+      // Simulate a Response implementation with no streaming body, content-length
+      // declaring a huge payload. readBoundedErrorBody must not materialise it.
+      const hugeBody = "y".repeat(2000);
+      const fakeResponse = {
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        body: null,
+        headers: new Headers({ "content-length": "10000000" }),
+        arrayBuffer: vi.fn(
+          async () => new TextEncoder().encode(hugeBody).buffer,
+        ),
+        text: vi.fn(async () => hugeBody),
+      } as unknown as Response;
+      (fetch as Mock).mockResolvedValueOnce(fakeResponse);
+
+      const err = await sandbox.commands.run("over-claimed").catch((e) => e);
+
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(err.body).toBe("");
+      expect(fakeResponse.arrayBuffer).not.toHaveBeenCalled();
+      expect(fakeResponse.text).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===== port-forward auto-reconnect =====
+
+  describe("port-forward auto-reconnect", () => {
+    it("reconnects port-forward when process has died before a request", async () => {
+      // Fake a free-port server
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 54321 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      // Fake a kubectl process that starts alive
+      const fakeProc = {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn((ev: string, cb: () => void) => {
+          if (ev === "exit") setTimeout(cb, 0);
+        }),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProc);
+
+      // createConnection: succeed immediately for the reconnect port-forward check
+      mockCreateConnection.mockImplementation(
+        (_opts: unknown, cb: () => void) => {
+          const sock = {
+            destroy: vi.fn(),
+            on: vi.fn(),
+          };
+          process.nextTick(cb);
+          return sock;
+        },
+      );
+
+      // Create sandbox in port-forward mode, manually set a dead process + valid baseUrl
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 1 }),
+      );
+      sandbox._baseUrl = "http://127.0.0.1:12345";
+
+      // Simulate port-forward process death
+      const deadProc = {
+        exitCode: 1,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn((ev: string, cb: () => void) => {
+          if (ev === "exit") setTimeout(cb, 0);
+        }),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      sandbox._portForwardProcess = deadProc as never;
+
+      // fetch returns OK after reconnect
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), { status: 200 }),
+      );
+
+      await sandbox.files.exists("test.txt");
+
+      // SIGTERM was sent to the dead process
+      expect(deadProc.kill).toHaveBeenCalledWith("SIGTERM");
+      // A new kubectl process was spawned for the reconnect
+      expect(mockSpawn).toHaveBeenCalled();
+      // fetch was eventually called (reconnect succeeded)
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== port-forward timeout deletes claim =====
+
+  describe("port-forward timeout deletes claim", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("SandboxClaim is NOT deleted when port-forward times out", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      // getFreePort: synchronous mock server
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 12345 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      // kubectl: living process (exitCode stays null throughout)
+      const fakeProc = {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn(),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProc);
+
+      // createConnection: always refuses connection
+      mockCreateConnection.mockImplementation(() =>
+        makeFakeSocketAlwaysError(),
+      );
+
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 0.1 }),
+      );
+
+      const connectPromise = sandbox.connect();
+      // Attach rejection handler before advancing timers to prevent
+      // Node.js from flagging the rejection as unhandled
+      const settled = connectPromise.catch(() => {});
+
+      // Advance past the 100ms timeout and all 500ms retry sleeps
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled;
+
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("port-forward reconnect failure does not permanently close sandbox", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("sandbox.isActive remains true after reconnect timeout (transport error ≠ logical close)", async () => {
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 54321 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      // Reconnect attempts: process stays ALIVE (exitCode = null) but TCP never connects.
+      // This forces the timeout path in startAndWaitForPortForward(), which currently
+      // calls closeLocal() and sets _isClosed = true.
+      const failingProc = {
+        exitCode: null as number | null, // ALIVE — no crash detection
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn(),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(failingProc);
+      mockCreateConnection.mockImplementation(() =>
+        makeFakeSocketAlwaysError(),
+      );
+
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 0.05 }),
+      );
+      sandbox._baseUrl = "http://127.0.0.1:12345";
+
+      const deadProc = {
+        exitCode: 1 as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn((ev: string, cb: () => void) => {
+          if (ev === "exit") setTimeout(cb, 0);
+        }),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      sandbox._portForwardProcess = deadProc as never;
+
+      const requestPromise = sandbox.files.exists("test.txt");
+      const settled = requestPromise.catch(() => {});
+
+      // Advance past the reconnect timeout and all backoff delays
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settled;
+
+      // Expected: isActive remains true — reconnect failure is a transport error,
+      // not a logical close. The caller can retry later.
+      // Current behavior: startAndWaitForPortForward timeout calls closeLocal(),
+      // setting _isClosed = true and making isActive return false.
+      expect(sandbox.isActive).toBe(true);
+    });
+  });
+
+  describe("response body drain is bounded by MAX_DRAIN_BYTES", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("does not call response.text() (unbounded read) when draining a 503 body", async () => {
+      const sandbox = createReadySandbox();
+
+      // 503 response with body larger than MAX_DRAIN_BYTES
+      const largeBody = "x".repeat(MAX_DRAIN_BYTES + 1024);
+      const errorResponse = new Response(largeBody, { status: 503 });
+
+      // Spy on text() — if called, that means unbounded drain is happening
+      const textSpy = vi
+        .spyOn(errorResponse, "text")
+        .mockResolvedValue(largeBody);
+
+      const okResponse = new Response(JSON.stringify({ exists: true }), {
+        status: 200,
+      });
+      (fetch as Mock)
+        .mockResolvedValueOnce(errorResponse)
+        .mockResolvedValueOnce(okResponse);
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      const settled = existsPromise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settled;
+
+      // Expected: text() is NOT called (bounded reader is used instead).
+      // Current behavior: fetchWithRetry calls response.text() for unbounded drain.
+      expect(textSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("overall timeout throws SandboxTimeoutError", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("aborts with SandboxTimeoutError, not DOMException, when overall timeout fires", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockRejectedValue(
+        Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      );
+
+      // timeout = 0.1 s
+      const listPromise = sandbox.files.list(".", 0.1);
+      const errPromise = listPromise.catch((e) => e);
+
+      await vi.advanceTimersByTimeAsync(200);
+      const caught = await errPromise;
+
+      // Expected: SandboxTimeoutError (distinct from transport errors).
+      // Current behavior: DOMException("signal timed out", "TimeoutError") or
+      // SandboxRequestError — neither is SandboxTimeoutError.
+      expect(caught).toBeInstanceOf(SandboxTimeoutError);
+    });
+  });
+
+  describe("concurrent requests wait for reconnect completion", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("second request should wait for reconnect to finish, not fail after fixed 2s", async () => {
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 5 }),
+      );
+
+      // simulate an in-flight reconnect via shared promise
+      let resolveReconnect!: () => void;
+      const pendingReconnect = new Promise<void>((res) => {
+        resolveReconnect = res;
+      });
+      sandbox.testReconnectPromise = pendingReconnect.finally(() => {
+        sandbox.testReconnectPromise = null;
+      });
+      // baseUrl not yet restored (reconnect still in progress)
+
+      (fetch as Mock).mockResolvedValue(
+        new Response(JSON.stringify({ exists: true }), { status: 200 }),
+      );
+
+      // Second request — awaits the shared reconnect promise
+      const requestPromise = sandbox.files.exists("test.txt");
+      const errPromise = requestPromise.catch((e) => e);
+
+      // Simulate reconnect completing: set baseUrl then resolve the promise
+      sandbox._baseUrl = "http://127.0.0.1:54321";
+      resolveReconnect();
+      await vi.advanceTimersByTimeAsync(100);
+
+      const result = await errPromise;
+
+      // Expected: second request shares the reconnect promise and succeeds.
+      expect(result).toBe(true);
+    });
+  });
+
+  describe("close() does not hang beyond cleanup timeout", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("completes (or throws) within timeout even if K8s delete never resolves", async () => {
+      // deleteNamespacedCustomObject never resolves — simulates a hung API server
+      mockDeleteNamespacedCustomObject.mockImplementation(
+        () => new Promise<void>(() => {}),
+      );
+
+      const sandbox = createReadySandbox();
+      const closePromise = sandbox.close();
+      const settled = closePromise
+        .then(() => "resolved")
+        .catch(() => "rejected");
+
+      // Advance 10 seconds — well beyond any reasonable cleanup timeout
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      // Expected: close() completes (resolves or rejects) within cleanup budget.
+      // Current behavior: close() hangs indefinitely because deleteNamespacedCustomObject
+      // never resolves and there is no cleanup timeout.
+      const result = await Promise.race([settled, Promise.resolve("hanging")]);
+      expect(result).not.toBe("hanging");
+    });
+  });
+
+  describe("per-attempt timeout stops at response headers, not body read", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("large response body read succeeds even if body takes longer than PER_ATTEMPT_TIMEOUT_MS", async () => {
+      const sandbox = createReadySandbox();
+
+      // Body arrives PER_ATTEMPT_TIMEOUT_MS + 5000 ms after headers.
+      // The response stream respects the fetch AbortSignal so that the current
+      // per-attempt abort-all-of-fetch behavior is observable.
+      const bodyDelayMs = PER_ATTEMPT_TIMEOUT_MS + 5_000;
+
+      (fetch as Mock).mockImplementation(
+        async (_url: string, opts?: RequestInit) => {
+          const signal = opts?.signal as AbortSignal | undefined;
+          const stream = new ReadableStream({
+            start(controller) {
+              const timer = setTimeout(() => {
+                controller.enqueue(
+                  new TextEncoder().encode(JSON.stringify({ exists: true })),
+                );
+                controller.close();
+              }, bodyDelayMs);
+
+              // Connect the AbortSignal to the stream so we can observe abort behavior
+              signal?.addEventListener("abort", () => {
+                clearTimeout(timer);
+                controller.error(
+                  signal.reason ?? new DOMException("aborted", "AbortError"),
+                );
+              });
+            },
+          });
+          return new Response(stream, { status: 200 });
+        },
+      );
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      const errPromise = existsPromise.catch((e) => e);
+
+      // Advance past PER_ATTEMPT_TIMEOUT_MS to fire the per-attempt signal
+      await vi.advanceTimersByTimeAsync(PER_ATTEMPT_TIMEOUT_MS + 1_000);
+      // Advance remaining delay so body would arrive (only relevant if signal didn't abort)
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      const result = await errPromise;
+
+      // Expected: result is true — per-attempt timeout stops at headers, not body.
+      // Current behavior: the per-attempt AbortSignal is still active during body read.
+      // When it fires, the stream aborts → result is an AbortError or SandboxRequestError.
+      expect(result).toBe(true);
+    });
+  });
+
+  // ===== close() drains in-flight requests =====
+
+  describe("close() drains in-flight requests before destroying transport", () => {
+    it("does not call K8s delete while a request is still in flight", async () => {
+      let resolveRequest!: (r: Response) => void;
+      vi.mocked(fetch).mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveRequest = resolve;
+        }),
+      );
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      const sandbox = createReadySandbox();
+
+      // Start in-flight request (do not await yet)
+      const runPromise = sandbox.commands.run("slow-cmd");
+
+      // Call close() concurrently
+      const closePromise = sandbox.close();
+
+      // Yield microtasks so close() can start, but in-flight fetch is still pending
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // K8s claim deletion must NOT have been called yet
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+
+      // Resolve the in-flight fetch with a valid execute response
+      resolveRequest(
+        new Response(JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }), {
+          status: 200,
+        }),
+      );
+
+      // Both should now complete
+      await closePromise;
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      await expect(runPromise).resolves.toBeDefined();
+    });
+  });
+
+  describe("empty path is rejected by files methods", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('files.list("") rejects immediately without making a request', async () => {
+      const sandbox = createReadySandbox();
+      // Reject immediately to prevent an infinite real-timer hang in the retry loop
+      (fetch as Mock).mockRejectedValue(
+        new Error("unexpected: fetch was called"),
+      );
+
+      const listPromise = sandbox.files.list("");
+      const settled = listPromise.catch(() => {});
+      // Advance past all retry backoffs so the promise settles
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settled;
+
+      // Expected: validation fires before fetch is called.
+      // Current behavior: empty path is forwarded to GET /list/, so fetch IS called.
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('files.exists("") rejects immediately without making a request', async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockRejectedValue(
+        new Error("unexpected: fetch was called"),
+      );
+
+      const existsPromise = sandbox.files.exists("");
+      const settled = existsPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settled;
+
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('files.read("") rejects immediately without making a request', async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockRejectedValue(
+        new Error("unexpected: fetch was called"),
+      );
+
+      const readPromise = sandbox.files.read("");
+      const settled = readPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settled;
+
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("configurable per-attempt timeout", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("applies the overridden perAttemptTimeoutMs to fetch's AbortSignal", async () => {
+      const customTimeoutMs = 5_000;
+      const sandbox = createReadySandbox({
+        perAttemptTimeoutMs: customTimeoutMs,
+      });
+
+      // fetch never resolves unless aborted; when the per-attempt signal fires,
+      // reject with the abort reason so the retry loop can continue.
+      (fetch as Mock).mockImplementation(
+        (_url: string, opts?: RequestInit) =>
+          new Promise((_, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              reject(
+                (opts.signal as AbortSignal).reason ??
+                  new DOMException("aborted", "AbortError"),
+              );
+            });
+          }),
+      );
+
+      const listPromise = sandbox.files.list(".");
+      const settled = listPromise.catch(() => {});
+
+      // Advance just under the override — fetch should still be pending.
+      await vi.advanceTimersByTimeAsync(customTimeoutMs - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      // Cross the override deadline — per-attempt signal fires, first attempt
+      // rejects, loop moves to backoff → attempt #2 starts.
+      await vi.advanceTimersByTimeAsync(2);
+      // Flush backoff so attempt #2 begins.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      // Drain remaining retries to let the promise settle before the test ends.
+      await vi.advanceTimersByTimeAsync(customTimeoutMs * 6 + 60_000);
+      await settled;
+    });
+
+    it("falls back to PER_ATTEMPT_TIMEOUT_MS when perAttemptTimeoutMs is not set", async () => {
+      const sandbox = createReadySandbox();
+
+      (fetch as Mock).mockImplementation(
+        (_url: string, opts?: RequestInit) =>
+          new Promise((_, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              reject(
+                (opts.signal as AbortSignal).reason ??
+                  new DOMException("aborted", "AbortError"),
+              );
+            });
+          }),
+      );
+
+      const listPromise = sandbox.files.list(".");
+      const settled = listPromise.catch(() => {});
+
+      // Just before the default per-attempt timeout — still only one attempt.
+      await vi.advanceTimersByTimeAsync(PER_ATTEMPT_TIMEOUT_MS - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      // Cross the default deadline, then the first backoff.
+      await vi.advanceTimersByTimeAsync(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      // Drain remaining retries to let the promise settle.
+      await vi.advanceTimersByTimeAsync(PER_ATTEMPT_TIMEOUT_MS * 6 + 60_000);
+      await settled;
+    });
+  });
+
+  describe("external AbortSignal cancellation", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("aborts an in-flight request when the caller's signal fires, without retrying", async () => {
+      const sandbox = createReadySandbox();
+
+      (fetch as Mock).mockImplementation(
+        (_url: string, opts?: RequestInit) =>
+          new Promise((_, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              reject(
+                (opts.signal as AbortSignal).reason ??
+                  new DOMException("aborted", "AbortError"),
+              );
+            });
+          }),
+      );
+
+      const controller = new AbortController();
+      const listPromise = sandbox.files.list(".", {
+        signal: controller.signal,
+      });
+      const settled = listPromise.catch((e) => e);
+
+      // Let the fetch start.
+      await Promise.resolve();
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      // Abort — the in-flight attempt should reject and the loop should exit
+      // immediately without a retry.
+      controller.abort(new Error("cancelled by caller"));
+      // Advance generously; the loop must NOT schedule another attempt.
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const err = await settled;
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not affect a request that has already completed", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify([]), { status: 200 }),
+      );
+
+      const controller = new AbortController();
+      const listPromise = sandbox.files.list(".", {
+        signal: controller.signal,
+      });
+      await expect(listPromise).resolves.toEqual([]);
+
+      // Aborting post-completion must not throw or affect the returned value.
+      controller.abort();
+    });
+  });
+
+  describe("X-Request-ID header", () => {
+    it("attaches an X-Request-ID (UUID v4) to every outgoing request", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify([]), { status: 200 }),
+      );
+
+      await sandbox.files.list(".");
+
+      const [[, init]] = (fetch as Mock).mock.calls;
+      const headers = init.headers as Record<string, string>;
+      const requestId = headers[HEADER_REQUEST_ID];
+      expect(requestId).toBeDefined();
+      // UUID v4: 8-4-4-4-12 hex digits, version 4, variant 8/9/a/b
+      expect(requestId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+    });
+
+    it("keeps the same X-Request-ID across retries (matches Go connector)", async () => {
+      vi.useFakeTimers();
+      try {
+        const sandbox = createReadySandbox();
+        (fetch as Mock)
+          .mockResolvedValueOnce(new Response("", { status: 503 }))
+          .mockResolvedValueOnce(new Response("", { status: 503 }))
+          .mockResolvedValueOnce(
+            new Response(JSON.stringify([]), { status: 200 }),
+          );
+
+        const listPromise = sandbox.files.list(".");
+        // Drain backoffs between attempts.
+        await vi.advanceTimersByTimeAsync(5_000);
+        await listPromise;
+
+        expect((fetch as Mock).mock.calls.length).toBe(3);
+        const ids = (fetch as Mock).mock.calls.map(
+          ([, init]) =>
+            (init.headers as Record<string, string>)[HEADER_REQUEST_ID],
+        );
+        expect(ids[0]).toBeDefined();
+        expect(ids[1]).toBe(ids[0]);
+        expect(ids[2]).toBe(ids[0]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // ===== 5xx retry coverage — files.read =====
+
+  describe("5xx retry — files.read", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("retries on 502 and succeeds on second attempt", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock)
+        .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+        .mockResolvedValueOnce(new Response("file content", { status: 200 }));
+
+      const readPromise = sandbox.files.read("test.txt");
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await readPromise;
+
+      expect(result.toString()).toBe("file content");
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it(`throws SandboxRequestError after ${MAX_RETRIES} consecutive 503s`, async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const readPromise = sandbox.files.read("test.txt");
+      const settled = readPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      const err = await readPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(MAX_RETRIES);
+    });
+  });
+
+  // ===== 5xx retry coverage — files.list =====
+
+  describe("5xx retry — files.list", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("retries on 504 and succeeds on second attempt", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock)
+        .mockResolvedValueOnce(new Response("gateway timeout", { status: 504 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify([]), { status: 200 }),
+        );
+
+      const listPromise = sandbox.files.list(".");
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await listPromise;
+
+      expect(result).toEqual([]);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it(`throws SandboxRequestError after ${MAX_RETRIES} consecutive 504s`, async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 504 }));
+
+      const listPromise = sandbox.files.list(".");
+      const settled = listPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      const err = await listPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(MAX_RETRIES);
+    });
+  });
+
+  // ===== 5xx retry coverage — files.exists =====
+
+  describe("5xx retry — files.exists", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("retries on 502 then 503 and succeeds on third attempt", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock)
+        .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+        .mockResolvedValueOnce(
+          new Response("service unavailable", { status: 503 }),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ exists: true }), { status: 200 }),
+        );
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      await vi.advanceTimersByTimeAsync(5_000); // drain 500ms + 1000ms backoffs
+      const result = await existsPromise;
+
+      expect(result).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it(`throws SandboxRequestError after ${MAX_RETRIES} consecutive 502s`, async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 502 }));
+
+      const existsPromise = sandbox.files.exists("test.txt");
+      const settled = existsPromise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      const err = await existsPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(MAX_RETRIES);
+    });
+  });
+
+  // ===== 5xx is not retried — files.write =====
+
+  describe("5xx is not retried — files.write", () => {
+    it("throws SandboxRequestError on 503 without retrying (non-idempotent)", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      await expect(
+        sandbox.files.write("test.txt", "data"),
+      ).rejects.toBeInstanceOf(SandboxRequestError);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===== backoff delay behaviour =====
+
+  describe("backoff delays", () => {
+    let setTimeoutSpy: Mock | null = null;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      setTimeoutSpy = vi.spyOn(globalThis, "setTimeout") as unknown as Mock;
+    });
+
+    afterEach(() => {
+      setTimeoutSpy?.mockRestore();
+      setTimeoutSpy = null;
+      vi.useRealTimers();
+    });
+
+    it("exponential backoff sequence is [500, 1000, 2000, 4000, 8000] ms, clamped at MAX_BACKOFF_MS", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const promise = sandbox.files.list(".");
+      const settled = promise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+
+      // Filter per-attempt timeout sleeps (PER_ATTEMPT_TIMEOUT_MS = 60 s)
+      // biome-ignore lint/style/noNonNullAssertion: setTimeoutSpy is always set within this test
+      const backoffDelays = setTimeoutSpy!.mock.calls
+        .map(([, delay]) => delay as number)
+        .filter((d) => d !== PER_ATTEMPT_TIMEOUT_MS);
+
+      // 5 backoff sleeps between 6 attempts (MAX_RETRIES = 6)
+      expect(backoffDelays).toEqual([500, 1000, 2000, 4000, 8000]);
+      // All delays must stay at or below the cap (matches Go client's maxBackoff = 8s)
+      expect(backoffDelays.every((d) => d <= MAX_BACKOFF_MS)).toBe(true);
+    });
+
+    it("backoff delay is clamped at MAX_BACKOFF_MS for high attempt counts", async () => {
+      // With maxRetries=10, attempts 0-9 would produce unclamped delays of
+      // [500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000] ms.
+      // After clamping at MAX_BACKOFF_MS (8000), attempts >= 4 must all equal 8000.
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const promise = fetchWithRetry(
+        "http://sandbox/test",
+        {},
+        10,
+        BACKOFF_FACTOR,
+        RETRY_STATUS_CODES,
+      );
+      const settled = promise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(200_000);
+      await settled;
+
+      // biome-ignore lint/style/noNonNullAssertion: setTimeoutSpy is always set within this test
+      const backoffDelays = setTimeoutSpy!.mock.calls
+        .map(([, delay]) => delay as number)
+        .filter((d) => d !== PER_ATTEMPT_TIMEOUT_MS);
+
+      expect(backoffDelays).toEqual([
+        500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000,
+      ]);
+    });
+
+    it("first backoff fires at exactly 500ms (confirmed by attempt count at 499ms vs 500ms)", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      sandbox.files.list(".").catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(0); // flush initial microtasks
+      expect(fetch).toHaveBeenCalledTimes(1); // attempt 0 already ran
+
+      await vi.advanceTimersByTimeAsync(499); // still within first backoff window
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1); // 500ms: first backoff fires
+      expect(fetch).toHaveBeenCalledTimes(2); // attempt 1 ran
+
+      await vi.advanceTimersByTimeAsync(20_000); // drain remaining
+    });
+
+    it("overall timeout fires during second backoff: 2 attempts then SandboxTimeoutError", async () => {
+      // Confirms TS does NOT shorten backoff delay to match remaining overall timeout.
+      // The 1000ms second-backoff sleep is started at full duration; the 600ms
+      // overall timeout fires concurrently and throws SandboxTimeoutError instead
+      // of clipping the sleep to ~100ms (the way Go would handle remaining context).
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));
+
+      const promise = sandbox.files.list(".", 0.6); // 600ms overall timeout
+      const settled = promise.catch(() => {});
+      // Advance past the 600ms timeout (first backoff 500ms fires → attempt 1 → second backoff 1000ms starts → timeout at 600ms)
+      await vi.advanceTimersByTimeAsync(700);
+      await settled;
+
+      const err = await promise.catch((e) => e);
+      expect(err.constructor.name).toBe("SandboxTimeoutError");
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+  });
+});

@@ -221,6 +221,11 @@ def test_restore_from_snapshot(sandbox, snapshot_uid: str):
     """Tests restoring a sandbox from a previous snapshot."""
     print("\n======= Testing Restore from Previous Snapshot =======")
     
+    print(f"\nSuspending sandbox '{sandbox.sandbox_id}' before dedicated restore...")
+    suspend_result = sandbox.suspend(snapshot_before_suspend=False)
+    assert suspend_result.success, f"Suspend failed before restore: {suspend_result.error_reason}"
+    assert sandbox.is_suspended(), "Sandbox should be suspended."
+
     print(f"\nRestoring sandbox '{sandbox.sandbox_id}' from snapshot '{snapshot_uid}'...")
     restore_result = sandbox.restore(snapshot_uid=snapshot_uid)
     

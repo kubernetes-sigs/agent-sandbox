@@ -66,6 +66,12 @@ try:
     if resume_response.success:
         print(f"Sandbox resumed! Restored from snapshot: {resume_response.snapshot_uid}")
 
+    # Suspend the sandbox before performing a dedicated restore
+    print("Suspending sandbox...")
+    suspend_response = sandbox.suspend(snapshot_before_suspend=False)
+    if suspend_response.success:
+        print("Sandbox suspended successfully.")
+
     # Restore the sandbox to a specific previous snapshot
     print("Restoring sandbox to a specific snapshot...")
     restore_response = sandbox.restore(snapshot_uid=response.snapshot_uid)

@@ -52,6 +52,10 @@ class RestorationResponse(BaseModel):
     error_reason: str = ""
     error_code: int = 0
 
+class ResumeResponse(RestorationResponse):
+    """Deprecated alias for RestorationResponse."""
+    pass
+
 class SandboxWithSnapshotSupport(Sandbox):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -352,39 +356,22 @@ class SandboxWithSnapshotSupport(Sandbox):
             else:
                 self._verify_snapshot_exists(snapshot_uid)
 
-            # Suspend first to ensure the pod is deleted before we mutate the claim
-            suspend_resp = self.suspend(snapshot_before_suspend=False, wait_timeout=sandbox_ready_timeout)
-            if not suspend_resp.success:
+            if not self.is_suspended():
                 return RestorationResponse(
                     success=False,
                     restored_from_snapshot=False,
                     snapshot_uid=snapshot_uid,
-                    error_reason=f"Failed to suspend sandbox before restore: {suspend_resp.error_reason}",
+                    error_reason="Sandbox must be suspended before restoring from a dedicated snapshot.",
                     error_code=ERROR_CODE
                 )
-
-            claim = self.k8s_helper.get_sandbox_claim(self.claim_name, self.namespace)
-            if not claim:
-                return RestorationResponse(
-                    success=False,
-                    restored_from_snapshot=False,
-                    snapshot_uid=snapshot_uid,
-                    error_reason=f"SandboxClaim '{self.claim_name}' not found in namespace '{self.namespace}'",
-                    error_code=ERROR_CODE
-                )
-
-            spec = claim.get("spec", {}) or {}
-            additional_pod_metadata = copy.deepcopy(spec.get("additionalPodMetadata", {})) or {}            
-            if "annotations" not in additional_pod_metadata:
-                additional_pod_metadata["annotations"] = {}
-            else:
-                additional_pod_metadata["annotations"] = dict(additional_pod_metadata["annotations"])
-
-            additional_pod_metadata["annotations"][PODSNAPSHOT_NAME_ANNOTATION] = snapshot_uid
 
             body = {
                 "spec": {
-                    "additionalPodMetadata": additional_pod_metadata
+                    "additionalPodMetadata": {
+                        "annotations": {
+                            PODSNAPSHOT_NAME_ANNOTATION: snapshot_uid
+                        }
+                    }
                 }
             }
             self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)

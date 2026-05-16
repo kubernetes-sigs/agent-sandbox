@@ -536,6 +536,109 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 		"sandbox should have template ref annotation for metrics")
 }
 
+func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+	trueValue := true
+
+	tests := []struct {
+		name             string
+		templateSpec     corev1.PodSpec
+		management       extensionsv1alpha1.NetworkPolicyManagement
+		networkPolicy    *extensionsv1alpha1.NetworkPolicySpec
+		wantAutomount    bool
+		wantDNSPolicy    corev1.DNSPolicy
+		wantDNSConfigNil bool
+	}{
+		{
+			name: "defaults automount token off and isolates DNS for managed template with no network policy",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test-image"}},
+			},
+			wantAutomount: false,
+			wantDNSPolicy: corev1.DNSNone,
+		},
+		{
+			name: "preserves explicit automount token setting when enabled",
+			templateSpec: corev1.PodSpec{
+				AutomountServiceAccountToken: &trueValue,
+				Containers:                   []corev1.Container{{Name: "app", Image: "test-image"}},
+			},
+			wantAutomount: true,
+			wantDNSPolicy: corev1.DNSNone,
+		},
+		{
+			name: "does not isolate DNS when network policy management is unmanaged",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test-image"}},
+			},
+			management:       extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
+			wantAutomount:    false,
+			wantDNSConfigNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			template := &extensionsv1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: poolNamespace,
+				},
+				Spec: extensionsv1alpha1.SandboxTemplateSpec{
+					NetworkPolicyManagement: tt.management,
+					NetworkPolicy:           tt.networkPolicy,
+					PodTemplate: sandboxv1alpha1.PodTemplate{
+						Spec: tt.templateSpec,
+					},
+				},
+			}
+
+			warmPool := &extensionsv1alpha1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: poolNamespace,
+					UID:       "warmpool-uid-secure-defaults",
+				},
+				Spec: extensionsv1alpha1.SandboxWarmPoolSpec{
+					Replicas:    1,
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: templateName},
+				},
+			}
+
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithRuntimeObjects(template).
+					Build(),
+				Scheme: scheme,
+			}
+
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			list := &sandboxv1alpha1.SandboxList{}
+			err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+			require.NoError(t, err)
+			require.Len(t, list.Items, 1)
+
+			podSpec := list.Items[0].Spec.PodTemplate.Spec
+			require.NotNil(t, podSpec.AutomountServiceAccountToken)
+			require.Equal(t, tt.wantAutomount, *podSpec.AutomountServiceAccountToken)
+			require.Equal(t, tt.wantDNSPolicy, podSpec.DNSPolicy)
+			if tt.wantDNSConfigNil {
+				require.Nil(t, podSpec.DNSConfig)
+			} else {
+				require.Equal(t, &corev1.PodDNSConfig{Nameservers: []string{"8.8.8.8", "1.1.1.1"}}, podSpec.DNSConfig)
+			}
+		})
+	}
+}
+
 func TestReconcilePoolReadyReplicas(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"

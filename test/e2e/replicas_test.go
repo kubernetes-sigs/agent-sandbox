@@ -15,7 +15,9 @@
 package e2e
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -30,7 +32,7 @@ func TestSandboxReplicas(t *testing.T) {
 
 	// Set up a namespace
 	ns := &corev1.Namespace{}
-	ns.Name = "my-sandbox-ns"
+	ns.Name = fmt.Sprintf("my-sandbox-ns-%d", time.Now().UnixNano())
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 	// Create a Sandbox Object
 	sandboxObj := simpleSandbox(ns.Name)
@@ -42,16 +44,16 @@ func TestSandboxReplicas(t *testing.T) {
 	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "my-sandbox",
-			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
+			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod is Ready; Service Exists",
-					ObservedGeneration: 1,
-					Reason:             "DependenciesReady",
-					Status:             "True",
 					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1alpha1.SandboxReasonDependenciesReady,
+					Message:            "Pod is Ready; Service Exists",
 				},
 			},
 		}),
@@ -60,12 +62,12 @@ func TestSandboxReplicas(t *testing.T) {
 	// Assert Pod and Service objects exist
 	pod := &corev1.Pod{}
 	pod.Name = "my-sandbox"
-	pod.Namespace = "my-sandbox-ns"
+	pod.Namespace = ns.Name
 	tc.MustExist(pod)
 
 	service := &corev1.Service{}
 	service.Name = "my-sandbox"
-	service.Namespace = "my-sandbox-ns"
+	service.Namespace = ns.Name
 	tc.MustExist(service)
 
 	// Set replicas to zero
@@ -77,16 +79,23 @@ func TestSandboxReplicas(t *testing.T) {
 	p = []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
 			Service:       "my-sandbox",
-			ServiceFQDN:   "my-sandbox.my-sandbox-ns.svc.cluster.local",
+			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      0,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod does not exist, replicas is 0; Service Exists",
-					ObservedGeneration: 2,
-					Reason:             "DependenciesReady",
-					Status:             "True",
 					Type:               "Ready",
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1alpha1.SandboxReasonSuspended,
+					Message:            "Sandbox is suspended",
+				},
+				{
+					Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1alpha1.SandboxReasonSuspendedPodTerminated,
+					Message:            "Pod has been terminated. Sandbox is not operational.",
 				},
 			},
 		}),

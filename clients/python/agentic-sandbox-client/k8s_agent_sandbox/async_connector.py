@@ -67,7 +67,9 @@ class AsyncSandboxConnector:
         self._get_pod_ip = get_pod_ip
 
         self._base_url: str | None = None
+        self._pod_ip: str | None = None
         self._pod_ip_resolved = False
+        self._pod_ip_auth_failed = False
         self._cached_pod_ip_url: str | None = None
         if isinstance(connection_config, SandboxInClusterConnectionConfig):
             self._dns_url = (
@@ -95,6 +97,7 @@ class AsyncSandboxConnector:
                     return self._cached_pod_ip_url or self._dns_url
                 pod_ip = await self._get_pod_ip()
                 if pod_ip:
+                    self._pod_ip = pod_ip
                     self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
                     self._pod_ip_resolved = True
                     return self._cached_pod_ip_url
@@ -128,6 +131,22 @@ class AsyncSandboxConnector:
             headers["X-Sandbox-ID"] = self.id
             headers["X-Sandbox-Namespace"] = self.namespace
             headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+            if self._get_pod_ip and not self._pod_ip_auth_failed:
+                if not self._pod_ip_resolved:
+                    try:
+                        pod_ip = await self._get_pod_ip()
+                        if pod_ip:
+                            self._pod_ip = pod_ip
+                            self._pod_ip_resolved = True
+                    except Exception as e:
+                        status_code = getattr(getattr(e, "response", None), "status_code", None)
+                        if status_code in (401, 403):
+                            self._pod_ip_auth_failed = True
+                            logger.debug(f"K8s API auth failed ({status_code}). Permanently disabling direct pod IP routing for this client instance.")
+                        else:
+                            logger.debug(f"Transient failure resolving pod IP for direct routing: {e}")
+                if self._pod_ip:
+                    headers["X-Sandbox-Pod-IP"] = self._pod_ip
 
         last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):
@@ -153,6 +172,7 @@ class AsyncSandboxConnector:
                     self._base_url = None
                 self._pod_ip_resolved = False
                 self._cached_pod_ip_url = None
+                self._pod_ip = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=e.response.status_code,
@@ -165,6 +185,7 @@ class AsyncSandboxConnector:
                     self._base_url = None
                 self._pod_ip_resolved = False
                 self._cached_pod_ip_url = None
+                self._pod_ip = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=None,
@@ -184,3 +205,4 @@ class AsyncSandboxConnector:
             self._base_url = None
         self._pod_ip_resolved = False
         self._cached_pod_ip_url = None
+        self._pod_ip = None

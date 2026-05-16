@@ -429,6 +429,13 @@ func TestTracingErrorRecording(t *testing.T) {
 	t.Error("run span not found")
 }
 
+func TestTraceContextJSON_NoActiveSpan(t *testing.T) {
+	// Background context carries no span; carrier will be empty -> return "".
+	if got := traceContextJSON(context.Background()); got != "" {
+		t.Errorf("expected empty string for context without an active span, got %q", got)
+	}
+}
+
 // --- helpers ---
 
 func spanNames(spans tracetest.SpanStubs) []string {

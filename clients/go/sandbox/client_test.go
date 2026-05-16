@@ -82,6 +82,25 @@ func TestClient_Registry(t *testing.T) {
 	if active[0].ClaimName != "test-claim" {
 		t.Errorf("expected test-claim, got %s", active[0].ClaimName)
 	}
+
+	// Inactive sandboxes (baseURL=="") are pruned from the registry.
+	inactive := &Sandbox{log: logr.Discard()}
+	inactive.connector = &connector{} // baseURL="" -> IsReady() = false
+	key = Key{Namespace: "default", ClaimName: "inactive-claim"}
+	c.mu.Lock()
+	c.registry[key] = inactive
+	c.mu.Unlock()
+
+	got := c.ListActiveSandboxes()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 active after adding inactive, got %d", len(got))
+	}
+	c.mu.Lock()
+	_, stillPresent := c.registry[key]
+	c.mu.Unlock()
+	if stillPresent {
+		t.Error("inactive sandbox should have been pruned from registry")
+	}
 }
 
 func TestClient_DeleteAll(t *testing.T) {
@@ -193,6 +212,46 @@ func TestClient_GetSandbox_ReturnsCached(t *testing.T) {
 	}
 	if got != sb {
 		t.Error("expected cached handle to be returned")
+	}
+}
+
+func TestClient_DeleteSandbox_Tracked(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	sb := &Sandbox{
+		k8s:  c.k8s,
+		log:  logr.Discard(),
+		opts: c.opts,
+		connector: &connector{
+			strategy:   &DirectStrategy{URL: "http://fake"},
+			httpClient: &http.Client{},
+		},
+		inflightOps:  &sync.WaitGroup{},
+		lifecycleSem: make(chan struct{}, 1),
+	}
+	sb.mu.Lock()
+	sb.claimName = "tracked-claim"
+	sb.sandboxName = "sb-tracked"
+	sb.mu.Unlock()
+
+	key := Key{Namespace: "default", ClaimName: "tracked-claim"}
+	c.mu.Lock()
+	c.registry[key] = sb
+	c.mu.Unlock()
+
+	if err := c.DeleteSandbox(context.Background(), "tracked-claim", "default"); err != nil {
+		t.Fatalf("DeleteSandbox for tracked sandbox: %v", err)
+	}
+
+	c.mu.Lock()
+	remaining := len(c.registry)
+	c.mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("expected empty registry after DeleteSandbox of tracked sandbox, got %d", remaining)
 	}
 }
 

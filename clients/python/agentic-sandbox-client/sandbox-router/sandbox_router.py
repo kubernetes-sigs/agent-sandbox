@@ -26,6 +26,7 @@ app = FastAPI()
 DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
 DEFAULT_PROXY_TIMEOUT = 180.0
+DEFAULT_CLUSTER_DOMAIN = "cluster.local"
 
 
 def _get_proxy_timeout() -> float:
@@ -45,10 +46,23 @@ def _get_proxy_timeout() -> float:
     return value
 
 
+def _get_cluster_domain() -> str:
+    cluster_domain = os.environ.get("CLUSTER_DOMAIN")
+    if cluster_domain is None:
+        return DEFAULT_CLUSTER_DOMAIN
+    if cluster_domain == "":
+        print("WARNING: CLUSTER_DOMAIN must not be an empty string, "
+              f"falling back to {DEFAULT_CLUSTER_DOMAIN}")
+        return DEFAULT_CLUSTER_DOMAIN
+    return cluster_domain
+
+
+cluster_domain = _get_cluster_domain()
 proxy_timeout = _get_proxy_timeout()
 client = httpx.AsyncClient(timeout=proxy_timeout)
 
 print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")
+print(f"Sandbox router configured with cluster_domain: {cluster_domain}")
 
 
 @app.get("/healthz")
@@ -80,8 +94,14 @@ async def proxy_request(request: Request, full_path: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid port format.")
 
-    # Construct the K8s internal DNS name
-    target_host = f"{sandbox_id}.{namespace}.svc.cluster.local"
+    # Dynamic routing: route by Pod IP if provided by client, otherwise fallback to DNS name
+    pod_ip = request.headers.get("X-Sandbox-Pod-IP")
+    if pod_ip:
+        target_host = pod_ip
+    else:
+        # Construct the K8s internal DNS name
+        target_host = f"{sandbox_id}.{namespace}.svc.{cluster_domain}"
+
     target_url = str(
         request.url.replace(scheme="http", hostname=target_host, port=port)
     )

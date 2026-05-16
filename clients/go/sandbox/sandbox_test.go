@@ -330,6 +330,15 @@ func TestOpen_TimeoutWhenNotReady(t *testing.T) {
 	if !errors.Is(err, ErrTimeout) {
 		t.Errorf("expected ErrTimeout, got: %v", err)
 	}
+
+	c.mu.Lock()
+	span := c.lifecycleSpan
+	lifecycleCtx := c.lifecycleCtx
+	c.mu.Unlock()
+	// Without clearing lifecycle state on failure, spans leak across sessions.
+	if span != nil || lifecycleCtx != nil {
+		t.Error("expected lifecycle span/context to be cleared after timeout")
+	}
 }
 
 func TestClose_DeletesClaim(t *testing.T) {
@@ -2074,6 +2083,20 @@ func TestHTTPError_CanBeExtracted(t *testing.T) {
 	if httpErr.Operation != "read" {
 		t.Errorf("expected Operation=read, got %s", httpErr.Operation)
 	}
+
+	// Error() truncates bodies longer than 256 chars.
+	longE := &HTTPError{StatusCode: 500, Body: strings.Repeat("x", 300), Operation: "op"}
+	msg := longE.Error()
+	if !strings.Contains(msg, "... [truncated]") {
+		t.Error("expected truncation marker for body > 256 chars")
+	}
+	if strings.Contains(msg, strings.Repeat("x", 257)) {
+		t.Error("body was not truncated to 256 chars")
+	}
+	shortE := &HTTPError{StatusCode: 404, Body: "short", Operation: "op"}
+	if strings.Contains(shortE.Error(), "truncated") {
+		t.Error("short body should not be marked as truncated")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2582,6 +2605,13 @@ func TestClose_DeleteFailure_ClearsIdentityButKeepsClaim(t *testing.T) {
 	if c.PodName() != "" {
 		t.Error("expected PodName to be cleared after failed Close")
 	}
+	// Span must be nil regardless of delete error. an unended span leaks tracer resources.
+	c.mu.Lock()
+	span := c.lifecycleSpan
+	c.mu.Unlock()
+	if span != nil {
+		t.Error("lifecycleSpan must be nil after Close() even when claim deletion fails; span leak")
+	}
 	if err := c.Open(context.Background()); !errors.Is(err, ErrOrphanedClaim) {
 		t.Fatalf("expected ErrOrphanedClaim after failed Close, got: %v", err)
 	}
@@ -2863,6 +2893,78 @@ func TestDisconnect_Timeout(t *testing.T) {
 
 	// Release the sem for cleanup.
 	<-c.lifecycleSem
+}
+
+func TestDeleteClaim_EmptyName(t *testing.T) {
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck
+	deleteCalled := false
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		deleteCalled = true
+		return true, nil, nil
+	})
+	h := &K8sHelper{
+		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		Log:              logr.Discard(),
+	}
+	if err := h.deleteClaim(context.Background(), "", "default"); err != nil {
+		t.Fatalf("deleteClaim(\"\") should return nil, got: %v", err)
+	}
+	if deleteCalled {
+		t.Error("deleteClaim(\"\") should not call the k8s API")
+	}
+}
+
+func TestTrackOp_WhenDraining(t *testing.T) {
+	opts := defaultTestOpts()
+	c, _, _ := newTestSandbox(opts)
+
+	c.mu.Lock()
+	c.draining = true
+	c.mu.Unlock()
+
+	done := c.trackOp()
+	done() // must not panic; no Done() on a WaitGroup that had no Add
+
+	// Verify WaitGroup was not incremented by confirming Wait returns immediately.
+	c.mu.Lock()
+	wg := c.inflightOps
+	c.draining = false
+	c.mu.Unlock()
+
+	waitDone := make(chan struct{})
+	go func() { wg.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Error("WaitGroup was incremented by trackOp when draining=true")
+	}
+}
+
+// TestOpen_FailureClearsLifecycleSpan verifies that a failed Open ends and
+// clears the lifecycle span.
+func TestOpen_FailureClearsLifecycleSpan(t *testing.T) {
+	opts := defaultTestOpts()
+	c, _, extensionsCS := newTestSandbox(opts)
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("injected failure")
+	})
+
+	if err := c.Open(context.Background()); err == nil {
+		c.Close(context.Background())
+		t.Fatal("expected Open() to fail")
+	}
+
+	c.mu.Lock()
+	span := c.lifecycleSpan
+	ctx := c.lifecycleCtx
+	c.mu.Unlock()
+
+	if span != nil {
+		t.Error("lifecycleSpan must be nil after failed Open(); unended span leaks tracer resources")
+	}
+	if ctx != nil {
+		t.Error("lifecycleCtx must be nil after failed Open(); context leak")
+	}
 }
 
 func TestDisconnect_DoubleDisconnect(t *testing.T) {

@@ -44,6 +44,7 @@ func simpleSandbox(ns string) *sandboxv1alpha1.Sandbox {
 	sandboxObj := &sandboxv1alpha1.Sandbox{}
 	sandboxObj.Name = "my-sandbox"
 	sandboxObj.Namespace = ns
+	sandboxObj.Spec.Service = new(true)
 	sandboxObj.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -82,11 +83,11 @@ func TestSimpleSandbox(t *testing.T) {
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod is Ready; Service Exists",
-					ObservedGeneration: 1,
-					Reason:             "DependenciesReady",
-					Status:             "True",
 					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1alpha1.SandboxReasonDependenciesReady,
+					Message:            "Pod is Ready; Service Exists",
 				},
 			},
 		}),

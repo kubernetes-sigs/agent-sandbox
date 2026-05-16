@@ -330,6 +330,20 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_code=ERROR_CODE
             )
 
+        try:
+            body = {
+                "spec": {
+                    "additionalPodMetadata": {
+                        "annotations": {
+                            PODSNAPSHOT_NAME_ANNOTATION: None
+                        }
+                    }
+                }
+            }
+            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+        except Exception as e:
+            logger.error(f"Failed to clean up restore annotation before resuming: {e}")
+
         return self._restore_internal(latest_snapshot_uid, wait_timeout)
 
     def _verify_snapshot_exists(self, snapshot_uid: str) -> None:

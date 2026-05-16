@@ -406,8 +406,7 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		latest.Status = desiredStatus
 		return r.Status().Update(ctx, latest)
 	}); err != nil {
-		logger.Error(err, "Failed to update SandboxWarmPool status")
-		return err
+		return fmt.Errorf("failed to update SandboxWarmPool status: %w", err)
 	}
 
 	logger.Info("Updated SandboxWarmPool status", "replicas", desiredStatus.Replicas, "readyReplicas", desiredStatus.ReadyReplicas)

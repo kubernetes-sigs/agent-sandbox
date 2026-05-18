@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -36,11 +36,11 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 	ns.Name = fmt.Sprintf("sandbox-vct-test-%d", time.Now().UnixNano())
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 
-	sandboxObj := &sandboxv1alpha1.Sandbox{}
+	sandboxObj := &sandboxv1beta1.Sandbox{}
 	sandboxObj.Name = "vct-sandbox"
 	sandboxObj.Namespace = ns.Name
 	sandboxObj.Spec.Service = new(true)
-	sandboxObj.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+	sandboxObj.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -56,9 +56,9 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 			},
 		},
 	}
-	sandboxObj.Spec.VolumeClaimTemplates = []sandboxv1alpha1.PersistentVolumeClaimTemplate{
+	sandboxObj.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
 		{
-			EmbeddedObjectMetadata: sandboxv1alpha1.EmbeddedObjectMetadata{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{
 				Name: "data",
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
@@ -77,7 +77,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 
 	// Wait for the sandbox to become ready
 	p := []predicates.ObjectPredicate{
-		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "vct-sandbox",
 			ServiceFQDN:   fmt.Sprintf("vct-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      1,
@@ -87,7 +87,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,
-					Reason:             sandboxv1alpha1.SandboxReasonDependenciesReady,
+					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 					Message:            "Pod is Ready; Service Exists",
 				},
 			},

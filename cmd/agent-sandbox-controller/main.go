@@ -31,7 +31,7 @@ import (
 	"github.com/felixge/fgprof"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -165,7 +165,7 @@ func main() {
 
 	scheme := controllers.Scheme
 	if extensions {
-		utilruntime.Must(extensionsv1alpha1.AddToScheme(scheme))
+		utilruntime.Must(extensionsv1beta1.AddToScheme(scheme))
 	}
 
 	metricsOpts := metricsserver.Options{

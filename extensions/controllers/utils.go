@@ -17,11 +17,11 @@ package controllers
 import (
 	corev1 "k8s.io/api/core/v1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // ApplySandboxSecureDefaults applies the controller's "Secure by Default" logic to a PodSpec.
-func ApplySandboxSecureDefaults(template *extensionsv1alpha1.SandboxTemplate, spec *corev1.PodSpec) {
+func ApplySandboxSecureDefaults(template *extensionsv1beta1.SandboxTemplate, spec *corev1.PodSpec) {
 	// Enforce a secure-by-default policy by disabling the automatic mounting
 	// of the service account token, adhering to security best practices for
 	// sandboxed environments.
@@ -32,7 +32,7 @@ func ApplySandboxSecureDefaults(template *extensionsv1alpha1.SandboxTemplate, sp
 
 	// Determine if we are in "Secure By Default" mode
 	management := template.Spec.NetworkPolicyManagement
-	isManaged := management == "" || management == extensionsv1alpha1.NetworkPolicyManagementManaged
+	isManaged := management == "" || management == extensionsv1beta1.NetworkPolicyManagementManaged
 	isSecureByDefault := isManaged && template.Spec.NetworkPolicy == nil
 
 	// To prevent internal DNS enumeration while still allowing public domain resolution,

@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -391,24 +392,24 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		return nil
 	}
 
-	patch := &extensionsv1alpha1.SandboxWarmPool{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: extensionsv1alpha1.GroupVersion.String(),
-			Kind:       "SandboxWarmPool",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      warmPool.Name,
-			Namespace: warmPool.Namespace,
-		},
-		Status: warmPool.Status,
+	desiredStatus := warmPool.Status
+	key := client.ObjectKeyFromObject(warmPool)
+
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &extensionsv1alpha1.SandboxWarmPool{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		if equality.Semantic.DeepEqual(&latest.Status, &desiredStatus) {
+			return nil
+		}
+		latest.Status = desiredStatus
+		return r.Status().Update(ctx, latest)
+	}); err != nil {
+		return fmt.Errorf("failed to update SandboxWarmPool status: %w", err)
 	}
 
-	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil { //nolint:staticcheck // SA1019: client.Apply requires generated apply configurations
-		logger.Error(err, "Failed to apply SandboxWarmPool status via SSA")
-		return err
-	}
-
-	logger.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
+	logger.Info("Updated SandboxWarmPool status", "replicas", desiredStatus.Replicas, "readyReplicas", desiredStatus.ReadyReplicas)
 	return nil
 }
 

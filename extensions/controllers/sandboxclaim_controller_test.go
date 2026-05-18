@@ -832,9 +832,20 @@ func TestSandboxClaimReconcile(t *testing.T) {
 
 			if tc.expectSandbox {
 				// Verify the controller injected the template hash label so the NP can find the pod
-				expectedHash := sandboxcontrollers.NameHash(claimToUse.Spec.TemplateRef.Name)
-				if val, exists := sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash]; !exists || val != expectedHash {
-					t.Errorf("expected Sandbox PodTemplate to have label '%s' with value %q, got %q", sandboxTemplateRefHash, expectedHash, val)
+				var usedTemplate *extensionsv1alpha1.SandboxTemplate
+				for _, obj := range allObjects {
+					if t, ok := obj.(*extensionsv1alpha1.SandboxTemplate); ok {
+						usedTemplate = t
+						break
+					}
+				}
+				if usedTemplate == nil {
+					usedTemplate = template
+				}
+				oldHash := HashUsingSandboxTemplateRefName(usedTemplate.Name)
+				newHash := SandboxTemplateRefHash(usedTemplate.Namespace, usedTemplate.Name)
+				if val, exists := sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash]; !exists || (val != oldHash && val != newHash) {
+					t.Errorf("expected Sandbox PodTemplate to have label '%s' with value %q or %q, got %q", sandboxTemplateRefHash, newHash, oldHash, val)
 				}
 			}
 
@@ -1569,7 +1580,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
 					warmPoolSandboxLabel:   poolNameHash,
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					sandboxTemplateRefHash: SandboxTemplateRefHash("default", "test-template"),
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -1793,6 +1804,21 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectedAdoptedSandbox:  "pool-sb-2",
 			expectNewSandboxCreated: false,
 			simulateConflicts:       1, // Fail update on the first sandbox, succeed on the second
+		},
+		{
+			name: "adopts sandbox with legacy hash",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-legacy", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Labels[sandboxTemplateRefHash] = HashUsingSandboxTemplateRefName("test-template")
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "pool-sb-legacy",
+			expectNewSandboxCreated: false,
 		},
 	}
 

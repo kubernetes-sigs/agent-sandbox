@@ -31,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
@@ -124,7 +123,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			existingObjects:     []client.Object{templateWithNP},
 			expectNetworkPolicy: true,
 			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
-				expectedHash := sandboxcontrollers.NameHash("test-template-custom")
+				expectedHash := SandboxTemplateRefHash(templateWithNP.Namespace, templateWithNP.Name)
 				if np.Spec.PodSelector.MatchLabels[sandboxTemplateRefHash] != expectedHash {
 					t.Errorf("unexpected pod selector hash")
 				}

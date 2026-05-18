@@ -332,6 +332,7 @@ _Appears in:_
 | `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox |  | Optional: \{\} <br /> |
+| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requests/limits for the workspace container at claim time. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -556,5 +557,23 @@ _Appears in:_
 | --- | --- |
 | `none` | WarmPoolPolicyNone indicates that no warm pool should be used.<br />A fresh sandbox will always be created.<br /> |
 | `default` | WarmPoolPolicyDefault indicates the default behavior: select from all<br />available warm pools that match the template. This is the default behavior<br />if warmpool is not specified.<br /> |
+
+
+#### WorkspaceResources
+
+
+
+WorkspaceResources defines per-claim resource overrides for the workspace container.
+
+
+
+_Appears in:_
+- [SandboxClaimSpec](#sandboxclaimspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `cpuMillicores` _integer_ | cpuMillicores is the desired CPU request/limit for the workspace container. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `memoryMiB` _integer_ | memoryMiB is the desired memory request/limit for the workspace container, in mebibytes (1 MiB = 1024*1024 B). |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `diskGiB` _integer_ | diskGiB is the desired ephemeral-storage request/limit for the workspace container, in gibibytes (1 GiB = 1024*1024*1024 B). |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 

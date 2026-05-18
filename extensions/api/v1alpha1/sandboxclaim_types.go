@@ -32,20 +32,20 @@ const (
 
 // WarmPoolPolicy describes the policy for using warm pools.
 // It can be one of the following:
-//   - "none": Do not use any warm pool, always create fresh sandboxes
-//   - "default": Select from all available warm pools that match the template (default)
+//   - "None": Do not use any warm pool, always create fresh sandboxes
+//   - "Default": Select from all available warm pools that match the template (default)
 //   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
 type WarmPoolPolicy string
 
 const (
 	// WarmPoolPolicyNone indicates that no warm pool should be used.
 	// A fresh sandbox will always be created.
-	WarmPoolPolicyNone WarmPoolPolicy = "none"
+	WarmPoolPolicyNone WarmPoolPolicy = "None"
 
 	// WarmPoolPolicyDefault indicates the default behavior: select from all
 	// available warm pools that match the template. This is the default behavior
 	// if warmpool is not specified.
-	WarmPoolPolicyDefault WarmPoolPolicy = "default"
+	WarmPoolPolicyDefault WarmPoolPolicy = "Default"
 )
 
 // IsSpecificPool returns true if the policy specifies a specific warm pool name
@@ -132,11 +132,11 @@ type SandboxClaimSpec struct {
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 
 	// warmpool specifies the warm pool policy for sandbox adoption.
-	// - "none": Do not use any warm pool, always create fresh sandboxes
-	// - "default": Use default behavior, select from all matching warm pools (default)
+	// - "None": Do not use any warm pool, always create fresh sandboxes
+	// - "Default": Use default behavior, select from all matching warm pools (default)
 	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
 	// +optional
-	// +kubebuilder:default=default
+	// +kubebuilder:default=Default
 	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.

@@ -79,7 +79,7 @@ spec:
                 - name
                 type: object
               warmpool:
-                default: default
+                default: Default
                 type: string
             required:
             - sandboxTemplateRef

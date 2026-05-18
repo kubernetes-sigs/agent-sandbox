@@ -446,6 +446,14 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 		return true
 	}
 
+	// Check if the sandbox is unowned (orphaned).
+	controllerRef := metav1.GetControllerOf(sandbox)
+	isOrphan := controllerRef == nil
+	if isOrphan {
+		// Always perform full semantic comparison for orphans.
+		return !r.comparePodSpecs(template, &sandbox.Spec.PodTemplate.Spec)
+	}
+
 	// If hashes match, it's fresh.
 	if sandboxHash != "" && sandboxHash == currentPodTemplateHash {
 		return false

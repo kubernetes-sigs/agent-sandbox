@@ -53,6 +53,7 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 	if template != nil {
 		templateRefHash = sandboxcontrollers.NameHash(template.Name)
 		podSpec = *template.Spec.PodTemplate.Spec.DeepCopy()
+		ApplySandboxSecureDefaults(template, &podSpec)
 		// If template has a version label, we could use it as part of the hash placeholder
 		if v, ok := template.Spec.PodTemplate.ObjectMeta.Labels["version"]; ok {
 			podTemplateHash = "pod-hash-" + v
@@ -1366,4 +1367,81 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 	for _, sb := range sandboxes.Items {
 		require.Equal(t, corev1.DNSClusterFirst, sb.Spec.PodTemplate.Spec.DNSPolicy, "Sandbox should have updated DNSPolicy")
 	}
+}
+
+func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "app", Image: "genuine-image"},
+					},
+				},
+			},
+		},
+	}
+
+	currentPodTemplateHash, err := computePodTemplateHash(template)
+	require.NoError(t, err)
+	templateRefHash := SandboxTemplateRefHash(template.Name)
+
+	r := &SandboxWarmPoolReconciler{Scheme: scheme}
+	vettedHashes := make(map[string]bool)
+
+	// Case 1: Orphaned sandbox with matching hash label but modified PodSpec (Spoofed).
+	// Should be detected as stale because unowned sandboxes must undergo full vetting.
+	spoofedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+	spoofedSpec.Containers[0].Image = "malicious-image"
+
+	spoofedOrphan := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "spoofed-orphan",
+			Namespace: poolNamespace,
+			Labels: map[string]string{
+				sandboxv1alpha1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
+				sandboxTemplateRefHash:                      templateRefHash,
+				warmPoolSandboxLabel:                        sandboxcontrollers.NameHash(poolName),
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: *spoofedSpec},
+		},
+	}
+
+	isStaleSpoofed := r.isSandboxStale(ctx, spoofedOrphan, template, currentPodTemplateHash, vettedHashes)
+	require.True(t, isStaleSpoofed, "Orphaned sandbox with spoofed hash but modified PodSpec should be stale")
+
+	// Case 2: Orphaned sandbox with matching hash label and genuine/fully vetted PodSpec.
+	// Should be evaluated as fresh (not stale) after passing full semantic comparison.
+	genuineSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+	ApplySandboxSecureDefaults(template, genuineSpec)
+
+	genuineOrphan := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "genuine-orphan",
+			Namespace: poolNamespace,
+			Labels: map[string]string{
+				sandboxv1alpha1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
+				sandboxTemplateRefHash:                      templateRefHash,
+				warmPoolSandboxLabel:                        sandboxcontrollers.NameHash(poolName),
+			},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: *genuineSpec},
+		},
+	}
+
+	isStaleGenuine := r.isSandboxStale(ctx, genuineOrphan, template, currentPodTemplateHash, vettedHashes)
+	require.False(t, isStaleGenuine, "Orphaned sandbox with genuine fully vetted PodSpec should be fresh")
 }

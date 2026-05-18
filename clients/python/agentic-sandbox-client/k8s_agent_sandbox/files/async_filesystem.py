@@ -13,10 +13,10 @@
 # limitations under the License.
 
 import logging
-import os
 import urllib.parse
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
+from k8s_agent_sandbox.files.filesystem import Filesystem
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
 
@@ -41,12 +41,18 @@ class AsyncFilesystem:
         if isinstance(content, str):
             content = content.encode("utf-8")
 
-        filename = os.path.basename(path)
-        files_payload = {"file": (filename, content)}
+        # Use the same hardened sanitizer as the sync twin — rejects
+        # empty / bare-'.', embedded NUL and ASCII control characters,
+        # and any '..' segment after normalisation. os.path.basename
+        # alone is not sufficient: basename("foo\x00../etc/passwd")
+        # returns the string unchanged, and the NUL truncates at the
+        # runtime's C layer.
+        safe_path = Filesystem._safe_upload_path(path)
+        files_payload = {"file": (safe_path, content)}
         await self.connector.send_request(
             "POST", "upload", files=files_payload, timeout=timeout
         )
-        logging.info(f"File '{filename}' uploaded successfully.")
+        logging.info(f"File '{path}' uploaded successfully.")
 
     @async_trace_span("read")
     async def read(self, path: str, timeout: int = 60) -> bytes:

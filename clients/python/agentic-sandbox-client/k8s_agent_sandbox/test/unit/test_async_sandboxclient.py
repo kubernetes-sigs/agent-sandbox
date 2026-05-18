@@ -425,6 +425,21 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
+    async def test_follow_redirects_is_false(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
+            
+            call_args, call_kwargs = connector.client.request.call_args
+            self.assertFalse(call_kwargs.get("follow_redirects", True))
+        finally:
+            await connector.close()
+
     async def test_post_execute(self):
         connector = self._make_connector()
         try:

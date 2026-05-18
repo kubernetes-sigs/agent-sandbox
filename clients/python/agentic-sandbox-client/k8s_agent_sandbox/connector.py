@@ -351,7 +351,7 @@ class SandboxConnector:
             kwargs["headers"] = headers
 
             # Send the request
-            response = self.session.request(method, url, **kwargs)
+            response = self.session.request(method, url, allow_redirects=False, **kwargs)
             response.raise_for_status()
             return response
         except SandboxPortForwardError:

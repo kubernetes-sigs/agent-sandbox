@@ -152,7 +152,7 @@ class AsyncSandboxConnector:
         for attempt in range(MAX_RETRIES + 1):
             try:
                 response = await self.client.request(
-                    method, url, headers=headers, **kwargs
+                    method, url, headers=headers, follow_redirects=False, **kwargs
                 )
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
                     delay = BACKOFF_FACTOR * (2 ** attempt)

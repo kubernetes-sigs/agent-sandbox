@@ -161,6 +161,74 @@ spec:
 - Retaining Internet Access: We copy the public internet egress rules from the secure defaults to ensure the agent can still make external API calls while blocking lateral movement across the internal cluster network.
 
 
+**Example 3: GCP Workload Identity & Google Cloud Services (Vertex AI, GCS, etc.)**
+
+If your AI sandboxes interact with Google Cloud APIs (e.g., Vertex AI model generation or reading/writing data to Google Cloud Storage buckets), you must configure your network policy to support **Workload Identity** and prevent latency hangs.
+
+There are two critical gotchas to be aware of when using Google Cloud APIs inside a sandboxed environment:
+1. **Workload Identity (169.254.169.254)**: Google Cloud SDKs authenticate by querying the GCP Metadata Server at `169.254.169.254`. This link-local address is blocked by default under the Secure-by-Default posture, so you must explicitly permit it.
+2. **IPv6 / DNS**: Modern runtimes (such as Node.js clients using `fetch` or Python SDKs using libraries like `urllib3`, `requests`, or `aiohttp`) may attempt to reach Google API domains (like `aiplatform.googleapis.com` or `storage.googleapis.com`) over both IPv4 and IPv6. Because standard Kubernetes network policies are default-deny, if you omit the IPv6 egress block (`::/0`), the CNI may silently drop the outbound IPv6 packets. This can cause the application to hang for up to ~2 minutes before falling back to IPv4, depending on the runtime and network stack.
+
+To support Google Cloud APIs natively without experiencing these latency hangs or resolution failures, you must:
+1. Explicitly allow **both** IPv4 and IPv6 egress to the internet.
+2. Add a separate, narrow egress rule allowing traffic only to the GCP Metadata Server (`169.254.169.254/32` on TCP port 80) rather than leaving the entire `169.254.0.0/16` link-local range exposed.
+3. Configure custom DNS resolvers (like public Google/Cloudflare DNS) directly in the sandbox `podTemplate`. Since defining a custom `networkPolicy` disables the automatic "Secure-by-Default" DNS override, and since RFC1918 private subnets are blocked by the custom egress rules, the sandbox would be unable to reach internal cluster DNS (CoreDNS), causing DNS lookups for external domains to fail.
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: gcp-agent-template
+spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      # Re-allow the standard Sandbox Router
+      - from:
+        - podSelector:
+            matchLabels:
+              app: sandbox-router
+    egress:
+      # 1. Allow outbound IPv4 to the public internet (excluding private subnets and link-local)
+      - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+
+      # 2. Allow outbound IPv6
+      - to:
+        - ipBlock:
+            cidr: "::/0"
+            except:
+              - "fc00::/7"
+
+      # 3. Allow narrow egress to the GCP Metadata Server for Workload Identity
+      - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+        ports:
+          - protocol: TCP
+            port: 80
+
+  podTemplate:
+    spec:
+      # Custom networkPolicies disable the automatic "Secure-by-Default" DNS override.
+      # Since private subnets are blocked above, we must configure external public resolvers
+      # here so that the sandbox can resolve public Google API domains.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 8.8.8.8
+          - 1.1.1.1
+      # ... rest of the pod template spec (containers, volumes, etc.)
+```
+
+
+
 ## Troubleshooting
 
 **How can I confirm which network policy is actively applied to a Sandbox?**

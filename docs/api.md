@@ -575,3 +575,5 @@ _Appears in:_
 | `cpuMillicores` _integer_ | cpuMillicores is the desired CPU request/limit for the workspace container. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `memoryMiB` _integer_ | memoryMiB is the desired memory request/limit for the workspace container, in mebibytes (1 MiB = 1024*1024 B). |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `diskGiB` _integer_ | diskGiB is the desired ephemeral-storage request/limit for the workspace container, in gibibytes (1 GiB = 1024*1024*1024 B). |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+

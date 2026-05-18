@@ -1770,11 +1770,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: true,
 		},
 		{
-			// Mixed pool: some sandboxes are mid-rotation (no pod) and some have
-			// pods but haven't gone Ready yet. The ones with pods should still
-			// be adopted rather than falling to cold creation. This is the
-			// aditya-shantanu correction: a pod-started-but-not-ready sandbox
-			// is more useful than a from-scratch cold start.
+			// Prefer a not-Ready sandbox with PodIPs over cold creation, while
+			// still skipping stale queue entries whose Pods disappeared.
 			name: "adopts not-ready sandbox with backing pod, skipping rotating sandboxes without pods",
 			existingObjects: []client.Object{
 				template,
@@ -1860,16 +1857,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			// 1. Initialize the Queue
 			warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
-			// 2. Seed the Queue with every warm-pool-labelled sandbox in the
-			//    test case, regardless of current adoptability. This is an
-			//    intentional test setup to simulate stale queue entries: in
-			//    production, sandboxEventHandler only enqueues a sandbox when
-			//    it transitions to adoptable, but the queue can later hold
-			//    stale entries for sandboxes whose backing Pod was deleted
-			//    (e.g. warm-pool rotation) without being explicitly removed.
-			//    Seeding non-adoptable candidates here drives the pop-side
-			//    filter (verifySandboxCandidate -> isAdoptable), which is what
-			//    actually guards against adopting them in production.
+			// 2. Seed stale queue entries too; production can retain keys after
+			//    a sandbox stops being adoptable, and pop-side validation must
+			//    reject them.
 			for _, obj := range tc.existingObjects {
 				if sb, ok := obj.(*sandboxv1alpha1.Sandbox); ok {
 					if sb.Labels[warmPoolSandboxLabel] == "" || sb.Labels[sandboxTemplateRefHash] == "" {

@@ -21,7 +21,7 @@ Apply this minimal template once per namespace:
 
 ```bash
 kubectl apply -n default -f - <<'EOF'
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: python-sandbox-template

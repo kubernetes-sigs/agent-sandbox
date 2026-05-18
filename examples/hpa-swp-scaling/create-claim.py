@@ -41,7 +41,7 @@ def delete_expired_claims():
             # List all sandbox claims
             claims = custom_api.list_namespaced_custom_object(
                 group="extensions.agents.x-k8s.io",
-                version="v1alpha1",
+                version="v1beta1",
                 namespace=NAMESPACE,
                 plural="sandboxclaims"
             )
@@ -56,7 +56,7 @@ def delete_expired_claims():
                     name = claim['metadata']['name']
                     custom_api.delete_namespaced_custom_object(
                         group="extensions.agents.x-k8s.io",
-                        version="v1alpha1",
+                        version="v1beta1",
                         name=name,
                         namespace=NAMESPACE,
                         plural="sandboxclaims",
@@ -72,7 +72,7 @@ def create_claim(index):
     """Creates a single SandboxClaim."""
     name = f"loadtest-{int(time.time())}-{index}"
     body = {
-        "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+        "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
         "kind": "SandboxClaim",
         "metadata": {"name": name, "namespace": NAMESPACE},
         "spec": {"sandboxTemplateRef": {"name": TEMPLATE}}
@@ -80,7 +80,7 @@ def create_claim(index):
     try:
         custom_api.create_namespaced_custom_object(
             group="extensions.agents.x-k8s.io",
-            version="v1alpha1",
+            version="v1beta1",
             namespace=NAMESPACE,
             plural="sandboxclaims",
             body=body

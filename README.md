@@ -115,7 +115,7 @@ For advanced scale and concurrency tuning (e.g., API QPS and worker counts), ple
 Once you have installed the controller, you can create a simple Sandbox by applying the following YAML to your cluster:
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: my-sandbox

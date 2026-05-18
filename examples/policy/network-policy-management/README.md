@@ -71,7 +71,7 @@ When you provide a custom networkPolicy block within your template, it completel
 You can override the secure defaults by defining custom rules within the `SandboxTemplate`. The schema uses standard Kubernetes `NetworkPolicyIngressRule` and `NetworkPolicyEgressRule` formats.
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: custom-net-template
@@ -89,7 +89,7 @@ spec:
 If you are running an agent that purely performs computation and requires absolute network isolation, you can pass empty arrays to explicitly block all traffic.
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: airgapped-template
@@ -105,7 +105,7 @@ spec:
 Here is a practical example of a `SandboxTemplate` configured for an AI agent that requires access to an internal database, the public internet, and incoming health checks from a monitoring namespace.
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: custom-agent-template

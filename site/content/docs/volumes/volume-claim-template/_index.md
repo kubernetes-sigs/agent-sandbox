@@ -30,7 +30,7 @@ To use a volume, you need to add the `volumeClaimTemplates` array to your `Sandb
 Create a file named `sandbox-template-with-volume.yaml`:
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: stateful-sandbox-template
@@ -68,7 +68,7 @@ Now that your template is registered, you can spawn an actual sandbox instance b
 
 Create a file named `sandbox-claim.yaml`:
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   name: my-stateful-sandbox

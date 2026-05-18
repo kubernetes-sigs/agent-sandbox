@@ -24,8 +24,8 @@ import (
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/testing"
 	clientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1"
-	fakeagentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1/fake"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1"
+	fakeagentsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1/fake"
 )
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.
@@ -97,7 +97,7 @@ var (
 	_ testing.FakeClient  = &Clientset{}
 )
 
-// AgentsV1alpha1 retrieves the AgentsV1alpha1Client
-func (c *Clientset) AgentsV1alpha1() agentsv1alpha1.AgentsV1alpha1Interface {
-	return &fakeagentsv1alpha1.FakeAgentsV1alpha1{Fake: &c.Fake}
+// AgentsV1beta1 retrieves the AgentsV1beta1Client
+func (c *Clientset) AgentsV1beta1() agentsv1beta1.AgentsV1beta1Interface {
+	return &fakeagentsv1beta1.FakeAgentsV1beta1{Fake: &c.Fake}
 }

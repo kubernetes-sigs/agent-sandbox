@@ -111,7 +111,7 @@ kubectl create secret generic jupyter-hf-token-bob \
   --from-literal=token=${BOB_TOKEN}
 
 kubectl apply -f - <<EOF
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: jupyterlab-bob

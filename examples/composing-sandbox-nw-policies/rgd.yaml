@@ -1,5 +1,5 @@
 
-apiVersion: kro.run/v1alpha1
+apiVersion: kro.run/v1beta1
 kind: ResourceGraphDefinition
 metadata:
   name: agentic-sandbox
@@ -8,7 +8,7 @@ spec:
   # This follows a simplified specification: https://kro.run/docs/concepts/simple-schema/
   schema:
     # The user facing CRD that KRO will create
-    apiVersion: v1alpha1
+    apiVersion: v1beta1
     group: custom.agents.x-k8s.io
     kind: AgenticSandbox
     # Spec fields that users can provide.
@@ -42,7 +42,7 @@ spec:
       readyWhen: # CEL expressions to determine when a resource is ready
       - ${sandbox.status.conditions.exists(x, x.type == 'Ready' && x.status == "True")}
       template:
-        apiVersion: agents.x-k8s.io/v1alpha1
+        apiVersion: agents.x-k8s.io/v1beta1
         kind: Sandbox
         metadata:
           # CEL expressions to reference fields from the `schema`

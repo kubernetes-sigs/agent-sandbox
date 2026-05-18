@@ -161,6 +161,51 @@ spec:
 - Retaining Internet Access: We copy the public internet egress rules from the secure defaults to ensure the agent can still make external API calls while blocking lateral movement across the internal cluster network.
 
 
+**Example 3: GCP Workload Identity & Google Cloud Services (Vertex AI, GCS, etc.)**
+
+If your AI sandboxes interact with Google Cloud APIs (e.g., Vertex AI model generation or reading/writing data to Google Cloud Storage buckets), you must configure your network policy to support **Workload Identity** and prevent latency hangs.
+
+There are two critical gotchas to be aware of when using Google Cloud APIs inside a sandboxed environment:
+1. **Workload Identity (169.254.169.254)**: Google Cloud SDKs authenticate by querying the GCP Metadata Server at `169.254.169.254`. This link-local address is blocked by default under the Secure-by-Default posture, so you must explicitly permit it.
+2. **IPv6**: Modern runtimes (such as Node.js or python SDKs calling `undici`/`fetch`) attempt to resolve Google API domains (like `aiplatform.googleapis.com` or `storage.googleapis.com`) using both IPv4 and IPv6 concurrently. Because standard Kubernetes network policies are default-deny, if you omit the IPv6 egress block (`::/0`), the CNI will silently drop the outbound IPv6 packets. This forces the application to hang for exactly 127 seconds of TCP SYN retransmissions before falling back to IPv4.
+
+To support Google Cloud APIs natively without experiencing 2-minute hangs, you must explicitly allow **both** IPv4 and IPv6 egress to the internet, while omitting `169.254.0.0/16` from the blocked IPv4 subnets:
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: gcp-agent-template
+spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      # Re-allow the standard Sandbox Router
+      - from:
+        - podSelector:
+            matchLabels:
+              app: sandbox-router
+    egress:
+      # 1. Allow outbound IPv4 to the public internet and metadata server
+      #    (Notice 169.254.0.0/16 is omitted from the 'except' block)
+      - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              
+      # 2. Allow outbound IPv6 to prevent Happy Eyeballs latency hangs
+      - to:
+        - ipBlock:
+            cidr: "::/0"
+            except:
+              - "fc00::/7"
+```
+
+
+
 ## Troubleshooting
 
 **How can I confirm which network policy is actively applied to a Sandbox?**

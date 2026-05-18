@@ -3287,6 +3287,9 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				Kind: "SandboxWarmPool",
 			}},
 		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			PodIPs: []string{"10.0.0.10"},
+		},
 	}
 
 	// 2. Invalid Sandbox (Different Namespace, but identical hash)

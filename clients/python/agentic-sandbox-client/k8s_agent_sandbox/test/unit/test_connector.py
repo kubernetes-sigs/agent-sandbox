@@ -204,6 +204,17 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         url = call_args[1]
         self.assertEqual(url, "http://my-sb.my-ns.svc.cluster.local:8888/execute")
 
+    def test_allow_redirects_is_false(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute")
+
+        call_args, call_kwargs = mock_session.request.call_args
+        self.assertFalse(call_kwargs.get("allow_redirects", True))
+
 
 if __name__ == "__main__":
     unittest.main()

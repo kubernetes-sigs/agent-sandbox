@@ -24,8 +24,8 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -35,11 +35,11 @@ const (
 	defaultPollingInterval = 1 * time.Second
 )
 
-func createSandboxTemplate(ns *corev1.Namespace, name string) *extensionsv1alpha1.SandboxTemplate {
-	template := &extensionsv1alpha1.SandboxTemplate{}
+func createSandboxTemplate(ns *corev1.Namespace, name string) *extensionsv1beta1.SandboxTemplate {
+	template := &extensionsv1beta1.SandboxTemplate{}
 	template.Name = name
 	template.Namespace = ns.Name
-	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -52,8 +52,8 @@ func createSandboxTemplate(ns *corev1.Namespace, name string) *extensionsv1alpha
 	return template
 }
 
-func createSandboxWarmPool(ns *corev1.Namespace, template *extensionsv1alpha1.SandboxTemplate, updateStrategy *extensionsv1alpha1.SandboxWarmPoolUpdateStrategy) *extensionsv1alpha1.SandboxWarmPool {
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
+func createSandboxWarmPool(ns *corev1.Namespace, template *extensionsv1beta1.SandboxTemplate, updateStrategy *extensionsv1beta1.SandboxWarmPoolUpdateStrategy) *extensionsv1beta1.SandboxWarmPool {
+	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	warmPool.Name = "test-warmpool"
 	warmPool.Namespace = ns.Name
 	warmPool.Spec.TemplateRef.Name = template.Name
@@ -62,7 +62,7 @@ func createSandboxWarmPool(ns *corev1.Namespace, template *extensionsv1alpha1.Sa
 	return warmPool
 }
 
-func updateSandboxTemplateSpec(template *extensionsv1alpha1.SandboxTemplate) {
+func updateSandboxTemplateSpec(template *extensionsv1beta1.SandboxTemplate) {
 	template.Spec.PodTemplate.Spec.Containers[0].Env = append(template.Spec.PodTemplate.Spec.Containers[0].Env, corev1.EnvVar{
 		Name:  "TEST_ENV",
 		Value: "updated",
@@ -74,7 +74,7 @@ func verifySandboxStaysSame(t *testing.T, tc *framework.TestContext, ns *corev1.
 	time.Sleep(5 * time.Second)
 
 	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
-	sb := &sandboxv1alpha1.Sandbox{}
+	sb := &sandboxv1beta1.Sandbox{}
 	err := tc.Get(t.Context(), types.NamespacedName{Name: poolSandboxName, Namespace: ns.Name}, sb)
 	require.NoError(t, err, "Sandbox should still exist")
 	require.True(t, sb.DeletionTimestamp.IsZero(), "Sandbox should not be marked for deletion")
@@ -82,7 +82,7 @@ func verifySandboxStaysSame(t *testing.T, tc *framework.TestContext, ns *corev1.
 
 func verifySandboxRecreated(t *testing.T, tc *framework.TestContext, ns *corev1.Namespace, poolSandboxName string, sandboxWarmpoolID types.NamespacedName, expectUpdate bool) {
 	require.Eventually(t, func() bool {
-		sb := &sandboxv1alpha1.Sandbox{}
+		sb := &sandboxv1beta1.Sandbox{}
 		err := tc.Get(t.Context(), types.NamespacedName{Name: poolSandboxName, Namespace: ns.Name}, sb)
 		if k8serrors.IsNotFound(err) {
 			return true
@@ -94,7 +94,7 @@ func verifySandboxRecreated(t *testing.T, tc *framework.TestContext, ns *corev1.
 		return !sb.DeletionTimestamp.IsZero()
 	}, defaultTestTimeout, defaultPollingInterval, "old sandbox should be deleted or marked for deletion")
 
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	require.NoError(t, tc.Get(t.Context(), sandboxWarmpoolID, warmPool))
 
 	if expectUpdate {
@@ -105,10 +105,10 @@ func verifySandboxRecreated(t *testing.T, tc *framework.TestContext, ns *corev1.
 	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
 }
 
-func verifySandboxHasUpdatedSpec(t *testing.T, tc *framework.TestContext, ns *corev1.Namespace, excludeSandboxName string, warmPool *extensionsv1alpha1.SandboxWarmPool) {
+func verifySandboxHasUpdatedSpec(t *testing.T, tc *framework.TestContext, ns *corev1.Namespace, excludeSandboxName string, warmPool *extensionsv1beta1.SandboxWarmPool) {
 	var newSandboxName string
 	require.Eventually(t, func() bool {
-		sandboxList := &sandboxv1alpha1.SandboxList{}
+		sandboxList := &sandboxv1beta1.SandboxList{}
 		if err := tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)); err != nil {
 			return false
 		}
@@ -121,7 +121,7 @@ func verifySandboxHasUpdatedSpec(t *testing.T, tc *framework.TestContext, ns *co
 		return false
 	}, defaultTestTimeout, defaultPollingInterval, "expected to find a new pool sandbox")
 
-	newSb := &sandboxv1alpha1.Sandbox{}
+	newSb := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: newSandboxName, Namespace: ns.Name}, newSb))
 
 	require.NotEmpty(t, newSb.Spec.PodTemplate.Spec.Containers, "Sandbox should have containers")
@@ -140,18 +140,18 @@ func verifyOnReplenishLifecycle(t *testing.T, tc *framework.TestContext, ns *cor
 	verifySandboxStaysSame(t, tc, ns, poolSandboxName, sandboxWarmpoolID)
 
 	// Delete the old sandbox to trigger replenishment
-	sb := &sandboxv1alpha1.Sandbox{}
+	sb := &sandboxv1beta1.Sandbox{}
 	err := tc.Get(t.Context(), types.NamespacedName{Name: poolSandboxName, Namespace: ns.Name}, sb)
 	require.NoError(t, err, "Sandbox should still exist")
 	require.NoError(t, tc.Delete(t.Context(), sb), "Failed to delete sandbox for replenishment")
 
 	// Wait for the old sandbox to be gone
 	require.Eventually(t, func() bool {
-		err := tc.Get(t.Context(), types.NamespacedName{Name: poolSandboxName, Namespace: ns.Name}, &sandboxv1alpha1.Sandbox{})
+		err := tc.Get(t.Context(), types.NamespacedName{Name: poolSandboxName, Namespace: ns.Name}, &sandboxv1beta1.Sandbox{})
 		return k8serrors.IsNotFound(err)
 	}, defaultTestTimeout, defaultPollingInterval, "old sandbox should be deleted")
 
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	require.NoError(t, tc.Get(t.Context(), sandboxWarmpoolID, warmPool))
 
 	verifySandboxHasUpdatedSpec(t, tc, ns, poolSandboxName, warmPool)
@@ -164,7 +164,7 @@ func verifyOnReplenishLifecycle(t *testing.T, tc *framework.TestContext, ns *cor
 func TestWarmPoolRollout(t *testing.T) {
 	cases := []struct {
 		name     string
-		strategy *extensionsv1alpha1.SandboxWarmPoolUpdateStrategy
+		strategy *extensionsv1beta1.SandboxWarmPoolUpdateStrategy
 		verify   func(t *testing.T, tc *framework.TestContext, ns *corev1.Namespace, poolSandboxName string, sandboxWarmpoolID types.NamespacedName)
 	}{
 		{
@@ -174,15 +174,15 @@ func TestWarmPoolRollout(t *testing.T) {
 		},
 		{
 			name: "onreplenish",
-			strategy: &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-				Type: extensionsv1alpha1.OnReplenishSandboxWarmPoolUpdateStrategyType,
+			strategy: &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+				Type: extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType,
 			},
 			verify: verifyOnReplenishLifecycle,
 		},
 		{
 			name: "recreate",
-			strategy: &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-				Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+			strategy: &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+				Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
 			},
 			verify: func(t *testing.T, tc *framework.TestContext, ns *corev1.Namespace, poolSandboxName string, sandboxWarmpoolID types.NamespacedName) {
 				verifySandboxRecreated(t, tc, ns, poolSandboxName, sandboxWarmpoolID, true)
@@ -215,7 +215,7 @@ func TestWarmPoolRollout(t *testing.T) {
 			// Get the pool sandbox name
 			var poolSandboxName string
 			require.Eventually(t, func() bool {
-				sandboxList := &sandboxv1alpha1.SandboxList{}
+				sandboxList := &sandboxv1beta1.SandboxList{}
 				if err := tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)); err != nil {
 					return false
 				}
@@ -256,14 +256,14 @@ func TestWarmPoolRolloutMultiTemplateIsolation(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), templateB))
 
 	// Create two SandboxWarmPools, each pointing to a different template
-	warmPoolA := createSandboxWarmPool(ns, templateA, &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-		Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+	warmPoolA := createSandboxWarmPool(ns, templateA, &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+		Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
 	})
 	warmPoolA.Name = "warmpool-a"
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPoolA))
 
-	warmPoolB := createSandboxWarmPool(ns, templateB, &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-		Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+	warmPoolB := createSandboxWarmPool(ns, templateB, &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+		Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
 	})
 	warmPoolB.Name = "warmpool-b"
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPoolB))
@@ -277,7 +277,7 @@ func TestWarmPoolRolloutMultiTemplateIsolation(t *testing.T) {
 	// Get sandbox names for both
 	var sbNameA, sbNameB string
 	require.Eventually(t, func() bool {
-		sbList := &sandboxv1alpha1.SandboxList{}
+		sbList := &sandboxv1beta1.SandboxList{}
 		if err := tc.List(t.Context(), sbList, client.InNamespace(ns.Name)); err != nil {
 			return false
 		}
@@ -303,7 +303,7 @@ func TestWarmPoolRolloutMultiTemplateIsolation(t *testing.T) {
 	verifySandboxRecreated(t, tc, ns, sbNameA, idA, true)
 
 	// Verify WarmPool B's sandbox stays the same (same name, not deleted)
-	sb := &sandboxv1alpha1.Sandbox{}
+	sb := &sandboxv1beta1.Sandbox{}
 	err := tc.Get(t.Context(), types.NamespacedName{Name: sbNameB, Namespace: ns.Name}, sb)
 	require.NoError(t, err, "Sandbox B should still exist")
 	require.True(t, sb.DeletionTimestamp.IsZero(), "Sandbox B should not be marked for deletion")
@@ -325,8 +325,8 @@ func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), templateB))
 
 	// Create a SandboxWarmPool pointing to Template A
-	warmPool := createSandboxWarmPool(ns, templateA, &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-		Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+	warmPool := createSandboxWarmPool(ns, templateA, &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+		Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
 	})
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
@@ -339,7 +339,7 @@ func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 	// Get the sandbox name
 	var poolSandboxName string
 	require.Eventually(t, func() bool {
-		sandboxList := &sandboxv1alpha1.SandboxList{}
+		sandboxList := &sandboxv1beta1.SandboxList{}
 		if err := tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)); err != nil {
 			return false
 		}
@@ -365,7 +365,7 @@ func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 	// Verify the new sandbox has the updated template ref annotation
 	var newSandboxName string
 	require.Eventually(t, func() bool {
-		sandboxList := &sandboxv1alpha1.SandboxList{}
+		sandboxList := &sandboxv1beta1.SandboxList{}
 		if err := tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)); err != nil {
 			return false
 		}
@@ -378,10 +378,10 @@ func TestWarmPoolRolloutSwitchTemplate(t *testing.T) {
 		return false
 	}, defaultTestTimeout, defaultPollingInterval, "expected to find a new pool sandbox")
 
-	newSb := &sandboxv1alpha1.Sandbox{}
+	newSb := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: newSandboxName, Namespace: ns.Name}, newSb))
 
-	require.Equal(t, templateB.Name, newSb.Annotations[sandboxv1alpha1.SandboxTemplateRefAnnotation], "Sandbox should use the new template name")
+	require.Equal(t, templateB.Name, newSb.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation], "Sandbox should use the new template name")
 }
 
 // Test that metadata updates to the template does not trigger a rollout.
@@ -394,14 +394,14 @@ func TestWarmPoolRolloutMetadataUpdate(t *testing.T) {
 
 	// Create a SandboxTemplate with initial labels in pod template
 	template := createSandboxTemplate(ns, "test-template")
-	template.Spec.PodTemplate.ObjectMeta = sandboxv1alpha1.PodMetadata{
+	template.Spec.PodTemplate.ObjectMeta = sandboxv1beta1.PodMetadata{
 		Labels: map[string]string{"initial-label": "value"},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
 	// Create a SandboxWarmPool with strategy Recreate
-	warmPool := createSandboxWarmPool(ns, template, &extensionsv1alpha1.SandboxWarmPoolUpdateStrategy{
-		Type: extensionsv1alpha1.RecreateSandboxWarmPoolUpdateStrategyType,
+	warmPool := createSandboxWarmPool(ns, template, &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+		Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
 	})
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
@@ -414,7 +414,7 @@ func TestWarmPoolRolloutMetadataUpdate(t *testing.T) {
 	// Get the initial sandbox name
 	var initialSandboxName string
 	require.Eventually(t, func() bool {
-		sandboxList := &sandboxv1alpha1.SandboxList{}
+		sandboxList := &sandboxv1beta1.SandboxList{}
 		if err := tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)); err != nil {
 			return false
 		}
@@ -436,7 +436,7 @@ func TestWarmPoolRolloutMetadataUpdate(t *testing.T) {
 	// Wait a bit to be sure no deletion happens
 	time.Sleep(5 * time.Second) // Wait for potential reconciliation
 
-	sb := &sandboxv1alpha1.Sandbox{}
+	sb := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: initialSandboxName, Namespace: ns.Name}, sb))
 	require.True(t, sb.DeletionTimestamp.IsZero(), "Sandbox should not be marked for deletion")
 }

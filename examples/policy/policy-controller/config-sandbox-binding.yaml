@@ -1,4 +1,4 @@
-apiVersion: config.gatekeeper.sh/v1alpha1
+apiVersion: config.gatekeeper.sh/v1beta1
 kind: Config
 metadata:
   name: config

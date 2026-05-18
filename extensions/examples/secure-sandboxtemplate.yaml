@@ -12,7 +12,7 @@
 
 # Don't Allow Access to API Server: This is a direct result of the "default-deny" egress policy. 
 # Since there is no rule in 'egress' that allows traffic to the API server IPs, it is blocked.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: secure-datascience-template

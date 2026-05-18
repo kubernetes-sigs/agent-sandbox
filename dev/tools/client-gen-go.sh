@@ -22,7 +22,7 @@ SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
 cd "${SCRIPT_ROOT}"
 
 CMD="go run -modfile=tools.mod k8s.io/code-generator"
-API_PKG="sigs.k8s.io/agent-sandbox/api/v1alpha1"
+API_PKG="sigs.k8s.io/agent-sandbox/api/v1beta1"
 CLIENT_PKG="sigs.k8s.io/agent-sandbox/clients/k8s"
 
 echo "Generating clientset..."
@@ -48,7 +48,7 @@ ${CMD}/cmd/informer-gen \
   "${API_PKG}"
 
 
-EXT_API_PKG="sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+EXT_API_PKG="sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 EXT_CLIENT_PKG="sigs.k8s.io/agent-sandbox/clients/k8s/extensions"
 
 echo "Generating extensions clientset..."

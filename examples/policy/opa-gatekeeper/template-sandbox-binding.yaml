@@ -39,7 +39,7 @@ spec:
           # Check if this pod is controlled by a Sandbox CR
           owner := pod.metadata.ownerReferences[_]
           owner.kind == "Sandbox"
-          startswith(owner.apiVersion, "agents.x-k8s.io/") # Match agents.x-k8s.io/v1alpha1 or other versions
+          startswith(owner.apiVersion, "agents.x-k8s.io/") # Match agents.x-k8s.io/v1beta1 or other versions
 
           msg := sprintf("RoleBinding cannot be created/updated: ServiceAccount '%s/%s' is in use by Pod '%s/%s', which is controlled by Sandbox CR '%s'", [sa_namespace, sa_name, sa_namespace, pod.metadata.name, owner.name])
         }
@@ -62,7 +62,7 @@ spec:
           # Check if this pod is controlled by a Sandbox CR
           owner := pod.metadata.ownerReferences[_]
           owner.kind == "Sandbox"
-          startswith(owner.apiVersion, "agents.x-k8s.io/") # Match agents.x-k8s.io/v1alpha1 or other versions
+          startswith(owner.apiVersion, "agents.x-k8s.io/") # Match agents.x-k8s.io/v1beta1 or other versions
 
           msg := sprintf("ClusterRoleBinding cannot be created/updated: ServiceAccount '%s/%s' is in use by Pod '%s/%s', which is controlled by Sandbox CR '%s'", [sa_namespace, sa_name, sa_namespace, pod.metadata.name, owner.name])
         }

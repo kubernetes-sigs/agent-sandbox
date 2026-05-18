@@ -68,7 +68,7 @@ Validate that the RGD is installed correctly:
 ```
 $ kubectl get rgd
 NAME              APIVERSION   KIND             STATE    AGE
-agentic-sandbox   v1alpha1     AgenticSandbox   Active   6m38s
+agentic-sandbox   v1beta1     AgenticSandbox   Active   6m38s
 ```
 
 Validate that the new `AgenticSandbox` CRD is installed correctly:
@@ -85,7 +85,7 @@ sandboxes.agents.x-k8s.io                 2025-09-19T22:40:05Z
 You can now create an example `AgenticSandbox` resource:
 
 ```yaml
-apiVersion: custom.agents.x-k8s.io/v1alpha1
+apiVersion: custom.agents.x-k8s.io/v1beta1
 kind: AgenticSandbox
 metadata:
   name: demo

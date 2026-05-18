@@ -1,4 +1,4 @@
-apiVersion: chainsaw.kyverno.io/v1alpha1
+apiVersion: chainsaw.kyverno.io/v1beta1
 kind: Test
 metadata:
   name: prevent-sandbox-sa-binding

@@ -57,7 +57,7 @@ kubectl apply -f kueue-resources.yaml
 ## Step 3: Deploy Agent Sandbox with Kueue
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: kueue-sandbox-example

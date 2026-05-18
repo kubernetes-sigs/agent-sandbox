@@ -27,8 +27,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -152,10 +152,10 @@ func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolS
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 
 	// Create a SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{}
+	template := &extensionsv1beta1.SandboxTemplate{}
 	template.Name = "test-template"
 	template.Namespace = ns.Name
-	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{Name: "pause", Image: "registry.k8s.io/pause:3.10"},
@@ -164,7 +164,7 @@ func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolS
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
-	poolObj := &extensionsv1alpha1.SandboxWarmPool{}
+	poolObj := &extensionsv1beta1.SandboxWarmPool{}
 	poolObj.Name = "warmpool"
 	poolObj.Namespace = ns.Name
 	poolObj.Spec.Replicas = poolSize
@@ -181,7 +181,7 @@ func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolS
 		go func(idx int) {
 			defer wg.Done()
 			claimName := fmt.Sprintf("claim-%d", idx)
-			claimObj := &extensionsv1alpha1.SandboxClaim{}
+			claimObj := &extensionsv1beta1.SandboxClaim{}
 			claimObj.Name = claimName
 			claimObj.Namespace = ns.Name
 			claimObj.Spec.TemplateRef.Name = template.Name

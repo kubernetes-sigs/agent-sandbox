@@ -39,7 +39,7 @@ Apply an example sandbox with the `shutdownPolicy` and `shutdownTime`:
 
 ```bash
 cat <<EOF | kubectl apply -f -
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: dynamic-ephemeral-sandbox

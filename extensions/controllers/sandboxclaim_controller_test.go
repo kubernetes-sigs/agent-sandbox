@@ -1882,15 +1882,18 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 
 				// 4. Verify the adopted sandbox records the adopted pod name
-				if val := adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; val != adoptedSandbox.Name {
-					t.Errorf("expected adopted sandbox to have %q annotation %q, got %q; annotations=%v", sandboxv1alpha1.SandboxPodNameAnnotation, adoptedSandbox.Name, val, adoptedSandbox.Annotations)
-				}
+				require.Equal(t, adoptedSandbox.Name, adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation])
 
 				for key, expected := range tc.expectedAnnotations {
-					if val := adoptedSandbox.Annotations[key]; val != expected {
-						t.Errorf("expected adopted sandbox to preserve annotation %q=%q, got %q; annotations=%v", key, expected, val, adoptedSandbox.Annotations)
-					}
+					require.Equal(t, expected, adoptedSandbox.Annotations[key])
 				}
+
+				// 5. Verify the claim records the assigned sandbox annotation
+				var updatedClaim extensionsv1alpha1.SandboxClaim
+				if err := fakeClient.Get(ctx, req.NamespacedName, &updatedClaim); err != nil {
+					t.Fatalf("failed to get updated claim: %v", err)
+				}
+				require.Equal(t, tc.expectedAdoptedSandbox, updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation])
 
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
@@ -3273,7 +3276,7 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 }
 
 // TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag verifies that during informer cache lag,
-// the assigned sandbox label on the claim is used to identify the previously adopted Sandbox,
+// the assigned sandbox annotation on the claim is used to identify the previously adopted Sandbox,
 // preventing duplicate adoptions from the warm pool.
 func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	scheme := newScheme(t)
@@ -3283,8 +3286,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			Name:      "test-claim",
 			Namespace: "default",
 			UID:       "claim-uid-123",
-			Labels: map[string]string{
-				"agents.x-k8s.io/sandbox-name": "adopted-sb",
+			Annotations: map[string]string{
+				extensionsv1alpha1.AssignedSandboxNameAnnotation: "adopted-sb",
 			},
 		},
 		Spec: extensionsv1alpha1.SandboxClaimSpec{
@@ -3376,7 +3379,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	// Run reconcile
 	_, err := reconciler.Reconcile(context.Background(), req)
-	expectedErr := "triggered adoption completion for \"adopted-sb\": retrying"
+	expectedErr := "triggered adoption completion for sandbox adopted-sb, retry"
 	if err == nil {
 		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
 	} else if err.Error() != expectedErr {
@@ -3584,4 +3587,91 @@ func TestMapTemplateToClaims(t *testing.T) {
 			t.Errorf("expected namespace 'default', got %s", req.Namespace)
 		}
 	}
+}
+
+func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim-legacy",
+			Namespace: "default",
+			UID:       "claim-uid-legacy",
+			Labels: map[string]string{
+				extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel: "adopted-sb-legacy",
+			},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	adoptedSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sb-legacy",
+			Namespace: "default",
+			UID:       "adopted-sb-legacy-uid",
+			Labels: map[string]string{
+				extensionsv1alpha1.SandboxIDLabel: "claim-uid-legacy",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxClaim",
+				Name:       "test-claim-legacy",
+				UID:        "claim-uid-legacy",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				ObjectMeta: sandboxv1alpha1.PodMetadata{
+					Labels: map[string]string{
+						extensionsv1alpha1.SandboxIDLabel: "claim-uid-legacy",
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, adoptedSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim-legacy", Namespace: "default"}}
+
+	// Run reconcile
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected reconcile to succeed, but got error: %v", err)
+	}
+
+	// Verify that the claim was migrated: DeprecatedAssignedSandboxNameLabel removed, AssignedSandboxNameAnnotation added
+	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+
+	require.NotContains(t, updatedClaim.Labels, extensionsv1alpha1.DeprecatedAssignedSandboxNameLabel)
+	require.Equal(t, "adopted-sb-legacy", updatedClaim.Annotations[extensionsv1alpha1.AssignedSandboxNameAnnotation])
 }

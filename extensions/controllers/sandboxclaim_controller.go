@@ -71,12 +71,12 @@ var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
 var ErrCrossNamespaceAdoption = errors.New("cross-namespace adoption forbidden")
 
-// getWarmPoolPolicy returns the effective warm pool policy for a claim.
-func getWarmPoolPolicy(claim *extensionsv1beta1.SandboxClaim) extensionsv1beta1.WarmPoolPolicy {
+// getWarmPoolConfig returns the effective warm pool configuration for a claim.
+func getWarmPoolConfig(claim *extensionsv1beta1.SandboxClaim) extensionsv1beta1.WarmPoolConfig {
 	if claim.Spec.WarmPool != nil {
 		return *claim.Spec.WarmPool
 	}
-	return extensionsv1beta1.WarmPoolPolicyDefault
+	return extensionsv1beta1.WarmPoolConfig{Strategy: extensionsv1beta1.WarmPoolStrategyAuto}
 }
 
 // observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
@@ -590,7 +590,7 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, templateHash string) (*v1beta1.Sandbox, queue.SandboxKey, error) {
 	logger := log.FromContext(ctx)
-	policy := getWarmPoolPolicy(claim)
+	config := getWarmPoolConfig(claim)
 
 	var skipped []queue.SandboxKey
 	// Instantly returns unused keys the moment we find a valid candidate!
@@ -632,8 +632,8 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			continue
 		}
 
-		if policy.IsSpecificPool() {
-			specificPoolHash := sandboxcontrollers.NameHash(string(policy))
+		if config.Strategy == extensionsv1beta1.WarmPoolStrategyPoolName {
+			specificPoolHash := sandboxcontrollers.NameHash(config.PoolName)
 			if adopted.Labels[warmPoolSandboxLabel] != specificPoolHash {
 				skipped = append(skipped, adoptedKey) // Save to skip list for the defer loop
 				continue
@@ -1152,17 +1152,17 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return sandbox, nil
 	}
 
-	policy := getWarmPoolPolicy(claim)
+	config := getWarmPoolConfig(claim)
 
 	// Preserve HEAD's new Env validation feature!
-	if policy != extensionsv1beta1.WarmPoolPolicyNone && len(claim.Spec.Env) > 0 {
+	if config.Strategy != extensionsv1beta1.WarmPoolStrategyDisabled && len(claim.Spec.Env) > 0 {
 		err := fmt.Errorf("custom environment variables are not supported when using a warm pool")
 		logger.Error(err, "Invalid configuration", "claim", claim.Name)
 		return nil, err
 	}
 
-	if policy == extensionsv1beta1.WarmPoolPolicyNone {
-		logger.Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
+	if config.Strategy == extensionsv1beta1.WarmPoolStrategyDisabled {
+		logger.Info("Skipping warm pool adoption based on warm pool strategy", "claim", claim.Name, "strategy", config.Strategy)
 		return nil, nil
 	}
 

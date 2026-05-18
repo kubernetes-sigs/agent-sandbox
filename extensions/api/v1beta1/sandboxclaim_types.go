@@ -30,28 +30,36 @@ const (
 	AssignedSandboxNameLabel = "agents.x-k8s.io/sandbox-name"
 )
 
-// WarmPoolPolicy describes the policy for using warm pools.
-// It can be one of the following:
-//   - "none": Do not use any warm pool, always create fresh sandboxes
-//   - "default": Select from all available warm pools that match the template (default)
-//   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
-type WarmPoolPolicy string
+// WarmPoolStrategy defines the strategy for using warm pools.
+// +kubebuilder:validation:Enum=Auto;Disabled;PoolName
+type WarmPoolStrategy string
 
 const (
-	// WarmPoolPolicyNone indicates that no warm pool should be used.
-	// A fresh sandbox will always be created.
-	WarmPoolPolicyNone WarmPoolPolicy = "none"
+	// WarmPoolStrategyAuto indicates the default behavior: Controller decides the Sandbox adoption.
+	WarmPoolStrategyAuto WarmPoolStrategy = "Auto"
 
-	// WarmPoolPolicyDefault indicates the default behavior: select from all
-	// available warm pools that match the template. This is the default behavior
-	// if warmpool is not specified.
-	WarmPoolPolicyDefault WarmPoolPolicy = "default"
+	// WarmPoolStrategyDisabled indicates that no warm pool will be used for Sandbox adoption.
+	// A fresh sandbox will always be created.
+	WarmPoolStrategyDisabled WarmPoolStrategy = "Disabled"
+
+	// WarmPoolStrategyPoolName indicates that Sandbox will be adopted from the specified pool name.
+	WarmPoolStrategyPoolName WarmPoolStrategy = "PoolName"
 )
 
-// IsSpecificPool returns true if the policy specifies a specific warm pool name
-// (not "none" or "default").
-func (p WarmPoolPolicy) IsSpecificPool() bool {
-	return p != WarmPoolPolicyNone && p != WarmPoolPolicyDefault && p != ""
+// WarmPoolConfig configures how this claim interacts with warm pools.
+// +kubebuilder:validation:XValidation:rule="self.strategy == 'PoolName' ? has(self.poolName) && self.poolName != ” : !has(self.poolName) || self.poolName == ”",message="poolName must be set if and only if strategy is PoolName"
+type WarmPoolConfig struct {
+	// strategy specifies the warm pool adoption behavior.
+	// +kubebuilder:default=Auto
+	// +optional
+	Strategy WarmPoolStrategy `json:"strategy,omitempty"`
+
+	// poolName specifies the exact warm pool to adopt from.
+	// This is only allowed when strategy is "PoolName".
+	// +optional
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+	// +kubebuilder:validation:MaxLength=63
+	PoolName string `json:"poolName,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
@@ -131,13 +139,9 @@ type SandboxClaimSpec struct {
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 
-	// warmpool specifies the warm pool policy for sandbox adoption.
-	// - "none": Do not use any warm pool, always create fresh sandboxes
-	// - "default": Use default behavior, select from all matching warm pools (default)
-	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+	// warmPool configures how this claim interacts with warm pools.
 	// +optional
-	// +kubebuilder:default=default
-	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
+	WarmPool *WarmPoolConfig `json:"warmPool,omitempty"`
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.

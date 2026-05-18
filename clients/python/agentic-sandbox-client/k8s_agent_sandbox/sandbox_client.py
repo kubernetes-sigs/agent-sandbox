@@ -91,7 +91,7 @@ class SandboxClient(Generic[T]):
         if cleanup:
             atexit.register(self.delete_all)
 
-    def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None, warmpool: str | None = None, *, shutdown_after_seconds: int | None = None) -> T:
+    def create_sandbox(self, template: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None, warmpool: dict | None = None, *, shutdown_after_seconds: int | None = None) -> T:
         """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
            the underlying infrastructure.
 
@@ -100,7 +100,8 @@ class SandboxClient(Generic[T]):
             namespace: Kubernetes namespace for the claim.
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim.
-            warmpool: Optional warm pool policy for sandbox adoption (e.g. "default", "none", or custom).
+            warmpool: Optional warm pool configuration dictionary for sandbox adoption.
+                (e.g., {"strategy": "Disabled"} or {"strategy": "PoolName", "poolName": "my-pool"})
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -334,7 +335,7 @@ class SandboxClient(Generic[T]):
                 SandboxClient._validate_label_name(value, f"value '{value}' for key '{key}'")
 
     @trace_span("create_claim")
-    def _create_claim(self, claim_name: str, template_name: str, namespace: str, labels: dict[str, str] | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
+    def _create_claim(self, claim_name: str, template_name: str, namespace: str, labels: dict[str, str] | None = None, lifecycle: dict | None = None, warmpool: dict | None = None):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
         if span.is_recording():

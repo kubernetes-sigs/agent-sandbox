@@ -186,7 +186,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	templateWithEnvAllowed.Name = "test-template-env-allowed"
 	templateWithEnvAllowed.Spec.EnvVarsInjectionPolicy = extensionsv1beta1.EnvVarsInjectionPolicyAllowed
 
-	nonePolicy := extensionsv1beta1.WarmPoolPolicyNone
+	nonePolicy := extensionsv1beta1.WarmPoolConfig{Strategy: extensionsv1beta1.WarmPoolStrategyDisabled}
 
 	claimWithEnv := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-env", Namespace: "default", UID: "claim-env-uid"},
@@ -2444,10 +2444,10 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		}
 	}
 
-	t.Run("skips warm pool when policy is none", func(t *testing.T) {
+	t.Run("skips warm pool when strategy is disabled", func(t *testing.T) {
 		scheme := newScheme(t)
 		claimWithNone := baseClaim.DeepCopy()
-		warmPoolNone := extensionsv1beta1.WarmPoolPolicyNone
+		warmPoolNone := extensionsv1beta1.WarmPoolConfig{Strategy: extensionsv1beta1.WarmPoolStrategyDisabled}
 		claimWithNone.Spec.WarmPool = &warmPoolNone
 
 		existingObjects := []client.Object{
@@ -2506,7 +2506,10 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 	t.Run("adopts from specific warm pool only", func(t *testing.T) {
 		scheme := newScheme(t)
 		claimWithSpecificPool := baseClaim.DeepCopy()
-		specificPool := extensionsv1beta1.WarmPoolPolicy("test-pool")
+		specificPool := extensionsv1beta1.WarmPoolConfig{
+			Strategy: extensionsv1beta1.WarmPoolStrategyPoolName,
+			PoolName: "test-pool",
+		}
 		claimWithSpecificPool.Spec.WarmPool = &specificPool
 
 		existingObjects := []client.Object{
@@ -2572,7 +2575,10 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 	t.Run("falls back to cold start when specific pool has no sandboxes", func(t *testing.T) {
 		scheme := newScheme(t)
 		claimWithSpecificPool := baseClaim.DeepCopy()
-		specificPool := extensionsv1beta1.WarmPoolPolicy("nonexistent-pool")
+		specificPool := extensionsv1beta1.WarmPoolConfig{
+			Strategy: extensionsv1beta1.WarmPoolStrategyPoolName,
+			PoolName: "nonexistent-pool",
+		}
 		claimWithSpecificPool.Spec.WarmPool = &specificPool
 
 		existingObjects := []client.Object{
@@ -2624,22 +2630,22 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("default policy adopts from any matching warm pool", func(t *testing.T) {
+	t.Run("auto strategy adopts from any matching warm pool", func(t *testing.T) {
 		scheme := newScheme(t)
-		claimWithDefault := baseClaim.DeepCopy()
-		defaultPolicy := extensionsv1beta1.WarmPoolPolicyDefault
-		claimWithDefault.Spec.WarmPool = &defaultPolicy
+		claimWithAuto := baseClaim.DeepCopy()
+		autoStrategy := extensionsv1beta1.WarmPoolConfig{Strategy: extensionsv1beta1.WarmPoolStrategyAuto}
+		claimWithAuto.Spec.WarmPool = &autoStrategy
 
 		existingObjects := []client.Object{
 			template,
-			claimWithDefault,
+			claimWithAuto,
 			createWarmPoolSandbox("pool-sb-1", "test-pool", true),
 		}
 
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(existingObjects...).
-			WithStatusSubresource(claimWithDefault).
+			WithStatusSubresource(claimWithAuto).
 			Build()
 
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
@@ -2674,12 +2680,12 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		}
 
 		controllerRef := metav1.GetControllerOf(&adoptedSandbox)
-		if controllerRef == nil || controllerRef.UID != claimWithDefault.UID {
+		if controllerRef == nil || controllerRef.UID != claimWithAuto.UID {
 			t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
 		}
 	})
 
-	t.Run("nil warmpool field uses default behavior", func(t *testing.T) {
+	t.Run("nil warmPool field uses auto strategy", func(t *testing.T) {
 		scheme := newScheme(t)
 		claimWithNil := baseClaim.DeepCopy()
 		// WarmPool is nil by default
@@ -2717,7 +2723,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 			t.Fatalf("reconcile failed: %v", err)
 		}
 
-		// Verify the warm pool sandbox was adopted (nil = default = adopt from any)
+		// Verify the warm pool sandbox was adopted (nil = auto = adopt from any)
 		var adoptedSandbox sandboxv1beta1.Sandbox
 		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "pool-sb-1", Namespace: "default"}, &adoptedSandbox); err != nil {
 			t.Fatalf("failed to get adopted sandbox: %v", err)
@@ -2731,8 +2737,8 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 	t.Run("errors when custom environment variables are provided with a warm pool", func(t *testing.T) {
 		scheme := newScheme(t)
 		claimWithEnv := baseClaim.DeepCopy()
-		defaultPolicy := extensionsv1beta1.WarmPoolPolicyDefault
-		claimWithEnv.Spec.WarmPool = &defaultPolicy
+		autoStrategy := extensionsv1beta1.WarmPoolConfig{Strategy: extensionsv1beta1.WarmPoolStrategyAuto}
+		claimWithEnv.Spec.WarmPool = &autoStrategy
 		claimWithEnv.Spec.Env = []extensionsv1beta1.EnvVar{{Name: "CUSTOM_ENV", Value: "test-value"}}
 
 		existingObjects := []client.Object{
@@ -3447,7 +3453,7 @@ func TestSandboxClaimRecoveryWhenTemplateCreated(t *testing.T) {
 	claimName := "recovery-claim"
 	templateName := "recovery-template"
 
-	nonePolicy := extensionsv1beta1.WarmPoolPolicyNone
+	nonePolicy := extensionsv1beta1.WarmPoolConfig{Strategy: extensionsv1beta1.WarmPoolStrategyDisabled}
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claimName,

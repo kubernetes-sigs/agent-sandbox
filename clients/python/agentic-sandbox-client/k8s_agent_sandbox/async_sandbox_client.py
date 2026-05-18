@@ -110,7 +110,7 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str = "default",
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
-        warmpool: str | None = None,
+        warmpool: dict | None = None,
         *,
         shutdown_after_seconds: int | None = None,
     ) -> T:
@@ -121,7 +121,8 @@ class AsyncSandboxClient(Generic[T]):
             namespace: Kubernetes namespace for the claim.
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim.
-            warmpool: Optional warm pool policy for sandbox adoption (e.g. "default", "none", or custom).
+            warmpool: Optional warm pool configuration dictionary for sandbox adoption.
+                (e.g., {"strategy": "Disabled"} or {"strategy": "PoolName", "poolName": "my-pool"})
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -368,7 +369,7 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str,
         labels: dict[str, str] | None = None,
         lifecycle: dict | None = None,
-        warmpool: str | None = None,
+        warmpool: dict | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():

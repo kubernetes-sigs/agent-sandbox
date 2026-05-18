@@ -329,7 +329,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox. |  | Required: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
-| `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
+| `warmPool` _[WarmPoolConfig](#warmpoolconfig)_ | warmPool configures how this claim interacts with warm pools. |  | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox |  | Optional: \{\} <br /> |
 
@@ -537,24 +537,39 @@ _Appears in:_
 | `Retain` | ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).<br />The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,<br />but the SandboxClaim object itself remains.<br /> |
 
 
-#### WarmPoolPolicy
+#### WarmPoolConfig
 
-_Underlying type:_ _string_
 
-WarmPoolPolicy describes the policy for using warm pools.
-It can be one of the following:
-  - "none": Do not use any warm pool, always create fresh sandboxes
-  - "default": Select from all available warm pools that match the template (default)
-  - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+
+WarmPoolConfig configures how this claim interacts with warm pools.
 
 
 
 _Appears in:_
 - [SandboxClaimSpec](#sandboxclaimspec)
 
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `strategy` _[WarmPoolStrategy](#warmpoolstrategy)_ | strategy specifies the warm pool adoption behavior. | Auto | Enum: [Auto Disabled PoolName] <br />Optional: \{\} <br /> |
+| `poolName` _string_ | poolName specifies the exact warm pool to adopt from.<br />This is only allowed when strategy is "PoolName". |  | MaxLength: 63 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+
+
+#### WarmPoolStrategy
+
+_Underlying type:_ _string_
+
+WarmPoolStrategy defines the strategy for using warm pools.
+
+_Validation:_
+- Enum: [Auto Disabled PoolName]
+
+_Appears in:_
+- [WarmPoolConfig](#warmpoolconfig)
+
 | Field | Description |
 | --- | --- |
-| `none` | WarmPoolPolicyNone indicates that no warm pool should be used.<br />A fresh sandbox will always be created.<br /> |
-| `default` | WarmPoolPolicyDefault indicates the default behavior: select from all<br />available warm pools that match the template. This is the default behavior<br />if warmpool is not specified.<br /> |
+| `Auto` | WarmPoolStrategyAuto indicates the default behavior: Controller decides the Sandbox adoption.<br /> |
+| `Disabled` | WarmPoolStrategyDisabled indicates that no warm pool will be used for Sandbox adoption.<br />A fresh sandbox will always be created.<br /> |
+| `PoolName` | WarmPoolStrategyPoolName indicates that Sandbox will be adopted from the specified pool name.<br /> |
 
 

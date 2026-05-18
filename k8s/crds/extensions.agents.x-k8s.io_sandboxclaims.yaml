@@ -78,9 +78,24 @@ spec:
                 required:
                 - name
                 type: object
-              warmpool:
-                default: default
-                type: string
+              warmPool:
+                properties:
+                  poolName:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  strategy:
+                    default: Auto
+                    enum:
+                    - Auto
+                    - Disabled
+                    - PoolName
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: poolName must be set if and only if strategy is PoolName
+                  rule: 'self.strategy == ''PoolName'' ? has(self.poolName) && self.poolName
+                    != ” : !has(self.poolName) || self.poolName == ”'
             required:
             - sandboxTemplateRef
             type: object

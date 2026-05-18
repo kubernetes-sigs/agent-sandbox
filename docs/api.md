@@ -329,7 +329,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox. |  | Required: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
-| `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
+| `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "None": Do not use any warm pool, always create fresh sandboxes<br />- "Default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | Default | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox |  | Optional: \{\} <br /> |
 
@@ -543,8 +543,8 @@ _Underlying type:_ _string_
 
 WarmPoolPolicy describes the policy for using warm pools.
 It can be one of the following:
-  - "none": Do not use any warm pool, always create fresh sandboxes
-  - "default": Select from all available warm pools that match the template (default)
+  - "None": Do not use any warm pool, always create fresh sandboxes
+  - "Default": Select from all available warm pools that match the template (default)
   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
 
 
@@ -554,7 +554,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `none` | WarmPoolPolicyNone indicates that no warm pool should be used.<br />A fresh sandbox will always be created.<br /> |
-| `default` | WarmPoolPolicyDefault indicates the default behavior: select from all<br />available warm pools that match the template. This is the default behavior<br />if warmpool is not specified.<br /> |
+| `None` | WarmPoolPolicyNone indicates that no warm pool should be used.<br />A fresh sandbox will always be created.<br /> |
+| `Default` | WarmPoolPolicyDefault indicates the default behavior: select from all<br />available warm pools that match the template. This is the default behavior<br />if warmpool is not specified.<br /> |
 
 

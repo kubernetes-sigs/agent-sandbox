@@ -7,6 +7,7 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 * `--sandbox-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the Sandbox controller.
 * `--sandbox-claim-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxClaim controller.
 * `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller.
+* `--sandbox-warm-pool-max-batch-size` (default: 300): The maximum number of sandboxes the SandboxWarmPool controller will create/delete in a single batch.
 * `--kube-api-qps` (default: -1 ; no rate limiting): The maximum Queries Per Second (QPS) sent to the Kubernetes API server from the controller.
 * `--kube-api-burst` (default: 10): The maximum burst for throttle requests to the Kubernetes API server.
 
@@ -45,6 +46,7 @@ If you are deploying the extensions controller (which includes the core controll
         - --sandbox-concurrent-workers=10
         - --sandbox-claim-concurrent-workers=10
         - --sandbox-warm-pool-concurrent-workers=10
+        - --sandbox-warm-pool-max-batch-size=500
         - --kube-api-qps=50
         - --kube-api-burst=100
 ```
@@ -59,6 +61,7 @@ kubectl patch deployment agent-sandbox-controller \
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-concurrent-workers=10"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=10"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-concurrent-workers=10"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-max-batch-size=500"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kube-api-qps=50"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kube-api-burst=100"}
   ]'
@@ -84,6 +87,7 @@ spec:
         - --sandbox-concurrent-workers=10
         - --sandbox-claim-concurrent-workers=10
         - --sandbox-warm-pool-concurrent-workers=10
+        - --sandbox-warm-pool-max-batch-size=500
         - --kube-api-qps=50
         - --kube-api-burst=100
 ```

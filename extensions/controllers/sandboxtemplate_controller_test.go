@@ -30,26 +30,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
-	templateDefault := &extensionsv1alpha1.SandboxTemplate{
+	templateDefault := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
 			},
 		},
 	}
 
-	templateWithNP := &extensionsv1alpha1.SandboxTemplate{
+	templateWithNP := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
 					{
 						From: []networkingv1.NetworkPolicyPeer{
@@ -68,11 +68,11 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 		},
 	}
 
-	templateOptOut := &extensionsv1alpha1.SandboxTemplate{
+	templateOptOut := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Egress: []networkingv1.NetworkPolicyEgressRule{{}}, // Should be ignored
 			},
 		},
@@ -92,7 +92,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 
 	testCases := []struct {
 		name                  string
-		templateToReconcile   *extensionsv1alpha1.SandboxTemplate
+		templateToReconcile   *extensionsv1beta1.SandboxTemplate
 		existingObjects       []client.Object
 		expectNetworkPolicy   bool
 		validateNetworkPolicy func(t *testing.T, np *networkingv1.NetworkPolicy)

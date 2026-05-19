@@ -23,8 +23,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -97,7 +97,7 @@ func (c *SandboxCollector) Describe(ch chan<- *prometheus.Desc) {
 // A GaugeVec updated in the Reconcile loop would be more performant (O(1) per scrape),
 // but this is a known trade-off to keep the Reconcile loop simpler.
 func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
-	var sandboxList sandboxv1alpha1.SandboxList
+	var sandboxList sandboxv1beta1.SandboxList
 	ctx, cancel := context.WithTimeout(context.Background(), metricsCollectTimeout)
 	defer cancel()
 
@@ -110,29 +110,29 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, sandbox := range sandboxList.Items {
 		readyConditionStr := "false"
 		expiredStr := "false"
-		readyCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
+		readyCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 		if readyCond != nil {
 			if readyCond.Status == metav1.ConditionTrue {
 				readyConditionStr = "true"
 			}
-			if readyCond.Reason == sandboxv1alpha1.SandboxReasonExpired {
+			if readyCond.Reason == sandboxv1beta1.SandboxReasonExpired {
 				expiredStr = "true"
 			}
 		}
 
 		launchTypeStr := LaunchTypeCold
-		if _, ok := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; ok && sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation] != "" {
+		if _, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] != "" {
 			launchTypeStr = LaunchTypeWarm
 		}
 
 		sandboxTemplateStr := "unknown"
 		// If a user manually creates a Sandbox without a SandboxClaim, it won't have the
 		// SandboxTemplateRefAnnotation. The collector correctly handles this by defaulting to "unknown".
-		if template, ok := sandbox.Annotations[sandboxv1alpha1.SandboxTemplateRefAnnotation]; ok && template != "" {
+		if template, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && template != "" {
 			sandboxTemplateStr = template
 		}
 
-		apiVersion := extensionsv1alpha1.GroupVersion.String()
+		apiVersion := extensionsv1beta1.GroupVersion.String()
 		ownedByStr := "None"
 		if controllerRef := metav1.GetControllerOf(&sandbox); controllerRef != nil {
 			if controllerRef.APIVersion == apiVersion {

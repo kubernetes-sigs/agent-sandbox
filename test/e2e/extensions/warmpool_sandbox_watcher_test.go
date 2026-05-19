@@ -27,17 +27,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func newWarmPoolTemplate(namespace string) *extensionsv1alpha1.SandboxTemplate {
-	template := &extensionsv1alpha1.SandboxTemplate{}
+func newWarmPoolTemplate(namespace string) *extensionsv1beta1.SandboxTemplate {
+	template := &extensionsv1beta1.SandboxTemplate{}
 	template.Name = "test-template"
 	template.Namespace = namespace
-	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -50,11 +50,11 @@ func newWarmPoolTemplate(namespace string) *extensionsv1alpha1.SandboxTemplate {
 	return template
 }
 
-func waitForWarmPoolSandboxReady(t *testing.T, tc *framework.TestContext, namespace string, warmPool *extensionsv1alpha1.SandboxWarmPool) {
+func waitForWarmPoolSandboxReady(t *testing.T, tc *framework.TestContext, namespace string, warmPool *extensionsv1beta1.SandboxWarmPool) {
 	t.Helper()
 
 	require.Eventually(t, func() bool {
-		sandboxList := &sandboxv1alpha1.SandboxList{}
+		sandboxList := &sandboxv1beta1.SandboxList{}
 		if err := tc.List(t.Context(), sandboxList, client.InNamespace(namespace)); err != nil {
 			return false
 		}
@@ -67,7 +67,7 @@ func waitForWarmPoolSandboxReady(t *testing.T, tc *framework.TestContext, namesp
 	}, 60*time.Second, 2*time.Second, "warm pool sandbox should become ready")
 }
 
-func waitForClaimReady(t *testing.T, tc *framework.TestContext, claim *extensionsv1alpha1.SandboxClaim) {
+func waitForClaimReady(t *testing.T, tc *framework.TestContext, claim *extensionsv1beta1.SandboxClaim) {
 	t.Helper()
 
 	require.Eventually(t, func() bool {
@@ -78,18 +78,18 @@ func waitForClaimReady(t *testing.T, tc *framework.TestContext, claim *extension
 	}, 30*time.Second, 1*time.Second, "claim should become ready")
 }
 
-func isSandboxReady(sb *sandboxv1alpha1.Sandbox) bool {
+func isSandboxReady(sb *sandboxv1beta1.Sandbox) bool {
 	for _, cond := range sb.Status.Conditions {
-		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+		if cond.Type == string(sandboxv1beta1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
 	return false
 }
 
-func isClaimReady(claim *extensionsv1alpha1.SandboxClaim) bool {
+func isClaimReady(claim *extensionsv1beta1.SandboxClaim) bool {
 	for _, cond := range claim.Status.Conditions {
-		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+		if cond.Type == string(sandboxv1beta1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
@@ -100,7 +100,7 @@ func requirePodNameAnnotationWhenReady(
 	t *testing.T,
 	tc *framework.TestContext,
 	namespace string,
-	claim *extensionsv1alpha1.SandboxClaim,
+	claim *extensionsv1beta1.SandboxClaim,
 ) {
 	t.Helper()
 
@@ -109,7 +109,7 @@ func requirePodNameAnnotationWhenReady(
 
 	// Use a direct API watch to avoid the async subscription race in framework.Watch
 	sandboxWatcher, err := tc.DynamicClient().Resource(
-		sandboxv1alpha1.GroupVersion.WithResource("sandboxes"),
+		sandboxv1beta1.GroupVersion.WithResource("sandboxes"),
 	).Namespace(namespace).Watch(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	defer sandboxWatcher.Stop()
@@ -131,7 +131,7 @@ func requirePodNameAnnotationWhenReady(
 			u, ok := event.Object.(*unstructured.Unstructured)
 			require.True(t, ok, "unexpected sandbox watch event object type: %T", event.Object)
 
-			sb := &sandboxv1alpha1.Sandbox{}
+			sb := &sandboxv1beta1.Sandbox{}
 			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, sb))
 
 			controllerRef := metav1.GetControllerOf(sb)
@@ -141,8 +141,8 @@ func requirePodNameAnnotationWhenReady(
 			if !isSandboxReady(sb) {
 				continue
 			}
-			if sb.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation] == "" {
-				t.Fatalf("observed adopted sandbox %s Ready=True without %s annotation", sb.Name, sandboxv1alpha1.SandboxPodNameAnnotation)
+			if sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] == "" {
+				t.Fatalf("observed adopted sandbox %s Ready=True without %s annotation", sb.Name, sandboxv1beta1.SandboxPodNameAnnotation)
 			}
 			return
 		}
@@ -160,7 +160,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
 	// Create a SandboxWarmPool
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	warmPool.Name = "test-warmpool"
 	warmPool.Namespace = ns.Name
 	warmPool.Spec.TemplateRef.Name = template.Name
@@ -171,7 +171,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	waitForWarmPoolSandboxReady(t, tc, ns.Name, warmPool)
 
 	// Create a SandboxClaim to adopt the warm pool sandbox
-	claim := &extensionsv1alpha1.SandboxClaim{}
+	claim := &extensionsv1beta1.SandboxClaim{}
 	claim.Name = "test-claim"
 	claim.Namespace = ns.Name
 	claim.Spec.TemplateRef.Name = template.Name
@@ -181,7 +181,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	waitForClaimReady(t, tc, claim)
 
 	// Verify the adopted sandbox is now owned by the claim
-	adoptedSandbox := &sandboxv1alpha1.Sandbox{}
+	adoptedSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{
 		Name:      claim.Status.SandboxStatus.Name,
 		Namespace: ns.Name,
@@ -190,7 +190,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 
 	// Find the pod belonging to the adopted sandbox
 	podName := adoptedSandbox.Name
-	if ann, ok := adoptedSandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; ok && ann != "" {
+	if ann, ok := adoptedSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && ann != "" {
 		podName = ann
 	}
 	adoptedPod := &corev1.Pod{}
@@ -232,7 +232,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 			return false
 		}
 		for _, cond := range adoptedSandbox.Status.Conditions {
-			if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status != metav1.ConditionTrue {
+			if cond.Type == string(sandboxv1beta1.SandboxConditionReady) && cond.Status != metav1.ConditionTrue {
 				return true
 			}
 		}
@@ -252,7 +252,7 @@ func TestWarmPoolPodNameAnnotationBeforeReady(t *testing.T) {
 	template := newWarmPoolTemplate(ns.Name)
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	warmPool.Name = "test-warmpool"
 	warmPool.Namespace = ns.Name
 	warmPool.Spec.TemplateRef.Name = template.Name
@@ -262,7 +262,7 @@ func TestWarmPoolPodNameAnnotationBeforeReady(t *testing.T) {
 	// Start from a Ready warm-pool Sandbox so the claim reconcile path must adopt it
 	waitForWarmPoolSandboxReady(t, tc, ns.Name, warmPool)
 
-	claim := &extensionsv1alpha1.SandboxClaim{}
+	claim := &extensionsv1beta1.SandboxClaim{}
 	claim.Name = "test-claim"
 	claim.Namespace = ns.Name
 	claim.Spec.TemplateRef.Name = template.Name

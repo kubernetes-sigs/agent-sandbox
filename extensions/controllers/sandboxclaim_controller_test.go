@@ -558,7 +558,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Spec: extensionsv1alpha1.SandboxClaimSpec{
 					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
 					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
-						Labels:      map[string]string{"user-label": "user-value"},
+						Labels:      map[string]string{"sandbox.users.io/user-label": "user-value"},
 						Annotations: map[string]string{"user-annotation": "user-value"},
 					},
 				},
@@ -569,12 +569,30 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
-				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels["user-label"]; !ok || val != "user-value" {
-					t.Errorf("expected user-label to be propagated, got %q", val)
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels["sandbox.users.io/user-label"]; !ok || val != "user-value" {
+					t.Errorf("expected sandbox.users.io/user-label to be propagated, got %q", val)
 				}
 				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations["user-annotation"]; !ok || val != "user-value" {
 					t.Errorf("expected user-annotation to be propagated, got %q", val)
 				}
+			},
+		},
+		{
+			name: "claim with label without domain is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-no-domain-label", Namespace: "default", UID: "uid-no-domain-label"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"label-without-domain": "value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
 			},
 		},
 		{
@@ -584,7 +602,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Spec: extensionsv1alpha1.SandboxClaimSpec{
 					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
 					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
-						Labels: map[string]string{"user-label": "a-very-long-value-that-exceeds-sixty-three-characters-limit-which-is-sixty-four"},
+						Labels: map[string]string{"sandbox.users.io/user-label": "a-very-long-value-that-exceeds-sixty-three-characters-limit-which-is-sixty-four"},
 					},
 				},
 			},
@@ -602,7 +620,25 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Spec: extensionsv1alpha1.SandboxClaimSpec{
 					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
 					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
-						Labels: map[string]string{"user-label": "invalid@value"},
+						Labels: map[string]string{"sandbox.users.io/user-label": "invalid@value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+			},
+		},
+		{
+			name: "claim with invalid label key is rejected",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-invalid-key", Namespace: "default", UID: "uid-invalid-key"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"sandbox.users.io/invalid@key": "value"},
 					},
 				},
 			},
@@ -629,6 +665,39 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectError:     false,
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+			},
+		},
+		{
+			name: "claim with custom allowed domain via configmap is accepted",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-custom-domain", Namespace: "default", UID: "uid-custom-domain"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"custom.company.com/my-label": "my-value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				template,
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "agent-sandbox-config",
+						Namespace: "agent-sandbox-system",
+					},
+					Data: map[string]string{
+						"allowed-label-domains": "sandbox.users.io, custom.company.com",
+					},
+				},
+			},
+			expectSandbox: true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels["custom.company.com/my-label"]; !ok || val != "my-value" {
+					t.Errorf("expected custom.company.com/my-label to be propagated, got %q", val)
+				}
 			},
 		},
 		{
@@ -3310,6 +3379,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			UID:       "adopted-sb-uid",
 			Labels: map[string]string{
 				extensionsv1alpha1.SandboxIDLabel: "claim-uid-123",
+				sandboxTemplateRefHash:            sandboxcontrollers.NameHash("test-template"),
+				warmPoolSandboxLabel:              sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
@@ -3439,6 +3510,102 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	}
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
 		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
+	}
+}
+
+func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Labels: map[string]string{
+				"agents.x-k8s.io/sandbox-name": "wrong-template-sb",
+			},
+		},
+		Spec: extensionsv1alpha1.SandboxClaimSpec{
+			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "correct-template"},
+		},
+	}
+
+	template := &extensionsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "correct-template", Namespace: "default"},
+		Spec: extensionsv1alpha1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
+				},
+			},
+		},
+	}
+
+	wrongTemplateSandbox := &sandboxv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "wrong-template-sb",
+			Namespace: "default",
+			UID:       "wrong-sb-uid",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("wrong-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSpec{
+			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+		},
+		Status: sandboxv1alpha1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, claim, wrongTemplateSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: warmSandboxQueue,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected reconcile to succeed (fall through and create new sandbox), but failed: %v", err)
+	}
+
+	var sb sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "wrong-template-sb", Namespace: "default"}, &sb); err != nil {
+		t.Fatalf("failed to get sandbox: %v", err)
+	}
+	if _, ok := sb.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected wrong template sandbox to still have warm pool label, meaning it was not incorrectly adopted")
+	}
+
+	var newSb sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, &newSb); err != nil {
+		t.Fatalf("expected a new sandbox to be created with claim name, but got error: %v", err)
+	}
+
+	if newSb.UID == "wrong-sb-uid" {
+		t.Error("expected created sandbox to be a new one, not the wrong one from label")
 	}
 }
 

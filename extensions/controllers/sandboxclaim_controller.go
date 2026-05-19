@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -63,6 +64,9 @@ var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 
 // ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
 var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
+
+// ErrConfigReadFailure indicates a controller config read failure.
+var ErrConfigReadFailure = errors.New("controller config read failure")
 
 // ErrSandboxNotOwned indicates the Sandbox exists but is not controlled by this claim.
 var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
@@ -130,6 +134,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
@@ -322,7 +327,10 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
 
 	// Upfront validation of additional metadata to skip unnecessary processing
-	if err := validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
+	if err := r.validateAdditionalPodMetadata(ctx, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if errors.Is(err, ErrConfigReadFailure) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
@@ -359,7 +367,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 			mergedMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
 
-			if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+			if err := r.mergePodMetadata(ctx, &mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 				return nil, err
 			}
 
@@ -762,7 +770,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		mergedMeta.Labels[extensionsv1alpha1.SandboxIDLabel] = string(claim.UID)
 		mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 
-		if err := mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if err := r.mergePodMetadata(ctx, &mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
 
@@ -772,7 +780,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		// Fallback (just in case template is somehow missing)
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
 
-		if err := mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if err := r.mergePodMetadata(ctx, &adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
 	}
@@ -803,21 +811,95 @@ func isRestrictedDomain(domain string) bool {
 	return false
 }
 
+var (
+	controllerNamespace     string
+	controllerNamespaceOnce sync.Once
+)
+
+func getControllerNamespace() string {
+	controllerNamespaceOnce.Do(func() {
+		if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+			controllerNamespace = ns
+			return
+		}
+		if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+			if ns := strings.TrimSpace(string(data)); ns != "" {
+				controllerNamespace = ns
+				return
+			}
+		}
+		controllerNamespace = "agent-sandbox-system"
+	})
+	return controllerNamespace
+}
+
 // validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
-func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
+func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(ctx context.Context, claimMeta *v1alpha1.PodMetadata) error {
 	if claimMeta == nil {
 		return nil
 	}
 
+	allowedDomains := []string{"sandbox.users.io"} // default
+	if len(claimMeta.Labels) > 0 {
+		// Read allowed domains from ConfigMap only when there are labels to validate
+		cm := &corev1.ConfigMap{}
+		ns := getControllerNamespace()
+		err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: "agent-sandbox-config"}, cm)
+		if err == nil {
+			val := strings.TrimSpace(cm.Data["allowed-label-domains"])
+			if val != "" {
+				var domains []string
+				for _, d := range strings.FieldsFunc(val, func(c rune) bool {
+					return c == ',' || c == '\n' || c == '\r'
+				}) {
+					d = strings.ToLower(strings.TrimSpace(d))
+					if d != "" {
+						domains = append(domains, d)
+					}
+				}
+				if len(domains) > 0 {
+					allowedDomains = domains
+				}
+			}
+		} else if !k8errors.IsNotFound(err) {
+			return fmt.Errorf("%w: failed to get ConfigMap %s/%s: %w", ErrConfigReadFailure, ns, "agent-sandbox-config", err)
+		}
+	}
+
 	validate := func(key, value string, isLabel bool) error {
-		// Check restricted domains
+		if errs := validation.IsQualifiedName(key); len(errs) > 0 {
+			kind := "annotation"
+			if isLabel {
+				kind = "label"
+			}
+			return fmt.Errorf("invalid %s key: %q: %s", kind, key, strings.Join(errs, "; "))
+		}
+
 		parts := strings.SplitN(key, "/", 2)
 		domain := ""
 		if len(parts) > 1 {
 			domain = strings.ToLower(parts[0])
+		} else if isLabel {
+			return fmt.Errorf("label %q must have a domain prefix to prevent opting into unintended policy domains", key)
 		}
-		if isRestrictedDomain(domain) {
-			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+
+		if isLabel {
+			// Strict Allowlist for labels
+			allowed := false
+			for _, d := range allowedDomains {
+				if domain == d || strings.HasSuffix(domain, "."+d) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("label domain %q is not in the allowlist", domain)
+			}
+		} else {
+			// For annotations, we use the blocklist
+			if isRestrictedDomain(domain) {
+				return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+			}
 		}
 
 		// Validate label values (annotations have less restrictions)
@@ -846,8 +928,8 @@ func validateAdditionalPodMetadata(claimMeta *v1alpha1.PodMetadata) error {
 
 // mergePodMetadata merges labels and annotations from claimMeta into templateMeta,
 // rejecting overrides with different values.
-func mergePodMetadata(templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
-	if err := validateAdditionalPodMetadata(claimMeta); err != nil {
+func (r *SandboxClaimReconciler) mergePodMetadata(ctx context.Context, templateMeta *v1alpha1.PodMetadata, claimMeta *v1alpha1.PodMetadata) error {
+	if err := r.validateAdditionalPodMetadata(ctx, claimMeta); err != nil {
 		return err
 	}
 
@@ -956,7 +1038,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
 
-	if err := mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+	if err := r.mergePodMetadata(ctx, &sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
 	}
 
@@ -1077,21 +1159,27 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Check if a previously adopted sandbox is recorded in claim labels
+	sbName := ""
 	if claim.Labels != nil {
-		if sbName := claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel]; sbName != "" {
-			logger.V(1).Info("Checking labels for sandbox name", "label", sbName, "claim", claim.Name)
-			sandbox := &v1alpha1.Sandbox{}
-			if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
-				if metav1.IsControlledBy(sandbox, claim) {
-					logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
-					return sandbox, nil
-				}
+		sbName = claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel]
+	}
+	if sbName != "" {
+		logger.V(1).Info("Checking labels for sandbox name", "label", sbName, "claim", claim.Name)
+		sandbox := &v1alpha1.Sandbox{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
+			if metav1.IsControlledBy(sandbox, claim) {
+				logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
+				return sandbox, nil
+			}
 
-				controllerRef := metav1.GetControllerOf(sandbox)
-				if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
-					// Still in warm pool. Try to complete adoption!
-					logger.Info("Sandbox found by label still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
+			controllerRef := metav1.GetControllerOf(sandbox)
+			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
+				// Still in warm pool. Try to complete adoption!
+				logger.Info("Sandbox found by label still in warm pool, checking if it matches template", "sandbox", sbName, "claim", claim.Name)
 
+				if err := verifySandboxCandidate(sandbox, claim); err != nil {
+					logger.Info("Sandbox recorded in label cannot be adopted, falling through", "sandbox", sbName, "claim", claim.Name, "reason", err.Error())
+				} else {
 					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
 						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
 							logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
@@ -1099,22 +1187,23 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
 					} else {
-						// If succeeded, return error to retry so next reconcile sees it controlled by us!
-						return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
+						// Successfully completed adoption: return the adopted sandbox directly.
+						logger.Info("Successfully completed adoption", "sandbox", sbName, "claim", claim.Name)
+						return sandbox, nil
 					}
 				}
-
-				logger.Info("Sandbox recorded in label belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
-			} else if k8errors.IsNotFound(err) {
-				logger.Info("Sandbox recorded in label not found, removing stale label", "sandbox", sbName, "claim", claim.Name)
-				patch := client.MergeFrom(claim.DeepCopy())
-				delete(claim.Labels, extensionsv1alpha1.AssignedSandboxNameLabel)
-				if err := r.Patch(ctx, claim, patch); err != nil {
-					return nil, fmt.Errorf("failed to remove stale sandbox label: %w", err)
-				}
-			} else {
-				return nil, fmt.Errorf("failed to get sandbox %q from labels: %w", sbName, err)
 			}
+
+			logger.Info("Sandbox recorded in label belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
+		} else if k8errors.IsNotFound(err) {
+			logger.Info("Sandbox recorded in label not found, removing stale label", "sandbox", sbName, "claim", claim.Name)
+			patch := client.MergeFrom(claim.DeepCopy())
+			delete(claim.Labels, extensionsv1alpha1.AssignedSandboxNameLabel)
+			if err := r.Patch(ctx, claim, patch); err != nil {
+				return nil, fmt.Errorf("failed to remove stale sandbox label: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to get sandbox %q from labels: %w", sbName, err)
 		}
 	}
 

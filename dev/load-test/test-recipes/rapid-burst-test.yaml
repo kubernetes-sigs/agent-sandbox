@@ -16,7 +16,7 @@
 # The minimum replicas for the HPA controlling the warm pool.
 {{$hpaMinReplicas := DefaultParam .CL2_HPA_MIN_REPLICAS 10}}
 # The maximum replicas for the HPA controlling the warm pool.
-{{$hpaMaxReplicas := DefaultParam .CL2_HPA_MAX_REPLICAS 500}}
+{{$hpaMaxReplicas := DefaultParam .CL2_HPA_MAX_REPLICAS 1000}}
 # The target claim creation rate (per second) for the HPA.
 {{$hpaTargetValue := DefaultParam .CL2_HPA_TARGET_VALUE "0.5"}}
 # Whether to enable CapacityBuffer scaling during the test.
@@ -25,6 +25,8 @@
 {{$bufferPercentage := DefaultParam .CL2_BUFFER_PERCENTAGE 200}}
 # The provisioning strategy for CapacityBuffer.
 {{$provisioningStrategy := DefaultParam .CL2_PROVISIONING_STRATEGY "buffer.gke.io/standby-capacity"}}
+# The pause duration to wait for standby capacity nodes to provision.
+{{$capacityBufferPause := DefaultParam .CL2_CAPACITY_BUFFER_PAUSE "5m"}}
 
 name: rapid-burst-test
 
@@ -137,7 +139,7 @@ steps:
     - basename: warmpool-hpa
       objectTemplatePath: templates/cluster-loader-hpa.yaml
       templateFillMap:
-        WarmpoolName: warmpool-0
+        WarmPoolName: warmpool-0
         MinReplicas: {{$hpaMinReplicas}}
         MaxReplicas: {{$hpaMaxReplicas}}
         TargetValue: {{$hpaTargetValue}}
@@ -157,12 +159,12 @@ steps:
         Percentage: {{$bufferPercentage}}
         ProvisioningStrategy: {{$provisioningStrategy}}
 
-- name: Pause 5m for Capacity Buffer Nodes to Provision
+- name: Pause {{$capacityBufferPause}} for Capacity Buffer Nodes to Provision
   measurements:
   - Identifier: WaitCapacityBufferProvision
     Method: Sleep
     Params:
-      duration: 5m
+      duration: {{$capacityBufferPause}}
 {{end}}
 
 # --- START BURST LOOP ---

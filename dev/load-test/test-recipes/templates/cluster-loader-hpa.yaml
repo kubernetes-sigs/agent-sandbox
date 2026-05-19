@@ -6,7 +6,7 @@ spec:
   scaleTargetRef:
     apiVersion: extensions.agents.x-k8s.io/v1alpha1
     kind: SandboxWarmPool
-    name: {{.WarmpoolName}}
+    name: {{.WarmPoolName}}
   minReplicas: {{.MinReplicas}}
   maxReplicas: {{.MaxReplicas}}
   metrics:
@@ -16,7 +16,7 @@ spec:
         name: "prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"
         selector:
           matchLabels:
-            metric.labels.warmpool_name: "{{.WarmpoolName}}"
+            metric.labels.warmpool_name: "{{.WarmPoolName}}"
       target:
         type: Value 
         value: "{{.TargetValue}}"

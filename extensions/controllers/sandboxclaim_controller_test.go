@@ -1568,8 +1568,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				Namespace:         "default",
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
-					warmPoolSandboxLabel:   poolNameHash,
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					warmPoolSandboxLabel:                   poolNameHash,
+					sandboxTemplateRefHash:                 sandboxcontrollers.NameHash("test-template"),
+					sandboxv1alpha1.SandboxLaunchTypeLabel: sandboxv1alpha1.SandboxLaunchTypeWarm,
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
@@ -1868,6 +1869,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				if _, exists := adoptedSandbox.Labels[sandboxTemplateRefHash]; exists {
 					t.Errorf("expected template ref label to be removed from adopted sandbox")
 				}
+				if val := adoptedSandbox.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeWarm {
+					t.Errorf("expected adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeWarm, val, adoptedSandbox.Labels)
+				}
 
 				// 2. Verify SandboxID label was added to pod template
 				expectedUID := string(types.UID("claim-uid"))
@@ -1898,6 +1902,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				err = fakeClient.Get(ctx, req.NamespacedName, &sandbox)
 				if err != nil {
 					t.Fatalf("expected sandbox to be created but got error: %v", err)
+				}
+				if val := sandbox.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeCold {
+					t.Errorf("expected new sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeCold, val, sandbox.Labels)
 				}
 			}
 		})
@@ -2053,6 +2060,14 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	}
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
 		t.Error("pool sandbox should still have warm pool label (should not have been adopted)")
+	}
+
+	var updatedAdopted sandboxv1alpha1.Sandbox
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &updatedAdopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+	if val := updatedAdopted.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeWarm {
+		t.Errorf("expected previously adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeWarm, val, updatedAdopted.Labels)
 	}
 }
 
@@ -2323,6 +2338,116 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 			t.Errorf("expected metric count 1, got %v", val)
 		}
 	})
+}
+
+func TestGetLaunchType(t *testing.T) {
+	testCases := []struct {
+		name    string
+		sandbox *sandboxv1alpha1.Sandbox
+		want    string
+	}{
+		{
+			name: "nil sandbox is unknown",
+			want: asmetrics.LaunchTypeUnknown,
+		},
+		{
+			name: "warm launch label is warm",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						sandboxv1alpha1.SandboxLaunchTypeLabel: sandboxv1alpha1.SandboxLaunchTypeWarm,
+					},
+				},
+			},
+			want: asmetrics.LaunchTypeWarm,
+		},
+		{
+			name: "cold launch label with pod name annotation remains cold",
+			sandbox: &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						sandboxv1alpha1.SandboxLaunchTypeLabel: sandboxv1alpha1.SandboxLaunchTypeCold,
+					},
+					Annotations: map[string]string{
+						sandboxv1alpha1.SandboxPodNameAnnotation: "sandbox-cold",
+					},
+				},
+			},
+			want: asmetrics.LaunchTypeCold,
+		},
+		{
+			name:    "missing launch label defaults cold",
+			sandbox: &sandboxv1alpha1.Sandbox{},
+			want:    asmetrics.LaunchTypeCold,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, getLaunchType(tc.sandbox))
+		})
+	}
+}
+
+func TestInitializeSandboxLaunchTypeLabel(t *testing.T) {
+	testCases := []struct {
+		name          string
+		existingLabel string
+		launchType    string
+		want          string
+	}{
+		{
+			name:          "existing warm label is not overwritten by cold",
+			existingLabel: sandboxv1alpha1.SandboxLaunchTypeWarm,
+			launchType:    sandboxv1alpha1.SandboxLaunchTypeCold,
+			want:          sandboxv1alpha1.SandboxLaunchTypeWarm,
+		},
+		{
+			name:          "existing cold label is not overwritten by warm",
+			existingLabel: sandboxv1alpha1.SandboxLaunchTypeCold,
+			launchType:    sandboxv1alpha1.SandboxLaunchTypeWarm,
+			want:          sandboxv1alpha1.SandboxLaunchTypeCold,
+		},
+		{
+			name:       "missing label is initialized",
+			launchType: sandboxv1alpha1.SandboxLaunchTypeWarm,
+			want:       sandboxv1alpha1.SandboxLaunchTypeWarm,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			sandbox := &sandboxv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+			}
+			if tc.existingLabel != "" {
+				sandbox.Labels = map[string]string{
+					sandboxv1alpha1.SandboxLaunchTypeLabel: tc.existingLabel,
+				}
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(sandbox).
+				Build()
+			reconciler := &SandboxClaimReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			err := reconciler.initializeSandboxLaunchTypeLabel(context.Background(), sandbox, tc.launchType)
+			require.NoError(t, err)
+
+			var updated sandboxv1alpha1.Sandbox
+			err = fakeClient.Get(context.Background(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, &updated)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, updated.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel])
+		})
+	}
 }
 
 func newScheme(t *testing.T) *runtime.Scheme {
@@ -3431,6 +3556,13 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	}
 	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
 		t.Errorf("expected claim status to be updated with 'adopted-sb' on 2nd pass, got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &adopted); err != nil {
+		t.Fatalf("failed to get adopted sandbox: %v", err)
+	}
+	if val := adopted.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel]; val != sandboxv1alpha1.SandboxLaunchTypeWarm {
+		t.Errorf("expected assigned adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1alpha1.SandboxLaunchTypeWarm, val, adopted.Labels)
 	}
 
 	// Verify that the extra warm sandbox was STILL NOT adopted (it should still have its warm pool labels)

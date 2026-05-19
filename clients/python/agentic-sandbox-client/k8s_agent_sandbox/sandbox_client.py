@@ -364,7 +364,7 @@ class SandboxClient(Generic[T]):
         except Exception as e:
             logging.error(f"Failed to cleanup SandboxClaim '{claim_name}': {e}")
 
-    def get_sandbox_claim_temlpate_name(self, claim_name: str, namespace: str) -> str:
+    def get_sandbox_claim_template_name(self, claim_name: str, namespace: str) -> str:
         """Get template name of a sandbox claim."""
         claim_object = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
         if not claim_object:

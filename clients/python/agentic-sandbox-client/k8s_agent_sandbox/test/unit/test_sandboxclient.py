@@ -394,13 +394,13 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper.get_sandbox_claim.return_value = {
             "spec": {"sandboxTemplateRef": {"name": "my-template"}},
         }
-        template_name = self.client.get_sandbox_claim_temlpate_name("my-claim", "my-namespace")
+        template_name = self.client.get_sandbox_claim_template_name("my-claim", "my-namespace")
         self.assertEqual(template_name, "my-template")
 
     def test_get_sandbox_claim_template_name_claim_not_found(self):
         self.mock_k8s_helper.get_sandbox_claim.return_value = None
         with self.assertRaises(SandboxNotFoundError):
-            self.client.get_sandbox_claim_temlpate_name("my-claim", "my-namespace")
+            self.client.get_sandbox_claim_template_name("my-claim", "my-namespace")
 
 
 class SandboxHandler(BaseHTTPRequestHandler):

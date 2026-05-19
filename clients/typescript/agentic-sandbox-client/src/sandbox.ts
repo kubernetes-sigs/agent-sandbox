@@ -36,6 +36,9 @@ import {
   MAX_RETRIES,
   PER_ATTEMPT_TIMEOUT_MS,
   RETRY_STATUS_CODES,
+  SANDBOX_API_GROUP,
+  SANDBOX_API_VERSION,
+  SANDBOX_PLURAL_NAME,
 } from "./constants.js";
 import {
   isK8s404,
@@ -955,16 +958,39 @@ export class Sandbox {
         [HEADER_REQUEST_ID]: requestId,
       };
 
+      // The overall timeout signal caps the entire operation including retries
+      // (constructed here so it also covers fetchPodIp)
+      const overallSignal = options.timeout
+        ? AbortSignal.timeout(options.timeout * 1000)
+        : undefined;
+
+      if (!this.apiUrl && !this._podIpAuthFailed) {
+        if (!this._podIpResolved) {
+          const podIpSignals = [overallSignal, options.signal].filter(
+            (s): s is AbortSignal => s !== undefined,
+          );
+          const podIpSignal =
+            podIpSignals.length === 0
+              ? undefined
+              : podIpSignals.length === 1
+                ? podIpSignals[0]
+                : AbortSignal.any(podIpSignals);
+          const ip = await this.fetchPodIp(podIpSignal);
+          if (ip) {
+            this._podIp = ip;
+            this._podIpResolved = true;
+          }
+        }
+        if (this._podIp) {
+          headers["X-Sandbox-Pod-IP"] = this._podIp;
+        }
+      }
+
       const fetchOptions: RequestInit = {
         method,
         headers,
         body: options.body,
       };
-
-      // The overall timeout signal caps the entire operation including retries
-      const overallSignal = options.timeout
-        ? AbortSignal.timeout(options.timeout * 1000)
-        : undefined;
 
       try {
         const response = await fetchWithRetry(
@@ -997,6 +1023,9 @@ export class Sandbox {
         }
         return response;
       } catch (err) {
+        this._podIp = null;
+        this._podIpResolved = false;
+
         if (err instanceof SandboxRequestError) throw err;
         if (err instanceof SandboxTimeoutError) throw err;
 
@@ -1051,16 +1080,57 @@ export class Sandbox {
     } finally {
       this.portForwardProcess = null;
       this.baseUrl = undefined;
+      this._podIp = null;
+      this._podIpResolved = false;
     }
   }
 
   protected _reconnectPromise: Promise<void> | null = null;
+
+  private _podIp: string | null = null;
+  private _podIpResolved = false;
+  private _podIpAuthFailed = false;
 
   private drainInflight(): Promise<void> {
     if (this._inflightCount === 0) return Promise.resolve();
     return new Promise<void>((resolve) => {
       this._drainResolvers.push(resolve);
     });
+  }
+
+  private async fetchPodIp(signal?: AbortSignal): Promise<string | null> {
+    if (signal?.aborted) return null;
+    try {
+      const apiCall = this.customObjectsApi.getNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: this.namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: this.sandboxName,
+      });
+      const obj = (await (signal
+        ? Promise.race([
+            apiCall,
+            new Promise<never>((_, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+          ])
+        : apiCall)) as Record<string, unknown>;
+      const status = (obj?.status as Record<string, unknown>) ?? {};
+      const podIPs = (status.podIPs as string[] | undefined) ?? [];
+      return podIPs[0] ?? null;
+    } catch (err: unknown) {
+      // On abort, return null silently — fetchWithRetry will throw the correct error
+      if (signal?.aborted) return null;
+      const code = (err as { code?: number })?.code;
+      if (code === 401 || code === 403) {
+        this._podIpAuthFailed = true;
+        console.debug(`Pod IP lookup disabled: K8s API returned ${code}`);
+      }
+      return null;
+    }
   }
 
   /**

@@ -1512,8 +1512,8 @@ describe("Sandbox", () => {
       });
       const settled = listPromise.catch((e) => e);
 
-      // Let the fetch start.
-      await Promise.resolve();
+      // Flush all pending microtasks until fetch starts.
+      await vi.advanceTimersByTimeAsync(0);
       expect(fetch).toHaveBeenCalledTimes(1);
 
       // Abort — the in-flight attempt should reject and the loop should exit
@@ -1830,6 +1830,217 @@ describe("Sandbox", () => {
       const err = await promise.catch((e) => e);
       expect(err.constructor.name).toBe("SandboxTimeoutError");
       expect(fetch).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ===== X-Sandbox-Pod-IP header =====
+
+  describe("X-Sandbox-Pod-IP header", () => {
+    it("injects Pod IP when K8s API returns podIPs", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: { podIPs: ["10.0.0.42"] },
+      });
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await sandbox.files.exists("test.txt");
+
+      const [, opts] = (fetch as Mock).mock.calls[0];
+      expect(opts.headers["X-Sandbox-Pod-IP"]).toBe("10.0.0.42");
+    });
+
+    it("caches Pod IP: K8s API called only once for multiple requests", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        status: { podIPs: ["10.0.0.1"] },
+      });
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+      (fetch as Mock).mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ exists: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      await sandbox.files.exists("a.txt");
+      await sandbox.files.exists("b.txt");
+
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(1);
+      for (const [, opts] of (fetch as Mock).mock.calls) {
+        expect(opts.headers["X-Sandbox-Pod-IP"]).toBe("10.0.0.1");
+      }
+    });
+
+    it("omits header and retries on empty podIPs, injects on subsequent fetch", async () => {
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({ status: { podIPs: [] } })
+        .mockResolvedValueOnce({ status: { podIPs: ["10.0.0.2"] } });
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+      (fetch as Mock).mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ exists: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      await sandbox.files.exists("a.txt");
+      const [, opts1] = (fetch as Mock).mock.calls[0];
+      expect(opts1.headers["X-Sandbox-Pod-IP"]).toBeUndefined();
+
+      await sandbox.files.exists("b.txt");
+      const [, opts2] = (fetch as Mock).mock.calls[1];
+      expect(opts2.headers["X-Sandbox-Pod-IP"]).toBe("10.0.0.2");
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(2);
+    });
+
+    it("permanently disables Pod IP lookup after 401", async () => {
+      const authErr = Object.assign(new Error("Unauthorized"), { code: 401 });
+      mockGetNamespacedCustomObject.mockRejectedValue(authErr);
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+      (fetch as Mock).mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ exists: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      await sandbox.files.exists("a.txt");
+      await sandbox.files.exists("b.txt");
+
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(1);
+      for (const [, opts] of (fetch as Mock).mock.calls) {
+        expect(opts.headers["X-Sandbox-Pod-IP"]).toBeUndefined();
+      }
+    });
+
+    it("permanently disables Pod IP lookup after 403", async () => {
+      const authErr = Object.assign(new Error("Forbidden"), { code: 403 });
+      mockGetNamespacedCustomObject.mockRejectedValue(authErr);
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+      (fetch as Mock).mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ exists: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      await sandbox.files.exists("a.txt");
+      await sandbox.files.exists("b.txt");
+
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(1);
+      for (const [, opts] of (fetch as Mock).mock.calls) {
+        expect(opts.headers["X-Sandbox-Pod-IP"]).toBeUndefined();
+      }
+    });
+
+    it("retries Pod IP fetch after transient K8s error", async () => {
+      mockGetNamespacedCustomObject
+        .mockRejectedValueOnce(new Error("connection reset"))
+        .mockResolvedValueOnce({ status: { podIPs: ["10.0.0.3"] } });
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+      (fetch as Mock).mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ exists: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      await sandbox.files.exists("a.txt");
+      const [, opts1] = (fetch as Mock).mock.calls[0];
+      expect(opts1.headers["X-Sandbox-Pod-IP"]).toBeUndefined();
+
+      await sandbox.files.exists("b.txt");
+      const [, opts2] = (fetch as Mock).mock.calls[1];
+      expect(opts2.headers["X-Sandbox-Pod-IP"]).toBe("10.0.0.3");
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(2);
+    });
+
+    it("resets cache on SandboxRequestError so next request re-fetches Pod IP", async () => {
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({ status: { podIPs: ["10.0.0.4"] } })
+        .mockResolvedValueOnce({ status: { podIPs: ["10.0.0.5"] } });
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+
+      // First request: router returns 404 (non-retryable) → SandboxRequestError
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("not found", { status: 404 }),
+      );
+      await expect(sandbox.files.exists("a.txt")).rejects.toThrow(
+        SandboxRequestError,
+      );
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(1);
+
+      // Second request: cache was reset, so K8s API is called again
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await sandbox.files.exists("b.txt");
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(2);
+      const [, opts2] = (fetch as Mock).mock.calls[1];
+      expect(opts2.headers["X-Sandbox-Pod-IP"]).toBe("10.0.0.5");
+    });
+
+    it("aborts fetchPodIp mid-lookup when the caller's signal fires", async () => {
+      vi.useFakeTimers();
+      // K8s API call that never resolves (simulates a hanging / throttled API)
+      mockGetNamespacedCustomObject.mockImplementation(() => new Promise(() => {}));
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+
+      const controller = new AbortController();
+      const listPromise = sandbox.files.list(".", { signal: controller.signal });
+      const settled = listPromise.catch((e) => e);
+
+      // Flush microtasks: fetchPodIp is now awaiting the K8s API response
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(1);
+      expect(fetch).not.toHaveBeenCalled();
+
+      // Abort while K8s API is still pending — fetchPodIp must unblock immediately
+      controller.abort(new Error("cancelled by caller"));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const err = await settled;
+      expect(err.constructor.name).toBe("SandboxRequestError");
+      // fetch was never reached because the signal fired before fetchWithRetry
+      expect(fetch).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
+    it("skips fetchPodIp and X-Sandbox-Pod-IP header in direct API mode (apiUrl set)", async () => {
+      // createReadySandbox() defaults to apiUrl: "http://localhost:9999"
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await sandbox.files.exists("test.txt");
+
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+      const [, opts] = (fetch as Mock).mock.calls[0];
+      expect(opts.headers["X-Sandbox-Pod-IP"]).toBeUndefined();
+      expect(opts.headers["X-Sandbox-ID"]).toBe("test-sandbox");
+      expect(opts.headers["X-Sandbox-Namespace"]).toBe("default");
+      expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
     });
   });
 });

@@ -33,7 +33,8 @@ The following example demonstrates creating a sandbox, modifying its filesystem,
 > Note: this example uses `simple-sandbox-template`, which you should create in your GKE cluster first. The associated resources can be found [here](https://github.com/volatilemolotov/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source).
 
 
-```python
+{{< blocks/tabs name="hello-world" >}}
+  {{< blocks/tab name="Python" codelang="python" >}}
 import time
 from k8s_agent_sandbox.gke_extensions.snapshots import PodSnapshotSandboxClient
 
@@ -74,4 +75,212 @@ print(f"Is restored?\nAnswer: {is_restored}")
 # 7. Verify the filesystem state was preserved
 response = restored_sandbox.commands.run("cat /tmp/data/status.txt")
 print(response.stdout) # Should output 'session_active'
-```
+  {{< /blocks/tab >}}
+  {{< blocks/tab name="Go" codelang="go" >}}
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
+
+const sleepTime = 10 * time.Second
+
+func sleep() {
+	fmt.Printf("sleep %s\n", sleepTime)
+	time.Sleep(sleepTime)
+}
+
+// --- PodSnapshotSandboxClient ---
+
+type PodSnapshotSandboxClient struct {
+	http    *http.Client
+	baseURL string
+}
+
+func NewPodSnapshotSandboxClient() *PodSnapshotSandboxClient {
+	return &PodSnapshotSandboxClient{http: &http.Client{}, baseURL: sandboxAPIBase}
+}
+
+func (c *PodSnapshotSandboxClient) CreateSandbox(template string) (*Sandbox, error) {
+	body, _ := json.Marshal(map[string]string{"template": template})
+	resp, err := c.http.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create sandbox: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &Sandbox{ID: result.ID, client: c}, nil
+}
+
+// --- Sandbox ---
+
+type Sandbox struct {
+	ID     string
+	client *PodSnapshotSandboxClient
+}
+
+func (s *Sandbox) String() string { return fmt.Sprintf("Sandbox{ID: %s}", s.ID) }
+
+func (s *Sandbox) Commands() *CommandService  { return &CommandService{sandbox: s} }
+func (s *Sandbox) Snapshots() *SnapshotService { return &SnapshotService{sandbox: s} }
+
+func (s *Sandbox) IsRestoredFromSnapshot(snapshotUID string) (bool, error) {
+	url := fmt.Sprintf("%s/sandboxes/%s/snapshot-status?uid=%s", s.client.baseURL, s.ID, snapshotUID)
+	resp, err := s.client.http.Get(url)
+	if err != nil {
+		return false, fmt.Errorf("snapshot status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Restored bool `json:"restored"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("decode response: %w", err)
+	}
+	return result.Restored, nil
+}
+
+func (s *Sandbox) Terminate() error {
+	url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	resp, err := s.client.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("terminate: %w", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return nil
+}
+
+// --- CommandService ---
+
+type CommandService struct{ sandbox *Sandbox }
+
+type CommandResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+func (c *CommandService) Run(cmd string) (CommandResult, error) {
+	body, _ := json.Marshal(map[string]string{"command": cmd})
+	url := fmt.Sprintf("%s/sandboxes/%s/commands", c.sandbox.client.baseURL, c.sandbox.ID)
+	resp, err := c.sandbox.client.http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return CommandResult{}, fmt.Errorf("run command: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return CommandResult{}, fmt.Errorf("decode response: %w", err)
+	}
+	return CommandResult{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}, nil
+}
+
+func (r CommandResult) String() string {
+	return fmt.Sprintf("CommandResult{ExitCode: %d, Stdout: %q}", r.ExitCode, r.Stdout)
+}
+
+// --- SnapshotService ---
+
+type SnapshotService struct{ sandbox *Sandbox }
+
+type SnapshotResponse struct {
+	SnapshotUID string `json:"snapshot_uid"`
+}
+
+func (s *SnapshotService) Create(trigger string) (*SnapshotResponse, error) {
+	body, _ := json.Marshal(map[string]string{"trigger": trigger})
+	url := fmt.Sprintf("%s/sandboxes/%s/snapshots", s.sandbox.client.baseURL, s.sandbox.ID)
+	resp, err := s.sandbox.client.http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create snapshot: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result SnapshotResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// --- main ---
+
+func main() {
+	// 1. Initialize the snapshot-capable client
+	client := NewPodSnapshotSandboxClient()
+
+	// 2. Create the sandbox
+	sandbox, err := client.CreateSandbox("simple-sandbox-template")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(sandbox)
+
+	// 3. Run a command that alters the filesystem
+	response, err := sandbox.Commands().Run("mkdir -p /tmp/data && echo 'session_active' > /tmp/data/status.txt")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(response)
+	sleep()
+
+	// 4. Snapshot the sandbox
+	snapshotResponse, err := sandbox.Snapshots().Create("my-trigger")
+	if err != nil {
+		panic(err)
+	}
+	sleep()
+	if snapshotResponse == nil {
+		panic("snapshot response is nil")
+	}
+	fmt.Printf("Snapshot saved with ID: %s\n", snapshotResponse.SnapshotUID)
+
+	// 5. Clean up the original sandbox
+	if err := sandbox.Terminate(); err != nil {
+		panic(err)
+	}
+	sleep()
+
+	// 6. Restore the sandbox from the snapshot
+	restoredSandbox, err := client.CreateSandbox("simple-sandbox-template")
+	if err != nil {
+		panic(err)
+	}
+	isRestored, err := restoredSandbox.IsRestoredFromSnapshot(snapshotResponse.SnapshotUID)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Is restored?\nAnswer: %v\n", isRestored)
+
+	// 7. Verify the filesystem state was preserved
+	result, err := restoredSandbox.Commands().Run("cat /tmp/data/status.txt")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(result.Stdout) // Should output 'session_active'
+}
+  {{< /blocks/tab >}}
+{{< /blocks/tabs >}}
+
+

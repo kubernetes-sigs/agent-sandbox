@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -39,6 +40,7 @@ type AgentSandboxesMetricKey struct {
 	Expired        string
 	LaunchType     string
 	Template       string
+	OwnedBy        string
 }
 
 // NewAgentSandboxesConstMetric creates a new Prometheus ConstMetric for the agent_sandboxes gauge.
@@ -52,6 +54,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.Expired,
 		key.LaunchType,
 		key.Template,
+		key.OwnedBy,
 	)
 }
 
@@ -129,12 +132,26 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			sandboxTemplateStr = template
 		}
 
+		apiVersion := extensionsv1alpha1.GroupVersion.String()
+		ownedByStr := "None"
+		if controllerRef := metav1.GetControllerOf(&sandbox); controllerRef != nil {
+			if controllerRef.APIVersion == apiVersion {
+				switch controllerRef.Kind {
+				case "SandboxClaim":
+					ownedByStr = "SandboxClaim"
+				case "SandboxWarmPool":
+					ownedByStr = "SandboxWarmPool"
+				}
+			}
+		}
+
 		key := AgentSandboxesMetricKey{
 			Namespace:      sandbox.Namespace,
 			ReadyCondition: readyConditionStr,
 			Expired:        expiredStr,
 			LaunchType:     launchTypeStr,
 			Template:       sandboxTemplateStr,
+			OwnedBy:        ownedByStr,
 		}
 		counts[key]++
 	}

@@ -17,6 +17,7 @@ package v1alpha1
 import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
@@ -164,5 +165,8 @@ type SandboxTemplateList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxTemplate{}, &SandboxTemplateList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxTemplate{}, &SandboxTemplateList{})
+		return nil
+	})
 }

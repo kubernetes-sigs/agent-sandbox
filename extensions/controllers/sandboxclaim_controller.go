@@ -55,8 +55,11 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-const immediateRequeueDelay = time.Millisecond
+const (
+	ObservabilityAnnotation   = "agents.x-k8s.io/controller-first-observed-at"
+	immediateRequeueDelay     = time.Millisecond
+	sandboxControllerUIDField = ".metadata.controllerUID"
+)
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -390,18 +393,43 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Expired claim", "claim", claim.Name)
 
-	// Fall back to claim.Name when status is unset.
-	statusName := claim.Name
-	if claim.Status.SandboxStatus.Name != "" {
-		statusName = claim.Status.SandboxStatus.Name
+	var sandbox *v1alpha1.Sandbox
+
+	// Check the status-recorded sandbox name first. Adopted warm-pool sandboxes
+	// keep their original name, which may differ from the claim name.
+	statusName := claim.Status.SandboxStatus.Name
+	if statusName != "" {
+		candidate := &v1alpha1.Sandbox{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, candidate); err != nil {
+			if !k8errors.IsNotFound(err) {
+				return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
+			}
+		} else if metav1.IsControlledBy(candidate, claim) {
+			sandbox = candidate
+		} else {
+			logger.Info("Status-recorded sandbox is not controlled by claim", "claim.Status.SandboxStatus.Name", statusName, "sandbox", candidate.Name, "claim", claim.Name)
+		}
 	}
 
-	sandbox := &v1alpha1.Sandbox{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err != nil {
-		if k8errors.IsNotFound(err) {
-			return nil, nil // Sandbox is gone, life is good.
+	// Fall back to a namespace-wide ownership lookup if status is empty, stale, or
+	// references a sandbox that is not controlled by this claim.
+	if sandbox == nil {
+		allSandboxes := &v1alpha1.SandboxList{}
+		if err := r.List(ctx, allSandboxes, client.InNamespace(claim.Namespace)); err != nil {
+			return nil, fmt.Errorf("failed to list sandboxes: %w", err)
 		}
-		return nil, err
+
+		for i := range allSandboxes.Items {
+			sb := &allSandboxes.Items[i]
+			if metav1.IsControlledBy(sb, claim) {
+				sandbox = sb
+				break
+			}
+		}
+	}
+
+	if sandbox == nil {
+		return nil, nil // Sandbox is gone, life is good.
 	}
 
 	// Verify ownership before delete action

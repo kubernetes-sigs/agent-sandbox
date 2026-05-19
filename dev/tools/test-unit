@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2025 The Kubernetes Authors.
+# Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,7 +29,13 @@ PYTHON_TEST_SUITES = [
         "name": "k8s-agent-sandbox",
         "dir": os.path.join("clients", "python", "agentic-sandbox-client", "k8s_agent_sandbox"),
         "requirements": "requirements.txt",
-    }
+    },
+    {
+        "name": "langchain-agent-sandbox",
+        "dir": os.path.join("clients", "python", "langchain-agent-sandbox", "tests"),
+        "package_dir": os.path.join("clients", "python", "langchain-agent-sandbox"),
+        "requirements": None,
+    },
 ]
 
 
@@ -72,15 +78,25 @@ def run_python_tests(repo_root):
         env = os.environ.copy()
         env["PIP_EXTRA_INDEX_URL"] = os.environ.get("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple/")
 
-        req_file = os.path.join(test_dir, suite["requirements"])
-        if os.path.isfile(req_file):
+        if suite.get("requirements"):
+            req_file = os.path.join(test_dir, suite["requirements"])
+            if os.path.isfile(req_file):
+                subprocess.check_call(
+                    [venv_pip, "install", "--quiet", "-r", req_file], env=env)
+        if suite.get("package_dir"):
+            # install local dependencies first (e.g., k8s-agent-sandbox for langchain)
+            sdk_path = os.path.join(repo_root, "clients", "python", "agentic-sandbox-client")
             subprocess.check_call(
-                [venv_pip, "install", "--quiet", "-r", req_file], env=env)
+                [venv_pip, "install", "--quiet", "-e", sdk_path], env=env)
+            # install the package with test extras from its pyproject.toml
+            package_dir = os.path.join(repo_root, suite["package_dir"])
+            subprocess.check_call(
+                [venv_pip, "install", "--quiet", "-e", ".[test]"], cwd=package_dir, env=env)
         elif suite["name"] == "k8s-agent-sandbox":
             # install the package itself with test extras
             package_dir = os.path.dirname(test_dir)
             subprocess.check_call(
-            [venv_pip, "install", "--quiet", "-e", ".[test]"], cwd=package_dir, env=env)
+                [venv_pip, "install", "--quiet", "-e", ".[test]"], cwd=package_dir, env=env)
 
         subprocess.check_call(
             [venv_pip, "install", "--quiet", "pytest"], env=env)

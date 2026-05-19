@@ -1,4 +1,4 @@
-# Copyright 2025 The Kubernetes Authors.
+# Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -153,15 +153,36 @@ class SandboxClient(Generic[T]):
         self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
         return sandbox
 
-    def get_sandbox(self, claim_name: str, namespace: str = "default", resolve_timeout: int = 30) -> T:
+    def get_sandbox(
+        self,
+        claim_name: str,
+        namespace: str = "default",
+        resolve_timeout: int = 30,
+        template_name: str | None = None,
+    ) -> T:
         """
-        Retrieves an existing sandbox handle given a sandbox claim name. 
+        Retrieves an existing sandbox handle given a sandbox claim name.
         If the handle is closed or missing, it re-attaches to the infrastructure.
-        
+
+        Args:
+            claim_name: Name of the SandboxClaim to attach to.
+            namespace: Kubernetes namespace the claim lives in.
+            resolve_timeout: Seconds to wait while resolving the sandbox
+                name from the claim status.
+            template_name: Optional SandboxTemplate name to validate against
+                the existing claim's ``spec.sandboxTemplateRef.name``.
+                When supplied and the existing claim references a different
+                template, a ``ValueError`` is raised before returning a
+                handle. This prevents surprising silent reconnects when the
+                caller expects a specific template.
+
         Example:
-        
+
             >>> client = SandboxClient()
-            >>> sandbox = client.get_sandbox("sandbox-claim-1234abcd")
+            >>> sandbox = client.get_sandbox(
+            ...     "sandbox-claim-1234abcd",
+            ...     template_name="python-sandbox-template",
+            ... )
             >>> sandbox.commands.run("ls -la")
         """
         key = (namespace, claim_name)
@@ -169,10 +190,29 @@ class SandboxClient(Generic[T]):
 
         # Check if the sandbox actually exists in Kubernetes
         try:
+            if template_name is not None:
+                claim_object = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
+                if not claim_object:
+                    raise SandboxNotFoundError(
+                        f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'."
+                    )
+                existing_template = (
+                    claim_object.get("spec", {})
+                    .get("sandboxTemplateRef", {})
+                    .get("name")
+                )
+                if existing_template != template_name:
+                    raise ValueError(
+                        f"SandboxClaim '{claim_name}' in namespace '{namespace}' references "
+                        f"template '{existing_template}', not '{template_name}'. Refusing "
+                        f"to reattach."
+                    )
             sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout)
             sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
+        except ValueError:
+            raise
         except Exception as e:
             if existing:
                 existing.terminate()
@@ -182,7 +222,7 @@ class SandboxClient(Generic[T]):
         # If it's already in the registry and active (and verified on K8s), return the existing object
         if existing and existing.is_active:
             return existing
-            
+
         # If the sandbox is not active, pop it out from the tracking list
         if existing:
             self._active_connection_sandboxes.pop(key, None)
@@ -196,7 +236,7 @@ class SandboxClient(Generic[T]):
             tracer_config=self.tracer_config,
             k8s_helper=self.k8s_helper
         )
-        
+
         self._active_connection_sandboxes[key] = new_handle
         return new_handle
     
@@ -216,18 +256,24 @@ class SandboxClient(Generic[T]):
                 self._active_connection_sandboxes.pop(key, None)
         return list(self._active_connection_sandboxes.keys())
       
-    def list_all_sandboxes(self, namespace: str = "default") -> List[str]:
+    def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> List[str]:
         """
-        Lists all SandboxClaim names currently existing in the Kubernetes cluster 
+        Lists all SandboxClaim names currently existing in the Kubernetes cluster
         for the given namespace.
-        
+
+        Args:
+            namespace: Kubernetes namespace to list claims in.
+            label_selector: Optional Kubernetes label selector string
+                (e.g. ``"app=myapp"``). When set, only claims matching
+                the selector are returned.
+
         Example:
-        
+
             >>> client = SandboxClient()
             >>> print(client.list_all_sandboxes(namespace="default"))
             ['sandbox-claim-1234abcd', 'sandbox-claim-5678efgh']
         """
-        return self.k8s_helper.list_sandbox_claims(namespace)
+        return self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
 
     def delete_sandbox(self, claim_name: str, namespace: str = "default"):
         """Stops the client side connection and deletes the Kubernetes resources.

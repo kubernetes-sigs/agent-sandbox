@@ -153,7 +153,7 @@ class TestSandboxClient(unittest.TestCase):
         
         result = self.client.list_all_sandboxes("test-namespace")
         
-        self.mock_k8s_helper.list_sandbox_claims.assert_called_once_with("test-namespace")
+        self.mock_k8s_helper.list_sandbox_claims.assert_called_once_with("test-namespace", label_selector=None)
         self.assertEqual(result, ["sandbox-1", "sandbox-2"])
 
     def test_delete_sandbox_in_registry(self):

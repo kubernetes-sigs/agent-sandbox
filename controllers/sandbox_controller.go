@@ -736,6 +736,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			})
 		}
 
+		needsUpdate := false
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
 		case resourceOwnedByOther:
@@ -754,13 +755,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
+			needsUpdate = true
 
 		case resourceOwnedBySandbox:
 			// No additional action needed — label applied below.
 		}
 
-		updated := r.updatePodMetadata(pod, sandbox, nameHash)
-		if updated {
+		metadataUpdated := r.updatePodMetadata(pod, sandbox, nameHash)
+		if metadataUpdated || needsUpdate {
 			if err := r.Update(ctx, pod); err != nil {
 				return nil, fmt.Errorf("failed to update pod: %w", err)
 			}

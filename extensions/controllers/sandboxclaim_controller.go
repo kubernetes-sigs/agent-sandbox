@@ -1506,6 +1506,12 @@ func isAdoptable(candidate *v1alpha1.Sandbox) error {
 	if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
 		return fmt.Errorf("sandbox is not managed by warm pool. Controller: %v", controllerRef)
 	}
+
+	// PodIPs is the adoption boundary: without it, the backing Pod is missing
+	// or not networked yet. Not-Ready sandboxes with PodIPs are still useful.
+	if len(candidate.Status.PodIPs) == 0 {
+		return fmt.Errorf("sandbox is not yet networked (Status.PodIPs is empty)")
+	}
 	return nil
 }
 

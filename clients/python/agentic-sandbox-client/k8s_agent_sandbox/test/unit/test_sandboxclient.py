@@ -35,6 +35,7 @@ from k8s_agent_sandbox.constants import POD_NAME_ANNOTATION
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
+    SandboxNotFoundError,
 )
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 
@@ -153,7 +154,7 @@ class TestSandboxClient(unittest.TestCase):
         
         result = self.client.list_all_sandboxes("test-namespace")
         
-        self.mock_k8s_helper.list_sandbox_claims.assert_called_once_with("test-namespace")
+        self.mock_k8s_helper.list_sandbox_claims.assert_called_once_with("test-namespace", label_selector=None)
         self.assertEqual(result, ["sandbox-1", "sandbox-2"])
 
     def test_delete_sandbox_in_registry(self):
@@ -388,6 +389,18 @@ class TestSandboxClient(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.client.create_sandbox("test-template", shutdown_after_seconds="10")
         self.assertIn("integer", str(ctx.exception))
+
+    def test_get_sandbox_claim_template_name(self):
+        self.mock_k8s_helper.get_sandbox_claim.return_value = {
+            "spec": {"sandboxTemplateRef": {"name": "my-template"}},
+        }
+        template_name = self.client.get_sandbox_claim_temlpate_name("my-claim", "my-namespace")
+        self.assertEqual(template_name, "my-template")
+
+    def test_get_sandbox_claim_template_name_claim_not_found(self):
+        self.mock_k8s_helper.get_sandbox_claim.return_value = None
+        with self.assertRaises(SandboxNotFoundError):
+            self.client.get_sandbox_claim_temlpate_name("my-claim", "my-namespace")
 
 
 class SandboxHandler(BaseHTTPRequestHandler):

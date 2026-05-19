@@ -13,15 +13,22 @@
 # limitations under the License.
 
 import logging
+import copy
 from kubernetes.client import ApiException
 from .snapshot_engine import SnapshotEngine, SnapshotResponse
 from k8s_agent_sandbox.sandbox import Sandbox
-from k8s_agent_sandbox.constants import SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME
+from k8s_agent_sandbox.constants import (
+    SANDBOX_API_GROUP,
+    SANDBOX_API_VERSION,
+    SANDBOX_PLURAL_NAME,
+    PODSNAPSHOT_NAME_ANNOTATION,
+)
 from .utils import (
     check_pod_restored_from_snapshot,
     RestoreCheckResult,
     wait_for_pod_termination,
     wait_for_pod_ready,
+    wait_for_sandbox_propagation,
 )
 from pydantic import BaseModel
 
@@ -37,13 +44,17 @@ class SuspendResponse(BaseModel):
     error_reason: str = ""
     error_code: int = 0
 
-class ResumeResponse(BaseModel):
-    """Result of a resume operation."""
+class RestorationResponse(BaseModel):
+    """Result of a restore/resume operation."""
     success: bool
     restored_from_snapshot: bool | None = None
     snapshot_uid: str | None = None
     error_reason: str = ""
     error_code: int = 0
+
+class ResumeResponse(RestorationResponse):
+    """Deprecated alias for RestorationResponse."""
+    pass
 
 class SandboxWithSnapshotSupport(Sandbox):
     def __init__(self, *args, **kwargs):
@@ -228,57 +239,29 @@ class SandboxWithSnapshotSupport(Sandbox):
             error_code=ERROR_CODE
         )
 
-    def resume(self, wait_timeout: int = 180) -> ResumeResponse:
-        """
-        Resumes the sandbox from the latest available snapshot.
-
-        Args:
-            wait_timeout: The maximum time in seconds to wait for the pod to become ready. Defaults to 180.
-
-        Returns:
-            ResumeResponse: An object containing the success status, restoration details, and any error information.
-        """
-        if not self.is_suspended():
-            logger.info(f"Sandbox '{self.sandbox_id}' is already running (not suspended).")
-            return ResumeResponse(
-                success=True,
-                restored_from_snapshot=False,
-                snapshot_uid=None,
-                error_reason="",
-                error_code=SUCCESS_CODE
-            )
-
-        # Capture the snapshot UID before patching replicas to guarantee we verify
-        # against the exact state the controller will see.
-        try:
-            latest_snapshot_uid = self._get_latest_snapshot_uid()
-        except Exception as e:
-            logger.error(f"Failed to get latest snapshot UID before resuming: {e}")
-            return ResumeResponse(
-                success=False,
-                restored_from_snapshot=False,
-                snapshot_uid=None,
-                error_reason=f"Failed to get latest snapshot UID: {e}",
-                error_code=ERROR_CODE
-            )
+    def _restore_internal(self, target_snapshot_uid: str | None, wait_timeout: int) -> RestorationResponse:
+        """Internal restore logic shared by resume() and restore()."""
+        # Clear cached pod name and connection before resuming to ensure we pick up the new pod
+        self.connector.close()
+        self._pod_name = None
 
         try:
             self._set_replicas(1)
-            logger.info(f"Sandbox '{self.sandbox_id}' resumed (scaled up to 1 replica).")
+            logger.info(f"Sandbox '{self.sandbox_id}' activated (scaled up to 1 replica).")
         except Exception as e:
-            logger.error(f"Failed to resume Sandbox '{self.sandbox_id}': {e}")
-            return ResumeResponse(
+            logger.error(f"Failed to activate Sandbox '{self.sandbox_id}': {e}")
+            return RestorationResponse(
                 success=False,
                 restored_from_snapshot=False,
-                snapshot_uid=None,
+                snapshot_uid=target_snapshot_uid,
                 error_reason=f"Failed to patch replicas: {e}",
                 error_code=ERROR_CODE
             )
 
         if wait_for_pod_ready(self.k8s_helper, self.namespace, self.get_pod_name, wait_timeout):
-            if not latest_snapshot_uid:
+            if not target_snapshot_uid:
                 logger.info(f"No previous snapshots found for Sandbox '{self.sandbox_id}'. Skipping restore verification.")
-                return ResumeResponse(
+                return RestorationResponse(
                     success=True,
                     restored_from_snapshot=False,
                     snapshot_uid=None,
@@ -286,35 +269,149 @@ class SandboxWithSnapshotSupport(Sandbox):
                     error_code=SUCCESS_CODE
                 )
 
-            restore_check = self.is_restored_from_snapshot(latest_snapshot_uid)
+            restore_check = self.is_restored_from_snapshot(target_snapshot_uid)
             if restore_check.success:
-                logger.info(f"Sandbox '{self.sandbox_id}' successfully restored from snapshot '{latest_snapshot_uid}'.")
-                return ResumeResponse(
+                logger.info(f"Sandbox '{self.sandbox_id}' successfully restored from snapshot '{target_snapshot_uid}'.")
+                return RestorationResponse(
                     success=True,
                     restored_from_snapshot=True,
-                    snapshot_uid=latest_snapshot_uid,
+                    snapshot_uid=target_snapshot_uid,
                     error_reason="",
                     error_code=SUCCESS_CODE
                 )
             else:
-                logger.error(f"Sandbox '{self.sandbox_id}' was not restored from snapshot '{latest_snapshot_uid}': {restore_check.error_reason}")
-                return ResumeResponse(
+                logger.error(f"Sandbox '{self.sandbox_id}' was not restored from snapshot '{target_snapshot_uid}': {restore_check.error_reason}")
+                return RestorationResponse(
                     success=False,
                     restored_from_snapshot=False,
-                    snapshot_uid=latest_snapshot_uid,
+                    snapshot_uid=target_snapshot_uid,
                     error_reason=f"Pod ready but not restored from snapshot: {restore_check.error_reason}",
                     error_code=ERROR_CODE
                 )
         
         logger.warning(f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to become ready.")
-        return ResumeResponse(
+        return RestorationResponse(
             success=False,
             restored_from_snapshot=False,
-            snapshot_uid=latest_snapshot_uid,
+            snapshot_uid=target_snapshot_uid,
             error_reason="Timed out waiting for pod to become ready.",
             error_code=ERROR_CODE
         )
-    
+
+    def resume(self, wait_timeout: int = 180) -> RestorationResponse:
+        """
+        Resumes the sandbox from the latest available snapshot.
+
+        Args:
+            wait_timeout: The maximum time in seconds to wait for the pod to become ready. Defaults to 180.
+
+        Returns:
+            RestorationResponse: An object containing the success status, restoration details, and any error information.
+        """
+        if not self.is_suspended():
+            logger.info(f"Sandbox '{self.sandbox_id}' is already running (not suspended).")
+            return RestorationResponse(
+                success=True,
+                restored_from_snapshot=False,
+                snapshot_uid=None,
+                error_reason="",
+                error_code=SUCCESS_CODE
+            )
+
+        try:
+            latest_snapshot_uid = self._get_latest_snapshot_uid()
+        except Exception as e:
+            logger.error(f"Failed to get target snapshot UID before resuming: {e}")
+            return RestorationResponse(
+                success=False,
+                restored_from_snapshot=False,
+                snapshot_uid=None,
+                error_reason=f"Failed to get target snapshot UID: {e}",
+                error_code=ERROR_CODE
+            )
+
+        try:
+            body = {
+                "spec": {
+                    "additionalPodMetadata": {
+                        "annotations": {
+                            PODSNAPSHOT_NAME_ANNOTATION: None
+                        }
+                    }
+                }
+            }
+            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+        except Exception as e:
+            logger.error(f"Failed to clean up restore annotation before resuming: {e}")
+
+        return self._restore_internal(latest_snapshot_uid, wait_timeout)
+
+    def _verify_snapshot_exists(self, snapshot_uid: str) -> None:
+        """Verifies that a snapshot exists for this sandbox."""
+        list_result = self.snapshots.list()
+        if not list_result.success:
+            raise RuntimeError(f"Failed to list snapshots: {list_result.error_reason}")
+        if not any(snap.snapshot_uid == snapshot_uid for snap in list_result.snapshots):
+            raise RuntimeError(f"Snapshot '{snapshot_uid}' does not exist for this sandbox.")
+
+    def restore(self, snapshot_uid: str | None = None, sandbox_ready_timeout: int = 180) -> RestorationResponse:
+        """Restores this sandbox from a specific or the latest snapshot."""
+        try:
+            if not snapshot_uid:
+                snapshot_uid = self._get_latest_snapshot_uid()
+                if not snapshot_uid:
+                    return RestorationResponse(
+                        success=False,
+                        restored_from_snapshot=False,
+                        snapshot_uid=None,
+                        error_reason=f"No snapshots found for sandbox '{self.claim_name}' to restore from.",
+                        error_code=ERROR_CODE
+                    )
+            else:
+                self._verify_snapshot_exists(snapshot_uid)
+
+            if not self.is_suspended():
+                return RestorationResponse(
+                    success=False,
+                    restored_from_snapshot=False,
+                    snapshot_uid=snapshot_uid,
+                    error_reason="Sandbox must be suspended before restoring from a dedicated snapshot.",
+                    error_code=ERROR_CODE
+                )
+
+            body = {
+                "spec": {
+                    "additionalPodMetadata": {
+                        "annotations": {
+                            PODSNAPSHOT_NAME_ANNOTATION: snapshot_uid
+                        }
+                    }
+                }
+            }
+            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+
+            if not wait_for_sandbox_propagation(self.k8s_helper, self.namespace, self.sandbox_id, snapshot_uid):
+                return RestorationResponse(
+                    success=False,
+                    restored_from_snapshot=False,
+                    snapshot_uid=snapshot_uid,
+                    error_reason="Timed out waiting for snapshot UID to propagate to Sandbox spec.",
+                    error_code=ERROR_CODE
+                )
+
+            logger.info(f"Resuming Sandbox '{self.sandbox_id}' to trigger restore.")
+            return self._restore_internal(snapshot_uid, sandbox_ready_timeout)
+
+        except Exception as e:
+            logger.error(f"Unexpected error during restore for Sandbox '{self.sandbox_id}': {e}")
+            return RestorationResponse(
+                success=False,
+                restored_from_snapshot=False,
+                snapshot_uid=snapshot_uid,
+                error_reason=f"Unexpected error: {e}",
+                error_code=ERROR_CODE
+            )
+
     def terminate(self):
         """
         Cleans up the manually generated trigger resources and terminates the Sandbox.

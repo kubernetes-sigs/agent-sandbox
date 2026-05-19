@@ -217,6 +217,25 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     print(f"Snapshots deleted successfully.")
 
 
+def test_restore_from_snapshot(sandbox, snapshot_uid: str):
+    """Tests restoring a sandbox from a previous snapshot."""
+    print("\n======= Testing Restore from Previous Snapshot =======")
+    
+    print(f"\nSuspending sandbox '{sandbox.sandbox_id}' before dedicated restore...")
+    suspend_result = sandbox.suspend(snapshot_before_suspend=False)
+    assert suspend_result.success, f"Suspend failed before restore: {suspend_result.error_reason}"
+    assert sandbox.is_suspended(), "Sandbox should be suspended."
+
+    print(f"\nRestoring sandbox '{sandbox.sandbox_id}' from snapshot '{snapshot_uid}'...")
+    restore_result = sandbox.restore(snapshot_uid=snapshot_uid)
+    
+    assert restore_result.success, f"Restore failed: {restore_result.error_reason}"
+    assert restore_result.restored_from_snapshot, "Sandbox should have been restored from snapshot."
+    assert restore_result.snapshot_uid == snapshot_uid, f"Expected restored snapshot UID '{snapshot_uid}', but got '{restore_result.snapshot_uid}'"
+    
+    print(f"Sandbox successfully restored from Snapshot UID: {restore_result.snapshot_uid}")
+
+
 def main(
     template_name: str,
     api_url: str | None,
@@ -263,6 +282,8 @@ def main(
         suspend_third_snapshot_uid = test_suspend_resume(sandbox)
         
         time.sleep(WAIT_TIME_SECONDS)
+        
+        test_restore_from_snapshot(sandbox, first_snapshot_uid)
         
         test_list_and_delete(
             sandbox, first_snapshot_uid, second_snapshot_uid, suspend_third_snapshot_uid

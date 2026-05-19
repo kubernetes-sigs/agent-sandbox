@@ -439,11 +439,20 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, claim); err != nil {
-		logger.Error(err, "Failed to update sandboxclaim status")
+	oldClaim := claim.DeepCopy()
+	oldClaim.Status = *oldStatus
+
+	patch := client.MergeFrom(oldClaim)
+
+	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		logger.Error(err, "Failed to patch sandboxclaim status")
 		return err
 	}
 
+	logger.V(4).Info("Successfully patched sandboxclaim status",
+		"name", claim.Name,
+		"namespace", claim.Namespace,
+		"observedGeneration", claim.Generation)
 	return nil
 }
 

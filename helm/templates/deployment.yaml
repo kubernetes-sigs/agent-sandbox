@@ -16,6 +16,10 @@ spec:
         {{- include "agent-sandbox.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: agent-sandbox-controller
+      {{- if not (empty .Values.podSecurityContext) }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- end }}
       containers:
       - name: agent-sandbox-controller
         image: {{ include "agent-sandbox.image" . }}
@@ -44,6 +48,10 @@ spec:
         {{- with .Values.resources }}
         resources:
           {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- if not (empty .Values.containerSecurityContext) }}
+        securityContext:
+          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

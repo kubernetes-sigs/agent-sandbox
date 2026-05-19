@@ -134,6 +134,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
@@ -819,19 +820,42 @@ func isRestrictedDomain(domain string) bool {
 	return false
 }
 
+var (
+	controllerNamespace     string
+	controllerNamespaceOnce sync.Once
+)
+
+func getControllerNamespace() string {
+	controllerNamespaceOnce.Do(func() {
+		if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+			controllerNamespace = ns
+			return
+		}
+		if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+			if ns := strings.TrimSpace(string(data)); ns != "" {
+				controllerNamespace = ns
+				return
+			}
+		}
+		controllerNamespace = "agent-sandbox-system"
+	})
+	return controllerNamespace
+}
+
 // validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
-func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(_ context.Context, claimMeta *v1beta1.PodMetadata) error {
+func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(ctx context.Context, claimMeta *v1beta1.PodMetadata) error {
 	if claimMeta == nil {
 		return nil
 	}
 
 	allowedDomains := []string{"sandbox.users.io"} // default
 	if len(claimMeta.Labels) > 0 {
-		// Read allowed domains from mounted file only when there are labels to validate
-		configPath := "/etc/sandbox-config/allowed-label-domains"
-		data, err := os.ReadFile(configPath)
+		// Read allowed domains from ConfigMap only when there are labels to validate
+		cm := &corev1.ConfigMap{}
+		ns := getControllerNamespace()
+		err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: "agent-sandbox-config"}, cm)
 		if err == nil {
-			val := strings.TrimSpace(string(data))
+			val := strings.TrimSpace(cm.Data["allowed-label-domains"])
 			if val != "" {
 				var domains []string
 				for _, d := range strings.FieldsFunc(val, func(c rune) bool {
@@ -846,8 +870,8 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(_ context.Context
 					allowedDomains = domains
 				}
 			}
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("%w: failed to read configuration file %q: %w", ErrConfigReadFailure, configPath, err)
+		} else if !k8errors.IsNotFound(err) {
+			return fmt.Errorf("%w: failed to get ConfigMap %s/%s: %w", ErrConfigReadFailure, ns, "agent-sandbox-config", err)
 		}
 	}
 
@@ -1149,48 +1173,51 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Check if a previously adopted sandbox is recorded in claim labels
+	sbName := ""
 	if claim.Labels != nil {
-		if sbName := claim.Labels[extensionsv1beta1.AssignedSandboxNameLabel]; sbName != "" {
-			logger.V(1).Info("Checking labels for sandbox name", "label", sbName, "claim", claim.Name)
-			sandbox := &v1beta1.Sandbox{}
-			if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
-				if metav1.IsControlledBy(sandbox, claim) {
-					logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
-					return sandbox, nil
-				}
+		sbName = claim.Labels[extensionsv1beta1.AssignedSandboxNameLabel]
+	}
+	if sbName != "" {
+		logger.V(1).Info("Checking labels for sandbox name", "label", sbName, "claim", claim.Name)
+		sandbox := &v1beta1.Sandbox{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
+			if metav1.IsControlledBy(sandbox, claim) {
+				logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
+				return sandbox, nil
+			}
 
-				controllerRef := metav1.GetControllerOf(sandbox)
-				if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
-					// Still in warm pool. Try to complete adoption!
-					logger.Info("Sandbox found by label still in warm pool, checking if it matches template", "sandbox", sbName, "claim", claim.Name)
+			controllerRef := metav1.GetControllerOf(sandbox)
+			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
+				// Still in warm pool. Try to complete adoption!
+				logger.Info("Sandbox found by label still in warm pool, checking if it matches template", "sandbox", sbName, "claim", claim.Name)
 
-					if err := verifySandboxCandidate(sandbox, claim); err != nil {
-						logger.Info("Sandbox recorded in label cannot be adopted, falling through", "sandbox", sbName, "claim", claim.Name, "reason", err.Error())
-					} else {
-						if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
-							if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
-								logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
-							} else {
-								return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
-							}
+				if err := verifySandboxCandidate(sandbox, claim); err != nil {
+					logger.Info("Sandbox recorded in label cannot be adopted, falling through", "sandbox", sbName, "claim", claim.Name, "reason", err.Error())
+				} else {
+					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
+						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
+							logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
 						} else {
-							// If succeeded, return error to retry so next reconcile sees it controlled by us!
-							return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
+							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
+					} else {
+						// Successfully completed adoption: return the adopted sandbox directly.
+						logger.Info("Successfully completed adoption", "sandbox", sbName, "claim", claim.Name)
+						return sandbox, nil
 					}
 				}
-
-				logger.Info("Sandbox recorded in label belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
-			} else if k8errors.IsNotFound(err) {
-				logger.Info("Sandbox recorded in label not found, removing stale label", "sandbox", sbName, "claim", claim.Name)
-				patch := client.MergeFrom(claim.DeepCopy())
-				delete(claim.Labels, extensionsv1beta1.AssignedSandboxNameLabel)
-				if err := r.Patch(ctx, claim, patch); err != nil {
-					return nil, fmt.Errorf("failed to remove stale sandbox label: %w", err)
-				}
-			} else {
-				return nil, fmt.Errorf("failed to get sandbox %q from labels: %w", sbName, err)
 			}
+
+			logger.Info("Sandbox recorded in label belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
+		} else if k8errors.IsNotFound(err) {
+			logger.Info("Sandbox recorded in label not found, removing stale label", "sandbox", sbName, "claim", claim.Name)
+			patch := client.MergeFrom(claim.DeepCopy())
+			delete(claim.Labels, extensionsv1beta1.AssignedSandboxNameLabel)
+			if err := r.Patch(ctx, claim, patch); err != nil {
+				return nil, fmt.Errorf("failed to remove stale sandbox label: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to get sandbox %q from labels: %w", sbName, err)
 		}
 	}
 

@@ -1,0 +1,13 @@
+scenario: docs_installation_optimization
+description: "User wants to know how to build and run agent-sandbox from source, specifically optimizing for speed by avoiding building examples."
+questions:
+  - "How do I build and run agent-sandbox from source?"
+  - "How do I install and run from source?"
+  - "How do I run on a real kubernetes cluster from source without building all examples?"
+documents_to_cite:
+  - "docs/development.md"
+  - "Makefile"
+expected_key_elements:
+  - "push-images"
+  - "--controller-only"
+  - "deploy-to-kube"

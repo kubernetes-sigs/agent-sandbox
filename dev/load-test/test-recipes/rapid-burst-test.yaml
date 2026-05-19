@@ -11,6 +11,20 @@
 # The total number of burst iterations to execute in the test.
 {{$totalBursts := DefaultParam .CL2_TOTAL_BURSTS 100}}
 {{$runtimeClass := DefaultParam .CL2_RUNTIME_CLASS "gvisor"}}
+# Whether to enable HPA warmpool scaling during the test.
+{{$enableHpa := DefaultParam .CL2_ENABLE_HPA "false"}}
+# The minimum replicas for the HPA controlling the warm pool.
+{{$hpaMinReplicas := DefaultParam .CL2_HPA_MIN_REPLICAS 10}}
+# The maximum replicas for the HPA controlling the warm pool.
+{{$hpaMaxReplicas := DefaultParam .CL2_HPA_MAX_REPLICAS 500}}
+# The target claim creation rate (per second) for the HPA.
+{{$hpaTargetValue := DefaultParam .CL2_HPA_TARGET_VALUE "0.5"}}
+# Whether to enable CapacityBuffer scaling during the test.
+{{$enableCapacityBuffer := DefaultParam .CL2_ENABLE_CAPACITY_BUFFER "false"}}
+# The buffer percentage for CapacityBuffer.
+{{$bufferPercentage := DefaultParam .CL2_BUFFER_PERCENTAGE 200}}
+# The provisioning strategy for CapacityBuffer.
+{{$provisioningStrategy := DefaultParam .CL2_PROVISIONING_STRATEGY "buffer.gke.io/standby-capacity"}}
 
 name: rapid-burst-test
 
@@ -113,6 +127,44 @@ steps:
       maxFailedObjectCount: 0
       timeout: 15m
 
+{{if eq $enableHpa "true"}}
+- name: Setup Sandbox Warm Pool HPA
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: warmpool-hpa
+      objectTemplatePath: templates/cluster-loader-hpa.yaml
+      templateFillMap:
+        WarmpoolName: warmpool-0
+        MinReplicas: {{$hpaMinReplicas}}
+        MaxReplicas: {{$hpaMaxReplicas}}
+        TargetValue: {{$hpaTargetValue}}
+{{end}}
+
+{{if eq $enableCapacityBuffer "true"}}
+- name: Setup Capacity Buffer
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: capacity-buffer
+      objectTemplatePath: templates/cluster-loader-capacity-buffer.yaml
+      templateFillMap:
+        WarmPoolName: warmpool-0
+        Percentage: {{$bufferPercentage}}
+        ProvisioningStrategy: {{$provisioningStrategy}}
+
+- name: Pause 5m for Capacity Buffer Nodes to Provision
+  measurements:
+  - Identifier: WaitCapacityBufferProvision
+    Method: Sleep
+    Params:
+      duration: 5m
+{{end}}
+
 # --- START BURST LOOP ---
 {{range $i := Loop $totalBursts}}
 {{$burstIteration := AddInt $i 1}}
@@ -188,6 +240,28 @@ steps:
     objectBundle:
     - basename: agent-claim
       objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
+
+{{if eq $enableHpa "true"}}
+- name: Delete Sandbox Warm Pool HPA
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: warmpool-hpa
+      objectTemplatePath: templates/cluster-loader-hpa.yaml
+{{end}}
+
+{{if eq $enableCapacityBuffer "true"}}
+- name: Delete Capacity Buffer
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: capacity-buffer
+      objectTemplatePath: templates/cluster-loader-capacity-buffer.yaml
+{{end}}
 
 - name: Delete Sandbox Warm Pool
   phases:

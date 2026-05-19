@@ -1,0 +1,22 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{.Name}}
+spec:
+  scaleTargetRef:
+    apiVersion: extensions.agents.x-k8s.io/v1alpha1
+    kind: SandboxWarmPool
+    name: {{.WarmpoolName}}
+  minReplicas: {{.MinReplicas}}
+  maxReplicas: {{.MaxReplicas}}
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: "prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"
+        selector:
+          matchLabels:
+            metric.labels.warmpool_name: "{{.WarmpoolName}}"
+      target:
+        type: Value 
+        value: "{{.TargetValue}}"

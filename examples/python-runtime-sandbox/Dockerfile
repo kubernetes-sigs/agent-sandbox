@@ -1,5 +1,5 @@
 # Use the official Python image from the Docker Hub as the base image.  
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 

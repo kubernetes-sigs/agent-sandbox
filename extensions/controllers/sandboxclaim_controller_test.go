@@ -3403,8 +3403,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			UID:       "adopted-sb-uid",
 			Labels: map[string]string{
 				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
-				sandboxTemplateRefHash:            sandboxcontrollers.NameHash("test-template"),
-				warmPoolSandboxLabel:              sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash:           sandboxcontrollers.NameHash("test-template"),
+				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
@@ -3471,21 +3471,18 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	// Run reconcile
 	_, err := reconciler.Reconcile(context.Background(), req)
-	expectedErr := "triggered adoption completion for \"adopted-sb\": retrying"
-	if err == nil {
-		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
-	} else if err.Error() != expectedErr {
-		t.Errorf("Expected error %q, got: %q", expectedErr, err.Error())
+	if err != nil {
+		t.Fatalf("Expected first Reconcile to succeed, but failed: %v", err)
 	}
 
-	// Verify that the claim status was NOT updated with the sandbox name (due to error)
+	// Verify that the claim status WAS updated with the sandbox name
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 
-	if updatedClaim.Status.SandboxStatus.Name == "adopted-sb" {
-		t.Error("expected claim status to NOT be updated with 'adopted-sb' during cache lag")
+	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+		t.Errorf("expected claim status to be updated with 'adopted-sb', got %q", updatedClaim.Status.SandboxStatus.Name)
 	}
 
 	// Verify that the extra warm sandbox was NOT adopted (it should still have its warm pool labels)
@@ -3540,7 +3537,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 	scheme := newScheme(t)
 
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim",
 			Namespace: "default",
@@ -3549,15 +3546,15 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 				"agents.x-k8s.io/sandbox-name": "wrong-template-sb",
 			},
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "correct-template"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "correct-template"},
 		},
 	}
 
-	template := &extensionsv1alpha1.SandboxTemplate{
+	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "correct-template", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "c", Image: "img"}},
 				},
@@ -3565,7 +3562,7 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 		},
 	}
 
-	wrongTemplateSandbox := &sandboxv1alpha1.Sandbox{
+	wrongTemplateSandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "wrong-template-sb",
 			Namespace: "default",
@@ -3575,19 +3572,19 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("wrong-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
 				Kind:       "SandboxWarmPool",
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
-		Spec: sandboxv1alpha1.SandboxSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+		Spec: sandboxv1beta1.SandboxSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
-		Status: sandboxv1alpha1.SandboxStatus{
+		Status: sandboxv1beta1.SandboxStatus{
 			Conditions: []metav1.Condition{{
-				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 			}},
 		},
 	}
@@ -3615,7 +3612,7 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 		t.Fatalf("Expected reconcile to succeed (fall through and create new sandbox), but failed: %v", err)
 	}
 
-	var sb sandboxv1alpha1.Sandbox
+	var sb sandboxv1beta1.Sandbox
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "wrong-template-sb", Namespace: "default"}, &sb); err != nil {
 		t.Fatalf("failed to get sandbox: %v", err)
 	}
@@ -3623,7 +3620,7 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 		t.Error("expected wrong template sandbox to still have warm pool label, meaning it was not incorrectly adopted")
 	}
 
-	var newSb sandboxv1alpha1.Sandbox
+	var newSb sandboxv1beta1.Sandbox
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, &newSb); err != nil {
 		t.Fatalf("expected a new sandbox to be created with claim name, but got error: %v", err)
 	}

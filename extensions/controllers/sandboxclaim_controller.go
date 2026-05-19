@@ -849,7 +849,7 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(ctx context.Conte
 	}
 
 	allowedDomains := []string{"sandbox.users.io"} // default
-	if len(claimMeta.Labels) > 0 {
+	if len(claimMeta.Labels) > 0 && r.Client != nil {
 		// Read allowed domains from ConfigMap only when there are labels to validate
 		cm := &corev1.ConfigMap{}
 		ns := getControllerNamespace()
@@ -884,6 +884,11 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(ctx context.Conte
 			return fmt.Errorf("invalid %s key: %q: %s", kind, key, strings.Join(errs, "; "))
 		}
 
+		// Block spoofing of system components
+		if isLabel && strings.EqualFold(key, "app") && strings.EqualFold(value, "sandbox-router") {
+			return fmt.Errorf("restricted system label value: %q=%q is not allowed in AdditionalPodMetadata", key, value)
+		}
+
 		parts := strings.SplitN(key, "/", 2)
 		domain := ""
 		if len(parts) > 1 {
@@ -909,11 +914,6 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(ctx context.Conte
 			if isRestrictedDomain(domain) {
 				return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
 			}
-		}
-
-		// Block spoofing of system components
-		if isLabel && strings.EqualFold(key, "app") && strings.EqualFold(value, "sandbox-router") {
-			return fmt.Errorf("restricted system label value: %q=%q is not allowed in AdditionalPodMetadata", key, value)
 		}
 
 		// Validate label values (annotations have less restrictions)

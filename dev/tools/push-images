@@ -67,9 +67,11 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
     for tag in args.extra_image_tags:  # additional image tags
         extra_tag = utils.get_full_image_name(args, service_name, tag=tag)
         build_cmd.extend(["-t", extra_tag])
+    # dockerfile_path is expressed relative to repo root; the buildx call
+    # below runs with cwd=srcdir, so we re-express it relative to that.
     build_cmd.extend([
         "-f",
-        os.path.basename(dockerfile_path),
+        os.path.relpath(dockerfile_path, srcdir),
         ".",
     ])
     # Inject version info into Go binaries
@@ -121,6 +123,12 @@ def main(args):
 
             if service_name == ".":
                 service_name = "agent-sandbox-controller"
+
+            # The pod-agent image bundles the `proto/` directory (shared
+            # with the Go controller), which lives at the repo root. Use
+            # repo root as the build context for it.
+            if service_name == "pod-agent":
+                context_dir = "."
 
             if args.images and service_name not in args.images:
                 continue

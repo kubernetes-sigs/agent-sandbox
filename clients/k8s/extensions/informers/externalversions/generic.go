@@ -51,6 +51,8 @@ func (f *genericInformer) Lister() cache.GenericLister {
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
 	// Group=extensions.agents.x-k8s.io, Version=v1alpha1
+	case v1alpha1.SchemeGroupVersion.WithResource("managedsandboxes"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Extensions().V1alpha1().ManagedSandboxes().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxclaims"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Extensions().V1alpha1().SandboxClaims().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxtemplates"):

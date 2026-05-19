@@ -22,6 +22,8 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
+	// ManagedSandboxes returns a ManagedSandboxInformer.
+	ManagedSandboxes() ManagedSandboxInformer
 	// SandboxClaims returns a SandboxClaimInformer.
 	SandboxClaims() SandboxClaimInformer
 	// SandboxTemplates returns a SandboxTemplateInformer.
@@ -39,6 +41,11 @@ type version struct {
 // New returns a new Interface.
 func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+}
+
+// ManagedSandboxes returns a ManagedSandboxInformer.
+func (v *version) ManagedSandboxes() ManagedSandboxInformer {
+	return &managedSandboxInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // SandboxClaims returns a SandboxClaimInformer.

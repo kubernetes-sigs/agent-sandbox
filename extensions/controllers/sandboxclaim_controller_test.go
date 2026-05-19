@@ -668,6 +668,39 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "claim with custom allowed domain via configmap is accepted",
+			claimToReconcile: &extensionsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-custom-domain", Namespace: "default", UID: "uid-custom-domain"},
+				Spec: extensionsv1alpha1.SandboxClaimSpec{
+					TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1alpha1.PodMetadata{
+						Labels: map[string]string{"custom.company.com/my-label": "my-value"},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				template,
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "agent-sandbox-config",
+						Namespace: "agent-sandbox-system",
+					},
+					Data: map[string]string{
+						"allowed-label-domains": "sandbox.users.io, custom.company.com",
+					},
+				},
+			},
+			expectSandbox: true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1alpha1.Sandbox, _ *extensionsv1alpha1.SandboxTemplate) {
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels["custom.company.com/my-label"]; !ok || val != "my-value" {
+					t.Errorf("expected custom.company.com/my-label to be propagated, got %q", val)
+				}
+			},
+		},
+		{
 			name:             "sandbox is created with injected environment variables from claim",
 			claimToReconcile: claimWithEnv,
 			existingObjects:  []client.Object{templateWithEnvOverride},

@@ -217,7 +217,19 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
 		return err
 	}
+	setWarmLaunchTypeLabelIfNeeded(sb)
 	return r.Update(ctx, sb)
+}
+
+func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1alpha1.Sandbox) bool {
+	if sb.Labels == nil {
+		sb.Labels = make(map[string]string)
+	}
+	if sb.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel] == sandboxv1alpha1.SandboxLaunchTypeWarm {
+		return false
+	}
+	sb.Labels[sandboxv1alpha1.SandboxLaunchTypeLabel] = sandboxv1alpha1.SandboxLaunchTypeWarm
+	return true
 }
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
@@ -270,6 +282,14 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 			}
 		}
 
+		if isControlledByPool && setWarmLaunchTypeLabelIfNeeded(&sb) {
+			if err := r.Update(ctx, &sb); err != nil {
+				logger.Error(err, "Failed to update sandbox launch type label", "sandbox", sb.Name)
+				allErrors = errors.Join(allErrors, err)
+				continue
+			}
+		}
+
 		if isOrphan {
 			logger.Info("Adopting orphaned sandbox", "sandbox", sb.Name)
 			if err := r.adoptSandbox(ctx, warmPool, &sb); err != nil {
@@ -315,7 +335,8 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	// Build labels for the Sandbox CR
 	sandboxLabels := map[string]string{
 		warmPoolSandboxLabel:                        poolNameHash,
-		sandboxTemplateRefHash:                      SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
+		sandboxTemplateRefHash:                      sandboxcontrollers.NameHash(warmPool.Spec.TemplateRef.Name),
+		sandboxv1alpha1.SandboxLaunchTypeLabel:      sandboxv1alpha1.SandboxLaunchTypeWarm,
 		sandboxv1alpha1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
 	}
 

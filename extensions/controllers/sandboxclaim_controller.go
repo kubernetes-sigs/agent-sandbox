@@ -724,6 +724,10 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	delete(adopted.Labels, warmPoolSandboxLabel)
 	delete(adopted.Labels, sandboxTemplateRefHash)
 	delete(adopted.Labels, v1alpha1.SandboxPodTemplateHashLabel)
+	if adopted.Labels == nil {
+		adopted.Labels = make(map[string]string)
+	}
+	adopted.Labels[v1alpha1.SandboxLaunchTypeLabel] = v1alpha1.SandboxLaunchTypeWarm
 
 	// Transfer ownership from SandboxWarmPool to SandboxClaim
 	adopted.OwnerReferences = nil
@@ -953,6 +957,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// (KEP-0174 only propagates to pod template labels; platform's informer reads
 	// Sandbox.metadata.labels).
 	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
+	sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel] = v1alpha1.SandboxLaunchTypeCold
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
 
@@ -1069,6 +1074,13 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
+				launchType := v1alpha1.SandboxLaunchTypeCold
+				if claim.Labels[extensionsv1alpha1.AssignedSandboxNameLabel] == statusName || statusName != claim.Name {
+					launchType = v1alpha1.SandboxLaunchTypeWarm
+				}
+				if err := r.initializeSandboxLaunchTypeLabel(ctx, sandbox, launchType); err != nil {
+					return nil, fmt.Errorf("failed to initialize launch type label on sandbox %q: %w", sandbox.Name, err)
+				}
 				return sandbox, nil
 			}
 		} else if !k8errors.IsNotFound(err) {
@@ -1084,6 +1096,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 				if metav1.IsControlledBy(sandbox, claim) {
 					logger.Info("Found existing adopted sandbox from labels", "sandbox", sbName, "claim", claim.Name)
+					if err := r.initializeSandboxLaunchTypeLabel(ctx, sandbox, v1alpha1.SandboxLaunchTypeWarm); err != nil {
+						return nil, fmt.Errorf("failed to initialize launch type label on sandbox %q: %w", sandbox.Name, err)
+					}
 					return sandbox, nil
 				}
 
@@ -1140,6 +1155,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			logger.Error(err, "Sandbox controller mismatch")
 			return nil, err
 		}
+		if err := r.initializeSandboxLaunchTypeLabel(ctx, sandbox, v1alpha1.SandboxLaunchTypeCold); err != nil {
+			return nil, fmt.Errorf("failed to initialize launch type label on sandbox %q: %w", sandbox.Name, err)
+		}
 		return sandbox, nil
 	}
 
@@ -1168,6 +1186,21 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	// No warm pool sandbox available; caller decides whether to create
 	return nil, nil
+}
+
+func (r *SandboxClaimReconciler) initializeSandboxLaunchTypeLabel(ctx context.Context, sandbox *v1alpha1.Sandbox, launchType string) error {
+	if sandbox.Labels != nil {
+		if _, ok := sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel]; ok {
+			return nil
+		}
+	}
+
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Labels == nil {
+		sandbox.Labels = make(map[string]string)
+	}
+	sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel] = launchType
+	return r.Patch(ctx, sandbox, patch)
 }
 
 func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensionsv1alpha1.SandboxClaim) (*extensionsv1alpha1.SandboxTemplate, error) {
@@ -1327,7 +1360,7 @@ func getLaunchType(sandbox *v1alpha1.Sandbox) string {
 	if sandbox == nil {
 		return asmetrics.LaunchTypeUnknown
 	}
-	if sandbox.Annotations[v1alpha1.SandboxPodNameAnnotation] != "" {
+	if sandbox.Labels[v1alpha1.SandboxLaunchTypeLabel] == v1alpha1.SandboxLaunchTypeWarm {
 		return asmetrics.LaunchTypeWarm
 	}
 	return asmetrics.LaunchTypeCold

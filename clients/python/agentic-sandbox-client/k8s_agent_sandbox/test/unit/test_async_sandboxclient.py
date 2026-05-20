@@ -15,6 +15,7 @@
 import asyncio
 import json
 import unittest
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
@@ -65,7 +66,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             sandbox = await self.client.create_sandbox("test-template", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-template", "test-namespace", labels=None, lifecycle=None, warmpool=None
+                ANY, "test-template", "test-namespace", labels=None, lifecycle=ANY, warmpool=None
             )
             self.assertEqual(sandbox, mock_sandbox_instance)
 
@@ -230,20 +231,24 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
             self.assertIn("shutdownTime", lifecycle)
 
-    async def test_create_sandbox_without_shutdown_after_seconds(self):
+    async def test_create_sandbox_uses_default_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
         mock_sandbox_instance = MagicMock()
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
 
         with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch("k8s_agent_sandbox.utils.datetime") as mock_datetime, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+            mock_datetime.now.return_value = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+            mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
             await self.client.create_sandbox("test-template", "test-namespace")
 
             call_kwargs = mock_create.call_args
             lifecycle = call_kwargs[1].get("lifecycle")
-            self.assertIsNone(lifecycle)
+            self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
+            self.assertEqual(lifecycle["shutdownTime"], "2026-06-16T00:00:00Z")
 
     async def test_shutdown_after_seconds_validation_zero(self):
         with self.assertRaises(ValueError):

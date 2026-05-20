@@ -131,6 +131,7 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 			"opentelemetry.io/trace-context": traceCtx,
 		}
 	}
+	shutdownTime := metav1.NewTime(time.Now().Add(defaultShutdownAfter))
 
 	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -141,6 +142,10 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 		Spec: extv1beta1.SandboxClaimSpec{
 			TemplateRef: extv1beta1.SandboxTemplateRef{
 				Name: templateName,
+			},
+			Lifecycle: &extv1beta1.Lifecycle{
+				ShutdownTime:   &shutdownTime,
+				ShutdownPolicy: extv1beta1.ShutdownPolicyDelete,
 			},
 		},
 	}

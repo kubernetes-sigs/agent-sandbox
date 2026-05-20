@@ -14,17 +14,23 @@
 
 from datetime import datetime, timedelta, timezone
 
+from .constants import DEFAULT_SHUTDOWN_AFTER_SECONDS
 
-def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
+
+def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int | None = None) -> dict[str, str]:
     """Construct a SandboxClaim lifecycle spec dict from a TTL in seconds.
 
     Returns a dict suitable for inclusion as ``spec.lifecycle`` in a
     SandboxClaim manifest, with ``shutdownTime`` set to *now + TTL* (UTC)
     and ``shutdownPolicy`` set to ``"Delete"``.
 
+    If no TTL is provided, a default 12 hour TTL is used.
+
     Raises ``ValueError`` if the input is not a positive integer or is
     too large for datetime arithmetic.
     """
+    if shutdown_after_seconds is None:
+        shutdown_after_seconds = DEFAULT_SHUTDOWN_AFTER_SECONDS
     if type(shutdown_after_seconds) is not int:
         raise ValueError(
             f"shutdown_after_seconds must be an integer, got {type(shutdown_after_seconds).__name__}"

@@ -69,7 +69,7 @@ kubectl get sandbox dynamic-ephemeral-sandbox
 When creating a new sandbox via the `k8s_agent_sandbox` SDK, you can customize its readiness checks and lifecycle behavior using optional parameters:
 
 * **`sandbox_ready_timeout`**: The maximum time (in seconds) the client will wait for the sandbox environment to become ready before timing out.
-* **`shutdown_after_seconds`**: A Time-To-Live (TTL) integer in seconds. Setting this parameter tells the SDK to automatically populate the underlying Kubernetes claim's `spec.lifecycle` with a `shutdownPolicy` of `"Delete"` and schedule the deletion for *now + shutdown_after_seconds* (UTC). 
+* **`shutdown_after_seconds`**: A Time-To-Live (TTL) integer in seconds. The SDK defaults new sandbox claims to 12 hours. Setting this parameter overrides the default and tells the SDK to automatically populate the underlying Kubernetes claim's `spec.lifecycle` with a `shutdownPolicy` of `"Delete"` and schedule the deletion for *now + shutdown_after_seconds* (UTC).
 
 The following example demonstrates how to pass these parameters. Notice how the SDK handles the cluster cleanup policy for you:
 

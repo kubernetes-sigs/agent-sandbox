@@ -1350,6 +1350,7 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
 
 	var capturedTemplate string
+	var capturedLifecycle *extv1beta1.Lifecycle
 	fakeWatcher := watch.NewFake()
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -1360,6 +1361,7 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 				claim.Name = claim.GenerateName + "test12345"
 			}
 			capturedTemplate = claim.Spec.TemplateRef.Name
+			capturedLifecycle = claim.Spec.Lifecycle
 			go fakeWatcher.Add(readySandbox(claim.Name))
 		}
 		return false, nil, nil
@@ -1367,13 +1369,30 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(fakeWatcher, nil))
 
+	before := time.Now()
 	if err := c.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error: %v", err)
 	}
+	after := time.Now()
 	defer c.Close(context.Background())
 
 	if capturedTemplate != opts.TemplateName {
 		t.Errorf("expected template name %q, got %q", opts.TemplateName, capturedTemplate)
+	}
+	if capturedLifecycle == nil {
+		t.Fatal("expected default lifecycle on created SandboxClaim")
+	}
+	if capturedLifecycle.ShutdownPolicy != extv1beta1.ShutdownPolicyDelete {
+		t.Errorf("expected shutdown policy Delete, got %q", capturedLifecycle.ShutdownPolicy)
+	}
+	if capturedLifecycle.ShutdownTime == nil {
+		t.Fatal("expected shutdown time")
+	}
+	if capturedLifecycle.ShutdownTime.Time.Before(before.Add(defaultShutdownAfter)) {
+		t.Errorf("shutdown time %s is before expected lower bound", capturedLifecycle.ShutdownTime.Time)
+	}
+	if capturedLifecycle.ShutdownTime.Time.After(after.Add(defaultShutdownAfter + time.Second)) {
+		t.Errorf("shutdown time %s is after expected upper bound", capturedLifecycle.ShutdownTime.Time)
 	}
 }
 

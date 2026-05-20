@@ -65,7 +65,7 @@ class TestSandboxClient(unittest.TestCase):
             
             sandbox = self.client.create_sandbox("test-template", "test-namespace")
             
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=None, warmpool=None)
+            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-template", "test-namespace", labels=None, lifecycle=ANY, warmpool=None)
             self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
@@ -206,7 +206,7 @@ class TestSandboxClient(unittest.TestCase):
             mock_create_claim.assert_called_once_with(
                 "sandbox-claim-1234abcd", "test-template", "test-namespace",
                 labels={"agent": "code-agent", "team": "platform"},
-                lifecycle=None,
+                lifecycle=ANY,
                 warmpool=None,
             )
 
@@ -310,21 +310,26 @@ class TestSandboxClient(unittest.TestCase):
             self.assertIn("shutdownTime", lifecycle)
 
     @patch('uuid.uuid4')
-    def test_create_sandbox_without_shutdown_after_seconds(self, mock_uuid):
+    def test_create_sandbox_uses_default_shutdown_after_seconds(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
 
         mock_sandbox_instance = MagicMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
 
+        frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
         with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch("k8s_agent_sandbox.utils.datetime") as mock_datetime, \
              patch.object(self.client, '_wait_for_sandbox_ready'):
+            mock_datetime.now.return_value = frozen_now
+            mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
             self.client.create_sandbox("test-template", "test-namespace")
 
             call_kwargs = mock_create_claim.call_args
             lifecycle = call_kwargs[1].get("lifecycle")
-            self.assertIsNone(lifecycle)
+            self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
+            self.assertEqual(lifecycle["shutdownTime"], "2026-06-16T00:00:00Z")
 
     @patch("k8s_agent_sandbox.utils.datetime")
     def test_create_claim_with_lifecycle(self, mock_datetime):

@@ -122,7 +122,8 @@ class AsyncSandboxClient(Generic[T]):
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim.
             warmpool: Optional warm pool policy for sandbox adoption (e.g. "default", "none", or custom).
-            shutdown_after_seconds: Optional TTL in seconds. When set, the
+            shutdown_after_seconds: Optional TTL in seconds. Defaults to 12 hours.
+                When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
                 of ``"Delete"``, so the controller auto-deletes the claim on
@@ -140,7 +141,7 @@ class AsyncSandboxClient(Generic[T]):
         if labels:
             self._validate_labels(labels)
 
-        lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
+        lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds)
 
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 

@@ -87,11 +87,11 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(body["kind"], "SandboxClaim")
         self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "my-template")
 
-    def test_create_sandbox_without_shutdown_omits_lifecycle_in_manifest(
+    def test_create_sandbox_without_shutdown_uses_default_lifecycle_in_manifest(
         self, MockClientK8sHelper, mock_config, mock_api_cls, mock_core_cls
     ):
         """Full path: create_sandbox() without shutdown_after_seconds
-        produces no spec.lifecycle."""
+        embeds the default lifecycle in the manifest."""
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -112,10 +112,17 @@ class TestLifecycleIntegration(unittest.TestCase):
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
         real_helper.wait_for_sandbox_ready = MagicMock()
 
+        before = datetime.now(timezone.utc)
         sandbox_client.create_sandbox("my-template", "default")
+        after = datetime.now(timezone.utc)
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
-        self.assertNotIn("lifecycle", body["spec"])
+        lifecycle = body["spec"]["lifecycle"]
+        self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
+        shutdown_time = datetime.strptime(lifecycle["shutdownTime"], "%Y-%m-%dT%H:%M:%SZ")
+        shutdown_time = shutdown_time.replace(tzinfo=timezone.utc)
+        self.assertGreaterEqual(shutdown_time, before.replace(microsecond=0) + timedelta(hours=12))
+        self.assertLessEqual(shutdown_time, after.replace(microsecond=0) + timedelta(hours=12, seconds=1))
         self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "my-template")
 
     def test_invalid_shutdown_never_reaches_k8s_api(

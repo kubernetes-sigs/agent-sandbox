@@ -36,6 +36,7 @@ const (
 	defaultCleanupTimeout          = 30 * time.Second
 	defaultRequestTimeout          = 180 * time.Second
 	defaultPerAttemptTimeout       = 60 * time.Second
+	defaultShutdownAfter           = 12 * time.Hour
 	defaultMaxDownloadSize         = 256 << 20 // 256 MB
 	defaultMaxUploadSize           = 256 << 20 // 256 MB
 )

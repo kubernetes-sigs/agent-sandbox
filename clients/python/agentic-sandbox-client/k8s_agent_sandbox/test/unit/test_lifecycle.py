@@ -16,6 +16,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from k8s_agent_sandbox.constants import DEFAULT_SHUTDOWN_AFTER_SECONDS
 from k8s_agent_sandbox.utils import construct_sandbox_claim_lifecycle_spec
 
 
@@ -29,6 +30,17 @@ class TestConstructSandboxClaimLifecycleSpec(unittest.TestCase):
         result = construct_sandbox_claim_lifecycle_spec(300)
 
         self.assertEqual(result["shutdownTime"], "2026-06-15T12:05:00Z")
+        self.assertEqual(result["shutdownPolicy"], "Delete")
+
+    @patch("k8s_agent_sandbox.utils.datetime")
+    def test_uses_default_twelve_hour_ttl(self, mock_datetime):
+        frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        mock_datetime.now.return_value = frozen_now
+
+        result = construct_sandbox_claim_lifecycle_spec()
+
+        self.assertEqual(DEFAULT_SHUTDOWN_AFTER_SECONDS, 43200)
+        self.assertEqual(result["shutdownTime"], "2026-06-16T00:00:00Z")
         self.assertEqual(result["shutdownPolicy"], "Delete")
 
     @patch("k8s_agent_sandbox.utils.datetime")

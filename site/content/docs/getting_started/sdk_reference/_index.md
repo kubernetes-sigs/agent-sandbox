@@ -75,7 +75,8 @@ the underlying infrastructure.
 - `namespace` - Kubernetes namespace for the claim.
 - `sandbox_ready_timeout` - Seconds to wait for the sandbox to be ready.
 - `labels` - Optional Kubernetes labels to attach to the claim.
-- `shutdown_after_seconds` - Optional TTL in seconds. When set, the
+- `shutdown_after_seconds` - Optional TTL in seconds. Defaults to 12 hours.
+  When set, the
   claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
   of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
   of ``"Delete"``, so the controller auto-deletes the claim on

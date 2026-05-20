@@ -641,6 +641,8 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, error) {
 	logger := log.FromContext(ctx)
 
+	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
+
 	var skipped []queue.SandboxKey
 	var fallbackSandbox *v1beta1.Sandbox
 	var fallbackKey queue.SandboxKey
@@ -649,11 +651,11 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	// Instantly returns unused keys the moment we find a valid/ready candidate!
 	defer func() {
 		for _, key := range skipped {
-			r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, key)
+			r.WarmSandboxQueue.Add(namespacedWarmPoolName, key)
 		}
 		// If we parked a fallback sandbox but never ended up adopting it (due to error or adopting a ready one), requeue it.
 		if fallbackSandbox != nil && !adoptingFallback {
-			r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, fallbackKey)
+			r.WarmSandboxQueue.Add(namespacedWarmPoolName, fallbackKey)
 		}
 	}()
 
@@ -711,7 +713,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	}
 
 	for {
-		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(claim.Spec.WarmPoolRef.Name, pickSmart)
+		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(namespacedWarmPoolName, pickSmart)
 		if !ok {
 			// No more candidates in our namespace. If we found an unready fallback sandbox, return it.
 			if fallbackSandbox != nil {
@@ -730,7 +732,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 				continue
 			}
 			// For real errors, put the key back in line and error out
-			r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, adoptedKey)
+			r.WarmSandboxQueue.Add(namespacedWarmPoolName, adoptedKey)
 			return nil, queue.SandboxKey{}, err
 		}
 
@@ -764,12 +766,12 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	templateHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
-	var warmPoolRefUsed string
+	warmPoolNameForQueue := claim.Spec.WarmPoolRef.Name
+	namespacedWarmPoolNameForQueue := queue.GetNamespacedWarmPoolName(claim.Namespace, warmPoolNameForQueue)
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
 	for range 3 {
-		adopted, adoptedKey, err := r.getCandidate(ctx, claim, templateHash)
+		adopted, adoptedKey, err := r.getCandidate(ctx, claim)
 		if err != nil {
 			return nil, err
 		}
@@ -793,7 +795,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = adopted.Name
 			if err := r.Update(ctx, claim); err != nil {
-				r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, adoptedKey)
+				r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
 				if k8errors.IsConflict(err) {
 					// Conflict means someone else updated the claim. We fail and retry.
 					return false, err
@@ -807,7 +809,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				if k8errors.IsNotFound(err) {
 					return false, nil
 				}
-				r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, adoptedKey)
+				r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
 				if k8errors.IsConflict(err) {
 					return false, nil
 				}
@@ -1846,9 +1848,9 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 			Name:      newSandbox.Name,
 			NodeName:  newSandbox.Status.NodeName,
 		}
-		logger.V(1).Info("Adding/updating sandbox in warm pool queue", "warmPool", newWarmPoolName, "sandbox", key)
+		logger.V(1).Info("Adding/updating sandbox in warm pool queue", "warmPool", newWarmPoolName, "namespace", newSandbox.Namespace, "sandbox", key)
 		if newWarmPoolName != "" {
-			h.sandboxQueue.Add(newWarmPoolName, key)
+			h.sandboxQueue.Add(queue.GetNamespacedWarmPoolName(newSandbox.Namespace, newWarmPoolName), key)
 		}
 	}
 }
@@ -1908,10 +1910,12 @@ func (h *sandboxEventHandler) Delete(ctx context.Context, e event.DeleteEvent, _
 			Name:      sandbox.Name,
 		}
 
+		namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sandbox.Namespace, warmPoolName)
+
 		// Actively delete the Ghost Pod from the memory queue
 		logger := log.FromContext(ctx)
 		logger.V(1).Info("Removing deleted sandbox from warm pool queue", "sandbox", key)
-		h.sandboxQueue.RemoveItem(warmPoolName, key)
+		h.sandboxQueue.RemoveItem(namespacedWarmPoolName, key)
 	}
 }
 
@@ -1932,11 +1936,12 @@ func (h *warmPoolEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 		return
 	}
 
+	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(warmPool.Namespace, warmPool.Name)
 	logger := log.FromContext(ctx)
 	logger.Info("SandboxWarmPool deleted, cleaning up memory queue", "warmPool", warmPool.Name)
 
 	// Actively drop the entire queue from memory
-	h.sandboxQueue.RemoveQueue(warmPool.Name)
+	h.sandboxQueue.RemoveQueue(namespacedWarmPoolName)
 }
 
 func getWarmPoolName(obj metav1.Object) string {
@@ -1949,9 +1954,6 @@ func getWarmPoolName(obj metav1.Object) string {
 		}
 	}
 	return ""
-	templateHash := SandboxTemplateRefHash(template.Name)
-	logger := log.FromContext(ctx)
-	logger.Info("SandboxTemplate deleted, cleaning up memory queue", "template", template.Name, "hash", templateHash)
 }
 
 func shouldSuppressError(err error) bool {

@@ -2109,8 +2109,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					// Only add valid, adoptable sandboxes to the queue
 					if isAdoptable(sb) == nil {
 						warmPoolName := getWarmPoolName(sb)
+						namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sb.Namespace, warmPoolName)
 						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
-						warmSandboxQueue.Add(warmPoolName, key)
+						warmSandboxQueue.Add(namespacedWarmPoolName, key)
 					}
 				}
 			}
@@ -2256,8 +2257,9 @@ func TestWarmPoolEventHandler_Delete_RemovesEntireQueue(t *testing.T) {
 	warmPoolName := "old-warmpool"
 	key := queue.SandboxKey{Namespace: "default", Name: "abandoned-pod"}
 
-	// 1. Add a pod to this warmpool's queue
-	q.Add(warmPoolName, key)
+	// 1. Add a pod to this warmpool's queue using namespace-aware index
+	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName("default", warmPoolName)
+	q.Add(namespacedWarmPoolName, key)
 
 	// 2. Create the mock SandboxWarmPool object that is being deleted
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
@@ -2271,7 +2273,7 @@ func TestWarmPoolEventHandler_Delete_RemovesEntireQueue(t *testing.T) {
 	handler.Delete(context.Background(), event.DeleteEvent{Object: warmPool}, nil)
 
 	// 4. Verify the entire queue was wiped out
-	_, ok := q.Get(warmPoolName)
+	_, ok := q.Get(namespacedWarmPoolName)
 	if ok {
 		t.Errorf("Expected the entire queue to be removed when the warmpool was deleted")
 	}
@@ -4039,7 +4041,8 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			warmSandboxQueue := queue.NewSimpleSandboxQueue()
 			for _, sb := range tc.existingSandboxes {
 				key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
-				warmSandboxQueue.Add("test-pool", key)
+				namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sb.Namespace, "test-pool")
+				warmSandboxQueue.Add(namespacedWarmPoolName, key)
 			}
 
 			reconciler := &SandboxClaimReconciler{
@@ -4064,8 +4067,9 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 
 			// Verify that the expected remaining sandbox keys are still queued properly (regression test)
 			var actualRemaining []string
+			namespacedWarmPoolName := queue.GetNamespacedWarmPoolName("default", "test-pool")
 			for {
-				key, ok := warmSandboxQueue.Get("test-pool")
+				key, ok := warmSandboxQueue.Get(namespacedWarmPoolName)
 				if !ok {
 					break
 				}

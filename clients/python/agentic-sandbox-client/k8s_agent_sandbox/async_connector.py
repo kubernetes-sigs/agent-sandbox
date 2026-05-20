@@ -127,6 +127,9 @@ class AsyncSandboxConnector:
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.pop("headers", {}).copy()
+        # Ensure follow_redirects is not passed in kwargs to prevent duplicate parameter TypeError
+        kwargs.pop("follow_redirects", None)
+
         if self._inject_router_headers:
             headers["X-Sandbox-ID"] = self.id
             headers["X-Sandbox-Namespace"] = self.namespace
@@ -163,6 +166,12 @@ class AsyncSandboxConnector:
                     last_response = response
                     await asyncio.sleep(delay)
                     continue
+                if response.is_redirect:
+                    raise httpx.HTTPStatusError(
+                        f"Redirection is not allowed (status code {response.status_code}).",
+                        request=response.request,
+                        response=response,
+                    )
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:

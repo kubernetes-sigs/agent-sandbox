@@ -350,8 +350,16 @@ class SandboxConnector:
                         headers["X-Sandbox-Pod-IP"] = self._pod_ip
             kwargs["headers"] = headers
 
+            # Ensure allow_redirects is not passed in kwargs to prevent duplicate parameter TypeError
+            kwargs.pop("allow_redirects", None)
+
             # Send the request
             response = self.session.request(method, url, allow_redirects=False, **kwargs)
+            if response.is_redirect:
+                raise requests.exceptions.HTTPError(
+                    f"Redirection is not allowed (status code {response.status_code}).",
+                    response=response,
+                )
             response.raise_for_status()
             return response
         except SandboxPortForwardError:

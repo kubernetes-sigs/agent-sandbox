@@ -1,0 +1,127 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package config
+
+import (
+	"flag"
+	"strconv"
+	"time"
+)
+
+// Environment-variable aliases preserved from the original Python router so
+// existing operators don't have to relearn the surface.
+const (
+	EnvClusterDomain = "CLUSTER_DOMAIN"
+	EnvProxyTimeout  = "PROXY_TIMEOUT_SECONDS"
+)
+
+// LookupEnvFunc matches the signature of os.LookupEnv. Tests inject a fake.
+type LookupEnvFunc func(string) (string, bool)
+
+// RegisterFlags wires every flag the binary accepts into fs, using c's current
+// values as defaults. Env-var fallbacks for the keys the Python router used
+// (PROXY_TIMEOUT_SECONDS, CLUSTER_DOMAIN, KUBECONFIG) are applied to c BEFORE
+// flag registration so they show up as the default in --help output, and so
+// explicit flags override env vars.
+func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
+	if lookup == nil {
+		// Fall back to a no-op to keep the function total; main wires os.LookupEnv.
+		lookup = func(string) (string, bool) { return "", false }
+	}
+	applyEnvDefaults(c, lookup)
+
+	fs.StringVar(&c.HTTPAddr, "http-bind-address", c.HTTPAddr,
+		"Address for the plain-HTTP proxy listener (set empty to disable).")
+	fs.StringVar(&c.HTTPSAddr, "https-bind-address", c.HTTPSAddr,
+		"Address for the TLS proxy listener (empty disables TLS).")
+	fs.StringVar(&c.MetricsAddr, "metrics-bind-address", c.MetricsAddr,
+		"Address for the Prometheus /metrics endpoint.")
+	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", c.ProbeAddr,
+		"Address for the /healthz and /readyz endpoints.")
+
+	fs.StringVar(&c.TLSCertFile, "tls-cert-file", c.TLSCertFile,
+		"Path to the PEM-encoded server certificate.")
+	fs.StringVar(&c.TLSKeyFile, "tls-key-file", c.TLSKeyFile,
+		"Path to the PEM-encoded server private key.")
+	fs.StringVar(&c.TLSClientCAFile, "tls-client-ca-file", c.TLSClientCAFile,
+		"Path to the PEM-encoded CA bundle used to verify client certificates "+
+			"when --mtls-mode is optional or required.")
+	stringEnumVar(fs, (*string)(&c.MTLSMode), "mtls-mode", string(c.MTLSMode),
+		"Client-cert verification policy: off, optional, or required.")
+
+	fs.StringVar(&c.ClusterDomain, "cluster-domain", c.ClusterDomain,
+		"Kubernetes cluster DNS suffix used to build sandbox FQDNs. "+
+			"Honors "+EnvClusterDomain+".")
+	fs.DurationVar(&c.ProxyTimeout, "proxy-timeout", c.ProxyTimeout,
+		"Total time budget for proxying a single request to a sandbox. "+
+			"Honors "+EnvProxyTimeout+" (numeric seconds).")
+	fs.DurationVar(&c.ResponseHeaderTimeout, "response-header-timeout", c.ResponseHeaderTimeout,
+		"Maximum time to wait for the upstream response headers.")
+	fs.DurationVar(&c.ShutdownTimeout, "shutdown-timeout", c.ShutdownTimeout,
+		"Time budget for draining in-flight requests on SIGTERM.")
+	fs.Int64Var(&c.MaxRequestBodyBytes, "max-request-body-bytes", c.MaxRequestBodyBytes,
+		"Optional cap on inbound request body size in bytes. 0 means unlimited.")
+	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
+		"Number of additional dial attempts before returning 502. Only dial-class "+
+			"failures (DNS, connection refused) are retried. Smooths the case "+
+			"where a freshly-created sandbox is not yet ready. 0 disables retries.")
+	fs.DurationVar(&c.UpstreamRetryInitialDelay, "upstream-retry-initial-delay", c.UpstreamRetryInitialDelay,
+		"Wait before the first retry; subsequent waits double up to --upstream-retry-max-delay.")
+	fs.DurationVar(&c.UpstreamRetryMaxDelay, "upstream-retry-max-delay", c.UpstreamRetryMaxDelay,
+		"Upper bound on the per-iteration retry backoff.")
+
+	fs.BoolVar(&c.EnableTracing, "enable-tracing", c.EnableTracing,
+		"Enable OpenTelemetry tracing via OTLP. Endpoint is taken from "+
+			"OTEL_EXPORTER_OTLP_ENDPOINT.")
+	fs.BoolVar(&c.EnableOTelMetrics, "enable-otel-metrics", c.EnableOTelMetrics,
+		"Additionally push metrics via OTLP gRPC. The Prometheus /metrics "+
+			"endpoint remains active. Endpoint is taken from "+
+			"OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_METRICS_ENDPOINT.")
+	fs.BoolVar(&c.AccessLog, "access-log", c.AccessLog,
+		"Emit one structured log line per inbound request on the proxy "+
+			"port. Health/metrics endpoints are skipped.")
+	fs.BoolVar(&c.PrintVersion, "version", c.PrintVersion,
+		"Print version information and exit.")
+	// --config is intentionally registered so it appears in --help, but the
+	// file is actually loaded BEFORE flag.Parse runs (see main.go) by way of
+	// FileFromArgsAndEnv. Setting it here a second time during parse
+	// is harmless — the value is the same.
+	fs.StringVar(&c.ConfigFile, "config", c.ConfigFile,
+		"Path to a YAML config file with keys matching flag names "+
+			"(kebab-case). Also honors "+EnvConfigFile+". File values override "+
+			"env-var defaults; CLI flags override file values.")
+}
+
+// applyEnvDefaults overrides c's defaults with values pulled from the
+// environment. It is intentionally lenient: invalid env values are ignored
+// (the existing default wins) so that operators don't get a hard crash from
+// a typo in a deployment manifest.
+func applyEnvDefaults(c *Config, lookup LookupEnvFunc) {
+	if v, ok := lookup(EnvClusterDomain); ok && v != "" {
+		c.ClusterDomain = v
+	}
+	if v, ok := lookup(EnvProxyTimeout); ok && v != "" {
+		// The Python router accepts a numeric seconds value; preserve that.
+		if secs, err := strconv.ParseFloat(v, 64); err == nil && secs > 0 {
+			c.ProxyTimeout = time.Duration(secs * float64(time.Second))
+		}
+	}
+}
+
+// stringEnumVar registers a string flag; the dedicated function exists so the
+// flag help text uses a stable doc-style and to keep RegisterFlags scannable.
+func stringEnumVar(fs *flag.FlagSet, dst *string, name, def, usage string) {
+	fs.StringVar(dst, name, def, usage)
+}

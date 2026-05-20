@@ -1,0 +1,221 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Binary sandbox-router is the Go reimplementation of the Python sandbox
+// reverse proxy. It preserves the X-Sandbox-* header contract used by
+// existing clients and adds TLS, mTLS, metrics, tracing, and graceful
+// shutdown for enterprise deployments.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"flag"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/proxy"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/server"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/tlsutil"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/version"
+)
+
+func main() {
+	cfg := config.Defaults()
+	zapOpts := zap.Options{Development: false}
+
+	config.RegisterFlags(flag.CommandLine, &cfg, os.LookupEnv)
+	zapOpts.BindFlags(flag.CommandLine)
+
+	// Apply config-file values BEFORE flag.Parse so CLI flags take precedence.
+	// The file path is pulled from --config / SANDBOX_ROUTER_CONFIG without
+	// touching flag.Parse, so the rest of the args are still available below.
+	if path := config.FileFromArgsAndEnv(os.Args[1:], os.Getenv); path != "" {
+		cfg.ConfigFile = path
+		if err := config.LoadFromFile(path, flag.CommandLine); err != nil {
+			fmt.Fprintf(os.Stderr, "config: %v\n", err)
+			os.Exit(2)
+		}
+	}
+	flag.Parse()
+
+	if cfg.PrintVersion {
+		fmt.Println(version.Print("sandbox-router"))
+		return
+	}
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
+	log := ctrl.Log.WithName("sandbox-router")
+
+	if err := cfg.Validate(); err != nil {
+		log.Error(err, "invalid configuration")
+		os.Exit(2)
+	}
+
+	if err := run(&cfg, log); err != nil {
+		log.Error(err, "exited with error")
+		os.Exit(1)
+	}
+}
+
+func run(cfg *config.Config, log logr.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// --- Tracing -----------------------------------------------------------
+	if cfg.EnableTracing {
+		initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, cleanup, err := asmetrics.SetupOTel(initCtx, "sandbox-router")
+		cancel()
+		if err != nil {
+			return fmt.Errorf("setup otel: %w", err)
+		}
+		defer cleanup()
+	}
+
+	// --- Metrics -----------------------------------------------------------
+	reg := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(reg)
+
+	if cfg.EnableOTelMetrics {
+		initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		shutdown, err := observability.SetupOTLPMetrics(initCtx, "sandbox-router", reg)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("setup otel metrics: %w", err)
+		}
+		defer func() {
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutCancel()
+			_ = shutdown(shutCtx)
+		}()
+	}
+
+	// --- TLS / cert reload --------------------------------------------------
+	var tlsConfig *tls.Config
+	if cfg.HTTPSAddr != "" {
+		reloader, err := tlsutil.NewCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile, log.WithName("tls"),
+			func(ok bool, _ error) {
+				outcome := "success"
+				if !ok {
+					outcome = "failure"
+				}
+				metrics.CertReloadsTotal.WithLabelValues(outcome).Inc()
+			})
+		if err != nil {
+			return fmt.Errorf("cert reloader: %w", err)
+		}
+		if err := reloader.Start(ctx); err != nil {
+			return fmt.Errorf("cert watcher: %w", err)
+		}
+		tlsConfig, err = tlsutil.BuildServerTLS(cfg, reloader)
+		if err != nil {
+			return fmt.Errorf("build TLS config: %w", err)
+		}
+	}
+
+	// --- Proxy handler -----------------------------------------------------
+	handler := proxy.NewHandler(proxy.Options{
+		Config:     cfg,
+		Metrics:    metrics,
+		Propagator: otel.GetTextMapPropagator(),
+		Logger:     log.WithName("proxy"),
+	})
+
+	// Top-level mux: /healthz reuses the probes implementation so the
+	// Python router's contract (200 OK with {"status":"ok"}) is preserved.
+	// All other paths fall through to the proxy.
+	probes := server.NewProbes()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", probes.Healthz)
+	mux.Handle("/", handler)
+
+	// Wrap with observability middleware. Layering (outer → inner):
+	//   tracing  — opens span, attaches per-request logger w/ trace_id
+	//   access   — logs one line per request, reading the trace-aware logger
+	//   metrics  — records inflight, request totals, durations
+	//   mux      — /healthz fast-path, then proxy handler
+	// Access logging skips /healthz, /readyz, /metrics so high-frequency
+	// probes don't drown signal.
+	var rootHandler http.Handler = mux
+	rootHandler = metrics.Middleware(rootHandler)
+	if cfg.AccessLog {
+		rootHandler = observability.AccessLogMiddleware(
+			log.WithName("access"),
+			observability.SkipHealthAndMetrics,
+		)(rootHandler)
+	}
+	rootHandler = observability.TracingMiddleware(
+		otel.Tracer("sandbox-router"),
+		otel.GetTextMapPropagator(),
+		log,
+	)(rootHandler)
+	if cfg.MaxRequestBodyBytes > 0 {
+		rootHandler = limitBody(rootHandler, cfg.MaxRequestBodyBytes)
+	}
+
+	// --- Server lifecycle --------------------------------------------------
+	srv, err := server.New(server.Options{
+		Log:             log.WithName("server"),
+		Probes:          probes,
+		ProxyHandler:    rootHandler,
+		MetricsHandler:  promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
+		HTTPAddr:        cfg.HTTPAddr,
+		HTTPSAddr:       cfg.HTTPSAddr,
+		MetricsAddr:     cfg.MetricsAddr,
+		ProbeAddr:       cfg.ProbeAddr,
+		TLSConfig:       tlsConfig,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+
+	log.Info("starting sandbox-router",
+		"version", version.Get().GitVersion,
+		"sha", version.Get().GitSHA,
+		"http", cfg.HTTPAddr,
+		"https", cfg.HTTPSAddr,
+		"metrics", cfg.MetricsAddr,
+		"probes", cfg.ProbeAddr,
+		"mtls", cfg.MTLSMode,
+		"tracing", cfg.EnableTracing,
+		"otelMetrics", cfg.EnableOTelMetrics,
+	)
+	return srv.Run(ctx)
+}
+
+// limitBody applies http.MaxBytesReader to the inbound request body.
+func limitBody(next http.Handler, limit int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
+}

@@ -1,0 +1,223 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package config
+
+import (
+	"flag"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fakeEnv builds a LookupEnvFunc backed by a map. Missing keys return (_, false).
+func fakeEnv(kv map[string]string) LookupEnvFunc {
+	return func(k string) (string, bool) {
+		v, ok := kv[k]
+		return v, ok
+	}
+}
+
+func TestDefaultsAreValid(t *testing.T) {
+	c := Defaults()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Defaults() should validate, got: %v", err)
+	}
+}
+
+func TestApplyEnvDefaults(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want func(*Config) bool
+	}{
+		{
+			name: "cluster domain from env",
+			env:  map[string]string{EnvClusterDomain: "prod.local"},
+			want: func(c *Config) bool { return c.ClusterDomain == "prod.local" },
+		},
+		{
+			name: "proxy timeout numeric seconds",
+			env:  map[string]string{EnvProxyTimeout: "45"},
+			want: func(c *Config) bool { return c.ProxyTimeout == 45*time.Second },
+		},
+		{
+			name: "proxy timeout fractional seconds",
+			env:  map[string]string{EnvProxyTimeout: "0.5"},
+			want: func(c *Config) bool { return c.ProxyTimeout == 500*time.Millisecond },
+		},
+		{
+			name: "proxy timeout invalid keeps default",
+			env:  map[string]string{EnvProxyTimeout: "not-a-number"},
+			want: func(c *Config) bool { return c.ProxyTimeout == 180*time.Second },
+		},
+		{
+			name: "proxy timeout non-positive keeps default",
+			env:  map[string]string{EnvProxyTimeout: "-1"},
+			want: func(c *Config) bool { return c.ProxyTimeout == 180*time.Second },
+		},
+		{
+			name: "empty env value keeps default",
+			env:  map[string]string{EnvClusterDomain: ""},
+			want: func(c *Config) bool { return c.ClusterDomain == "cluster.local" },
+		},
+		{
+			name: "no env keeps defaults",
+			env:  map[string]string{},
+			want: func(c *Config) bool {
+				return c.ClusterDomain == "cluster.local" && c.ProxyTimeout == 180*time.Second
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Defaults()
+			applyEnvDefaults(&c, fakeEnv(tc.env))
+			if !tc.want(&c) {
+				t.Fatalf("env defaults check failed: %+v", c)
+			}
+		})
+	}
+}
+
+func TestRegisterFlagsOverridesEnv(t *testing.T) {
+	c := Defaults()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&strings.Builder{}) // silence usage
+	RegisterFlags(fs, &c, fakeEnv(map[string]string{
+		EnvClusterDomain: "from-env.local",
+		EnvProxyTimeout:  "30",
+	}))
+	if err := fs.Parse([]string{
+		"--cluster-domain=from-flag.local",
+		"--proxy-timeout=15s",
+	}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.ClusterDomain != "from-flag.local" {
+		t.Errorf("flag should override env; got %q", c.ClusterDomain)
+	}
+	if c.ProxyTimeout != 15*time.Second {
+		t.Errorf("flag should override env; got %s", c.ProxyTimeout)
+	}
+}
+
+func TestValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		mut     func(*Config)
+		wantErr string // substring; empty means must succeed
+	}{
+		{
+			name:    "defaults validate",
+			mut:     func(_ *Config) {},
+			wantErr: "",
+		},
+		{
+			name:    "both addrs empty",
+			mut:     func(c *Config) { c.HTTPAddr = ""; c.HTTPSAddr = "" },
+			wantErr: "at least one of",
+		},
+		{
+			name:    "invalid mtls mode",
+			mut:     func(c *Config) { c.MTLSMode = "bogus" },
+			wantErr: "invalid --mtls-mode",
+		},
+		{
+			name: "https without cert",
+			mut: func(c *Config) {
+				c.HTTPSAddr = ":8443"
+			},
+			wantErr: "tls-cert-file",
+		},
+		{
+			name: "mtls without https",
+			mut: func(c *Config) {
+				c.MTLSMode = MTLSRequired
+			},
+			wantErr: "requires --https-bind-address",
+		},
+		{
+			name: "mtls without ca",
+			mut: func(c *Config) {
+				c.HTTPSAddr = ":8443"
+				c.TLSCertFile = "/c"
+				c.TLSKeyFile = "/k"
+				c.MTLSMode = MTLSOptional
+			},
+			wantErr: "tls-client-ca-file",
+		},
+		{
+			name:    "negative proxy timeout",
+			mut:     func(c *Config) { c.ProxyTimeout = -1 * time.Second },
+			wantErr: "proxy-timeout",
+		},
+		{
+			name:    "zero response header timeout",
+			mut:     func(c *Config) { c.ResponseHeaderTimeout = 0 },
+			wantErr: "response-header-timeout",
+		},
+		{
+			name:    "empty cluster domain",
+			mut:     func(c *Config) { c.ClusterDomain = "" },
+			wantErr: "cluster-domain",
+		},
+		{
+			name:    "negative body limit",
+			mut:     func(c *Config) { c.MaxRequestBodyBytes = -1 },
+			wantErr: "max-request-body-bytes",
+		},
+		{
+			name:    "negative upstream max retries",
+			mut:     func(c *Config) { c.UpstreamMaxRetries = -1 },
+			wantErr: "upstream-max-retries",
+		},
+		{
+			name:    "negative upstream retry initial delay",
+			mut:     func(c *Config) { c.UpstreamRetryInitialDelay = -1 * time.Second },
+			wantErr: "upstream-retry-initial-delay",
+		},
+		{
+			name:    "zero retries is valid (disables retries)",
+			mut:     func(c *Config) { c.UpstreamMaxRetries = 0 },
+			wantErr: "",
+		},
+		{
+			name: "valid mtls configuration",
+			mut: func(c *Config) {
+				c.HTTPSAddr = ":8443"
+				c.TLSCertFile = "/c"
+				c.TLSKeyFile = "/k"
+				c.TLSClientCAFile = "/ca"
+				c.MTLSMode = MTLSRequired
+			},
+			wantErr: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Defaults()
+			tc.mut(&c)
+			err := c.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("expected ok, got: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			case tc.wantErr != "" && err != nil && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}

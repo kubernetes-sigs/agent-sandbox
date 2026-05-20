@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -44,14 +46,16 @@ import (
 )
 
 const (
-	sandboxTemplateRefHash = "agents.x-k8s.io/sandbox-template-ref-hash"
-	warmPoolSandboxLabel   = "agents.x-k8s.io/warm-pool-sandbox"
+	sandboxTemplateRefHash          = "agents.x-k8s.io/sandbox-template-ref-hash"
+	warmPoolSandboxLabel            = "agents.x-k8s.io/warm-pool-sandbox"
+	sandboxCreateDeleteMaxBatchSize = 300
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
 type SandboxWarmPoolReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme       *runtime.Scheme
+	MaxBatchSize int
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
@@ -164,22 +168,32 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	warmPool.Status.ReadyReplicas = readyReplicas
 
+	maxBatchSize := int32(r.MaxBatchSize)
+
 	// Create new sandboxes if we need more
 	if currentReplicas < desiredReplicas && tmplErr == nil {
-		sandboxesToCreate := desiredReplicas - currentReplicas
+		sandboxesToCreate := min(desiredReplicas-currentReplicas, maxBatchSize)
 		logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 
-		for range sandboxesToCreate {
-			if err := r.createPoolSandbox(ctx, warmPool, poolNameHash, template, currentPodTemplateHash); err != nil {
-				logger.Error(err, "Failed to create pool sandbox")
-				allErrors = errors.Join(allErrors, err)
+		sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash)
+		if err != nil {
+			logger.Error(err, "Failed to build sandbox CR blueprint")
+			allErrors = errors.Join(allErrors, err)
+		} else {
+			// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
+			_, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
+				return r.createPoolSandbox(ctx, warmPool, sandboxCR)
+			})
+			if createErr != nil {
+				logger.Error(createErr, "Failed to create pool sandboxes")
+				allErrors = errors.Join(allErrors, createErr)
 			}
 		}
 	}
 
 	// Delete excess sandboxes if we have too many
 	if currentReplicas > desiredReplicas {
-		sandboxesToDelete := currentReplicas - desiredReplicas
+		sandboxesToDelete := min(currentReplicas-desiredReplicas, maxBatchSize)
 		logger.Info("Deleting excess sandboxes", "count", sandboxesToDelete)
 
 		// Prioritize deleting unready sandboxes before ready ones,
@@ -196,12 +210,14 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			return b.CreationTimestamp.Compare(a.CreationTimestamp.Time) // newest first
 		})
 
-		for i := int32(0); i < sandboxesToDelete && i < int32(len(activeSandboxes)); i++ {
-			sb := &activeSandboxes[i]
-			if err := r.Delete(ctx, sb); err != nil {
-				logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name)
-				allErrors = errors.Join(allErrors, err)
-			}
+		toDeleteCount := min(sandboxesToDelete, int32(len(activeSandboxes)))
+		// Parallel sandbox deletion with adaptive slow-start batching (starts with 1 and doubles on success)
+		_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
+			return r.deletePoolSandbox(ctx, &activeSandboxes[idx])
+		})
+		if deleteErr != nil {
+			logger.Error(deleteErr, "Failed to delete pool sandboxes")
+			allErrors = errors.Join(allErrors, deleteErr)
 		}
 	}
 
@@ -308,11 +324,8 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	return template, currentPodTemplateHash, tmplErr
 }
 
-// createPoolSandbox creates a full Sandbox CR (with pod template, service, etc.) for the warm pool.
-func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash string) error {
-	logger := log.FromContext(ctx)
-
-	// Build labels for the Sandbox CR
+// buildSandboxCR constructs the base Sandbox CR (with pod template and volume claim templates) for the warm pool.
+func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.SandboxWarmPool, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash string) (*sandboxv1beta1.Sandbox, error) {
 	sandboxLabels := map[string]string{
 		warmPoolSandboxLabel:                       poolNameHash,
 		sandboxTemplateRefHash:                     SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
@@ -370,15 +383,32 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 
 	// Set controller reference so the Sandbox is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, sandbox, r.Scheme); err != nil {
-		return fmt.Errorf("SetControllerReference for Sandbox failed: %w", err)
+		return nil, fmt.Errorf("SetControllerReference for Sandbox failed: %w", err)
 	}
 
+	return sandbox, nil
+}
+
+// createPoolSandbox creates a full Sandbox CR for the warm pool using a pre-built sandboxCR.
+func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxCR *sandboxv1beta1.Sandbox) error {
+	logger := log.FromContext(ctx)
+	sandbox := sandboxCR.DeepCopy()
 	if err := r.Create(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to create pool sandbox")
 		return err
 	}
 
 	logger.Info("Created new pool sandbox", "sandbox", sandbox.Name, "poolName", warmPool.Name)
+	return nil
+}
+
+// deletePoolSandbox deletes a Sandbox CR from the warm pool. Ignores not found errors to not abort the batch deletion if some sandboxes are already deleted.
+func (r *SandboxWarmPoolReconciler) deletePoolSandbox(ctx context.Context, sb *sandboxv1beta1.Sandbox) error {
+	logger := log.FromContext(ctx)
+	if err := r.Delete(ctx, sb); err != nil && client.IgnoreNotFound(err) != nil {
+		logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name, "namespace", sb.Namespace)
+		return err
+	}
 	return nil
 }
 
@@ -502,6 +532,9 @@ func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if r.MaxBatchSize <= 0 {
+		r.MaxBatchSize = sandboxCreateDeleteMaxBatchSize
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, func(rawObj client.Object) []string {
 		wp := rawObj.(*extensionsv1beta1.SandboxWarmPool)
 		if wp.Spec.TemplateRef.Name == "" {
@@ -547,4 +580,42 @@ func (r *SandboxWarmPoolReconciler) findWarmPoolsForTemplate(ctx context.Context
 		})
 	}
 	return requests
+}
+
+// slowStartBatch is a helper that runs a given function fn multiple times in parallel batches.
+// It starts with initialBatchSize, and doubles the batch size for each successful batch.
+// If any execution of fn returns an error, it stops and returns the first encountered error.
+func slowStartBatch(ctx context.Context, count int, initialBatchSize int, fn func(int) error) (int, error) {
+	remaining := count
+	successes := 0
+
+	for batchSize := min(remaining, initialBatchSize); batchSize > 0; batchSize = min(2*batchSize, remaining) {
+		if ctx.Err() != nil {
+			return successes, ctx.Err()
+		}
+
+		eg, _ := errgroup.WithContext(ctx)
+		var batchSuccesses atomic.Int64
+
+		for i := 0; i < batchSize; i++ {
+			index := successes + i
+			eg.Go(func() error {
+				if err := fn(index); err != nil {
+					return err
+				}
+				batchSuccesses.Add(1)
+				return nil
+			})
+		}
+
+		if err := eg.Wait(); err != nil {
+			successes += int(batchSuccesses.Load())
+			return successes, err
+		}
+
+		successes += int(batchSuccesses.Load())
+		remaining -= batchSize
+	}
+
+	return successes, nil
 }

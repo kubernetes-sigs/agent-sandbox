@@ -17,6 +17,8 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,7 +198,8 @@ func TestReconcilePool(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(tc.initialObjs...).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			ctx := context.Background()
@@ -334,7 +337,8 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(tc.initialObjs...).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			ctx := context.Background()
@@ -422,7 +426,8 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				WithScheme(scheme).
 				WithRuntimeObjects(template).
 				Build(),
-			Scheme: scheme,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 		}
 
 		expectedPoolNameHash := sandboxcontrollers.NameHash(poolName)
@@ -518,7 +523,8 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 			WithScheme(scheme).
 			WithRuntimeObjects(template).
 			Build(),
-		Scheme: scheme,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 
 	err := r.reconcilePool(ctx, warmPool)
@@ -616,7 +622,8 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(template).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			err := r.reconcilePool(ctx, warmPool)
@@ -791,7 +798,8 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 					createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
 				).
 				Build(),
-			Scheme: scheme,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 		}
 
 		ctx := context.Background()
@@ -823,7 +831,8 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 					createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
 				).
 				Build(),
-			Scheme: scheme,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 		}
 
 		ctx := context.Background()
@@ -923,7 +932,8 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(template, warmPool).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			ctx := context.Background()
@@ -1068,7 +1078,8 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 			WithScheme(scheme).
 			WithRuntimeObjects(template1, warmPool).
 			Build(),
-		Scheme: scheme,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 
 	ctx := context.Background()
@@ -1334,7 +1345,8 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 			WithScheme(scheme).
 			WithRuntimeObjects(template, warmPool).
 			Build(),
-		Scheme: scheme,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 
 	// Initial reconcile to create sandboxes
@@ -1444,4 +1456,82 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 
 	isStaleGenuine := r.isSandboxStale(ctx, genuineOrphan, template, currentPodTemplateHash, vettedHashes)
 	require.False(t, isStaleGenuine, "Orphaned sandbox with genuine fully vetted PodSpec should be fresh")
+}
+
+func TestSlowStartBatch(t *testing.T) {
+	tests := []struct {
+		name               string
+		count              int
+		initialBatchSize   int
+		failAtIndices      *int
+		cancelContextAtIdx *int
+		expectedSuccess    int
+		expectError        bool
+		expectedCallCount  int
+		expectedErrMsgs    []string
+	}{
+		{
+			name:              "all succeed with batch trimming (count=14)",
+			count:             14,
+			initialBatchSize:  1,
+			expectedSuccess:   14,
+			expectedCallCount: 14,
+		},
+		{
+			name:              "zero count",
+			count:             0,
+			initialBatchSize:  1,
+			expectedSuccess:   0,
+			expectedCallCount: 0,
+		},
+		{
+			name:              "early exit on failure",
+			count:             14,
+			initialBatchSize:  1,
+			failAtIndices:     new(5),
+			expectedSuccess:   6, // index 0, 1, 2, 3, 4, and 6 succeeds, 5 fails - 6 successful calls
+			expectError:       true,
+			expectedCallCount: 7, // 1 + 2 + 4 = 7 calls in total.
+			expectedErrMsgs:   []string{"injected error at idx 5"},
+		},
+		{
+			name:               "context canceled in middle of batch",
+			count:              14,
+			initialBatchSize:   1,
+			cancelContextAtIdx: new(2), // cancels during batch 2 (indices 1, 2)
+			expectedSuccess:    3,      // indices 0, 1, 2 complete successfully before cancellation aborts batch 3
+			expectError:        true,
+			expectedCallCount:  3,
+			expectedErrMsgs:    []string{"context canceled"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var callCount atomic.Int32
+			ctx, cancel := context.WithCancel(context.Background())
+			successes, err := slowStartBatch(ctx, tt.count, tt.initialBatchSize, func(idx int) error {
+				callCount.Add(1)
+				if tt.cancelContextAtIdx != nil && *tt.cancelContextAtIdx == idx {
+					cancel()
+				}
+				if tt.failAtIndices != nil && *tt.failAtIndices == idx {
+					return fmt.Errorf("injected error at idx %d", idx)
+				}
+				return nil
+			})
+
+			if tt.expectError {
+				require.Error(t, err)
+				for _, expectedErrMsg := range tt.expectedErrMsgs {
+					require.Contains(t, err.Error(), expectedErrMsg)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, tt.expectedSuccess, successes)
+			require.Equal(t, int32(tt.expectedCallCount), callCount.Load())
+		})
+	}
 }

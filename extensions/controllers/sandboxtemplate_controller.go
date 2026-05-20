@@ -94,12 +94,12 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// 4. Construct Desired NetworkPolicy Spec
 	var desiredSpec networkingv1.NetworkPolicySpec
 	if template.Spec.NetworkPolicy == nil {
-		desiredSpec = buildDefaultNetworkPolicySpec(template.Namespace, template.Name)
+		desiredSpec = buildDefaultNetworkPolicySpec(template.Name)
 	} else {
 		desiredSpec = networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					sandboxTemplateRefHash: SandboxTemplateRefHash(template.Namespace, template.Name),
+					sandboxTemplateRefHash: SandboxTemplateRefHash(template.Name),
 				},
 			},
 			PolicyTypes: []networkingv1.PolicyType{
@@ -154,11 +154,11 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // buildDefaultNetworkPolicySpec generates the "Secure by Default" network policy.
-func buildDefaultNetworkPolicySpec(namespace, templateName string) networkingv1.NetworkPolicySpec {
+func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPolicySpec {
 	return networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				sandboxTemplateRefHash: SandboxTemplateRefHash(namespace, templateName),
+				sandboxTemplateRefHash: SandboxTemplateRefHash(templateName),
 			},
 		},
 		PolicyTypes: []networkingv1.PolicyType{

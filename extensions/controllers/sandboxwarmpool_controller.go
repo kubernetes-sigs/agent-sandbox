@@ -328,7 +328,7 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.SandboxWarmPool, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash string) (*sandboxv1beta1.Sandbox, error) {
 	sandboxLabels := map[string]string{
 		warmPoolSandboxLabel:                       poolNameHash,
-		sandboxTemplateRefHash:                     SandboxTemplateRefHash(warmPool.Namespace, warmPool.Spec.TemplateRef.Name),
+		sandboxTemplateRefHash:                     SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
 		sandboxv1beta1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
 	}
 
@@ -342,7 +342,7 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 	maps.Copy(podLabels, template.Spec.PodTemplate.ObjectMeta.Labels)
 	// Propagate pool and template labels to pod template for consistency and targeting
 	podLabels[warmPoolSandboxLabel] = poolNameHash
-	podLabels[sandboxTemplateRefHash] = SandboxTemplateRefHash(warmPool.Namespace, warmPool.Spec.TemplateRef.Name)
+	podLabels[sandboxTemplateRefHash] = SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name)
 	podLabels[sandboxv1beta1.SandboxPodTemplateHashLabel] = currentPodTemplateHash
 
 	podAnnotations := make(map[string]string)
@@ -471,13 +471,8 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 ) bool {
 	sandboxHash := sandbox.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel]
 
-	oldHash := HashUsingSandboxTemplateRefName(template.Name)
-	newHash := SandboxTemplateRefHash(template.Namespace, template.Name)
-	actualHash := sandbox.Labels[sandboxTemplateRefHash]
-
 	// If the templateRefHash doesn't match, it's stale.
-	// TODO remove old hash case after a deprecation period
-	if actualHash != oldHash && actualHash != newHash {
+	if sandbox.Labels[sandboxTemplateRefHash] != SandboxTemplateRefHash(template.Name) {
 		return true
 	}
 

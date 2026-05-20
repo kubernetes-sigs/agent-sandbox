@@ -17,11 +17,11 @@ export const GATEWAY_API_VERSION = "v1";
 export const GATEWAY_PLURAL = "gateways";
 
 export const CLAIM_API_GROUP = "extensions.agents.x-k8s.io";
-export const CLAIM_API_VERSION = "v1alpha1";
+export const CLAIM_API_VERSION = "v1beta1";
 export const CLAIM_PLURAL_NAME = "sandboxclaims";
 
 export const SANDBOX_API_GROUP = "agents.x-k8s.io";
-export const SANDBOX_API_VERSION = "v1alpha1";
+export const SANDBOX_API_VERSION = "v1beta1";
 export const SANDBOX_PLURAL_NAME = "sandboxes";
 
 export const POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name";

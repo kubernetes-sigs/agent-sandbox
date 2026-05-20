@@ -240,8 +240,7 @@ export class TestContext {
               settled = true;
               reject(
                 new Error(
-                  `Watch error for ${name}: ${
-                    err instanceof Error ? err.message : String(err)
+                  `Watch error for ${name}: ${err instanceof Error ? err.message : String(err)
                   }`,
                 ),
               );
@@ -299,7 +298,7 @@ export class TestContext {
     if (!ns) throw new Error("Namespace must be provided.");
 
     return this.waitForObject<Record<string, any>>(
-      `/apis/extensions.agents.x-k8s.io/v1alpha1/namespaces/${ns}/sandboxwarmpools`,
+      `/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/${ns}/sandboxwarmpools`,
       name,
       ns,
       warmPoolReady(),

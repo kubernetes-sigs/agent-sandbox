@@ -47,7 +47,7 @@ const (
 )
 
 // WarmPoolConfig configures how this claim interacts with warm pools.
-// +kubebuilder:validation:XValidation:rule="self.strategy == 'PoolName' ? has(self.poolName) && self.poolName != ” : !has(self.poolName) || self.poolName == ”",message="poolName must be set if and only if strategy is PoolName"
+// +kubebuilder:validation:XValidation:rule="self.strategy == 'PoolName' && has(self.poolName) && self.poolName.size() > 0",message="poolName must be set if and only if strategy is PoolName"
 type WarmPoolConfig struct {
 	// strategy specifies the warm pool adoption behavior.
 	// +kubebuilder:default=Auto

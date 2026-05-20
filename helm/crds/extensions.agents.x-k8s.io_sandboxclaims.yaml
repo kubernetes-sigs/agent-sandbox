@@ -94,8 +94,8 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: poolName must be set if and only if strategy is PoolName
-                  rule: 'self.strategy == ''PoolName'' ? has(self.poolName) && self.poolName
-                    != ” : !has(self.poolName) || self.poolName == ”'
+                  rule: self.strategy == 'PoolName' && has(self.poolName) && self.poolName.size()
+                    > 0
             required:
             - sandboxTemplateRef
             type: object

@@ -14,11 +14,13 @@
 # Whether to enable HPA warmpool scaling during the test.
 {{$enableHpa := DefaultParam .CL2_ENABLE_HPA "false"}}
 # The minimum replicas for the HPA controlling the warm pool.
-{{$hpaMinReplicas := DefaultParam .CL2_HPA_MIN_REPLICAS 10}}
+{{$hpaMinReplicas := DefaultParam .CL2_HPA_MIN_REPLICAS 1000}}
 # The maximum replicas for the HPA controlling the warm pool.
-{{$hpaMaxReplicas := DefaultParam .CL2_HPA_MAX_REPLICAS 1000}}
+{{$hpaMaxReplicas := DefaultParam .CL2_HPA_MAX_REPLICAS 2000}}
 # The target claim creation rate (per second) for the HPA.
 {{$hpaTargetValue := DefaultParam .CL2_HPA_TARGET_VALUE "0.5"}}
+# The metric name queried by the HPA to perform scaling.
+{{$hpaMetricName := DefaultParam .CL2_HPA_METRIC_NAME "prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"}}
 # Whether to enable CapacityBuffer scaling during the test.
 {{$enableCapacityBuffer := DefaultParam .CL2_ENABLE_CAPACITY_BUFFER "false"}}
 # The buffer percentage for CapacityBuffer.
@@ -143,6 +145,7 @@ steps:
         MinReplicas: {{$hpaMinReplicas}}
         MaxReplicas: {{$hpaMaxReplicas}}
         TargetValue: {{$hpaTargetValue}}
+        MetricName: {{$hpaMetricName}}
 {{end}}
 
 {{if eq $enableCapacityBuffer "true"}}

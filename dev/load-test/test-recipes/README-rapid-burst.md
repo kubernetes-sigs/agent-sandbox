@@ -111,9 +111,10 @@ The total number of claims created by the test will be `BURST_SIZE * TOTAL_BURST
 For more details on HPA configuration and scaling behavior, refer to the [HPA SandboxWarmPool Scaling Example](../../../examples/hpa-swp-scaling/README.md).
 
 - **`ENABLE_HPA`**: Set to `true` to deploy a HorizontalPodAutoscaler targeting the SandboxWarmPool (default: `false`). Note: The SandboxWarmPool is automatically provisioned under the name `warmpool-0` by this recipe, and both HPA and CapacityBuffer target this resource.
-- **`HPA_MIN_REPLICAS`**: The minimum number of pre-warmed sandboxes for the HPA (default: `10`).
-- **`HPA_MAX_REPLICAS`**: The maximum ceiling for the HPA (default: `500`).
+- **`HPA_MIN_REPLICAS`**: The minimum number of pre-warmed sandboxes for the HPA (default: `1000`).
+- **`HPA_MAX_REPLICAS`**: The maximum ceiling for the HPA (default: `2000`).
 - **`HPA_TARGET_VALUE`**: The target creation rate of SandboxClaims per second (default: `0.5`).
+- **`HPA_METRIC_NAME`**: The external metric name queried by the HPA to perform scaling (default: `"prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"`).
 - **`ENABLE_CAPACITY_BUFFER`**: Set to `true` to deploy a GKE `CapacityBuffer` resource (default: `false`).
 - **`BUFFER_PERCENTAGE`**: The percentage of extra capacity to maintain in standby (default: `200`).
 - **`PROVISIONING_STRATEGY`**: The GKE provisioning strategy for standby capacity (default: `buffer.gke.io/standby-capacity`).

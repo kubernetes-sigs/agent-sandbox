@@ -13,10 +13,11 @@ spec:
   - type: External
     external:
       metric:
-        name: "prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"
+        name: "{{.MetricName}}"
         selector:
           matchLabels:
             metric.labels.warmpool_name: "{{.WarmPoolName}}"
+            metric.labels.namespace: "{{.Namespace}}"
       target:
         type: Value 
         value: "{{.TargetValue}}"

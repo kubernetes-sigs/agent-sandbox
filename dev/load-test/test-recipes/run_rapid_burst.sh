@@ -1,4 +1,7 @@
 #!/bin/bash
+set -e
+set -o pipefail
+
 # Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,9 +31,10 @@ RUNTIME_CLASS="${RUNTIME_CLASS:-}" # Change to "gvisor" if your cluster supports
 
 # Optional autoscaling & capacity buffer extensions
 ENABLE_HPA="${ENABLE_HPA:-false}"
-HPA_MIN_REPLICAS="${HPA_MIN_REPLICAS:-10}"
-HPA_MAX_REPLICAS="${HPA_MAX_REPLICAS:-1000}"
+HPA_MIN_REPLICAS="${HPA_MIN_REPLICAS:-1000}"
+HPA_MAX_REPLICAS="${HPA_MAX_REPLICAS:-2000}"
 HPA_TARGET_VALUE="${HPA_TARGET_VALUE:-0.5}"
+HPA_METRIC_NAME="${HPA_METRIC_NAME:-prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter}"
 
 ENABLE_CAPACITY_BUFFER="${ENABLE_CAPACITY_BUFFER:-false}"
 BUFFER_PERCENTAGE="${BUFFER_PERCENTAGE:-200}"
@@ -46,6 +50,12 @@ TEST_CONFIG="${TEST_DIR}/rapid-burst-test.yaml"
 LOGS_DIR="${TEST_DIR}/tmp/${RUN_ID}"
 
 # Pre-flight checks
+echo "Verifying connection to Kubernetes cluster..."
+if ! kubectl cluster-info &> /dev/null; then
+  echo "ERROR: Kubernetes cluster is unreachable. Please check your kubeconfig, context, or network connection." >&2
+  exit 1
+fi
+
 if [ "$ENABLE_CAPACITY_BUFFER" = "true" ]; then
   echo "Checking if CapacityBuffer API is available in target cluster..."
   if ! kubectl api-resources --api-group=autoscaling.x-k8s.io | grep -q CapacityBuffer; then
@@ -79,6 +89,7 @@ cat <<JSON_EOF > "${LOGS_DIR}/testoverrides.json"
   "CL2_HPA_MIN_REPLICAS": $HPA_MIN_REPLICAS,
   "CL2_HPA_MAX_REPLICAS": $HPA_MAX_REPLICAS,
   "CL2_HPA_TARGET_VALUE": "$HPA_TARGET_VALUE",
+  "CL2_HPA_METRIC_NAME": "$HPA_METRIC_NAME",
   "CL2_ENABLE_CAPACITY_BUFFER": "$ENABLE_CAPACITY_BUFFER",
   "CL2_BUFFER_PERCENTAGE": $BUFFER_PERCENTAGE,
   "CL2_PROVISIONING_STRATEGY": "$PROVISIONING_STRATEGY",

@@ -374,7 +374,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			if mergedMeta.Labels == nil {
 				mergedMeta.Labels = make(map[string]string)
 			}
-			templateHash := SandboxTemplateRefHash(template.Namespace, template.Name)
+			templateHash := SandboxTemplateRefHash(template.Name)
 			mergedMeta.Labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
 			mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 
@@ -764,28 +764,18 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	templateHash := SandboxTemplateRefHash(claim.Namespace, claim.Spec.TemplateRef.Name)
+	templateHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
 	var warmPoolRefUsed string
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
 	for range 3 {
-		adopted, adoptedKey, err := r.getCandidate(ctx, claim)
+		adopted, adoptedKey, err := r.getCandidate(ctx, claim, templateHash)
 		if err != nil {
 			return nil, err
 		}
 		if adopted == nil {
-			// Try with old hash
-			oldHash := HashUsingSandboxTemplateRefName(claim.Spec.TemplateRef.Name)
-			logger.V(1).Info("Failed to find candidate with namespace-aware hash, trying namespace-agnostic hash", "newHash", templateHash, "oldHash", oldHash)
-			templateHashUsed = oldHash
-			adopted, adoptedKey, err = r.getCandidate(ctx, claim, oldHash)
-			if err != nil {
-				return nil, err
-			}
-			if adopted == nil {
-				logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
-				return nil, nil // Warm pool is truly empty, fall completely to cold start
-			}
+			logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
+			return nil, nil // Warm pool is truly empty, fall completely to cold start
 		}
 
 		// Wrap the API logic in a closure
@@ -803,8 +793,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = adopted.Name
 			if err := r.Update(ctx, claim); err != nil {
-				warmPoolRefUsed = claim.Spec.WarmPoolRef.Name
-				r.WarmSandboxQueue.Add(warmPoolRefUsed, adoptedKey)
+				r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, adoptedKey)
 				if k8errors.IsConflict(err) {
 					// Conflict means someone else updated the claim. We fail and retry.
 					return false, err
@@ -818,7 +807,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				if k8errors.IsNotFound(err) {
 					return false, nil
 				}
-				r.WarmSandboxQueue.Add(warmPoolRefUsed, adoptedKey)
+				r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, adoptedKey)
 				if k8errors.IsConflict(err) {
 					return false, nil
 				}
@@ -902,7 +891,6 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	// Resolve the template hash and metadata used by reconcileActive.
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateHash == "" && template != nil {
-		templateHash = SandboxTemplateRefHash(claim.Namespace, claim.Spec.TemplateRef.Name)
 		templateHash = SandboxTemplateRefHash(template.Name)
 	} else if templateHash == "" && templateErr != nil {
 		log.FromContext(ctx).V(1).Info("Unable to set template ref hash label during adoption because template lookup failed", "sandbox", adopted.Name, "claim", claim.Name, "error", templateErr.Error())
@@ -1161,7 +1149,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
 	// (KEP-0174 only propagates to pod template labels; platform's informer reads
 	// Sandbox.metadata.labels).
-	templateHash := SandboxTemplateRefHash(template.Namespace, template.Name)
+	templateHash := SandboxTemplateRefHash(template.Name)
 	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
 	sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] = v1beta1.SandboxLaunchTypeCold
 	sandbox.Labels[sandboxTemplateRefHash] = templateHash
@@ -1879,11 +1867,8 @@ func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1
 	}
 
 	warmPoolName := getWarmPoolName(candidate)
-	newWarmPoolName := SandboxTemplateRefHash(claim.Namespace, claim.Spec.WarmPoolRef.Name)
-
-	// TODO remove old case after a deprecation period
-	if warmPoolName == "" || (warmPoolName != claim.Spec.WarmPoolRef.Name && warmPoolName != newWarmPoolName) {
-		return fmt.Errorf("incorrect warm pool, expected %v or %v, got %v", newWarmPoolName, claim.Spec.WarmPoolRef.Name, warmPoolName)
+	if warmPoolName == "" || (warmPoolName != claim.Spec.WarmPoolRef.Name) {
+		return fmt.Errorf("incorrect warm pool, expected %v, got %v", claim.Spec.WarmPoolRef.Name, warmPoolName)
 	}
 	return nil
 }
@@ -1947,8 +1932,6 @@ func (h *warmPoolEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 		return
 	}
 
-<<<<<<< HEAD
-	newWarmPoolName := TODO lbg HERE
 	logger := log.FromContext(ctx)
 	logger.Info("SandboxWarmPool deleted, cleaning up memory queue", "warmPool", warmPool.Name)
 
@@ -1966,16 +1949,9 @@ func getWarmPoolName(obj metav1.Object) string {
 		}
 	}
 	return ""
-=======
-	newHash := SandboxTemplateRefHash(template.Namespace, template.Name)
-	oldHash := HashUsingSandboxTemplateRefName(template.Name)
+	templateHash := SandboxTemplateRefHash(template.Name)
 	logger := log.FromContext(ctx)
-	logger.Info("SandboxTemplate deleted, cleaning up memory queues", "template", template.Name, "newHash", newHash, "oldHash", oldHash)
-
-	// Actively drop both queues from memory
-	h.sandboxQueue.RemoveQueue(newHash)
-	h.sandboxQueue.RemoveQueue(oldHash)
->>>>>>> 0c6bdce (Refactor the Sandbox Template hash generation to include the namespace)
+	logger.Info("SandboxTemplate deleted, cleaning up memory queue", "template", template.Name, "hash", templateHash)
 }
 
 func shouldSuppressError(err error) bool {

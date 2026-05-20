@@ -102,8 +102,8 @@ class AsyncSandboxClient(Generic[T]):
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
 
-        # asyncio.run() creates a fresh event loop, safe to call from atexit
-        # after the main loop has already exited.
+        # asyncio.run() creates a fresh event loop, which is safe to call
+        # from an atexit handler after the main event loop has already exited.
         if cleanup:
             atexit.register(lambda: asyncio.run(self.delete_all()))
 

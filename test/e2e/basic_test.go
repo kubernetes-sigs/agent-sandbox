@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -40,12 +40,12 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", hashValue)
 }
 
-func simpleSandbox(ns string) *sandboxv1alpha1.Sandbox {
-	sandboxObj := &sandboxv1alpha1.Sandbox{}
+func simpleSandbox(ns string) *sandboxv1beta1.Sandbox {
+	sandboxObj := &sandboxv1beta1.Sandbox{}
 	sandboxObj.Name = "my-sandbox"
 	sandboxObj.Namespace = ns
 	sandboxObj.Spec.Service = new(true)
-	sandboxObj.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+	sandboxObj.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{ // Use a simple pause container as a basic test
@@ -54,7 +54,7 @@ func simpleSandbox(ns string) *sandboxv1alpha1.Sandbox {
 				},
 			},
 		},
-		ObjectMeta: sandboxv1alpha1.PodMetadata{
+		ObjectMeta: sandboxv1beta1.PodMetadata{
 			Annotations: map[string]string{"test-anno-key": "val-1"},
 			Labels:      map[string]string{"test-label-key": "val-2"},
 		},
@@ -76,7 +76,7 @@ func TestSimpleSandbox(t *testing.T) {
 	nameHash := NameHash(sandboxObj.Name)
 	// Assert Sandbox object status reconciles as expected
 	p := []predicates.ObjectPredicate{
-		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      1,
@@ -86,7 +86,7 @@ func TestSimpleSandbox(t *testing.T) {
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,
-					Reason:             sandboxv1alpha1.SandboxReasonDependenciesReady,
+					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 					Message:            "Pod is Ready; Service Exists",
 				},
 			},
@@ -99,7 +99,7 @@ func TestSimpleSandbox(t *testing.T) {
 		predicates.HasLabel("test-label-key", "val-2"),
 		predicates.HasOwnerReferences([]metav1.OwnerReference{
 			{
-				APIVersion:         "agents.x-k8s.io/v1alpha1",
+				APIVersion:         "agents.x-k8s.io/v1beta1",
 				BlockOwnerDeletion: new(true),
 				Controller:         new(true),
 				Kind:               "Sandbox",
@@ -116,7 +116,7 @@ func TestSimpleSandbox(t *testing.T) {
 	p = []predicates.ObjectPredicate{
 		predicates.HasOwnerReferences([]metav1.OwnerReference{
 			{
-				APIVersion:         "agents.x-k8s.io/v1alpha1",
+				APIVersion:         "agents.x-k8s.io/v1beta1",
 				BlockOwnerDeletion: new(true),
 				Controller:         new(true),
 				Kind:               "Sandbox",

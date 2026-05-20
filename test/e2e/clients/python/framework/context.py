@@ -192,7 +192,7 @@ class TestContext:
             functools.partial(
                 custom_objects_api.list_namespaced_custom_object,
                 group="extensions.agents.x-k8s.io",
-                version="v1alpha1",
+                version="v1beta1",
                 plural="sandboxwarmpools",
             ),
             name,

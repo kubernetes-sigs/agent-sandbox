@@ -97,3 +97,5 @@ The following table lists the configurable parameters and their defaults.
 | `nodeSelector` | Node selector for the controller pod | `{}` |
 | `tolerations` | Tolerations for the controller pod | `[]` |
 | `affinity` | Affinity rules for the controller pod | `{}` |
+| `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
+| `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |

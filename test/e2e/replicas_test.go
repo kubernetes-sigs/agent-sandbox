@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -42,7 +42,7 @@ func TestSandboxReplicas(t *testing.T) {
 	nameHash := NameHash(sandboxObj.Name)
 	// Assert Sandbox object status reconciles as expected
 	p := []predicates.ObjectPredicate{
-		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      1,
@@ -52,7 +52,7 @@ func TestSandboxReplicas(t *testing.T) {
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,
-					Reason:             sandboxv1alpha1.SandboxReasonDependenciesReady,
+					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 					Message:            "Pod is Ready; Service Exists",
 				},
 			},
@@ -71,13 +71,13 @@ func TestSandboxReplicas(t *testing.T) {
 	tc.MustExist(service)
 
 	// Set replicas to zero
-	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1alpha1.Sandbox) {
+	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
 		obj.Spec.Replicas = new(int32(0))
 	})
 
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{
-		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			Replicas:      0,
@@ -87,14 +87,14 @@ func TestSandboxReplicas(t *testing.T) {
 					Type:               "Ready",
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
-					Reason:             sandboxv1alpha1.SandboxReasonSuspended,
+					Reason:             sandboxv1beta1.SandboxReasonSuspended,
 					Message:            "Sandbox is suspended",
 				},
 				{
-					Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
+					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 2,
-					Reason:             sandboxv1alpha1.SandboxReasonSuspendedPodTerminated,
+					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
 					Message:            "Pod has been terminated. Sandbox is not operational.",
 				},
 			},

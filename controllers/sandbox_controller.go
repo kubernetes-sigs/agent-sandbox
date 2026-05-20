@@ -42,7 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -68,7 +68,7 @@ const (
 // has no controller, or is owned by a different controller.
 // It returns both the ownership classification and the controller reference (if any),
 // so callers can log owner details without redundant GetControllerOf calls.
-func checkOwnership(obj client.Object, sandbox *sandboxv1alpha1.Sandbox) (resourceOwnership, *metav1.OwnerReference) {
+func checkOwnership(obj client.Object, sandbox *sandboxv1beta1.Sandbox) (resourceOwnership, *metav1.OwnerReference) {
 	controllerRef := metav1.GetControllerOf(obj)
 	if controllerRef == nil {
 		return resourceUnowned, nil
@@ -82,8 +82,8 @@ func checkOwnership(obj client.Object, sandbox *sandboxv1alpha1.Sandbox) (resour
 // resolvePodName returns the name of the pod associated with the given Sandbox.
 // If the sandbox has adopted a warm pool pod, the pod name is tracked in the
 // agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
-func resolvePodName(sandbox *sandboxv1alpha1.Sandbox) string {
-	if name, ok := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; ok && name != "" {
+func resolvePodName(sandbox *sandboxv1beta1.Sandbox) string {
+	if name, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
 		return name
 	}
 	return sandbox.Name
@@ -116,7 +116,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
-	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
+	utilruntime.Must(sandboxv1beta1.AddToScheme(Scheme))
 }
 
 // SandboxReconciler reconciles a Sandbox object.
@@ -148,7 +148,7 @@ type SandboxReconciler struct {
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	sandbox := &sandboxv1alpha1.Sandbox{}
+	sandbox := &sandboxv1beta1.Sandbox{}
 	if err := r.Get(ctx, req.NamespacedName, sandbox); err != nil {
 		if k8serrors.IsNotFound(err) {
 			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
@@ -227,7 +227,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return result, err
 }
 
-func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
+func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
 	// Create a hash from the sandbox.Name and use it as label value
 	nameHash := NameHash(sandbox.Name)
 
@@ -258,19 +258,19 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	hasFinished := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
-		if condition.Type == string(sandboxv1alpha1.SandboxConditionFinished) {
+		if condition.Type == string(sandboxv1beta1.SandboxConditionFinished) {
 			hasFinished = true
 		}
 	}
 
 	if !hasFinished {
-		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionFinished))
+		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
 	}
 
 	return allErrors
 }
 
-func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) []metav1.Condition {
+func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) []metav1.Condition {
 	var conditions []metav1.Condition
 
 	if suspended := r.computeSuspendedCondition(sandbox, pod); suspended != nil {
@@ -286,37 +286,37 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1alpha1.Sandbox, 
 	return conditions
 }
 
-func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1alpha1.Sandbox, pod *corev1.Pod) *metav1.Condition {
+func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
 	replicaCountZero := sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0
 	if !replicaCountZero {
 		return nil
 	}
 
 	suspended := metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionSuspended),
+		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
 	}
 	if pod == nil {
 		// Mark Suspended condition as True
 		suspended.Status = metav1.ConditionTrue
-		suspended.Reason = sandboxv1alpha1.SandboxReasonSuspendedPodTerminated
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
 		suspended.Message = "Pod has been terminated. Sandbox is not operational."
 	} else {
 		suspended.Status = metav1.ConditionFalse
-		suspended.Reason = sandboxv1alpha1.SandboxReasonSuspendedPodNotTerminated
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodNotTerminated
 		suspended.Message = "Pod has not been terminated. Sandbox is operational."
 	}
 
 	return &suspended
 }
 
-func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
+func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
 	readyCondition := metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionReady),
+		Type:               string(sandboxv1beta1.SandboxConditionReady),
 		ObservedGeneration: sandbox.Generation,
 		Message:            "",
 		Status:             metav1.ConditionFalse,
-		Reason:             sandboxv1alpha1.SandboxReasonDependenciesNotReady,
+		Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
 	}
 
 	if err != nil {
@@ -327,7 +327,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 
 	replicaCountZero := sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0
 	if replicaCountZero {
-		readyCondition.Reason = sandboxv1alpha1.SandboxReasonSuspended
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
 		if pod != nil {
 			readyCondition.Message = "Sandbox is suspending"
 		} else {
@@ -385,29 +385,29 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1alpha1.Sandb
 	readyCondition.Message = message
 	if podReady && svcReady {
 		readyCondition.Status = metav1.ConditionTrue
-		readyCondition.Reason = sandboxv1alpha1.SandboxReasonDependenciesReady
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonDependenciesReady
 	}
 
 	return readyCondition
 }
 
-func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1alpha1.Sandbox, pod *corev1.Pod) *metav1.Condition {
+func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
 	if pod == nil {
 		return nil
 	}
 
 	condition := &metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionFinished),
+		Type:               string(sandboxv1beta1.SandboxConditionFinished),
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: sandbox.Generation,
 	}
 
 	switch pod.Status.Phase {
 	case corev1.PodSucceeded:
-		condition.Reason = sandboxv1alpha1.SandboxReasonPodSucceeded
+		condition.Reason = sandboxv1beta1.SandboxReasonPodSucceeded
 		condition.Message = "Pod completed successfully"
 	case corev1.PodFailed:
-		condition.Reason = sandboxv1alpha1.SandboxReasonPodFailed
+		condition.Reason = sandboxv1beta1.SandboxReasonPodFailed
 		condition.Message = "Pod failed"
 	default:
 		return nil
@@ -428,7 +428,7 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 	return ips
 }
 
-func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1alpha1.SandboxStatus, sandbox *sandboxv1alpha1.Sandbox) error {
+func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) error {
 	logger := log.FromContext(ctx)
 
 	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
@@ -457,7 +457,7 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
-func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Service, error) {
+func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
 	logger := log.FromContext(ctx)
 	desired := sandbox.Spec.Service
 
@@ -594,13 +594,13 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 }
 
 // clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
-func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) error {
-	if _, exists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]; !exists {
+func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
+	if _, exists := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; !exists {
 		return nil
 	}
 	logger := log.FromContext(ctx)
 	patch := client.MergeFrom(sandbox.DeepCopy())
-	delete(sandbox.Annotations, sandboxv1alpha1.SandboxPodNameAnnotation)
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
 		return fmt.Errorf("failed to clear pod name annotation: %w", err)
 	}
@@ -609,18 +609,18 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 }
 
 // setServiceStatus updates the sandbox status with the service name and FQDN.
-func (r *SandboxReconciler) setServiceStatus(sandbox *sandboxv1alpha1.Sandbox, service *corev1.Service) {
+func (r *SandboxReconciler) setServiceStatus(sandbox *sandboxv1beta1.Sandbox, service *corev1.Service) {
 	sandbox.Status.Service = service.Name
 	sandbox.Status.ServiceFQDN = service.Name + "." + service.Namespace + ".svc." + r.ClusterDomain
 }
 
 // clearServiceStatus clears the service-related fields from sandbox status.
-func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1alpha1.Sandbox) {
+func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1beta1.Sandbox) {
 	sandbox.Status.Service = ""
 	sandbox.Status.ServiceFQDN = ""
 }
 
-func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) (*corev1.Pod, error) {
+func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	logger := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
@@ -647,7 +647,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Determine the pod name to look up
 	podName := resolvePodName(sandbox)
-	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]
+	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
 	if podName != sandbox.Name {
 		logger.Info("Using tracked pod name from sandbox annotation", "podName", podName)
 	}
@@ -702,7 +702,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	ensurePodNameAnnotation := func(podName string) error {
 		annotatedPodName := ""
 		if sandbox.Annotations != nil {
-			annotatedPodName = sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation]
+			annotatedPodName = sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
 		}
 
 		if annotatedPodName == podName {
@@ -718,7 +718,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		sandbox.Annotations[sandboxv1alpha1.SandboxPodNameAnnotation] = podName
+		sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] = podName
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return fmt.Errorf("failed to set pod name annotation: %w", err)
 		}
@@ -800,10 +800,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	slices.Sort(managedLabelKeys)
 	slices.Sort(managedAnnotationKeys)
 	if len(managedLabelKeys) > 0 {
-		annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation] = strings.Join(managedLabelKeys, ",")
+		annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation] = strings.Join(managedLabelKeys, ",")
 	}
 	if len(managedAnnotationKeys) > 0 {
-		annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation] = strings.Join(managedAnnotationKeys, ",")
+		annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation] = strings.Join(managedAnnotationKeys, ",")
 	}
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
@@ -863,7 +863,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	return pod, nil
 }
 
-func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv1alpha1.Sandbox, nameHash string) bool {
+func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
 	updated := false
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
@@ -882,7 +882,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
 	// Handle deletion of labels
-	propagatedLabelsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation]
+	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
 		for k := range propagatedLabels {
@@ -910,7 +910,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 		}
 	}
 	// Handle deletion of annotations
-	propagatedAnnotationsStr := pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation]
+	propagatedAnnotationsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation]
 	if propagatedAnnotationsStr != "" {
 		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
 		for k := range propagatedAnnotations {
@@ -929,20 +929,20 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	}
 	slices.Sort(managedLabelKeys)
 	newLabelsStr := strings.Join(managedLabelKeys, ",")
-	if pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation] != newLabelsStr {
-		pod.Annotations[sandboxv1alpha1.SandboxPropagatedLabelsAnnotation] = newLabelsStr
+	if pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation] != newLabelsStr {
+		pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation] = newLabelsStr
 		updated = true
 	}
 	slices.Sort(managedAnnotationKeys)
 	newAnnotationsStr := strings.Join(managedAnnotationKeys, ",")
-	if pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation] != newAnnotationsStr {
-		pod.Annotations[sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation] = newAnnotationsStr
+	if pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation] != newAnnotationsStr {
+		pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation] = newAnnotationsStr
 		updated = true
 	}
 	return updated
 }
 
-func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox, nameHash string) error {
+func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) error {
 	logger := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
@@ -1011,7 +1011,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 }
 
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed.
-func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1alpha1.Sandbox) (bool, error) {
+func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (bool, error) {
 	logger := log.FromContext(ctx)
 	var allErrors error
 
@@ -1062,7 +1062,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		}
 	}
 
-	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1alpha1.ShutdownPolicyDelete {
+	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1beta1.ShutdownPolicyDelete {
 		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
 		} else {
@@ -1075,13 +1075,13 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	if allErrors == nil {
 		// Drop live-resource status while retaining terminal conditions.
 		conditions := sandbox.Status.Conditions
-		sandbox.Status = sandboxv1alpha1.SandboxStatus{Conditions: conditions}
+		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               string(sandboxv1alpha1.SandboxConditionReady),
+			Type:               string(sandboxv1beta1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: sandbox.Generation,
-			Reason:             sandboxv1alpha1.SandboxReasonExpired,
+			Reason:             sandboxv1beta1.SandboxReasonExpired,
 			Message:            "Sandbox has expired",
 		})
 	}
@@ -1092,7 +1092,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 // checks if the sandbox has expired
 // returns true if expired, false otherwise
 // if not expired, also returns the duration to requeue after.
-func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox, now time.Time) (bool, time.Duration) {
+func checkSandboxExpiry(sandbox *sandboxv1beta1.Sandbox, now time.Time) (bool, time.Duration) {
 	if sandbox.Spec.ShutdownTime == nil {
 		return false, 0
 	}
@@ -1110,20 +1110,20 @@ func checkSandboxExpiry(sandbox *sandboxv1alpha1.Sandbox, now time.Time) (bool, 
 	return false, requeueAfter
 }
 
-func setSandboxExpiredCondition(sandbox *sandboxv1alpha1.Sandbox) {
+func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-		Type:               string(sandboxv1alpha1.SandboxConditionReady),
+		Type:               string(sandboxv1beta1.SandboxConditionReady),
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: sandbox.Generation,
-		Reason:             sandboxv1alpha1.SandboxReasonExpired,
+		Reason:             sandboxv1beta1.SandboxReasonExpired,
 		Message:            "Sandbox has expired",
 	})
 }
 
 // sandboxMarkedExpired checks if the sandbox is already marked as expired.
-func sandboxMarkedExpired(sandbox *sandboxv1alpha1.Sandbox) bool {
-	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1alpha1.SandboxConditionReady))
-	return cond != nil && (cond.Reason == sandboxv1alpha1.SandboxReasonExpired)
+func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
+	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -1142,7 +1142,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&sandboxv1alpha1.Sandbox{}).
+		For(&sandboxv1beta1.Sandbox{}).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).

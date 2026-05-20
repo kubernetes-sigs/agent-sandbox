@@ -12,8 +12,13 @@ spec:
       {{- include "agent-sandbox.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- $selectorLabels := include "agent-sandbox.selectorLabels" . | fromYaml }}
       labels:
-        {{- include "agent-sandbox.selectorLabels" . | nindent 8 }}
+        {{- toYaml (merge (dict) $selectorLabels .Values.podLabels) | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: agent-sandbox-controller
       containers:

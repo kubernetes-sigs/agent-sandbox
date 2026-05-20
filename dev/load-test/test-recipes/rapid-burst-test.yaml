@@ -121,7 +121,7 @@ steps:
     Params:
       action: start
       objectGroup: "agents.x-k8s.io"
-      objectVersion: "v1alpha1"
+      objectVersion: "v1beta1"
       objectResource: "sandboxes"
       labelSelector: "agents.x-k8s.io/warm-pool-sandbox"
       namespaceRange: {min: 1, max: {{$namespaces}}}
@@ -193,7 +193,7 @@ steps:
     Params:
       action: start
       objectGroup: extensions.agents.x-k8s.io
-      objectVersion: v1alpha1
+      objectVersion: v1beta1
       objectResource: sandboxclaims
       namespaceRange: {min: 1, max: {{$namespaces}}}
       successfulConditions: ["Ready=True"]

@@ -1,16 +1,16 @@
 # API Reference
 
 ## Packages
-- [agents.x-k8s.io/v1alpha1](#agentsx-k8siov1alpha1)
-- [extensions.agents.x-k8s.io/v1alpha1](#extensionsagentsx-k8siov1alpha1)
+- [agents.x-k8s.io/v1beta1](#agentsx-k8siov1beta1)
+- [extensions.agents.x-k8s.io/v1beta1](#extensionsagentsx-k8siov1beta1)
 
 
-## agents.x-k8s.io/v1alpha1
+## agents.x-k8s.io/v1beta1
 
-Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API group
+Package v1beta1 contains API Schema definitions for the agents v1beta1 API group
 
 
-Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API group.
+Package v1beta1 contains API Schema definitions for the agents v1beta1 API group.
 
 ### Resource Types
 - [Sandbox](#sandbox)
@@ -120,7 +120,7 @@ Sandbox is the Schema for the sandboxes API.
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `apiVersion` _string_ | `agents.x-k8s.io/v1alpha1` | | |
+| `apiVersion` _string_ | `agents.x-k8s.io/v1beta1` | | |
 | `kind` _string_ | `Sandbox` | | |
 | `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  | Optional: \{\} <br /> |
 | `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  | Optional: \{\} <br /> |
@@ -191,11 +191,11 @@ _Appears in:_
 
 
 
-## extensions.agents.x-k8s.io/v1alpha1
+## extensions.agents.x-k8s.io/v1beta1
 
-Package v1alpha1 contains API Schema definitions for the extensions v1alpha1 API group
+Package v1beta1 contains API Schema definitions for the extensions v1beta1 API group
 
-Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API group.
+Package v1beta1 contains API Schema definitions for the agents v1beta1 API group.
 
 ### Resource Types
 - [SandboxClaim](#sandboxclaim)
@@ -305,7 +305,7 @@ SandboxClaim is the Schema for the sandbox Claim API.
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1alpha1` | | |
+| `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1beta1` | | |
 | `kind` _string_ | `SandboxClaim` | | |
 | `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  | Optional: \{\} <br /> |
 | `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  | Optional: \{\} <br /> |
@@ -380,7 +380,7 @@ SandboxTemplate is the Schema for the sandbox template API.
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1alpha1` | | |
+| `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1beta1` | | |
 | `kind` _string_ | `SandboxTemplate` | | |
 | `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  | Optional: \{\} <br /> |
 | `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  | Optional: \{\} <br /> |
@@ -438,7 +438,7 @@ SandboxWarmPool is the Schema for the sandboxwarmpools API.
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1alpha1` | | |
+| `apiVersion` _string_ | `extensions.agents.x-k8s.io/v1beta1` | | |
 | `kind` _string_ | `SandboxWarmPool` | | |
 | `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  | Optional: \{\} <br /> |
 | `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  | Optional: \{\} <br /> |

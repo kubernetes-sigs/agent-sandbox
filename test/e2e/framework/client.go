@@ -36,8 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	sandboxextensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	sandboxextensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -439,11 +439,11 @@ func gvkForObject(obj runtime.Object) (schema.GroupVersionKind, error) {
 		return schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}, nil
 	case *appsv1.Deployment:
 		return schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, nil
-	case *sandboxv1alpha1.Sandbox:
+	case *sandboxv1beta1.Sandbox:
 		return sandboxGVK, nil
-	case *sandboxextensionsv1alpha1.SandboxWarmPool:
+	case *sandboxextensionsv1beta1.SandboxWarmPool:
 		return sandboxWarmpoolGVK, nil
-	case *sandboxextensionsv1alpha1.SandboxClaim:
+	case *sandboxextensionsv1beta1.SandboxClaim:
 		return sandboxClaimGVK, nil
 	default:
 		return schema.GroupVersionKind{}, fmt.Errorf("no GVK found for object type %T", o)
@@ -605,19 +605,19 @@ func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedNa
 
 var sandboxGVK = schema.GroupVersionKind{
 	Group:   "agents.x-k8s.io",
-	Version: "v1alpha1",
+	Version: "v1beta1",
 	Kind:    "Sandbox",
 }
 
 var sandboxWarmpoolGVK = schema.GroupVersionKind{
 	Group:   "extensions.agents.x-k8s.io",
-	Version: "v1alpha1",
+	Version: "v1beta1",
 	Kind:    "SandboxWarmPool",
 }
 
 var sandboxClaimGVK = schema.GroupVersionKind{
 	Group:   "extensions.agents.x-k8s.io",
-	Version: "v1alpha1",
+	Version: "v1beta1",
 	Kind:    "SandboxClaim",
 }
 

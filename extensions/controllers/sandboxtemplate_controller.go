@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -44,7 +44,6 @@ type SandboxTemplateReconciler struct {
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
@@ -54,7 +53,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	logger := log.FromContext(ctx)
 
 	// 1. Fetch the SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{}
+	template := &extensionsv1beta1.SandboxTemplate{}
 	if err := r.Get(ctx, req.NamespacedName, template); err != nil {
 		if k8errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -75,11 +74,11 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	management := template.Spec.NetworkPolicyManagement
 	if management == "" {
-		management = extensionsv1alpha1.NetworkPolicyManagementManaged
+		management = extensionsv1beta1.NetworkPolicyManagementManaged
 	}
 
 	// 3. Handle "Unmanaged" Opt-Out
-	if management == extensionsv1alpha1.NetworkPolicyManagementUnmanaged {
+	if management == extensionsv1beta1.NetworkPolicyManagementUnmanaged {
 		existingNP := &networkingv1.NetworkPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: npName, Namespace: npNamespace},
 		}
@@ -216,7 +215,7 @@ func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPoli
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxTemplateReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extensionsv1alpha1.SandboxTemplate{}).
+		For(&extensionsv1beta1.SandboxTemplate{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)

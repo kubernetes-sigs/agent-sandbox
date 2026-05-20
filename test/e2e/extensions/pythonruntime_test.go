@@ -30,15 +30,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 	"sigs.k8s.io/yaml"
 )
 
 const sandboxManifest = `
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: sandbox-python-example
@@ -59,7 +59,7 @@ spec:
 `
 
 const templateManifest = `
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: python-sandbox-template
@@ -81,7 +81,7 @@ spec:
 `
 
 const claimManifest = `
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   name: python-sandbox-claim
@@ -91,7 +91,7 @@ spec:
 `
 
 const warmPoolManifest = `
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
   name: python-warmpool
@@ -101,32 +101,32 @@ spec:
     name: python-sandbox-template
 `
 
-func sandboxFromManifest(manifest string) (*sandboxv1alpha1.Sandbox, error) {
-	sandbox := &sandboxv1alpha1.Sandbox{}
+func sandboxFromManifest(manifest string) (*sandboxv1beta1.Sandbox, error) {
+	sandbox := &sandboxv1beta1.Sandbox{}
 	if err := yaml.Unmarshal([]byte(manifest), sandbox); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Sandbox: %w", err)
 	}
 	return sandbox, nil
 }
 
-func sandboxTemplateFromManifest(manifest string) (*extensionsv1alpha1.SandboxTemplate, error) {
-	template := &extensionsv1alpha1.SandboxTemplate{}
+func sandboxTemplateFromManifest(manifest string) (*extensionsv1beta1.SandboxTemplate, error) {
+	template := &extensionsv1beta1.SandboxTemplate{}
 	if err := yaml.Unmarshal([]byte(manifest), template); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal SandboxTemplate: %w", err)
 	}
 	return template, nil
 }
 
-func sandboxClaimFromManifest(manifest string) (*extensionsv1alpha1.SandboxClaim, error) {
-	claim := &extensionsv1alpha1.SandboxClaim{}
+func sandboxClaimFromManifest(manifest string) (*extensionsv1beta1.SandboxClaim, error) {
+	claim := &extensionsv1beta1.SandboxClaim{}
 	if err := yaml.Unmarshal([]byte(manifest), claim); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal SandboxClaim: %w", err)
 	}
 	return claim, nil
 }
 
-func sandboxWarmpoolFromManifest(manifest string) (*extensionsv1alpha1.SandboxWarmPool, error) {
-	warmpool := &extensionsv1alpha1.SandboxWarmPool{}
+func sandboxWarmpoolFromManifest(manifest string) (*extensionsv1beta1.SandboxWarmPool, error) {
+	warmpool := &extensionsv1beta1.SandboxWarmPool{}
 	if err := yaml.Unmarshal([]byte(manifest), warmpool); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal SandboxWarmPool: %w", err)
 	}

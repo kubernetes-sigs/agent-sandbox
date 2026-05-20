@@ -23,23 +23,23 @@ import (
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1"
 )
 
 type Interface interface {
 	Discovery() discovery.DiscoveryInterface
-	AgentsV1alpha1() agentsv1alpha1.AgentsV1alpha1Interface
+	AgentsV1beta1() agentsv1beta1.AgentsV1beta1Interface
 }
 
 // Clientset contains the clients for groups.
 type Clientset struct {
 	*discovery.DiscoveryClient
-	agentsV1alpha1 *agentsv1alpha1.AgentsV1alpha1Client
+	agentsV1beta1 *agentsv1beta1.AgentsV1beta1Client
 }
 
-// AgentsV1alpha1 retrieves the AgentsV1alpha1Client
-func (c *Clientset) AgentsV1alpha1() agentsv1alpha1.AgentsV1alpha1Interface {
-	return c.agentsV1alpha1
+// AgentsV1beta1 retrieves the AgentsV1beta1Client
+func (c *Clientset) AgentsV1beta1() agentsv1beta1.AgentsV1beta1Interface {
+	return c.agentsV1beta1
 }
 
 // Discovery retrieves the DiscoveryClient
@@ -86,7 +86,7 @@ func NewForConfigAndClient(c *rest.Config, httpClient *http.Client) (*Clientset,
 
 	var cs Clientset
 	var err error
-	cs.agentsV1alpha1, err = agentsv1alpha1.NewForConfigAndClient(&configShallowCopy, httpClient)
+	cs.agentsV1beta1, err = agentsv1beta1.NewForConfigAndClient(&configShallowCopy, httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func NewForConfigOrDie(c *rest.Config) *Clientset {
 // New creates a new Clientset for the given RESTClient.
 func New(c rest.Interface) *Clientset {
 	var cs Clientset
-	cs.agentsV1alpha1 = agentsv1alpha1.New(c)
+	cs.agentsV1beta1 = agentsv1beta1.New(c)
 
 	cs.DiscoveryClient = discovery.NewDiscoveryClient(c)
 	return &cs

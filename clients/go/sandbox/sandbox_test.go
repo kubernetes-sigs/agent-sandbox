@@ -39,10 +39,10 @@ import (
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	fakeextensions "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // ---------------------------------------------------------------------------
@@ -66,15 +66,15 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1alpha1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		Log:              opts.Logger,
 	}
 
 	// Simulate GenerateName: assign a name if only GenerateName is set.
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ca := action.(ktesting.CreateAction)
-		claim := ca.GetObject().(*extv1alpha1.SandboxClaim)
+		claim := ca.GetObject().(*extv1beta1.SandboxClaim)
 		if claim.Name == "" && claim.GenerateName != "" {
 			claim.Name = claim.GenerateName + "test12345"
 		}
@@ -84,10 +84,10 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 	// Default: claim status returns claim name as sandbox name.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ga := action.(ktesting.GetAction)
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
-			Status: extv1alpha1.SandboxClaimStatus{
-				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
 			},
 		}, nil
 	})
@@ -103,8 +103,8 @@ func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClien
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1alpha1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		DynamicClient:    dynCS,
 		Log:              opts.Logger,
 	}
@@ -112,7 +112,7 @@ func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClien
 	// Simulate GenerateName.
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ca := action.(ktesting.CreateAction)
-		claim := ca.GetObject().(*extv1alpha1.SandboxClaim)
+		claim := ca.GetObject().(*extv1beta1.SandboxClaim)
 		if claim.Name == "" && claim.GenerateName != "" {
 			claim.Name = claim.GenerateName + "test12345"
 		}
@@ -122,10 +122,10 @@ func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClien
 	// Default: claim status returns claim name as sandbox name.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ga := action.(ktesting.GetAction)
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
-			Status: extv1alpha1.SandboxClaimStatus{
-				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
 			},
 		}, nil
 	})
@@ -137,8 +137,8 @@ func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClien
 	return s, agentsCS, extensionsCS
 }
 
-func readySandbox(name string) *sandboxv1alpha1.Sandbox {
-	return &sandboxv1alpha1.Sandbox{
+func readySandbox(name string) *sandboxv1beta1.Sandbox {
+	return &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
@@ -146,10 +146,10 @@ func readySandbox(name string) *sandboxv1alpha1.Sandbox {
 				PodNameAnnotation: name + "-pod",
 			},
 		},
-		Status: sandboxv1alpha1.SandboxStatus{
+		Status: sandboxv1beta1.SandboxStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
 					Status: metav1.ConditionTrue,
 				},
 			},
@@ -161,7 +161,7 @@ func readySandbox(name string) *sandboxv1alpha1.Sandbox {
 // the claim is created, eliminating time.Sleep-based coordination.
 // It also seeds the claim status with the sandbox name so that
 // resolveSandboxName succeeds.
-func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensions.Clientset, sb *sandboxv1alpha1.Sandbox) {
+func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensions.Clientset, sb *sandboxv1beta1.Sandbox) {
 	// Track the last created claim name so the list reactor can return a
 	// matching ready sandbox.
 	var lastClaimName string
@@ -169,7 +169,7 @@ func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeext
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				// Simulate GenerateName.
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
@@ -188,7 +188,7 @@ func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeext
 		name := lastClaimName
 		lastClaimMu.Unlock()
 		if name == "" {
-			return true, &sandboxv1alpha1.SandboxList{}, nil
+			return true, &sandboxv1beta1.SandboxList{}, nil
 		}
 		matched := sb.DeepCopy()
 		matched.Name = name
@@ -197,7 +197,7 @@ func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeext
 				matched.Annotations[PodNameAnnotation] = name + "-pod"
 			}
 		}
-		return true, &sandboxv1alpha1.SandboxList{Items: []sandboxv1alpha1.Sandbox{*matched}}, nil
+		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*matched}}, nil
 	})
 }
 
@@ -283,7 +283,7 @@ func TestOpen_ListBeforeWatch_AlreadyReady(t *testing.T) {
 		// Extract claim name from field selector "metadata.name=<claimName>".
 		claimName := strings.TrimPrefix(selector, "metadata.name=")
 		sb := readySandbox(claimName)
-		return true, &sandboxv1alpha1.SandboxList{Items: []sandboxv1alpha1.Sandbox{*sb}}, nil
+		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*sb}}, nil
 	})
 
 	fakeWatcher := watch.NewFake()
@@ -312,11 +312,11 @@ func TestOpen_TimeoutWhenNotReady(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(fakeWatcher, nil))
 
 	go func() {
-		fakeWatcher.Add(&sandboxv1alpha1.Sandbox{
+		fakeWatcher.Add(&sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
-			Status: sandboxv1alpha1.SandboxStatus{
+			Status: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
-					{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
+					{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse},
 				},
 			},
 		})
@@ -387,14 +387,14 @@ func TestOpen_PodNameFallsBackToSandboxName(t *testing.T) {
 	opts := defaultTestOpts()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
 
-	sb := &sandboxv1alpha1.Sandbox{
+	sb := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sb-no-annotation",
 			Namespace: "default",
 		},
-		Status: sandboxv1alpha1.SandboxStatus{
+		Status: sandboxv1beta1.SandboxStatus{
 			Conditions: []metav1.Condition{
-				{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
 			},
 		},
 	}
@@ -563,7 +563,7 @@ func TestModeSelection_Gateway(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(sandboxWatcher, nil))
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -623,7 +623,7 @@ func TestGatewayDiscovery_Timeout(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(sandboxWatcher, nil))
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -702,7 +702,7 @@ func TestGatewayDiscovery_WatchUsesCorrectFieldSelector(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(sandboxWatcher, nil))
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -766,7 +766,7 @@ func TestGatewayDiscovery_ListUsesCorrectFieldSelector(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(sandboxWatcher, nil))
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -985,7 +985,7 @@ func TestOpen_CloseReopens(t *testing.T) {
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		name := "sb"
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -1354,7 +1354,7 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ca := action.(ktesting.CreateAction)
-		claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim)
+		claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim)
 		if ok {
 			if claim.Name == "" && claim.GenerateName != "" {
 				claim.Name = claim.GenerateName + "test12345"
@@ -1598,7 +1598,7 @@ func TestGatewayDiscovery_Timeout_CleansUpClaim(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(sandboxWatcher, nil))
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -1923,10 +1923,10 @@ func TestOpen_ReconnectsAfterTransportDeath_GatewayMode(t *testing.T) {
 
 	sandboxWatcher := watch.NewFake()
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(sandboxWatcher, nil))
-	var lastSb *sandboxv1alpha1.Sandbox
+	var lastSb *sandboxv1beta1.Sandbox
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -2009,7 +2009,7 @@ func TestGatewayDiscovery_ListPath_AlreadyReady(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(sandboxWatcher, nil))
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
@@ -2181,11 +2181,11 @@ func TestOpen_ReconnectFailsWhenSandboxNotReady(t *testing.T) {
 	c.connector.mu.Unlock()
 
 	agentsCS.PrependReactor("get", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, &sandboxv1alpha1.Sandbox{
+		return true, &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
-			Status: sandboxv1alpha1.SandboxStatus{
+			Status: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
-					{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
+					{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse},
 				},
 			},
 		}, nil
@@ -2432,10 +2432,10 @@ func TestOpen_WatchClosedReListFinds(t *testing.T) {
 		name := claimName
 		claimMu.Unlock()
 		if n == 1 {
-			return true, &sandboxv1alpha1.SandboxList{}, nil
+			return true, &sandboxv1beta1.SandboxList{}, nil
 		}
 		sb := readySandbox(name)
-		return true, &sandboxv1alpha1.SandboxList{Items: []sandboxv1alpha1.Sandbox{*sb}}, nil
+		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*sb}}, nil
 	})
 
 	if err := c.Open(context.Background()); err != nil {
@@ -2711,7 +2711,7 @@ func TestOpen_ReconnectTransportFailure(t *testing.T) {
 	c.mu.Unlock()
 
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: "existing-claim", Namespace: "default"},
 		}, nil
 	})
@@ -2824,7 +2824,7 @@ func TestDisconnect_ThenReconnect(t *testing.T) {
 
 	// Wire reactors for reconnect: get claim, get sandbox, watch.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default"},
 		}, nil
 	})
@@ -2903,7 +2903,7 @@ func TestDeleteClaim_EmptyName(t *testing.T) {
 		return true, nil, nil
 	})
 	h := &K8sHelper{
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		Log:              logr.Discard(),
 	}
 	if err := h.deleteClaim(context.Background(), "", "default"); err != nil {

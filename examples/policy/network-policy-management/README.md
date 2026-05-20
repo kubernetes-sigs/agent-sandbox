@@ -61,6 +61,8 @@ This is designed for running untrusted code safely:
 
   - Internal IPv6 Unique Local Addresses (`fc00::/7`).
 
+  - IPv6 Link-Local (`fe80::/10`).
+
   - Internal Cluster DNS (CoreDNS).
 
 
@@ -152,6 +154,7 @@ spec:
             cidr: "::/0"
             except:
               - "fc00::/7"
+              - "fe80::/10"
 ```
 
 - Total Override: Because the Secure Defaults are replaced, we must manually re-add the rule allowing ingress from the `sandbox-router` if we still want that functionality.  

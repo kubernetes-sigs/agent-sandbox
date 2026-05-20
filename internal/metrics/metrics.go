@@ -19,6 +19,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -34,6 +38,28 @@ const (
 	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )
+
+// AgentSandboxesMetricKey is used to aggregate counts for identical Sandboxes metric label combinations.
+type AgentSandboxesMetricKey struct {
+	Namespace      string
+	ReadyCondition string
+	Expired        string
+	LaunchType     string
+	Template       string
+	OwnedBy        string
+}
+
+// Slice returns the label values in the order defined by the metric.
+func (k AgentSandboxesMetricKey) Slice() []string {
+	return []string{
+		k.Namespace,
+		k.ReadyCondition,
+		k.Expired,
+		k.LaunchType,
+		k.Template,
+		k.OwnedBy,
+	}
+}
 
 var (
 	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
@@ -94,7 +120,7 @@ var (
 		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition"},
 	)
 
-	// AgentSandboxesDesc describes the agent_sandboxes metric point-in-time counts.
+	// AgentSandboxes monitor the point-in-time number of sandboxes in the cluster.
 	// Labels:
 	// - namespace: the namespace of the sandbox
 	// - ready_condition: "true" | "false"
@@ -102,11 +128,12 @@ var (
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: sandboxTemplateRef.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
-	AgentSandboxesDesc = prometheus.NewDesc(
-		"agent_sandboxes",
-		"Monitor the point-in-time number of sandboxes in the cluster.",
+	AgentSandboxes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "agent_sandboxes",
+			Help: "Monitor the point-in-time number of sandboxes in the cluster.",
+		},
 		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by"},
-		nil,
 	)
 
 	buildVersionInfo = version.Get()
@@ -135,8 +162,57 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
+	metrics.Registry.MustRegister(AgentSandboxes)
 	metrics.Registry.MustRegister(BuildInfo)
 }
+
+// CalculateAgentSandboxesMetricKey calculates the metric labels for a given Sandbox.
+func CalculateAgentSandboxesMetricKey(sandbox *sandboxv1beta1.Sandbox) AgentSandboxesMetricKey {
+	readyConditionStr := "false"
+	expiredStr := "false"
+	readyCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if readyCond != nil {
+		if readyCond.Status == metav1.ConditionTrue {
+			readyConditionStr = "true"
+		}
+		if readyCond.Reason == sandboxv1beta1.SandboxReasonExpired {
+			expiredStr = "true"
+		}
+	}
+
+	launchTypeStr := LaunchTypeCold
+	if _, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] != "" {
+		launchTypeStr = LaunchTypeWarm
+	}
+
+	sandboxTemplateStr := "unknown"
+	if template, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && template != "" {
+		sandboxTemplateStr = template
+	}
+
+	apiVersion := extensionsv1beta1.GroupVersion.String()
+	ownedByStr := "None"
+	if controllerRef := metav1.GetControllerOf(sandbox); controllerRef != nil {
+		if controllerRef.APIVersion == apiVersion {
+			switch controllerRef.Kind {
+			case "SandboxClaim":
+				ownedByStr = "SandboxClaim"
+			case "SandboxWarmPool":
+				ownedByStr = "SandboxWarmPool"
+			}
+		}
+	}
+
+	return AgentSandboxesMetricKey{
+		Namespace:      sandbox.Namespace,
+		ReadyCondition: readyConditionStr,
+		Expired:        expiredStr,
+		LaunchType:     launchTypeStr,
+		Template:       sandboxTemplateStr,
+		OwnedBy:        ownedByStr,
+	}
+}
+
 
 // RecordClaimStartupLatency records the duration since the provided start time.
 func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {

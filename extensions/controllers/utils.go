@@ -53,7 +53,6 @@ func SandboxTemplateRefHash(templateRefName string) string {
 }
 
 // HashUsingSandboxTemplateRefName generates the hash of a sandbox template ref, using only its name.
-// TODO: once https://github.com/kubernetes-sigs/agent-sandbox/issues/703 is fixed, deprecate this.
 func HashUsingSandboxTemplateRefName(templateRefName string) string {
 	return sandboxcontrollers.NameHash(templateRefName)
 }

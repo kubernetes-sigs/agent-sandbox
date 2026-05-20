@@ -15,6 +15,7 @@
 package queue
 
 import (
+	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -50,19 +51,34 @@ func (s *SimpleSandboxQueue) Add(templateHash string, item SandboxKey) {
 }
 
 // Get pops an item from the specific template's queue.
-func (s *SimpleSandboxQueue) Get(templateHash string) (SandboxKey, bool) {
-	q, ok := s.queues.Load(templateHash)
-	if !ok {
-		return SandboxKey{}, false
+func (s *SimpleSandboxQueue) Get(namespacedTemplateHash string) (SandboxKey, bool) {
+	if q, ok := s.queues.Load(namespacedTemplateHash); ok {
+		return q.(*synchronizedQueue).Pop()
 	}
-	return q.(*synchronizedQueue).Pop()
+
+	// Remain compatible with the legacy namespace-agnostic hash
+	if templateRefHash, ok := GetTemplateRefHashIfNamespaced(namespacedTemplateHash); ok {
+		if q, ok := s.queues.Load(templateRefHash); ok {
+			return q.(*synchronizedQueue).Pop()
+		}
+	}
+
+	return SandboxKey{}, false
 }
 
 // RemoveItem deletes a specific sandbox from a template's queue.
-func (s *SimpleSandboxQueue) RemoveItem(templateHash string, item SandboxKey) {
-	if q, ok := s.queues.Load(templateHash); ok {
+func (s *SimpleSandboxQueue) RemoveItem(namespacedTemplateHash string, item SandboxKey) {
+	if q, ok := s.queues.Load(namespacedTemplateHash); ok {
 		sq := q.(*synchronizedQueue)
 		sq.Remove(item)
+		return
+	}
+	// Remain compatible with the legacy namespace-agnostic hash
+	if templateRefHash, ok := GetTemplateRefHashIfNamespaced(namespacedTemplateHash); ok {
+		if q, ok := s.queues.Load(templateRefHash); ok {
+			sq := q.(*synchronizedQueue)
+			sq.Remove(item)
+		}
 	}
 }
 
@@ -141,6 +157,31 @@ func (q *synchronizedQueue) Pop() (SandboxKey, bool) {
 
 // RemoveQueue completely deletes a template's queue from the sync.Map
 // to prevent memory leaks when SandboxTemplates or WarmPools are deleted.
-func (s *SimpleSandboxQueue) RemoveQueue(templateHash string) {
-	s.queues.Delete(templateHash)
+func (s *SimpleSandboxQueue) RemoveQueue(namespacedTemplateHash string) {
+	if _, ok := s.queues.Load(namespacedTemplateHash); ok {
+		s.queues.Delete(namespacedTemplateHash)
+		return
+	}
+	// Remain compatible with the legacy namespace-agnostic hash
+	if templateRefHash, ok := GetTemplateRefHashIfNamespaced(namespacedTemplateHash); ok {
+		if _, ok := s.queues.Load(templateRefHash); ok {
+			s.queues.Delete(templateRefHash)
+		}
+	}
+}
+
+// GetNamespacedTemplateHash forms the namespace-aware hash value to use as a key to a SimpleSandboxQueue type.
+func GetNamespacedTemplateHash(namespace, templateRefHash string) string {
+	return namespace + "/" + templateRefHash
+}
+
+// GetTemplateRefHashIfNamespaced extracts the templateRefHash value if the parameter is namespace-aware.
+func GetTemplateRefHashIfNamespaced(templateHash string) (string, bool) {
+	if strings.Contains(templateHash, "/") {
+		parts := strings.SplitN(templateHash, "/", 2)
+		if len(parts) == 2 {
+			return parts[1], true
+		}
+	}
+	return "", false
 }

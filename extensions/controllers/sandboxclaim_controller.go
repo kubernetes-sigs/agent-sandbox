@@ -647,11 +647,12 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	templateHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
+	templateRefHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
+	namespacedTemplateHash := queue.GetNamespacedTemplateHash(claim.Namespace, templateRefHash)
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
 	for range 3 {
-		adopted, adoptedKey, err := r.getCandidate(ctx, claim, templateHash)
+		adopted, adoptedKey, err := r.getCandidate(ctx, claim, namespacedTemplateHash)
 		if err != nil {
 			return nil, err
 		}
@@ -675,7 +676,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			claim.Labels[extensionsv1beta1.AssignedSandboxNameLabel] = adopted.Name
 			if err := r.Update(ctx, claim); err != nil {
-				r.WarmSandboxQueue.Add(templateHash, adoptedKey)
+				r.WarmSandboxQueue.Add(namespacedTemplateHash, adoptedKey)
 				if k8errors.IsConflict(err) {
 					// Conflict means someone else updated the claim. We fail and retry.
 					return false, err
@@ -689,7 +690,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				if k8errors.IsNotFound(err) {
 					return false, nil
 				}
-				r.WarmSandboxQueue.Add(templateHash, adoptedKey)
+				r.WarmSandboxQueue.Add(namespacedTemplateHash, adoptedKey)
 				if k8errors.IsConflict(err) {
 					return false, nil
 				}
@@ -1475,8 +1476,10 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 			Namespace: newSandbox.Namespace,
 			Name:      newSandbox.Name,
 		}
-		logger.V(1).Info("Adding sandbox to warm pool queue", "templateRefHash", newSandbox.Labels[sandboxTemplateRefHash], "sandbox", key)
-		h.sandboxQueue.Add(newSandbox.Labels[sandboxTemplateRefHash], key)
+		templateRefHash := newSandbox.Labels[sandboxTemplateRefHash]
+		namespacedTemplateHash := queue.GetNamespacedTemplateHash(newSandbox.Namespace, templateRefHash)
+		logger.V(1).Info("Adding sandbox to warm pool queue", "templateRefHash", templateRefHash, "sandbox", key)
+		h.sandboxQueue.Add(namespacedTemplateHash, key)
 	}
 }
 
@@ -1525,18 +1528,20 @@ func (h *sandboxEventHandler) Delete(ctx context.Context, e event.DeleteEvent, _
 	}
 
 	// Grab the hash to find which queue this pod lived in
-	templateHash := sandbox.Labels[sandboxTemplateRefHash]
+	templateRefHash := sandbox.Labels[sandboxTemplateRefHash]
 
-	if templateHash != "" {
+	if templateRefHash != "" {
 		key := queue.SandboxKey{
 			Namespace: sandbox.Namespace,
 			Name:      sandbox.Name,
 		}
 
+		namespacedTemplateHash := queue.GetNamespacedTemplateHash(sandbox.Namespace, templateRefHash)
+
 		// Actively delete the Ghost Pod from the memory queue
 		logger := log.FromContext(ctx)
 		logger.V(1).Info("Removing deleted sandbox from warm pool queue", "sandbox", key)
-		h.sandboxQueue.RemoveItem(templateHash, key)
+		h.sandboxQueue.RemoveItem(namespacedTemplateHash, key)
 	}
 }
 
@@ -1557,10 +1562,11 @@ func (h *templateEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 		return
 	}
 
-	templateHash := SandboxTemplateRefHash(template.Name)
+	templateRefHash := SandboxTemplateRefHash(template.Name)
+	namespacedTemplateHash := queue.GetNamespacedTemplateHash(template.Namespace, templateRefHash)
 	logger := log.FromContext(ctx)
-	logger.Info("SandboxTemplate deleted, cleaning up memory queue", "template", template.Name, "hash", templateHash)
+	logger.Info("SandboxTemplate deleted, cleaning up memory queue", "template", template.Name, "hash", templateRefHash)
 
 	// Actively drop the entire queue from memory
-	h.sandboxQueue.RemoveQueue(templateHash)
+	h.sandboxQueue.RemoveQueue(namespacedTemplateHash)
 }

@@ -131,3 +131,112 @@ func TestSimpleSandboxQueue_RemoveQueue_MemoryLeakFix(t *testing.T) {
 		t.Errorf("Expected queue to be completely removed, but it still existed")
 	}
 }
+
+func TestSimpleSandboxQueue_KeyFallbackBehavior(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	legacyHash := "template-hash-1"
+	namespace := "my-ns"
+	namespacedHash := GetNamespacedTemplateHash(namespace, legacyHash)
+
+	key1 := SandboxKey{Namespace: namespace, Name: "sb-1"}
+
+	// Test that the namespace-agnostic legacy value can still be referenced by using the namespace-aware value to interact with the queues
+	q.Add(legacyHash, key1)
+	got1, ok := q.Get(namespacedHash)
+	if !ok || got1 != key1 {
+		t.Errorf("Expected %v from Get fallback, got %v (ok: %v)", key1, got1, ok)
+	}
+
+	// Test RemoveItem fallback
+	q.RemoveItem(namespacedHash, key1)
+	_, ok = q.Get(legacyHash)
+	if ok {
+		t.Errorf("Expected legacy queue to be empty after RemoveItem with fallback")
+	}
+
+	// Test RemoveQueue fallback (add item back first)
+	q.Add(legacyHash, key1)
+	q.RemoveQueue(namespacedHash)
+	_, ok = q.queues.Load(legacyHash)
+	if ok {
+		t.Errorf("Expected legacy queue to be deleted after RemoveQueue with fallback")
+	}
+
+	// Test reverse is false: that namespace-aware value cannot be referenced by using the legacy value
+	q.Add(namespacedHash, key1)
+	_, ok = q.Get(legacyHash)
+	if ok {
+		t.Errorf("Expected legacy Get to NOT find namespaced item")
+	}
+
+	// Test RemoveItem does nothing with legacy hash
+	q.RemoveItem(legacyHash, key1)
+	got2, ok := q.Get(namespacedHash)
+	if !ok || got2 != key1 {
+		t.Errorf("Expected item %v to still be in queue after RemoveItem with legacy hash, got %v", key1, got2)
+	}
+
+	// Test RemoveQueue does nothing with legacy hash (add item back first)
+	q.Add(namespacedHash, key1)
+	q.RemoveQueue(legacyHash)
+	got3, ok := q.Get(namespacedHash)
+	if !ok || got3 != key1 {
+		t.Errorf("Expected item %v to still be in namespaced queue after RemoveQueue with legacy hash, got %v", key1, got3)
+	}
+}
+
+func TestGetNamespacedTemplateHash(t *testing.T) {
+	namespace := "my-ns"
+	hash := "my-hash"
+	expected := "my-ns/my-hash"
+	got := GetNamespacedTemplateHash(namespace, hash)
+	if got != expected {
+		t.Errorf("Expected %q, got %q", expected, got)
+	}
+}
+
+func TestGetTemplateRefHashIfNamespaced(t *testing.T) {
+	testCases := []struct {
+		name         string
+		input        string
+		expectedHash string
+		expectedOk   bool
+	}{
+		{
+			name:         "namespace-aware hash",
+			input:        "my-ns/my-hash",
+			expectedHash: "my-hash",
+			expectedOk:   true,
+		},
+		{
+			name:         "namespace-agnostic (legacy) hash",
+			input:        "my-hash",
+			expectedHash: "",
+			expectedOk:   false,
+		},
+		{
+			name:         "empty string",
+			input:        "",
+			expectedHash: "",
+			expectedOk:   false,
+		},
+		{
+			name:         "unexpected format (multiple slashes)",
+			input:        "ns/dir/hash",
+			expectedHash: "dir/hash",
+			expectedOk:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			hash, ok := GetTemplateRefHashIfNamespaced(tc.input)
+			if ok != tc.expectedOk {
+				t.Errorf("Expected ok %v, got %v", tc.expectedOk, ok)
+			}
+			if hash != tc.expectedHash {
+				t.Errorf("Expected hash %q, got %q", tc.expectedHash, hash)
+			}
+		})
+	}
+}

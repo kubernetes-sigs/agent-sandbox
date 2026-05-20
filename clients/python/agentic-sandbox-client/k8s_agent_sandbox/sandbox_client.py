@@ -57,6 +57,7 @@ class SandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
+        k8s_helper: K8sHelper | None = None,
         cleanup: bool = False,
     ):
         """
@@ -69,6 +70,14 @@ class SandboxClient(Generic[T]):
                 or SandboxGatewayConnectionConfig.
             tracer_config: Configuration for OpenTelemetry tracing. 
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
+            k8s_helper: Optional pre-configured ``K8sHelper``. When provided,
+                the client uses it directly instead of constructing a default
+                one. Lets callers running outside the cluster inject a
+                helper backed by their own ``kubernetes.client.Configuration``
+                (e.g. one built from ``google.auth.default()``), avoiding the
+                default ``load_incluster_config()`` / ``load_kube_config()``
+                discovery. Mirrors the existing ``k8s_helper`` kwarg on
+                ``Sandbox`` / ``AsyncSandbox`` handle classes.
             cleanup: If True, registers an atexit hook to automatically delete 
                 all tracked sandboxes when the program terminates. Defaults to False.
         """
@@ -82,7 +91,7 @@ class SandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         # Downstream Kubernetes Configuration
-        self.k8s_helper = K8sHelper()
+        self.k8s_helper = k8s_helper or K8sHelper()
         
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}

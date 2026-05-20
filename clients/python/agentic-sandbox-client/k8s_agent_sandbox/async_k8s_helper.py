@@ -37,10 +37,25 @@ from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTempl
 class AsyncK8sHelper:
     """Async helper class for Kubernetes API interactions using kubernetes_asyncio."""
 
-    def __init__(self):
+    def __init__(self, api_client: client.ApiClient | None = None):
+        """Initializes the helper.
+
+        Args:
+            api_client: Optional pre-configured ``kubernetes_asyncio.client.ApiClient``.
+                When provided, the helper uses it directly and skips
+                ``load_incluster_config()`` / ``load_kube_config()`` discovery.
+                Useful for callers running outside the cluster (Cloud Run,
+                AWS Lambda, peer-cluster workloads) that build their own
+                ``Configuration`` from native credentials and want to inject
+                it without writing a kubeconfig file to disk.
+
+                When omitted, behavior is unchanged: try in-cluster config,
+                fall back to ``~/.kube/config`` / ``$KUBECONFIG``.
+        """
         self._initialized = False
         self._init_lock = asyncio.Lock()
-        self._api_client: client.ApiClient | None = None
+        self._api_client: client.ApiClient | None = api_client
+        self._injected = api_client is not None
 
     async def _ensure_initialized(self):
         if self._initialized:
@@ -48,11 +63,12 @@ class AsyncK8sHelper:
         async with self._init_lock:
             if self._initialized:
                 return
-            try:
-                config.load_incluster_config()
-            except config.ConfigException:
-                await config.load_kube_config()
-            self._api_client = client.ApiClient()
+            if not self._injected:
+                try:
+                    config.load_incluster_config()
+                except config.ConfigException:
+                    await config.load_kube_config()
+                self._api_client = client.ApiClient()
             self.custom_objects_api = client.CustomObjectsApi(self._api_client)
             self.core_v1_api = client.CoreV1Api(self._api_client)
             self._initialized = True

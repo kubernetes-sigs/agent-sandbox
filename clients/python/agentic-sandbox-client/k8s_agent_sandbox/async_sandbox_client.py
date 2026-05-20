@@ -63,7 +63,23 @@ class AsyncSandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
+        k8s_helper: AsyncK8sHelper | None = None,
     ):
+        """Initializes the AsyncSandboxClient.
+
+        Args:
+            connection_config: Required. Use SandboxDirectConnectionConfig,
+                SandboxGatewayConnectionConfig, or SandboxInClusterConnectionConfig.
+            tracer_config: Configuration for OpenTelemetry tracing.
+                Defaults to an empty SandboxTracerConfig (tracing disabled).
+            k8s_helper: Optional pre-configured ``AsyncK8sHelper``. When
+                provided, the client uses it directly instead of constructing
+                a default one. Lets callers running outside the cluster
+                inject a helper backed by their own ``Configuration``,
+                avoiding the default ``load_incluster_config()`` /
+                ``load_kube_config()`` discovery. Mirrors the existing
+                ``k8s_helper`` kwarg on ``AsyncSandbox`` handle class.
+        """
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
@@ -79,7 +95,7 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = AsyncK8sHelper()
+        self.k8s_helper = k8s_helper or AsyncK8sHelper()
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()

@@ -32,7 +32,26 @@ from .constants import (
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
-    def __init__(self):
+    def __init__(self, api_client: client.ApiClient | None = None):
+        """Initializes the helper.
+
+        Args:
+            api_client: Optional pre-configured ``kubernetes.client.ApiClient``.
+                When provided, the helper uses it directly and skips
+                ``load_incluster_config()`` / ``load_kube_config()`` discovery.
+                Useful for callers running outside the cluster (Cloud Run,
+                AWS Lambda, peer-cluster workloads) that build a
+                ``kubernetes.client.Configuration`` from their environment's
+                native credentials (e.g. ``google.auth.default()``) and want
+                to inject it without writing a kubeconfig file to disk.
+
+                When omitted, behavior is unchanged: try in-cluster config,
+                fall back to ``~/.kube/config`` / ``$KUBECONFIG``.
+        """
+        if api_client is not None:
+            self.custom_objects_api = client.CustomObjectsApi(api_client)
+            self.core_v1_api = client.CoreV1Api(api_client)
+            return
         try:
             config.load_incluster_config()
         except config.ConfigException:

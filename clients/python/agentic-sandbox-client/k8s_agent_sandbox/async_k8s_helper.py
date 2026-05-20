@@ -339,8 +339,13 @@ class AsyncK8sHelper:
                 await w.close()
 
     async def close(self):
-        """Closes the shared Kubernetes API client session."""
-        if self._api_client:
+        """Closes the shared Kubernetes API client session.
+
+        When this helper was constructed with an injected ``api_client`` the
+        caller owns that object and it is *not* closed here.  Only clients
+        that this helper created internally are closed.
+        """
+        if self._api_client and not self._injected:
             await self._api_client.close()
             self._api_client = None
             self._initialized = False

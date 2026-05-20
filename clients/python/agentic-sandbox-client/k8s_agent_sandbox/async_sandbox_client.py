@@ -95,7 +95,7 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = k8s_helper or AsyncK8sHelper()
+        self.k8s_helper = k8s_helper if k8s_helper is not None else AsyncK8sHelper()
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()

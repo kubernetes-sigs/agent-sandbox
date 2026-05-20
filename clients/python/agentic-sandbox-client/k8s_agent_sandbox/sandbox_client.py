@@ -91,7 +91,7 @@ class SandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         # Downstream Kubernetes Configuration
-        self.k8s_helper = k8s_helper or K8sHelper()
+        self.k8s_helper = k8s_helper if k8s_helper is not None else K8sHelper()
         
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}

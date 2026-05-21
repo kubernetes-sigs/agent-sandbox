@@ -21,7 +21,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -128,36 +130,61 @@ func New(o Options) (*Server, error) {
 }
 
 // Run starts every configured listener and blocks until ctx is canceled or a
-// listener returns an unrecoverable error. On exit it calls Shutdown on every
-// server in parallel with the configured shutdown timeout, then returns the
-// first non-nil server error (if any).
+// listener returns an unrecoverable error.
+//
+// All listener ports are bound synchronously up front so a bind failure
+// surfaces as an immediate error from Run() rather than from an async
+// goroutine, and so /readyz only flips to 200 after every port is
+// actually accepting connections (no rollout window where the LB sends
+// traffic to a not-yet-listening pod).
+//
+// On exit Shutdown is called concurrently on every server with a shared
+// shutdownTimeout so one slow listener cannot consume the whole budget.
 func (s *Server) Run(ctx context.Context) error {
-	g, gctx := errgroup.WithContext(ctx)
-
 	type listener struct {
 		name string
 		srv  *http.Server
+		ln   net.Listener
 		tls  bool
 	}
 	listeners := []listener{
-		{"proxy-http", s.proxy, false},
-		{"proxy-https", s.proxyTLS, true},
-		{"metrics", s.metrics, false},
-		{"health", s.healthSrv, false},
+		{"proxy-http", s.proxy, nil, false},
+		{"proxy-https", s.proxyTLS, nil, true},
+		{"metrics", s.metrics, nil, false},
+		{"health", s.healthSrv, nil, false},
 	}
 
+	// Pre-bind every listener synchronously. If any bind fails, close the
+	// already-bound listeners and return — Run() never advertises
+	// readiness or starts serving in that case.
+	bound := listeners[:0]
 	for _, l := range listeners {
 		if l.srv == nil {
 			continue
 		}
+		ln, err := net.Listen("tcp", l.srv.Addr)
+		if err != nil {
+			for _, b := range bound {
+				_ = b.ln.Close()
+			}
+			return fmt.Errorf("listen %s on %s: %w", l.name, l.srv.Addr, err)
+		}
+		l.ln = ln
+		bound = append(bound, l)
+		s.log.Info("listening", "name", l.name, "addr", ln.Addr().String(), "tls", l.tls)
+	}
+
+	// Start serving on the pre-bound listeners. Per-iteration loop variable
+	// scoping is Go 1.22+ default; no shadow copy needed.
+	g, gctx := errgroup.WithContext(ctx)
+	for _, l := range bound {
 		g.Go(func() error {
-			s.log.Info("listening", "name", l.name, "addr", l.srv.Addr, "tls", l.tls)
 			var err error
 			if l.tls {
 				// Empty cert/key paths because GetCertificate handles the cert.
-				err = l.srv.ListenAndServeTLS("", "")
+				err = l.srv.ServeTLS(l.ln, "", "")
 			} else {
-				err = l.srv.ListenAndServe()
+				err = l.srv.Serve(l.ln)
 			}
 			if errors.Is(err, http.ErrServerClosed) {
 				return nil
@@ -166,34 +193,39 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	// Mark ready once listeners are up. Listeners bind synchronously inside
-	// ListenAndServe before serving the first request, so the goroutines
-	// above transition from "g.Go scheduled" to "Listening" near-instantly.
-	// A tiny grace period is not necessary — even if the first request
-	// arrives during this window it would just see 503 from /readyz briefly.
+	// Now that every port is bound, advertise readiness.
 	s.probes.MarkReady()
 
-	// Wait for cancellation or first error.
+	// Wait for cancellation or first listener error.
 	<-gctx.Done()
 	s.probes.MarkUnready()
 	s.log.Info("shutdown initiated")
 
-	// Drain phase. Bound each Shutdown by shutdownTimeout.
+	// Drain phase — run Shutdown concurrently across listeners so one slow
+	// drain can't eat the whole shutdownTimeout budget.
 	shutCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
-	var shutErr error
-	for _, l := range listeners {
-		if l.srv == nil {
-			continue
-		}
-		if err := l.srv.Shutdown(shutCtx); err != nil && shutErr == nil {
-			shutErr = fmt.Errorf("%s shutdown: %w", l.name, err)
-		}
+	var (
+		shutWg  sync.WaitGroup
+		shutMu  sync.Mutex
+		shutErr error
+	)
+	for _, l := range bound {
+		shutWg.Go(func() {
+			if err := l.srv.Shutdown(shutCtx); err != nil {
+				shutMu.Lock()
+				if shutErr == nil {
+					shutErr = fmt.Errorf("%s shutdown: %w", l.name, err)
+				}
+				shutMu.Unlock()
+			}
+		})
 	}
+	shutWg.Wait()
 
 	if err := g.Wait(); err != nil {
-		// If a listener failed (not because of ErrServerClosed), prefer that
-		// error over the shutdown error.
+		// If a listener failed for any reason other than ErrServerClosed,
+		// surface that instead of the shutdown error.
 		return err
 	}
 	return shutErr

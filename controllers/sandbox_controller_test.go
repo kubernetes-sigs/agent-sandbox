@@ -288,6 +288,7 @@ func TestReconcile(t *testing.T) {
 		name                 string
 		initialObjs          []runtime.Object
 		sandboxSpec          sandboxv1beta1.SandboxSpec
+		initialStatus        sandboxv1beta1.SandboxStatus
 		sandboxAnnotations   map[string]string
 		reconcileCount       int
 		deletionTimestamp    *metav1.Time
@@ -343,6 +344,36 @@ func TestReconcile(t *testing.T) {
 								Name: "test-container",
 							},
 						},
+					},
+				},
+			},
+		},
+		{
+			name: "clears stale selector when no pod exists",
+			sandboxSpec: sandboxv1beta1.SandboxSpec{
+				Replicas: new(int32),
+			},
+			initialStatus: sandboxv1beta1.SandboxStatus{
+				Replicas:      1,
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				PodIPs:        []string{"10.0.0.1"},
+			},
+			wantStatus: sandboxv1beta1.SandboxStatus{
+				Replicas: 0,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+						Status:             metav1.ConditionTrue,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+						Message:            "Pod has been terminated. Sandbox is not operational.",
+					},
+					{
+						Type:               string(sandboxv1beta1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonSuspended,
+						Message:            "Sandbox is suspended",
 					},
 				},
 			},
@@ -955,6 +986,7 @@ func TestReconcile(t *testing.T) {
 				sb.Finalizers = []string{"test-finalizer"}
 			}
 			sb.Spec = tc.sandboxSpec
+			sb.Status = tc.initialStatus
 			if tc.sandboxAnnotations != nil {
 				sb.Annotations = tc.sandboxAnnotations
 			}

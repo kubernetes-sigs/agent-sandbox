@@ -97,6 +97,12 @@ def run_python_tests(repo_root):
             subprocess.check_call(
             [venv_pip, "install", "--quiet", "-e", ".[test]"], cwd=package_dir, env=env)
 
+            # Workaround: kubernetes 36.0.0 incorrectly bundles kubernetes_asyncio
+            # files in its wheel, which overwrite the real kubernetes_asyncio package.
+            # Force-reinstall kubernetes_asyncio after kubernetes to restore correct files.
+            subprocess.check_call(
+                [venv_pip, "install", "--quiet", "--force-reinstall", "kubernetes_asyncio"], env=env)
+
         subprocess.check_call(
             [venv_pip, "install", "--quiet", "pytest"], env=env)
 

@@ -7,7 +7,7 @@ package v1beta1
 import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
-	runtime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime"
 	apiv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 

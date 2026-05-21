@@ -1418,7 +1418,7 @@ func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T
 			Name:      "adopted-sandbox",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{
-				{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)},
+				{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)}, // nolint:modernize
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{PodTemplate: sandboxv1beta1.PodTemplate{}},

@@ -69,6 +69,13 @@ func main() {
 		return
 	}
 
+	// Auto-enable tracing / OTel metrics when the corresponding OTLP
+	// endpoint env var is set and the user didn't explicitly pass the
+	// flag. Must run after flag.Parse so flag.Visit can tell us which
+	// flags were set on the command line.
+	config.ApplyPostParseEnvDefaults(flag.CommandLine, &cfg,
+		func(k string) (string, bool) { return os.LookupEnv(k) })
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 	log := ctrl.Log.WithName("sandbox-router")
 

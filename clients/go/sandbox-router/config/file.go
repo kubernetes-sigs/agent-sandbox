@@ -29,17 +29,18 @@ import (
 const EnvConfigFile = "SANDBOX_ROUTER_CONFIG"
 
 // FileFromArgsAndEnv returns the config file path from args (--config
-// FILE, --config=FILE) or, if not present, from the SANDBOX_ROUTER_CONFIG
-// env var. Returns "" when neither source supplies a value.
+// FILE, --config=FILE) or, if no --config flag is present, from the
+// SANDBOX_ROUTER_CONFIG env var. Returns "" when neither source supplies
+// a value.
+//
+// Precedence matches the overall config precedence (CLI > file > env >
+// defaults): an explicit --config flag wins over the env var.
 //
 // This is invoked BEFORE flag.Parse because file values must be applied
 // between flag registration and parsing so CLI flags take precedence.
 func FileFromArgsAndEnv(args []string, lookupEnv func(string) string) string {
 	if lookupEnv == nil {
 		lookupEnv = os.Getenv
-	}
-	if v := lookupEnv(EnvConfigFile); v != "" {
-		return v
 	}
 	for i := range args {
 		a := args[i]
@@ -53,6 +54,9 @@ func FileFromArgsAndEnv(args []string, lookupEnv func(string) string) string {
 		case strings.HasPrefix(a, "-config="):
 			return strings.TrimPrefix(a, "-config=")
 		}
+	}
+	if v := lookupEnv(EnvConfigFile); v != "" {
+		return v
 	}
 	return ""
 }

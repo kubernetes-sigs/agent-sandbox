@@ -44,7 +44,8 @@ func TestFileFromArgsAndEnv(t *testing.T) {
 		{"--config=FILE", []string{"--config=/b.yaml"}, nil, "/b.yaml"},
 		{"-config FILE", []string{"-config", "/c.yaml"}, nil, "/c.yaml"},
 		{"-config=FILE", []string{"-config=/d.yaml"}, nil, "/d.yaml"},
-		{"env loses to args? no: env wins", []string{"--config", "/cli.yaml"}, map[string]string{EnvConfigFile: "/env.yaml"}, "/env.yaml"},
+		{"CLI flag wins over env", []string{"--config", "/cli.yaml"}, map[string]string{EnvConfigFile: "/env.yaml"}, "/cli.yaml"},
+		{"CLI flag (--config=value form) wins over env", []string{"--config=/cli.yaml"}, map[string]string{EnvConfigFile: "/env.yaml"}, "/cli.yaml"},
 		{"none", nil, nil, ""},
 	}
 	for _, tc := range cases {

@@ -25,6 +25,14 @@ import (
 const (
 	EnvClusterDomain = "CLUSTER_DOMAIN"
 	EnvProxyTimeout  = "PROXY_TIMEOUT_SECONDS"
+
+	// Standard OpenTelemetry exporter env vars. When any of these is set
+	// and the corresponding --enable-* flag wasn't explicitly passed on
+	// the command line, the relevant signal is auto-enabled. See
+	// ApplyPostParseEnvDefaults.
+	EnvOTLPEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	EnvOTLPTracesEndpoint  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	EnvOTLPMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 )
 
 // LookupEnvFunc matches the signature of os.LookupEnv. Tests inject a fake.
@@ -32,8 +40,8 @@ type LookupEnvFunc func(string) (string, bool)
 
 // RegisterFlags wires every flag the binary accepts into fs, using c's current
 // values as defaults. Env-var fallbacks for the keys the Python router used
-// (PROXY_TIMEOUT_SECONDS, CLUSTER_DOMAIN, KUBECONFIG) are applied to c BEFORE
-// flag registration so they show up as the default in --help output, and so
+// (PROXY_TIMEOUT_SECONDS, CLUSTER_DOMAIN) are applied to c BEFORE flag
+// registration so they show up as the default in --help output, and so
 // explicit flags override env vars.
 func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 	if lookup == nil {
@@ -84,11 +92,15 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 
 	fs.BoolVar(&c.EnableTracing, "enable-tracing", c.EnableTracing,
 		"Enable OpenTelemetry tracing via OTLP. Endpoint is taken from "+
-			"OTEL_EXPORTER_OTLP_ENDPOINT.")
+			"OTEL_EXPORTER_OTLP_ENDPOINT (or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT). "+
+			"Auto-enabled when either env var is set; pass --enable-tracing=false "+
+			"to override.")
 	fs.BoolVar(&c.EnableOTelMetrics, "enable-otel-metrics", c.EnableOTelMetrics,
 		"Additionally push metrics via OTLP gRPC. The Prometheus /metrics "+
 			"endpoint remains active. Endpoint is taken from "+
-			"OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_METRICS_ENDPOINT.")
+			"OTEL_EXPORTER_OTLP_ENDPOINT (or OTEL_EXPORTER_OTLP_METRICS_ENDPOINT). "+
+			"Auto-enabled when either env var is set; pass --enable-otel-metrics=false "+
+			"to override.")
 	fs.BoolVar(&c.AccessLog, "access-log", c.AccessLog,
 		"Emit one structured log line per inbound request on the proxy "+
 			"port. Health/metrics endpoints are skipped.")
@@ -102,6 +114,41 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Path to a YAML config file with keys matching flag names "+
 			"(kebab-case). Also honors "+EnvConfigFile+". File values override "+
 			"env-var defaults; CLI flags override file values.")
+}
+
+// ApplyPostParseEnvDefaults turns on tracing and / or OTel metrics push
+// when the corresponding OTLP endpoint env var is set AND the user did NOT
+// explicitly pass --enable-tracing / --enable-otel-metrics on the command
+// line.
+//
+// This MUST be called AFTER fs.Parse so we can distinguish "user did not
+// set" (in which case env-driven auto-enable applies) from "user
+// explicitly passed --enable-tracing=false" (in which case the explicit
+// value wins). fs.Visit only iterates flags actually set on the command
+// line, which is exactly the discrimination we need.
+func ApplyPostParseEnvDefaults(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
+	if lookup == nil {
+		lookup = func(string) (string, bool) { return "", false }
+	}
+	setExplicitly := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setExplicitly[f.Name] = true })
+
+	endpointSet := func(specific string) bool {
+		if v, ok := lookup(specific); ok && v != "" {
+			return true
+		}
+		if v, ok := lookup(EnvOTLPEndpoint); ok && v != "" {
+			return true
+		}
+		return false
+	}
+
+	if !setExplicitly["enable-tracing"] && endpointSet(EnvOTLPTracesEndpoint) {
+		c.EnableTracing = true
+	}
+	if !setExplicitly["enable-otel-metrics"] && endpointSet(EnvOTLPMetricsEndpoint) {
+		c.EnableOTelMetrics = true
+	}
 }
 
 // applyEnvDefaults overrides c's defaults with values pulled from the

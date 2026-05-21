@@ -80,8 +80,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
-| `--enable-tracing` | `false` | OTel traces via OTLP gRPC. Endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT`. |
-| `--enable-otel-metrics` | `false` | Additionally push metrics via OTLP gRPC. Prometheus `/metrics` stays active either way. |
+| `--enable-tracing` | auto | OTel traces via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; pass `--enable-tracing=false` to override. |
+| `--enable-otel-metrics` | auto | Additionally push metrics via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set; Prometheus `/metrics` stays active either way. |
 | `--access-log` | `true` | One structured log line per request on the proxy port (skips `/healthz`, `/readyz`, `/metrics`). |
 | `--config` | `""` | Path to a YAML config file. Honors `SANDBOX_ROUTER_CONFIG`. |
 | `--shutdown-timeout` | `30s` | Drain budget on SIGTERM. |

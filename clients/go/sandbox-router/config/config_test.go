@@ -113,6 +113,86 @@ func TestRegisterFlagsOverridesEnv(t *testing.T) {
 	}
 }
 
+func TestApplyPostParseEnvDefaults(t *testing.T) {
+	type expect struct {
+		tracing bool
+		metrics bool
+	}
+	cases := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want expect
+	}{
+		{
+			name: "no env, no flag -> defaults stay off",
+			args: nil,
+			env:  nil,
+			want: expect{tracing: false, metrics: false},
+		},
+		{
+			name: "generic OTLP endpoint set -> both auto-enable",
+			args: nil,
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4317"},
+			want: expect{tracing: true, metrics: true},
+		},
+		{
+			name: "signal-specific traces endpoint -> only tracing",
+			args: nil,
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://t:4317"},
+			want: expect{tracing: true, metrics: false},
+		},
+		{
+			name: "signal-specific metrics endpoint -> only metrics",
+			args: nil,
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://m:4317"},
+			want: expect{tracing: false, metrics: true},
+		},
+		{
+			name: "explicit --enable-tracing=false overrides env auto-enable",
+			args: []string{"--enable-tracing=false"},
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4317"},
+			want: expect{tracing: false, metrics: true},
+		},
+		{
+			name: "explicit --enable-otel-metrics=false overrides env",
+			args: []string{"--enable-otel-metrics=false"},
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4317"},
+			want: expect{tracing: true, metrics: false},
+		},
+		{
+			name: "explicit --enable-tracing=true with no env still on",
+			args: []string{"--enable-tracing=true"},
+			env:  nil,
+			want: expect{tracing: true, metrics: false},
+		},
+		{
+			name: "empty env value is treated as unset",
+			args: nil,
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": ""},
+			want: expect{tracing: false, metrics: false},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Defaults()
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(&strings.Builder{})
+			RegisterFlags(fs, &c, func(string) (string, bool) { return "", false })
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			ApplyPostParseEnvDefaults(fs, &c, fakeEnv(tc.env))
+			if c.EnableTracing != tc.want.tracing {
+				t.Errorf("EnableTracing: got %v want %v", c.EnableTracing, tc.want.tracing)
+			}
+			if c.EnableOTelMetrics != tc.want.metrics {
+				t.Errorf("EnableOTelMetrics: got %v want %v", c.EnableOTelMetrics, tc.want.metrics)
+			}
+		})
+	}
+}
+
 func TestValidate(t *testing.T) {
 	cases := []struct {
 		name    string

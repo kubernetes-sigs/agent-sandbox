@@ -113,6 +113,82 @@ the '--force' flag and manually ensure that any custom configuration
 previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
 is manually re-applied afterwards.
 
+## Maintaining operator manifests
+
+CRDs, ClusterRoles, and the controller Deployment in this module are **copies** of the main Agent Sandbox tree. They are not authored separately under `agent-sandbox-operator/config/`.
+
+### Single source of truth
+
+| Layer | Location | How it changes |
+| --- | --- | --- |
+| API types and kubebuilder markers | [`api/`](../api/), [`extensions/api/`](../extensions/api/) | Edit Go types and controller RBAC markers |
+| Generated install YAML | [`k8s/`](../k8s/) (`crds/`, `rbac.generated.yaml`, `controller.yaml`, `extensions.controller.yaml`, …) | From the **repo root**: `make fix-go-generate` (or `make all`) |
+| Operator SDK / OLM config | `agent-sandbox-operator/config/` | From **this directory**: `make manifests` or `make copy-k8s-config` |
+
+Contributors should **not** hand-edit the synced paths below. Change the upstream API or manifests, regenerate `k8s/`, then refresh the operator config.
+
+### Synced paths (do not edit by hand)
+
+`make copy-k8s-config` (also run as the `manifests` target) copies from `../k8s` (`K8S_ROOT`, default one level above this module):
+
+- `k8s/crds/*.yaml` → `config/crd/bases/`
+- `k8s/rbac.generated.yaml` → `config/rbac/role.yaml`
+- `k8s/extensions-rbac.generated.yaml` → `config/rbac/extensions_role.yaml`
+- `k8s/extensions.yaml` → `config/rbac/extensions_role_binding.yaml`
+- `k8s/controller.yaml` and `k8s/extensions.controller.yaml` → `config/rbac/support.yaml` and `config/manager/manager.yaml` via [`hack/sync-k8s-manifests`](hack/sync-k8s-manifests/) (Namespace, ServiceAccount, bindings, Service, extensions Deployment; image placeholder rewritten for the operator image)
+
+Run from `agent-sandbox-operator/`:
+
+```sh
+make manifests
+# equivalent:
+make copy-k8s-config
+```
+
+Other `make` targets (`test`, `deploy`, `bundle`, …) depend on `manifests` and will run the sync when needed.
+
+### Typical workflow
+
+1. Change API or controller code in the parent repo; run `make fix-go-generate` at the repo root and commit the updated `k8s/` output.
+2. `cd agent-sandbox-operator` and run `make manifests`.
+3. Commit the updated `config/crd/bases/`, `config/rbac/`, and `config/manager/manager.yaml` together with any OLM bundle changes (`make bundle` when publishing).
+
+### Operator-only config (safe to edit)
+
+OLM and kubebuilder scaffolding that are **not** overwritten by `copy-k8s-config` include, for example: `config/manifests/` (ClusterServiceVersion), `config/default/`, `config/prometheus/`, `config/network-policy/`, `config/scorecard/`, and `config/samples/`. Adjust those when changing catalog metadata, metrics wiring, or install UX—not when updating CRD schemas or controller RBAC.
+
+### Releasing a new operator version
+
+From `agent-sandbox-operator/`, after syncing manifests and ensuring the controller image you want is published, set the release version and controller image, generate the OLM bundle, then build and push the bundle image:
+
+```sh
+export VERSION=0.4.6
+export IMG=registry.k8s.io/agent-sandbox/agent-sandbox-controller:v${VERSION}
+
+make bundle
+make bundle-build
+make bundle-push
+```
+
+`make bundle` refreshes `config/` from `../k8s`, stamps the CSV with `VERSION`, and sets the related image to `IMG`. `BUNDLE_IMG` defaults to `agents.x-k8s.io/agent-sandbox-operator-bundle:v${VERSION}`; override it when pushing to your registry (e.g. `make bundle-push BUNDLE_IMG=quay.io/you/agent-sandbox-operator-bundle:v0.4.6`). You need registry credentials and a container runtime (`docker` or `podman`) for `bundle-build` / `bundle-push`.
+
+### Testing a bundle locally
+
+Log in to a Kubernetes cluster that can run OLM (for example OpenShift, or a kind cluster with OLM installed). From `agent-sandbox-operator/`:
+
+```sh
+export VERSION=0.4.6
+export IMG=registry.k8s.io/agent-sandbox/agent-sandbox-controller:v${VERSION}
+
+make bundle
+make bundle-build
+
+export BUNDLE_IMG=your-bundle-image-repo:tag   # must match the image you built
+operator-sdk run bundle ${BUNDLE_IMG}
+```
+
+`operator-sdk run bundle` installs the bundle into the cluster’s OLM namespace so you can subscribe and verify the operator before publishing. Use the same `VERSION`, `IMG`, and `BUNDLE_IMG` you intend to ship.
+
 ## Contributing
 Please read our [Contributing Guidelines](CONTRIBUTING.md) for our full code review and PR policies.
 

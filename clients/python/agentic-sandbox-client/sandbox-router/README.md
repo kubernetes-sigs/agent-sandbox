@@ -61,7 +61,7 @@ In `sandbox_router.yaml` replace `IMAGE_PLACEHOLDER` with the `$SANDBOX_ROUTER_I
 previous step, and then apply the manifest.
 
 ```bash
-sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
+sed -i "s|\${ROUTER_IMAGE}|$SANDBOX_ROUTER_IMG|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml
 ```
 

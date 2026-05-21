@@ -1608,11 +1608,15 @@ func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T
 		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-template", Namespace: "default"},
 		Spec:       extensionsv1beta1.SandboxTemplateSpec{PodTemplate: sandboxv1beta1.PodTemplate{}},
 	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "cleanup-template"}},
+	}
 
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "retain-claim", Namespace: "default", UID: types.UID("retain-claim")},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "cleanup-template"},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "cleanup-warmpool"},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
 				ShutdownTime:   &pastTime,
@@ -1628,7 +1632,7 @@ func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T
 			Name:      "adopted-sandbox",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{
-				{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)},
+				{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)}, // nolint:modernize
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{PodTemplate: sandboxv1beta1.PodTemplate{}},
@@ -1643,7 +1647,7 @@ func TestSandboxClaimCleanupPolicyDeletesAdoptedSandboxByStatusName(t *testing.T
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(template, claim, adoptedSandbox).
+		WithObjects(template, warmPool, claim, adoptedSandbox).
 		WithStatusSubresource(claim).
 		Build()
 

@@ -55,9 +55,8 @@ import (
 )
 
 const (
-	ObservabilityAnnotation   = "agents.x-k8s.io/controller-first-observed-at"
-	immediateRequeueDelay     = time.Millisecond
-	sandboxControllerUIDField = ".metadata.controllerUID"
+	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
+	immediateRequeueDelay   = time.Millisecond
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.

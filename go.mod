@@ -2,6 +2,8 @@ module sigs.k8s.io/agent-sandbox
 
 go 1.26.2
 
+toolchain go1.26.3
+
 require (
 	github.com/felixge/fgprof v0.9.5
 	github.com/go-logr/logr v1.4.3

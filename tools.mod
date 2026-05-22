@@ -2,6 +2,8 @@ module sigs.k8s.io/agent-sandbox
 
 go 1.25.7
 
+toolchain go1.26.3
+
 require (
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0

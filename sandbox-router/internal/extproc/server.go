@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 
@@ -151,7 +152,7 @@ func (s *Server) onRequestHeaders(_ context.Context, hdrs *extprocv3.HttpHeaders
 	if !validNamespace(r.namespace) {
 		return immediate(400, `{"detail":"Invalid namespace format."}`)
 	}
-	if r.port == 0 {
+	if r.port < 1 || r.port == 0 {
 		return immediate(400, `{"detail":"Invalid port format."}`)
 	}
 
@@ -290,11 +291,14 @@ func validNamespace(s string) bool {
 	return hasAlphanum
 }
 
-// joinHostPort formats "host:port" without the IPv6 bracket dance —
-// our cache stores IPv4 addresses or DNS names, never bare IPv6 strings.
-// (Pod IPv6 support would need updating here.)
+// joinHostPort formats "host:port", bracketing IPv6 literals per
+// RFC 3986. Sandbox Pods can have IPv6 PodIPs on dual-stack or
+// IPv6-only clusters (Pod.Status.PodIP is the primary address, which
+// can be v4 or v6); without brackets, Envoy's x-envoy-original-dst-host
+// parser would treat the trailing ":port" as part of the address and
+// reject the value.
 func joinHostPort(host string, port int) string {
-	return host + ":" + strconv.Itoa(port)
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // immediate builds an ImmediateResponse ProcessingResponse that ends the

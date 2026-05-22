@@ -1,0 +1,23 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{.Name}}
+spec:
+  scaleTargetRef:
+    apiVersion: extensions.agents.x-k8s.io/v1beta1
+    kind: SandboxWarmPool
+    name: {{.WarmPoolName}}
+  minReplicas: {{.MinReplicas}}
+  maxReplicas: {{.MaxReplicas}}
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: "{{.MetricName}}"
+        selector:
+          matchLabels:
+            metric.labels.warmpool_name: "{{.WarmPoolName}}"
+            metric.labels.exported_namespace: "{{.Namespace}}"
+      target:
+        type: Value 
+        value: "{{.TargetValue}}"

@@ -7,48 +7,88 @@ spec:
   matchConstraints:
     resourceRules:
     - apiGroups:   ["agents.x-k8s.io"]
-      apiVersions: ["v1alpha1"]
+      apiVersions: ["v1beta1"]
       operations:  ["CREATE", "UPDATE"]
       resources:   ["sandboxes"]
-  
-  # Define a variable to check ALL container types: containers, initContainers, and ephemeralContainers.
+
   variables:
+    # All containers across all list types — used by rules that apply universally.
     - name: allContainers
       expression: >-
         object.spec.podTemplate.spec.containers +
         (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : []) +
         (has(object.spec.podTemplate.spec.ephemeralContainers) ? object.spec.podTemplate.spec.ephemeralContainers : [])
 
+    # Operator-declared trusted init container names, sourced from annotation:
+    #   agents.x-k8s.io/trusted-init-containers: "sidecar-init,other-init"
+    # Only init containers may be named here — the policy enforces this explicitly.
+    # Trusted init containers are exempt from: capability adds (constrained allowlist) and runAsNonRoot.
+    # All other rules (privileged, hostNetwork, hostPID, procMount, etc.) remain unconditional.
+    - name: trustedInitNames
+      expression: >-
+        (has(object.metadata.annotations) &&
+         'agents.x-k8s.io/trusted-init-containers' in object.metadata.annotations)
+        ? object.metadata.annotations['agents.x-k8s.io/trusted-init-containers'].split(',')
+        : []
+
+    - name: trustedInitContainers
+      expression: >-
+        (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : [])
+          .filter(c, c.name in variables.trustedInitNames)
+
+    - name: untrustedInitContainers
+      expression: >-
+        (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : [])
+          .filter(c, !(c.name in variables.trustedInitNames))
+
   validations:
+    # 0a. Trusted Init Annotation Safety — no main or ephemeral containers.
+    # Prevent operators from declaring a main or ephemeral container as trusted.
+    # Since K8s enforces unique names across all container lists, this closes the
+    # only possible bypass: a user cannot name a main container the same as an init container.
+    - expression: >-
+        variables.trustedInitNames.all(name,
+          !object.spec.podTemplate.spec.containers.exists(c, c.name == name) &&
+          (!(has(object.spec.podTemplate.spec.ephemeralContainers)) ||
+           !object.spec.podTemplate.spec.ephemeralContainers.exists(c, c.name == name))
+        )
+      message: "Security Violation: 'agents.x-k8s.io/trusted-init-containers' may only name init containers. Main and ephemeral containers cannot be trusted."
+
+    # 0b. Trusted Init Annotation Safety — no sidecar (continuous) init containers.
+    # K8s 1.28+ allows init containers with restartPolicy: Always, which run for the
+    # entire pod lifetime alongside main containers. A trusted init container with
+    # elevated capabilities that stays alive during agent execution creates an
+    # intra-pod escalation path. Trusted init containers must run to completion and exit.
+    - expression: >-
+        variables.trustedInitContainers.all(c,
+          !has(c.restartPolicy) || c.restartPolicy != 'Always'
+        )
+      message: "Security Violation: Trusted init containers must not use 'restartPolicy: Always'. Sidecar (continuous) init containers cannot be granted elevated capabilities as they remain alive during agent execution."
+
     # 1. Runtime Isolation
-    # All sandboxes must use gVisor to prevent container escape.
     - expression: "has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'gvisor'"
       message: "Security Violation: All Sandboxes must use 'runtimeClassName: gvisor'"
 
     # 2. Network Isolation (Metadata Server Protection)
-    # Host networking allows access to 169.254.169.254 (Node Metadata). This must be blocked.
     - expression: "!has(object.spec.podTemplate.spec.hostNetwork) || object.spec.podTemplate.spec.hostNetwork == false"
       message: "Security Violation: 'hostNetwork: true' is strictly prohibited. Sandboxes must be isolated from the node network."
 
     # 3. Identity Isolation (K8s API Access)
-    # Sandboxes must not mount K8s ServiceAccount tokens to prevent API abuse.
     - expression: "has(object.spec.podTemplate.spec.automountServiceAccountToken) && object.spec.podTemplate.spec.automountServiceAccountToken == false"
       message: "Security Violation: 'automountServiceAccountToken' must be explicitly set to 'false'. Sandbox workloads are not permitted to access the K8s API."
 
-    # 4. Privilege Escalation Prevention
-    # Privileged containers break isolation boundaries.
+    # 4. Privilege Escalation Prevention — unconditional, no exemptions.
     - expression: >-
-        variables.allContainers.all(c, 
-           !has(c.securityContext) || 
+        variables.allContainers.all(c,
+           !has(c.securityContext) ||
            !has(c.securityContext.privileged) ||
            c.securityContext.privileged == false
         )
       message: "Security Violation: Privileged containers are not allowed (checked in containers, initContainers, and ephemeralContainers)."
 
-    # 5. Capabilities Hardening (Defense in Depth)
-    # Drop ALL capabilities.
+    # 5. Capabilities Hardening — all containers must drop ALL, no exemptions.
     - expression: >-
-        variables.allContainers.all(c, 
+        variables.allContainers.all(c,
            has(c.securityContext) &&
            has(c.securityContext.capabilities) &&
            has(c.securityContext.capabilities.drop) &&
@@ -56,86 +96,112 @@ spec:
         )
       message: "Security Violation: All containers must explicitly drop 'ALL' capabilities in securityContext."
 
-    # 6. DoS Protection (Resource Limits)
-    # Prevent noisy neighbors by enforcing memory/cpu limits.
+    # 6. DoS Protection (Resource Limits) — unconditional.
     - expression: >-
-        variables.allContainers.all(c, 
-           has(c.resources) && 
-           has(c.resources.limits) && 
-           has(c.resources.limits.memory) && 
+        variables.allContainers.all(c,
+           has(c.resources) &&
+           has(c.resources.limits) &&
+           has(c.resources.limits.memory) &&
            has(c.resources.limits.cpu)
         )
       message: "Security Violation: All containers must define resource limits (cpu and memory) to prevent DoS."
 
-    # 7. Root User Restriction
-    # Containers must not run as root. Checks Pod-level inheritance and Container-level overrides.
+    # 7. Root User Restriction — main containers and untrusted init containers only.
+    # Trusted init containers may run as root (needed for iptables setup); they exit
+    # before any untrusted code runs so there is no ongoing intra-pod threat.
+    # runAsNonRoot is a hard NO for main containers regardless of any annotation.
     - expression: >-
-        variables.allContainers.all(c, 
+        object.spec.podTemplate.spec.containers.all(c,
           (has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot == true) ||
-          ((!has(c.securityContext) || !has(c.securityContext.runAsNonRoot)) && 
-           has(object.spec.podTemplate.spec.securityContext) && 
-           has(object.spec.podTemplate.spec.securityContext.runAsNonRoot) && 
+          ((!has(c.securityContext) || !has(c.securityContext.runAsNonRoot)) &&
+           has(object.spec.podTemplate.spec.securityContext) &&
+           has(object.spec.podTemplate.spec.securityContext.runAsNonRoot) &&
            object.spec.podTemplate.spec.securityContext.runAsNonRoot == true)
         )
-      message: "Security Violation: Pods or Containers must set 'runAsNonRoot: true', and containers cannot override it to false."
+      message: "Security Violation: Main containers must set 'runAsNonRoot: true'. Root is not permitted in main containers."
+
+    - expression: >-
+        variables.untrustedInitContainers.all(c,
+          (has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot == true) ||
+          ((!has(c.securityContext) || !has(c.securityContext.runAsNonRoot)) &&
+           has(object.spec.podTemplate.spec.securityContext) &&
+           has(object.spec.podTemplate.spec.securityContext.runAsNonRoot) &&
+           object.spec.podTemplate.spec.securityContext.runAsNonRoot == true)
+        )
+      message: "Security Violation: Init containers must set 'runAsNonRoot: true', or be declared in 'agents.x-k8s.io/trusted-init-containers'."
 
     # 8. Identity Isolation (Projected Volumes)
-    # Blocks manual mounting of ServiceAccount tokens, ClusterTrustBundles, and PodCertificates.
     - expression: >-
         !has(object.spec.podTemplate.spec.volumes) ||
-        !object.spec.podTemplate.spec.volumes.exists(v, 
-           has(v.projected) && 
-           has(v.projected.sources) && 
+        !object.spec.podTemplate.spec.volumes.exists(v,
+           has(v.projected) &&
+           has(v.projected.sources) &&
            v.projected.sources.exists(s, has(s.serviceAccountToken) || has(s.clusterTrustBundle) || has(s.podCertificate))
         )
       message: "Security Violation: Projected Service Account Tokens, ClusterTrustBundles, and PodCertificates are prohibited."
 
     # 9. Filesystem Isolation (HostPath)
-    # HostPath volumes allow attackers to access the underlying node filesystem.
     - expression: >-
         !has(object.spec.podTemplate.spec.volumes) ||
         !object.spec.podTemplate.spec.volumes.exists(v, has(v.hostPath))
       message: "Security Violation: HostPath volumes are strictly prohibited. You cannot mount host directories."
-    
-    # 10. Capabilities Hardening (No Adds)
-    # Prevent adding dangerous capabilities back after dropping them.
+
+    # 10a. Capabilities — no adds on main containers or ephemeral containers, ever.
     - expression: >-
-        variables.allContainers.all(c, 
+        object.spec.podTemplate.spec.containers.all(c,
+           !has(c.securityContext) ||
+           !has(c.securityContext.capabilities) ||
+           !has(c.securityContext.capabilities.add) ||
+           size(c.securityContext.capabilities.add) == 0
+        ) &&
+        (!(has(object.spec.podTemplate.spec.ephemeralContainers)) ||
+         object.spec.podTemplate.spec.ephemeralContainers.all(c,
+           !has(c.securityContext) ||
+           !has(c.securityContext.capabilities) ||
+           !has(c.securityContext.capabilities.add) ||
+           size(c.securityContext.capabilities.add) == 0
+        ))
+      message: "Security Violation: Capabilities.add must be empty on main and ephemeral containers."
+
+    # 10b. Capabilities — no adds on untrusted init containers.
+    - expression: >-
+        variables.untrustedInitContainers.all(c,
            !has(c.securityContext) ||
            !has(c.securityContext.capabilities) ||
            !has(c.securityContext.capabilities.add) ||
            size(c.securityContext.capabilities.add) == 0
         )
-      message: "Security Violation: Capabilities.add must be empty. You cannot add capabilities."
-    
-    # 11. Process & IPC Isolation
-    # Prevent sharing PID/IPC namespaces with the host.
+      message: "Security Violation: Capabilities.add must be empty. Declare the init container in 'agents.x-k8s.io/trusted-init-containers' to allow capability adds."
+
+    # 10c. Capabilities — trusted init containers may add any capability.
+    # The operator has explicitly declared trust via the annotation. The only hard
+    # constraint is rule 0b: they must not use restartPolicy: Always, ensuring they
+    # run to completion and exit before the agent workload starts.
+
+    # 11. Process & IPC Isolation — unconditional.
     - expression: >-
-        (!has(object.spec.podTemplate.spec.hostPID) || object.spec.podTemplate.spec.hostPID == false) && 
+        (!has(object.spec.podTemplate.spec.hostPID) || object.spec.podTemplate.spec.hostPID == false) &&
         (!has(object.spec.podTemplate.spec.hostIPC) || object.spec.podTemplate.spec.hostIPC == false)
       message: "Security Violation: 'hostPID' and 'hostIPC' must be false."
 
-    # 12. Network Isolation (HostPort)
-    # Binding to a host port allows bypassing network policy and claiming node resources.
+    # 12. Network Isolation (HostPort) — unconditional.
     - expression: >-
-        variables.allContainers.all(c, 
-          !has(c.ports) || 
+        variables.allContainers.all(c,
+          !has(c.ports) ||
           c.ports.all(p, !has(p.hostPort))
         )
       message: "Security Violation: 'hostPort' usage is prohibited."
 
-    # 13. Kernel Hardening (Sysctls)
-    # Prevent modifying kernel parameters.
+    # 13. Kernel Hardening (Sysctls) — unconditional.
     - expression: >-
         !has(object.spec.podTemplate.spec.securityContext) ||
         !has(object.spec.podTemplate.spec.securityContext.sysctls) ||
         size(object.spec.podTemplate.spec.securityContext.sysctls) == 0
       message: "Security Violation: Custom 'sysctls' are prohibited."
 
-    # 14. Filesystem Hardening (ProcMount)
-    # Prevent unmasking /proc paths (which could leak host info).
+    # 14. Filesystem Hardening (ProcMount) — unconditional.
     - expression: >-
-        variables.allContainers.all(c, 
+        variables.allContainers.all(c,
            !has(c.securityContext) ||
            !has(c.securityContext.procMount) ||
            c.securityContext.procMount == 'Default'
@@ -143,20 +209,18 @@ spec:
       message: "Security Violation: 'procMount' must be 'Default' (Unmasked is prohibited)."
 
     # 15. GKE Scheduling (Node Selector)
-    # Ensure the workload lands on a node capable of running gVisor.
     - expression: >-
-        has(object.spec.podTemplate.spec.nodeSelector) && 
-        'sandbox.gke.io/runtime' in object.spec.podTemplate.spec.nodeSelector && 
+        has(object.spec.podTemplate.spec.nodeSelector) &&
+        'sandbox.gke.io/runtime' in object.spec.podTemplate.spec.nodeSelector &&
         object.spec.podTemplate.spec.nodeSelector['sandbox.gke.io/runtime'] == 'gvisor'
       message: "Scheduling Violation: Sandboxes must be scheduled on gVisor nodes (nodeSelector 'sandbox.gke.io/runtime: gvisor')."
 
     # 16. GKE Scheduling (Tolerations)
-    # Ensure the workload can tolerate the gVisor taint.
     - expression: >-
-         has(object.spec.podTemplate.spec.tolerations) &&
-         object.spec.podTemplate.spec.tolerations.exists(t, 
-           t.key == 'sandbox.gke.io/runtime' && 
-           t.value == 'gvisor' && 
-           t.effect == 'NoSchedule'
-         )
+        has(object.spec.podTemplate.spec.tolerations) &&
+        object.spec.podTemplate.spec.tolerations.exists(t,
+          t.key == 'sandbox.gke.io/runtime' &&
+          t.value == 'gvisor' &&
+          t.effect == 'NoSchedule'
+        )
       message: "Scheduling Violation: Sandboxes must tolerate the gVisor taint ('sandbox.gke.io/runtime=gvisor:NoSchedule')."

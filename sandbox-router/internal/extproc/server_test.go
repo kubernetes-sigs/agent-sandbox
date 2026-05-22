@@ -270,8 +270,44 @@ func TestReadHeaders_AcceptsBothRawAndStringValues(t *testing.T) {
 }
 
 func TestJoinHostPort(t *testing.T) {
-	if got := joinHostPort("10.0.0.1", 8888); got != "10.0.0.1:8888" {
-		t.Errorf("joinHostPort got %q", got)
+	cases := []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{"ipv4", "10.0.0.1", 8888, "10.0.0.1:8888"},
+		{"dns", "alpha.default.svc.cluster.local", 8888, "alpha.default.svc.cluster.local:8888"},
+		// IPv6 literals must be bracketed per RFC 3986, otherwise the
+		// trailing colon-port is ambiguous with the address itself. Pod
+		// IPs on dual-stack / IPv6-only clusters surface as bare IPv6
+		// strings in Pod.Status.PodIP.
+		{"ipv6 loopback", "::1", 8888, "[::1]:8888"},
+		{"ipv6 link-local", "fe80::1", 9090, "[fe80::1]:9090"},
+		{"ipv6 full", "2001:db8::1", 8888, "[2001:db8::1]:8888"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := joinHostPort(tc.host, tc.port); got != tc.want {
+				t.Errorf("joinHostPort(%q, %d) = %q, want %q", tc.host, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolve_IPv6PodIPGetsBracketed(t *testing.T) {
+	s, stub := newServer(t)
+	uid := types.UID("v6-uid")
+	stub[uid] = cache.Entry{PodIP: "2001:db8::42"}
+
+	target, source := s.resolve(request{
+		id: "alpha", uid: string(uid), namespace: "default", port: 8888,
+	})
+	if target != "[2001:db8::42]:8888" {
+		t.Errorf("target: got %q want [2001:db8::42]:8888", target)
+	}
+	if source != "cache" {
+		t.Errorf("source: got %q want cache", source)
 	}
 }
 

@@ -638,7 +638,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		LabelSelector: labelSelector,
 		Namespace:     sandbox.Namespace,
 	}); err != nil {
-		logger.Error(err, "Failed to list pods")
+		return nil, fmt.Errorf("failed to list pods for sandbox %s/%s with label selector %s: %w", sandbox.Namespace, sandbox.Name, labelSelector, err)
 	}
 
 	if len(podList.Items) > 1 {
@@ -885,12 +885,12 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
-		for k := range propagatedLabels {
-			if k == "" {
+		for labelKey := range propagatedLabels {
+			if labelKey == "" {
 				continue
 			}
-			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
-				delete(pod.Labels, k)
+			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[labelKey]; !ok {
+				delete(pod.Labels, labelKey)
 				updated = true
 			}
 		}
@@ -913,12 +913,12 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	propagatedAnnotationsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation]
 	if propagatedAnnotationsStr != "" {
 		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
-		for k := range propagatedAnnotations {
-			if k == "" {
+		for annotationKey := range propagatedAnnotations {
+			if annotationKey == "" {
 				continue
 			}
-			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {
-				delete(pod.Annotations, k)
+			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[annotationKey]; !ok {
+				delete(pod.Annotations, annotationKey)
 				updated = true
 			}
 		}

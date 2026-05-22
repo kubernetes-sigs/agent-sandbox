@@ -113,6 +113,13 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return err
 		}
 		resp := s.handle(stream.Context(), req)
+		if resp == nil {
+			// Unknown ProcessingRequest phase (newer Envoy variant we
+			// don't recognize). Skipping the Send keeps the stream open
+			// and lets Envoy decide what to do; sending a wrong-phase
+			// reply would abort it.
+			continue
+		}
 		if err := stream.Send(resp); err != nil {
 			return err
 		}
@@ -122,21 +129,73 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 // handle is the side-effect-free part of Process. Returns the response to
 // send back to Envoy. Header decisions never need to abort the stream —
 // validation failures come back as ImmediateResponse, not stream errors.
+//
+// Phases other than REQUEST_HEADERS return a phase-matched CONTINUE: the
+// ext_proc spec requires the ProcessingResponse oneof variant to match
+// the ProcessingRequest oneof variant (a ResponseBody request answered
+// with a RequestHeaders envelope is a protocol violation that aborts
+// the stream). The Envoy processing_mode config should have suppressed
+// these phases at the source, but we stay protocol-correct in case it
+// drifts.
 func (s *Server) handle(ctx context.Context, req *extprocv3.ProcessingRequest) *extprocv3.ProcessingResponse {
 	switch r := req.Request.(type) {
 	case *extprocv3.ProcessingRequest_RequestHeaders:
 		return s.onRequestHeaders(ctx, r.RequestHeaders)
 	default:
-		// Any other phase (request body / response headers / etc.) — just
-		// continue. Envoy's processing_mode config should have prevented
-		// these from being sent at all.
+		return continueFor(req)
+	}
+}
+
+// continueFor returns a CONTINUE-equivalent ProcessingResponse whose
+// oneof variant matches req's. Used as the no-op reply for off-mode
+// phases. TrailersResponse carries no CommonResponse field (its only
+// payload is an optional HeaderMutation), so its CONTINUE-equivalent
+// is an empty TrailersResponse — Envoy treats absent HeaderMutation as
+// "no change, proceed". Returns nil for unknown oneof variants (newer
+// Envoy phases we don't know about); Process drops nil responses
+// rather than sending a phase-mismatched envelope.
+func continueFor(req *extprocv3.ProcessingRequest) *extprocv3.ProcessingResponse {
+	common := &extprocv3.CommonResponse{Status: extprocv3.CommonResponse_CONTINUE}
+
+	switch req.Request.(type) {
+	case *extprocv3.ProcessingRequest_RequestHeaders:
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestHeaders{
-				RequestHeaders: &extprocv3.HeadersResponse{
-					Response: &extprocv3.CommonResponse{Status: extprocv3.CommonResponse_CONTINUE},
-				},
+				RequestHeaders: &extprocv3.HeadersResponse{Response: common},
 			},
 		}
+	case *extprocv3.ProcessingRequest_ResponseHeaders:
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseHeaders{
+				ResponseHeaders: &extprocv3.HeadersResponse{Response: common},
+			},
+		}
+	case *extprocv3.ProcessingRequest_RequestBody:
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_RequestBody{
+				RequestBody: &extprocv3.BodyResponse{Response: common},
+			},
+		}
+	case *extprocv3.ProcessingRequest_ResponseBody:
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseBody{
+				ResponseBody: &extprocv3.BodyResponse{Response: common},
+			},
+		}
+	case *extprocv3.ProcessingRequest_RequestTrailers:
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_RequestTrailers{
+				RequestTrailers: &extprocv3.TrailersResponse{},
+			},
+		}
+	case *extprocv3.ProcessingRequest_ResponseTrailers:
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseTrailers{
+				ResponseTrailers: &extprocv3.TrailersResponse{},
+			},
+		}
+	default:
+		return nil
 	}
 }
 

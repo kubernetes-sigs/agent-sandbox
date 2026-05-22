@@ -140,11 +140,7 @@ func run(log logr.Logger, cfg runConfig) error {
 	grpcSrv := grpc.NewServer()
 	extprocv3.RegisterExternalProcessorServer(grpcSrv, srv)
 
-	// Health server — NOT_SERVING until informer.HasSynced(); Envoy's
-	// gRPC health check sees this and routes around us until ready.
-	healthSrv := health.NewServer()
-	healthSrv.SetServingStatus(healthServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
-	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	healthSrv := newHealthServer()
 	healthpb.RegisterHealthServer(grpcSrv, healthSrv)
 
 	go func() {
@@ -153,7 +149,6 @@ func run(log logr.Logger, cfg runConfig) error {
 		if cch.WaitForSync(syncCtx) {
 			log.Info("informer synced; advertising READY")
 			healthSrv.SetServingStatus(healthServiceName, healthpb.HealthCheckResponse_SERVING)
-			healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 		} else {
 			log.Error(nil, "informer failed to sync within timeout; staying NOT_SERVING")
 		}
@@ -181,10 +176,12 @@ func run(log logr.Logger, cfg runConfig) error {
 		return fmt.Errorf("grpc serve: %w", err)
 	}
 
-	// Flip health to NOT_SERVING immediately so Envoy stops routing new
-	// streams here while the existing ones drain.
+	// Flip the named (readiness-gating) service to NOT_SERVING so Envoy
+	// and the kubelet readinessProbe stop routing new streams while
+	// in-flight ones drain. Leave the default service ("") SERVING —
+	// flipping it would make the kubelet livenessProbe fail mid-drain
+	// and SIGKILL us before GracefulStop finishes.
 	healthSrv.SetServingStatus(healthServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
-	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 
 	// Graceful shutdown: drain in-flight streams, then close listeners.
 	// Bounded by shutdownGrace; if drain stalls, fall back to a hard stop.
@@ -201,4 +198,29 @@ func run(log logr.Logger, cfg runConfig) error {
 		<-drained
 	}
 	return nil
+}
+
+// newHealthServer returns a grpc/health.Server with two services
+// reported separately, by design:
+//
+//   - The NAMED service (envoy.service.ext_proc.v3.ExternalProcessor)
+//     gates readiness: NOT_SERVING until the informer cache has synced.
+//     Envoy's gRPC health check and the kubelet readinessProbe both
+//     target this service, so neither sends real traffic until we can
+//     resolve UIDs.
+//
+//   - The DEFAULT service ("") gates liveness only: SERVING from the
+//     moment the gRPC server is up, period. The kubelet livenessProbe
+//     targets the empty service name. Coupling it to informer sync
+//     would mean a slow initial LIST (large cluster, throttled
+//     apiserver) blows past the liveness window and the kubelet
+//     restart-loops the pod forever, never letting sync complete.
+//
+// Exported as a helper so the test in main_test.go can pin this split
+// without spinning up the full process.
+func newHealthServer() *health.Server {
+	h := health.NewServer()
+	h.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	h.SetServingStatus(healthServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
+	return h
 }

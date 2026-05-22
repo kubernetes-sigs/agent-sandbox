@@ -38,6 +38,7 @@ type Metrics struct {
 	CertReloadsTotal        *prometheus.CounterVec
 	UpstreamRetriesTotal    *prometheus.CounterVec
 	CacheInvalidationsTotal *prometheus.CounterVec
+	AuthzDecisionsTotal     *prometheus.CounterVec
 	BuildInfo               prometheus.Collector
 }
 
@@ -82,6 +83,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help: "Pod-IP cache entries evicted by the proxy after a dial-class failure on a cached IP (KEP-NNNN active invalidation).",
 		}, []string{"sandbox_namespace"}),
 
+		AuthzDecisionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandbox_router_authz_decisions_total",
+			Help: "Per-request authorization outcomes, labeled by sandbox namespace and decision (allow / deny).",
+		}, []string{"sandbox_namespace", "decision"}),
+
 		BuildInfo: buildInfoCollector(),
 	}
 
@@ -93,6 +99,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.CertReloadsTotal,
 		m.UpstreamRetriesTotal,
 		m.CacheInvalidationsTotal,
+		m.AuthzDecisionsTotal,
 		m.BuildInfo,
 	)
 	return m

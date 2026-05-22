@@ -112,6 +112,24 @@ For every inbound request, the proxy resolves the upstream in this order: explic
 
 **When to leave it off.** The DNS-only mode (default) is appropriate for small deployments, for clusters where you don't want to grant Pod read permissions to the router, or for testing. Everything else continues to work — the cache is purely additive.
 
+## Authorization
+
+The router runs every request through an `authz.Authorizer` after header parsing and before resolving the upstream. The default — and the only one wired by `main.go` today — is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded.
+
+The `Authorizer` interface is intentionally simple:
+
+```go
+type Authorizer interface {
+    Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error
+}
+```
+
+Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (TLS client cert via `authz.IdentityFromTLS`, Bearer token via `authz.BearerTokenFromRequest`, custom header) directly off the request.
+
+The `sandbox_router_authz_decisions_total{decision="allow|deny",sandbox_namespace="…"}` counter records every verdict so deployments can see whether `AllowAll` is actually allowing the traffic shape they expect.
+
+A KEP-NNNN-aligned TokenReview-based authorizer that validates Bearer tokens against the cluster authn API ships alongside this — see the section that follows.
+
 ## TLS / mTLS
 
 The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read from `--tls-cert-file` and `--tls-key-file`. Both files are watched: writing a new file (atomic rename, like Kubernetes Secret projection) triggers an automatic reload with no pod restart.
@@ -138,6 +156,7 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_upstream_errors_total` | counter | `sandbox_namespace`, `reason` (`dial` / `timeout` / `tls` / `eof` / `other`) |
 | `sandbox_router_upstream_retries_total` | counter | `sandbox_namespace` |
 | `sandbox_router_cache_invalidations_total` | counter | `sandbox_namespace` (KEP-NNNN active invalidation: bumped when the proxy evicts a cached IP after a dial failure) |
+| `sandbox_router_authz_decisions_total` | counter | `sandbox_namespace`, `decision` (`allow` / `deny`) |
 | `sandbox_router_cert_reloads_total` | counter | `outcome` (`success` / `failure`) |
 | `sandbox_router_build_info` | gauge (const labels) | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` |
 

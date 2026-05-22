@@ -23,8 +23,9 @@ from shared import utils
 def _get_version_build_args():
     """Returns build args for version info injection into Go binaries."""
     import datetime
-    git_version = utils.git_describe()
-    git_sha = utils.git_sha()
+    import shlex
+    git_version = shlex.quote(utils.git_describe())
+    git_sha = shlex.quote(utils.git_sha())
     build_date = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     return [
         f"--build-arg=GIT_VERSION={git_version}",

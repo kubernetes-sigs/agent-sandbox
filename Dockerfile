@@ -25,7 +25,7 @@ COPY internal/ ./internal/
 
 # Build the binary with optimizations
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
-    -ldflags="-s -w -X sigs.k8s.io/agent-sandbox/internal/version.gitVersion=${GIT_VERSION} -X sigs.k8s.io/agent-sandbox/internal/version.gitSHA=${GIT_SHA} -X sigs.k8s.io/agent-sandbox/internal/version.buildDate=${BUILD_DATE}" \
+    -ldflags="-s -w -X sigs.k8s.io/agent-sandbox/internal/version.gitVersion='${GIT_VERSION}' -X sigs.k8s.io/agent-sandbox/internal/version.gitSHA='${GIT_SHA}' -X sigs.k8s.io/agent-sandbox/internal/version.buildDate='${BUILD_DATE}'" \
     -o /agent-sandbox-controller ./cmd/agent-sandbox-controller
 
 

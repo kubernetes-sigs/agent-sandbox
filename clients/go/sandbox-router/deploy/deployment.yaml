@@ -63,6 +63,11 @@ spec:
         # Retry budget for upstream dial failures; see README "Behavior on
         # missing sandboxes".
         - --upstream-max-retries=3
+        # KEP-NNNN: enable the Pod-IP cache so requests carrying
+        # X-Sandbox-UID dial the live PodIP and bypass DNS. Requires
+        # the ClusterRole granted in rbac.yaml. Set to false (and skip
+        # rbac.yaml) to fall back to DNS-only routing.
+        - --cache-enabled=true
         ports:
         - name: proxy
           containerPort: 8080

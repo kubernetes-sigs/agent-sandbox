@@ -29,13 +29,20 @@ The router **never** creates or looks up Sandbox resources. If the target sandbo
 | Header | Required | Default | Notes |
 |---|---|---|---|
 | `X-Sandbox-ID` | yes | — | Sandbox pod name. Used as the host component of the DNS form. |
+| `X-Sandbox-UID` | no | — | Sandbox CR UID. When `--cache-enabled=true` and the Pod-IP cache has an entry for this UID, the router dials the cached live PodIP and bypasses DNS — the KEP-NNNN fast path. Cache miss falls through to DNS form. |
 | `X-Sandbox-Namespace` | no | `default` | Must be ASCII letters / digits / hyphens, with at least one alphanumeric. |
 | `X-Sandbox-Port` | no | `8888` | Numeric. |
-| `X-Sandbox-Pod-IP` | no | — | When set, bypasses DNS and dials this IP directly. |
+| `X-Sandbox-Pod-IP` | no | — | When set, bypasses both cache and DNS and dials this IP directly. |
+
+Resolution priority (first match wins):
+
+1. `X-Sandbox-Pod-IP` — explicit caller override, used by SDKs that already know the Pod IP.
+2. Cache lookup by `X-Sandbox-UID` — KEP-NNNN's secure fast path. Only attempted when `--cache-enabled=true` and the UID header is present.
+3. DNS form — always works without informer cache or UID, matches the Python router's behavior.
 
 The router constructs the upstream URL as:
 - DNS form: `http://<ID>.<Namespace>.svc.<cluster-domain>:<port>/<path>?<query>`
-- Pod-IP form: `http://<Pod-IP>:<port>/<path>?<query>`
+- Pod-IP form (cache hit or override): `http://<Pod-IP>:<port>/<path>?<query>`
 
 It strips the inbound `Host` header before forwarding so `net/http` uses the upstream URL's host. All other headers pass through.
 
@@ -80,11 +87,30 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
+| `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
+| `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
+| `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |
 | `--enable-tracing` | auto | OTel traces via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; pass `--enable-tracing=false` to override. |
 | `--enable-otel-metrics` | auto | Additionally push metrics via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set; Prometheus `/metrics` stays active either way. |
 | `--access-log` | `true` | One structured log line per request on the proxy port (skips `/healthz`, `/readyz`, `/metrics`). |
 | `--config` | `""` | Path to a YAML config file. Honors `SANDBOX_ROUTER_CONFIG`. |
 | `--shutdown-timeout` | `30s` | Drain budget on SIGTERM. |
+
+## Pod-IP cache (KEP-NNNN fast path)
+
+When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes — not the size of the cluster.
+
+For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → cache lookup by `X-Sandbox-UID` → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. Cache misses fall through to DNS — the router never refuses to route a request just because the cache is cold or out of sync.
+
+**Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails (the Pod was rescheduled and the cache hasn't caught up), the cache entry is evicted immediately so the next request for the same UID falls through to DNS instead of retrying the same stale IP. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
+
+**Cache content.** Only Pods that pass `PodReady=True` and have a non-empty `Status.PodIP` are stored. Pods that flip out of Ready are removed automatically by the informer event handler so traffic doesn't get steered at a degraded Pod.
+
+**RBAC.** Cluster-wide `get`, `list`, `watch` on `pods`. The example `deploy/rbac.yaml` is a `ClusterRole` + `ClusterRoleBinding`; narrow to a `RoleBinding` when `--cache-namespace` is set.
+
+**Readiness gating.** The router's `/readyz` does not flip to ready until the initial Pod LIST has completed. A misconfigured RBAC therefore fails fast at startup rather than silently degrading the router to DNS-only service.
+
+**When to leave it off.** The DNS-only mode (default) is appropriate for small deployments, for clusters where you don't want to grant Pod read permissions to the router, or for testing. Everything else continues to work — the cache is purely additive.
 
 ## TLS / mTLS
 
@@ -111,6 +137,7 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_inflight_requests` | gauge | — |
 | `sandbox_router_upstream_errors_total` | counter | `sandbox_namespace`, `reason` (`dial` / `timeout` / `tls` / `eof` / `other`) |
 | `sandbox_router_upstream_retries_total` | counter | `sandbox_namespace` |
+| `sandbox_router_cache_invalidations_total` | counter | `sandbox_namespace` (KEP-NNNN active invalidation: bumped when the proxy evicts a cached IP after a dial failure) |
 | `sandbox_router_cert_reloads_total` | counter | `outcome` (`success` / `failure`) |
 | `sandbox_router_build_info` | gauge (const labels) | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` |
 

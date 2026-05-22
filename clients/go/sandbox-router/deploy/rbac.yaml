@@ -1,0 +1,40 @@
+# RBAC for the sandbox-router's Pod-IP cache (KEP-NNNN fast path).
+#
+# The router watches sandbox-owned Pods so it can dial the live PodIP
+# instead of hitting cluster DNS on every request. The informer requires
+# get/list/watch on Pods cluster-wide (or scoped to a single namespace
+# via --cache-namespace, in which case a RoleBinding is appropriate
+# instead of a ClusterRoleBinding).
+#
+# Skip these manifests entirely when running the router with
+# --cache-enabled=false (the DNS-only default).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-router
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+rules:
+# Pod read access for the informer cache. The cache uses a server-side
+# label selector to narrow the watch to sandbox-owned Pods, but the API
+# permission grant cannot be label-scoped.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-router
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-router
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: default

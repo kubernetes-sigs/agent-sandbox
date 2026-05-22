@@ -24,6 +24,7 @@ import (
 // integrations have a single source of truth.
 const (
 	HeaderSandboxID        = "X-Sandbox-Id"
+	HeaderSandboxUID       = "X-Sandbox-Uid"
 	HeaderSandboxNamespace = "X-Sandbox-Namespace"
 	HeaderSandboxPort      = "X-Sandbox-Port"
 	HeaderSandboxPodIP     = "X-Sandbox-Pod-Ip"
@@ -40,11 +41,20 @@ type Target struct {
 	// ID is the sandbox identifier from X-Sandbox-ID. Used as the host
 	// component of the DNS form (and as a free-form label in logs/traces).
 	ID string
+	// UID is the Sandbox CR UID from X-Sandbox-UID. When the proxy is
+	// running with a Pod informer cache attached, this is the key used to
+	// look up the live PodIP — bypassing DNS resolution for the fast
+	// secure path described in KEP-NNNN. Empty when the client did not
+	// supply the header; DNS-form routing still works.
+	UID string
 	// Namespace is the Kubernetes namespace of the sandbox.
 	Namespace string
 	// Port is the upstream port.
 	Port int
-	// PodIP is the optional direct pod IP. When set, DNS lookup is bypassed.
+	// PodIP is the optional direct pod IP from X-Sandbox-Pod-IP. When set,
+	// both DNS and cache lookups are bypassed and the proxy dials this IP
+	// directly. Lets a caller (typically an SDK that just created the
+	// Sandbox) skip the discovery hop entirely.
 	PodIP string
 }
 
@@ -76,6 +86,7 @@ func ParseSandboxHeaders(h http.Header) (Target, *Error) {
 
 	return Target{
 		ID:        id,
+		UID:       h.Get(HeaderSandboxUID),
 		Namespace: ns,
 		Port:      port,
 		PodIP:     h.Get(HeaderSandboxPodIP),

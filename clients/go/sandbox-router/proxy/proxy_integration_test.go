@@ -28,8 +28,12 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/types"
 
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
 )
 
 // newRouter builds a Handler that routes to backend via X-Sandbox-Pod-IP.
@@ -217,6 +221,118 @@ func TestIntegration_UpstreamConnectErrorReturns502(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(body), `{"detail":`) {
 		t.Errorf("body should be JSON detail shape; got %q", body)
+	}
+}
+
+// stubLookup is a minimal Lookup for integration tests of cache wiring.
+type stubLookup struct {
+	entries     map[types.UID]cache.Entry
+	invalidated []types.UID
+}
+
+func (s *stubLookup) Get(uid types.UID) (cache.Entry, bool) {
+	e, ok := s.entries[uid]
+	return e, ok
+}
+
+func (s *stubLookup) Invalidate(uid types.UID) bool {
+	_, ok := s.entries[uid]
+	delete(s.entries, uid)
+	s.invalidated = append(s.invalidated, uid)
+	return ok
+}
+
+// TestIntegration_CacheInvalidationOnDialError exercises the KEP-NNNN
+// active invalidation: when the proxy dials a cached IP and the dial
+// fails, the cache entry is evicted so the next request for the same UID
+// falls through to DNS instead of retrying the stale IP.
+func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.ResponseHeaderTimeout = 1 * time.Second
+	// Disable retries so a single dial failure shows up cleanly as one
+	// upstream error and one invalidation.
+	cfg.UpstreamMaxRetries = 0
+
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"sandbox-uid-xyz": {PodIP: "127.0.0.1", SandboxName: "s", Namespace: "ns"},
+	}}
+
+	reg := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(reg)
+
+	router := httptest.NewServer(NewHandler(Options{
+		Config:  &cfg,
+		Cache:   lookup,
+		Metrics: metrics,
+		Logger:  logr.Discard(),
+	}))
+	defer router.Close()
+
+	// Dial 127.0.0.1:1 — nothing listens there, so the proxy will hit a
+	// dial-class error and the ErrorHandler must invalidate the cache
+	// entry for the UID we passed in.
+	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
+	req.Header.Set(HeaderSandboxID, "s")
+	req.Header.Set(HeaderSandboxUID, "sandbox-uid-xyz")
+	req.Header.Set(HeaderSandboxNamespace, "ns")
+	req.Header.Set(HeaderSandboxPort, "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502", resp.StatusCode)
+	}
+
+	if len(lookup.invalidated) != 1 || lookup.invalidated[0] != "sandbox-uid-xyz" {
+		t.Fatalf("expected one invalidation for sandbox-uid-xyz, got %v", lookup.invalidated)
+	}
+	if _, still := lookup.entries["sandbox-uid-xyz"]; still {
+		t.Fatalf("entry should have been removed from cache")
+	}
+}
+
+// TestIntegration_NoInvalidationOnDNSDialError ensures we do NOT
+// invalidate when the dial failure was on the DNS path — there is no
+// cache entry to evict, and calling Invalidate would still trigger the
+// metric, which would be misleading.
+func TestIntegration_NoInvalidationOnDNSDialError(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.ResponseHeaderTimeout = 1 * time.Second
+	cfg.UpstreamMaxRetries = 0
+
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{}}
+
+	router := httptest.NewServer(NewHandler(Options{
+		Config: &cfg,
+		Cache:  lookup,
+		Logger: logr.Discard(),
+	}))
+	defer router.Close()
+
+	// Pod-IP override means SourcePodIP, not SourceCache — invalidation
+	// must not fire even with a UID present.
+	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
+	req.Header.Set(HeaderSandboxID, "s")
+	req.Header.Set(HeaderSandboxUID, "some-uid")
+	req.Header.Set(HeaderSandboxNamespace, "ns")
+	req.Header.Set(HeaderSandboxPodIP, "127.0.0.1")
+	req.Header.Set(HeaderSandboxPort, "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502", resp.StatusCode)
+	}
+	if len(lookup.invalidated) != 0 {
+		t.Fatalf("expected no invalidations, got %v", lookup.invalidated)
 	}
 }
 

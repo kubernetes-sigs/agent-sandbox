@@ -93,6 +93,10 @@ ENABLE_HPA=true ENABLE_CAPACITY_BUFFER=true WARMPOOL_SIZE=10 ./run_rapid_burst.s
 
 When `ENABLE_CAPACITY_BUFFER=true` is set, the test automatically introduces a 5-minute pause after creating the `CapacityBuffer` resource to allow GKE node auto-provisioning to spin up the required standby nodes before initiating the rapid burst loops.
 
+> [!NOTE]
+> **GKE Cluster Autoscaler CRD Version Caching Issue:**
+> If you recently upgraded `SandboxWarmPool` CRD versions in your cluster (e.g., from `v1alpha1` to `v1beta1`), the GKE Cluster Autoscaler (CA) may fail, resulting in `there is no pod template reference in buffer status` errors. This is a known GKE issue where the Cluster Autoscaler caches CRD schemas and versions. To resolve this, you may need to recreate or trigger a restart of the GKE Cluster Autoscaler to force a schema cache refresh.`
+
 ## Configuration
 
 The primary test parameters can be modified by editing the variables at the top of the

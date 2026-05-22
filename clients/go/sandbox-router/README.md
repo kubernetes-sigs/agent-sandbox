@@ -106,7 +106,7 @@ For every inbound request, the proxy resolves the upstream in this order: explic
 
 **Cache content.** Only Pods that pass `PodReady=True` and have a non-empty `Status.PodIP` are stored. Pods that flip out of Ready are removed automatically by the informer event handler so traffic doesn't get steered at a degraded Pod.
 
-**RBAC.** Cluster-wide `get`, `list`, `watch` on `pods`. The example `deploy/rbac.yaml` is a `ClusterRole` + `ClusterRoleBinding`; narrow to a `RoleBinding` when `--cache-namespace` is set.
+**RBAC.** Cluster-wide `get`, `list`, `watch` on `pods`. The example `deploy/rbac.yaml` is a `ClusterRole` + `ClusterRoleBinding`; narrow to a `Role` + `RoleBinding` when `--cache-namespace` is set. Note that K8s RBAC has no negative-namespace primitive, so the grant cannot say "all namespaces except kube-system" — the runtime label selector (`agents.x-k8s.io/sandbox-name-hash`) is what keeps system Pods out of the actual watch and the cache. The file's header comment spells this out for auditors.
 
 **Readiness gating.** The router's `/readyz` does not flip to ready until the initial Pod LIST has completed. A misconfigured RBAC therefore fails fast at startup rather than silently degrading the router to DNS-only service.
 

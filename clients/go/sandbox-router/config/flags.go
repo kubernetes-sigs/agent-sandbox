@@ -132,9 +132,17 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 	fs.StringVar(&c.CacheNamespace, "cache-namespace", c.CacheNamespace,
 		"Optional namespace filter for the Pod informer. Empty means "+
 			"cluster-wide. Ignored when --cache-enabled=false.")
-	fs.StringVar(&c.Kubeconfig, "kubeconfig", c.Kubeconfig,
-		"Path to a kubeconfig file used to build the informer client. "+
-			"Empty means use in-cluster config. Honors "+EnvKubeconfig+".")
+	// controller-runtime's pkg/client/config registers a "kubeconfig"
+	// flag in its package init. Detect that and reuse the existing
+	// flag rather than redefining it (Go's flag package panics on
+	// re-registration). We pull the value back into c.Kubeconfig in
+	// ApplyPostParseEnvDefaults so the precedence (flag > file > env >
+	// default) still holds.
+	if fs.Lookup("kubeconfig") == nil {
+		fs.StringVar(&c.Kubeconfig, "kubeconfig", c.Kubeconfig,
+			"Path to a kubeconfig file used to build the informer client. "+
+				"Empty means use in-cluster config. Honors "+EnvKubeconfig+".")
+	}
 
 	fs.BoolVar(&c.AccessLog, "access-log", c.AccessLog,
 		"Emit one structured log line per inbound request on the proxy "+
@@ -183,6 +191,15 @@ func ApplyPostParseEnvDefaults(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc
 	}
 	if !setExplicitly["enable-otel-metrics"] && endpointSet(EnvOTLPMetricsEndpoint) {
 		c.EnableOTelMetrics = true
+	}
+	// When controller-runtime owns the --kubeconfig flag (because its
+	// package init beat us to flag.CommandLine), we couldn't bind
+	// c.Kubeconfig directly. Pull the post-parse value into c so the
+	// rest of the code reads from a single field.
+	if f := fs.Lookup("kubeconfig"); f != nil && c.Kubeconfig == "" {
+		if v := f.Value.String(); v != "" {
+			c.Kubeconfig = v
+		}
 	}
 }
 

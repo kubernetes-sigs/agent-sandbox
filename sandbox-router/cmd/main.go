@@ -38,15 +38,15 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/authz"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/cache"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/proxy"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/server"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/tlsutil"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/proxy"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/server"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/tlsutil"
 )
 
 func main() {

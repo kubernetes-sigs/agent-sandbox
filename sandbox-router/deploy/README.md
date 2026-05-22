@@ -16,7 +16,7 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 ## Apply
 
 ```sh
-kubectl apply -f clients/go/sandbox-router/deploy/
+kubectl apply -f sandbox-router/deploy/
 ```
 
 ## Things to change before production

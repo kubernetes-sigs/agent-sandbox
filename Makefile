@@ -33,7 +33,7 @@ build-controller:
 
 .PHONY: build-sandbox-router
 build-sandbox-router:
-	go build -ldflags "$(LD_FLAGS)" -o bin/sandbox-router ./clients/go/sandbox-router
+	go build -ldflags "$(LD_FLAGS)" -o bin/sandbox-router ./sandbox-router/cmd
 
 KIND_CLUSTER=agent-sandbox
 

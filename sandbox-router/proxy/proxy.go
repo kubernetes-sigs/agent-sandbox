@@ -28,9 +28,9 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"k8s.io/apimachinery/pkg/types"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/authz"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 )
 
 // Handler implements the request-routing core of the sandbox-router. Each

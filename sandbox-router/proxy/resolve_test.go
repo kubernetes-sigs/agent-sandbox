@@ -19,7 +19,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/cache"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 )
 
 // fakeLookup is a minimal Lookup implementation for tests. It records

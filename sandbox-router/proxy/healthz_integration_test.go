@@ -23,7 +23,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/server"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/server"
 )
 
 // TestIntegration_HealthzEndpoint reproduces the Python TestHealthCheck case

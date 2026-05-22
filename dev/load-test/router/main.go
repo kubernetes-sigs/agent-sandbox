@@ -43,8 +43,8 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/proxy"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/proxy"
 )
 
 func main() {

@@ -84,6 +84,31 @@ func TestParseSandboxHeaders(t *testing.T) {
 			headers:  map[string]string{HeaderSandboxID: "x", HeaderSandboxPort: "abc"},
 			wantCode: http.StatusBadRequest,
 		},
+		{
+			name:     "zero port rejected",
+			headers:  map[string]string{HeaderSandboxID: "x", HeaderSandboxPort: "0"},
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "negative port rejected",
+			headers:  map[string]string{HeaderSandboxID: "x", HeaderSandboxPort: "-1"},
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "port above 65535 rejected",
+			headers:  map[string]string{HeaderSandboxID: "x", HeaderSandboxPort: "65536"},
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:    "port 1 accepted",
+			headers: map[string]string{HeaderSandboxID: "x", HeaderSandboxPort: "1"},
+			want:    Target{ID: "x", Namespace: DefaultSandboxNamespace, Port: 1},
+		},
+		{
+			name:    "port 65535 accepted",
+			headers: map[string]string{HeaderSandboxID: "x", HeaderSandboxPort: "65535"},
+			want:    Target{ID: "x", Namespace: DefaultSandboxNamespace, Port: 65535},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

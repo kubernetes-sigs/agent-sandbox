@@ -25,6 +25,10 @@ import (
 const (
 	EnvClusterDomain = "CLUSTER_DOMAIN"
 	EnvProxyTimeout  = "PROXY_TIMEOUT_SECONDS"
+	// EnvKubeconfig matches the standard kubectl env var so deployments
+	// can drop a kubeconfig file alongside the binary without an explicit
+	// flag.
+	EnvKubeconfig = "KUBECONFIG"
 
 	// Standard OpenTelemetry exporter env vars. When any of these is set
 	// and the corresponding --enable-* flag wasn't explicitly passed on
@@ -101,6 +105,18 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"OTEL_EXPORTER_OTLP_ENDPOINT (or OTEL_EXPORTER_OTLP_METRICS_ENDPOINT). "+
 			"Auto-enabled when either env var is set; pass --enable-otel-metrics=false "+
 			"to override.")
+	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
+		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+
+			"the router watches sandbox-owned Pods and dials cached IPs for "+
+			"requests carrying X-Sandbox-UID, bypassing DNS. Requires Pod "+
+			"get/list/watch RBAC and either in-cluster config or --kubeconfig.")
+	fs.StringVar(&c.CacheNamespace, "cache-namespace", c.CacheNamespace,
+		"Optional namespace filter for the Pod informer. Empty means "+
+			"cluster-wide. Ignored when --cache-enabled=false.")
+	fs.StringVar(&c.Kubeconfig, "kubeconfig", c.Kubeconfig,
+		"Path to a kubeconfig file used to build the informer client. "+
+			"Empty means use in-cluster config. Honors "+EnvKubeconfig+".")
+
 	fs.BoolVar(&c.AccessLog, "access-log", c.AccessLog,
 		"Emit one structured log line per inbound request on the proxy "+
 			"port. Health/metrics endpoints are skipped.")
@@ -164,6 +180,9 @@ func applyEnvDefaults(c *Config, lookup LookupEnvFunc) {
 		if secs, err := strconv.ParseFloat(v, 64); err == nil && secs > 0 {
 			c.ProxyTimeout = time.Duration(secs * float64(time.Second))
 		}
+	}
+	if v, ok := lookup(EnvKubeconfig); ok && v != "" {
+		c.Kubeconfig = v
 	}
 }
 

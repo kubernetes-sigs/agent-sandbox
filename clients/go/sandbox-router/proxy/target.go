@@ -26,6 +26,10 @@ import (
 //
 // The path and rawQuery components are preserved verbatim from the inbound
 // request so the upstream sandbox sees exactly what the client sent.
+//
+// This function does NOT consult any cache — it picks between the
+// caller-supplied PodIP and the DNS form. Cache-aware resolution lives
+// in (t Target) Resolve(...) in resolve.go.
 func (t Target) UpstreamURL(scheme, clusterDomain, path, rawQuery string) *url.URL {
 	if scheme == "" {
 		scheme = "http"

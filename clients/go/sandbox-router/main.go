@@ -33,9 +33,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/proxy"
@@ -146,13 +149,46 @@ func run(cfg *config.Config, log logr.Logger) error {
 		}
 	}
 
+	// --- Pod-IP cache (optional, KEP-NNNN fast path) ----------------------
+	var podCache *cache.Cache
+	if cfg.CacheEnabled {
+		k8sClient, err := buildKubernetesClient(cfg.Kubeconfig)
+		if err != nil {
+			return fmt.Errorf("kubernetes client for cache: %w", err)
+		}
+		podCache, err = cache.New(cache.Options{
+			Client:    k8sClient,
+			Log:       log.WithName("cache"),
+			Namespace: cfg.CacheNamespace,
+		})
+		if err != nil {
+			return fmt.Errorf("build pod cache: %w", err)
+		}
+		podCache.Start(ctx)
+		// Block readiness on the initial LIST. Use a generous timeout
+		// here so a slow API server doesn't make us flap, but bound it
+		// so a misconfigured RBAC fails fast at startup rather than
+		// silently serving DNS-only.
+		syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
+		ok := podCache.WaitForSync(syncCtx)
+		syncCancel()
+		if !ok {
+			return fmt.Errorf("pod cache failed initial sync (check RBAC for pods get/list/watch)")
+		}
+		log.Info("pod cache synced", "entries", podCache.Len(), "namespace", cfg.CacheNamespace)
+	}
+
 	// --- Proxy handler -----------------------------------------------------
-	handler := proxy.NewHandler(proxy.Options{
+	proxyOpts := proxy.Options{
 		Config:     cfg,
 		Metrics:    metrics,
 		Propagator: otel.GetTextMapPropagator(),
 		Logger:     log.WithName("proxy"),
-	})
+	}
+	if podCache != nil {
+		proxyOpts.Cache = podCache
+	}
+	handler := proxy.NewHandler(proxyOpts)
 
 	// Top-level mux: /healthz reuses the probes implementation so the
 	// Python router's contract (200 OK with {"status":"ok"}) is preserved.
@@ -213,8 +249,27 @@ func run(cfg *config.Config, log logr.Logger) error {
 		"mtls", cfg.MTLSMode,
 		"tracing", cfg.EnableTracing,
 		"otelMetrics", cfg.EnableOTelMetrics,
+		"cache", cfg.CacheEnabled,
 	)
 	return srv.Run(ctx)
+}
+
+// buildKubernetesClient returns a typed client built from kubeconfigPath
+// when non-empty, or the in-cluster config (ServiceAccount token) when
+// empty. Mirrors clientcmd's standard precedence so operators can run
+// the router locally with KUBECONFIG and in-cluster without any flag.
+func buildKubernetesClient(kubeconfigPath string) (kubernetes.Interface, error) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfigPath != "" {
+		loadingRules.ExplicitPath = kubeconfigPath
+	}
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		loadingRules, &clientcmd.ConfigOverrides{})
+	restConfig, err := clientConfig.ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("build rest config: %w", err)
+	}
+	return kubernetes.NewForConfig(restConfig)
 }
 
 // limitBody applies http.MaxBytesReader to the inbound request body.

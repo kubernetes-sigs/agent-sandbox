@@ -50,6 +50,11 @@ func TestParseSandboxHeaders(t *testing.T) {
 			want:    Target{ID: "my-box", Namespace: DefaultSandboxNamespace, Port: DefaultSandboxPort, PodIP: "10.0.0.5"},
 		},
 		{
+			name:    "uid header captured",
+			headers: map[string]string{HeaderSandboxID: "my-box", HeaderSandboxUID: "abc-123-uid"},
+			want:    Target{ID: "my-box", UID: "abc-123-uid", Namespace: DefaultSandboxNamespace, Port: DefaultSandboxPort},
+		},
+		{
 			name:    "hyphenated namespace accepted",
 			headers: map[string]string{HeaderSandboxID: "my-box", HeaderSandboxNamespace: "my-ns-1"},
 			want:    Target{ID: "my-box", Namespace: "my-ns-1", Port: DefaultSandboxPort},

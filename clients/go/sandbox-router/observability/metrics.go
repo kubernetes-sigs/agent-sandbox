@@ -31,13 +31,14 @@ import (
 // tests do not collide with the global one and so we don't accidentally
 // pick up unrelated controller-runtime metrics.
 type Metrics struct {
-	RequestsTotal          *prometheus.CounterVec
-	RequestDurationSeconds *prometheus.HistogramVec
-	InflightRequests       prometheus.Gauge
-	UpstreamErrorsTotal    *prometheus.CounterVec
-	CertReloadsTotal       *prometheus.CounterVec
-	UpstreamRetriesTotal   *prometheus.CounterVec
-	BuildInfo              prometheus.Collector
+	RequestsTotal           *prometheus.CounterVec
+	RequestDurationSeconds  *prometheus.HistogramVec
+	InflightRequests        prometheus.Gauge
+	UpstreamErrorsTotal     *prometheus.CounterVec
+	CertReloadsTotal        *prometheus.CounterVec
+	UpstreamRetriesTotal    *prometheus.CounterVec
+	CacheInvalidationsTotal *prometheus.CounterVec
+	BuildInfo               prometheus.Collector
 }
 
 // NewMetrics creates a fresh set of collectors and registers them with reg.
@@ -76,6 +77,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help: "Upstream dial retries, labeled by namespace.",
 		}, []string{"sandbox_namespace"}),
 
+		CacheInvalidationsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandbox_router_cache_invalidations_total",
+			Help: "Pod-IP cache entries evicted by the proxy after a dial-class failure on a cached IP (KEP-NNNN active invalidation).",
+		}, []string{"sandbox_namespace"}),
+
 		BuildInfo: buildInfoCollector(),
 	}
 
@@ -86,6 +92,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.UpstreamErrorsTotal,
 		m.CertReloadsTotal,
 		m.UpstreamRetriesTotal,
+		m.CacheInvalidationsTotal,
 		m.BuildInfo,
 	)
 	return m

@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/propagation"
+	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
@@ -39,17 +40,23 @@ type Handler struct {
 	metrics    *observability.Metrics
 	propagator propagation.TextMapPropagator
 	transport  http.RoundTripper
+	cache      Lookup
 	log        logr.Logger
 }
 
-// Options bundles the dependencies NewHandler needs. metrics and propagator
-// are optional; nil values produce a router with no metrics and a no-op
-// propagator, which is convenient for tests.
+// Options bundles the dependencies NewHandler needs. Metrics, Propagator,
+// and Cache are optional; nil values produce a router with no metrics, a
+// no-op propagator, and DNS-only resolution respectively, which is
+// convenient for tests.
 type Options struct {
 	Config     *config.Config
 	Metrics    *observability.Metrics
 	Propagator propagation.TextMapPropagator
-	Logger     logr.Logger
+	// Cache is the Pod-IP lookup used for the KEP-NNNN fast path. When
+	// nil, the handler resolves every request via DNS — useful for tests
+	// and for deployments running without RBAC for Pod informers.
+	Cache  Lookup
+	Logger logr.Logger
 }
 
 // NewHandler builds a Handler from o.
@@ -86,6 +93,7 @@ func NewHandler(o Options) *Handler {
 		metrics:    o.Metrics,
 		propagator: o.Propagator,
 		transport:  tr,
+		cache:      o.Cache,
 		log:        o.Logger,
 	}
 }
@@ -104,9 +112,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target0 := target // capture for closures
+	// Resolve once per request so the ErrorHandler can see which path
+	// produced the IP (cache vs DNS vs override) and invalidate the cache
+	// entry on dial-class failures. The Rewrite callback re-uses the URL.
+	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, r.URL.Path, r.URL.RawQuery, h.cache)
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL = target0.UpstreamURL("http", h.cfg.ClusterDomain, r.URL.Path, r.URL.RawQuery)
+			pr.Out.URL = upstreamURL
 			// Clear inbound Host so net/http picks the URL host. Matches the
 			// Python router's behavior of stripping Host before forwarding.
 			pr.Out.Host = ""
@@ -117,13 +129,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Transport:     h.transport,
 		FlushInterval: -1, // immediate flush for SSE / streaming responses
 		ErrorHandler: func(w http.ResponseWriter, errReq *http.Request, err error) {
-			h.recordUpstreamError(target0.Namespace, err)
+			reason := classifyError(err)
+			h.recordUpstreamErrorReason(target0.Namespace, reason)
+			// KEP-NNNN: actively invalidate the cache entry on dial-class
+			// failures so the next request falls through to DNS instead of
+			// retrying the same stale IP. We only invalidate when the IP
+			// we tried actually came from the cache — a DNS or PodIP-header
+			// failure means the cache had nothing useful to evict.
+			if src == SourceCache && h.cache != nil && reason == "dial" && target0.UID != "" {
+				if h.cache.Invalidate(types.UID(target0.UID)) && h.metrics != nil {
+					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
+				}
+			}
 			// Use the per-request logger from context so the trace ID is
 			// included alongside the upstream failure detail.
 			observability.LoggerFromContext(errReq.Context(), h.log).Error(err,
 				"upstream connect failure",
 				"sandbox", target0.ID,
 				"namespace", target0.Namespace,
+				"source", string(src),
 			)
 			WriteJSONError(w, &Error{
 				Status: http.StatusBadGateway,
@@ -160,12 +184,13 @@ func defaultTransport(cfg *config.Config) *http.Transport {
 	}
 }
 
-// recordUpstreamError categorizes err and bumps the upstream-error counter.
-func (h *Handler) recordUpstreamError(namespace string, err error) {
+// recordUpstreamErrorReason bumps the upstream-error counter with a
+// pre-classified reason label.
+func (h *Handler) recordUpstreamErrorReason(namespace, reason string) {
 	if h.metrics == nil {
 		return
 	}
-	h.metrics.UpstreamErrorsTotal.WithLabelValues(namespace, classifyError(err)).Inc()
+	h.metrics.UpstreamErrorsTotal.WithLabelValues(namespace, reason).Inc()
 }
 
 // classifyError turns an arbitrary RoundTrip error into a low-cardinality

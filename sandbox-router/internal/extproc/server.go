@@ -211,7 +211,13 @@ func (s *Server) onRequestHeaders(_ context.Context, hdrs *extprocv3.HttpHeaders
 	if !validNamespace(r.namespace) {
 		return immediate(400, `{"detail":"Invalid namespace format."}`)
 	}
-	if r.port < 1 || r.port == 0 {
+	// TCP port range is [1, 65535]. Reject anything outside it (and the
+	// 0 sentinel readHeaders sets on non-numeric input) before we hand
+	// the value to net.JoinHostPort — an out-of-range port would
+	// produce a syntactically valid but semantically junk
+	// x-envoy-original-dst-host (e.g. "10.0.0.1:99999") that Envoy
+	// would reject downstream with a less actionable error.
+	if r.port < 1 || r.port > 65535 {
 		return immediate(400, `{"detail":"Invalid port format."}`)
 	}
 

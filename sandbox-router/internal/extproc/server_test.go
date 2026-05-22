@@ -199,17 +199,71 @@ func TestHandle_InvalidNamespaceRejected(t *testing.T) {
 }
 
 func TestHandle_InvalidPortRejected(t *testing.T) {
-	s, _ := newServer(t)
-	resp := s.handle(context.Background(), reqHeaders(map[string]string{
-		HeaderSandboxID:   "alpha",
-		HeaderSandboxPort: "abc",
-	}))
-	ir := resp.GetImmediateResponse()
-	if ir == nil || ir.Status.Code != 400 {
-		t.Fatalf("expected 400 immediate; got: %+v", resp)
+	// Port must fall in [1, 65535]. Anything else gets rejected with a
+	// 400 immediate before we hand the value to net.JoinHostPort, so a
+	// bogus value can't ride along into x-envoy-original-dst-host and
+	// surface as a less actionable Envoy error.
+	cases := []struct {
+		name string
+		port string
+	}{
+		{"non-numeric", "abc"},
+		{"empty-after-trim", " "},
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"way negative", "-99999"},
+		{"just over 65535", "65536"},
+		{"big number", "100000"},
+		{"max int32", "2147483647"},
 	}
-	if !strings.Contains(string(ir.Body), "port") {
-		t.Errorf("body should mention port: %s", ir.Body)
+	s, _ := newServer(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := s.handle(context.Background(), reqHeaders(map[string]string{
+				HeaderSandboxID:   "alpha",
+				HeaderSandboxPort: tc.port,
+			}))
+			ir := resp.GetImmediateResponse()
+			if ir == nil || ir.Status.Code != 400 {
+				t.Fatalf("port=%q: expected 400 immediate; got: %+v", tc.port, resp)
+			}
+			if !strings.Contains(string(ir.Body), "port") {
+				t.Errorf("port=%q: body should mention port: %s", tc.port, ir.Body)
+			}
+		})
+	}
+}
+
+func TestHandle_PortBoundariesAccepted(t *testing.T) {
+	// The smallest and largest legal TCP ports both make it through.
+	s, stub := newServer(t)
+	uid := types.UID("boundary-uid")
+	stub[uid] = cache.Entry{PodIP: "10.0.0.1"}
+	for _, port := range []string{"1", "65535"} {
+		t.Run(port, func(t *testing.T) {
+			resp := s.handle(context.Background(), reqHeaders(map[string]string{
+				HeaderSandboxID:   "alpha",
+				HeaderSandboxUID:  string(uid),
+				HeaderSandboxPort: port,
+			}))
+			if ir := resp.GetImmediateResponse(); ir != nil {
+				t.Fatalf("port %s: unexpected immediate %d / %s", port, ir.Status.Code, ir.Body)
+			}
+			rh := resp.GetRequestHeaders()
+			if rh == nil {
+				t.Fatalf("port %s: expected RequestHeaders mutation; got %+v", port, resp)
+			}
+			want := "10.0.0.1:" + port
+			got := ""
+			for _, h := range rh.Response.HeaderMutation.SetHeaders {
+				if h.Header.Key == HeaderOriginalDstHost {
+					got = string(h.Header.RawValue)
+				}
+			}
+			if got != want {
+				t.Fatalf("port %s: dst host got %q want %q", port, got, want)
+			}
+		})
 	}
 }
 

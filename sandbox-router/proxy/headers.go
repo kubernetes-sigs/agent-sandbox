@@ -81,6 +81,14 @@ func ParseSandboxHeaders(h http.Header) (Target, *Error) {
 		if err != nil {
 			return Target{}, &Error{Status: http.StatusBadRequest, Detail: "Invalid port format."}
 		}
+		// TCP port range is [1, 65535]. Reject anything outside it
+		// before it can ride into the upstream URL — an out-of-range
+		// value would round-trip to net.JoinHostPort and produce a
+		// syntactically valid but semantically junk host:port that
+		// surfaces downstream as an opaque 502.
+		if n < 1 || n > 65535 {
+			return Target{}, &Error{Status: http.StatusBadRequest, Detail: "Invalid port format."}
+		}
 		port = n
 	}
 

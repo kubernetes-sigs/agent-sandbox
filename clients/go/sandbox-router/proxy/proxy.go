@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"k8s.io/apimachinery/pkg/types"
 
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
 )
@@ -41,13 +42,14 @@ type Handler struct {
 	propagator propagation.TextMapPropagator
 	transport  http.RoundTripper
 	cache      Lookup
+	authz      authz.Authorizer
 	log        logr.Logger
 }
 
 // Options bundles the dependencies NewHandler needs. Metrics, Propagator,
-// and Cache are optional; nil values produce a router with no metrics, a
-// no-op propagator, and DNS-only resolution respectively, which is
-// convenient for tests.
+// Cache, and Authorizer are optional; nil values produce a router with
+// no metrics, a no-op propagator, DNS-only resolution, and AllowAll
+// authorization respectively, which is convenient for tests.
 type Options struct {
 	Config     *config.Config
 	Metrics    *observability.Metrics
@@ -55,8 +57,12 @@ type Options struct {
 	// Cache is the Pod-IP lookup used for the KEP-NNNN fast path. When
 	// nil, the handler resolves every request via DNS — useful for tests
 	// and for deployments running without RBAC for Pod informers.
-	Cache  Lookup
-	Logger logr.Logger
+	Cache Lookup
+	// Authorizer guards every proxied request. When nil, the handler
+	// uses authz.AllowAll — the Python-compatible default. Set this to
+	// a TokenReview authorizer to enforce per-sandbox auth (KEP-NNNN).
+	Authorizer authz.Authorizer
+	Logger     logr.Logger
 }
 
 // NewHandler builds a Handler from o.
@@ -88,12 +94,17 @@ func NewHandler(o Options) *Handler {
 			onRetry,
 		)
 	}
+	authorizer := o.Authorizer
+	if authorizer == nil {
+		authorizer = authz.AllowAll{}
+	}
 	return &Handler{
 		cfg:        o.Config,
 		metrics:    o.Metrics,
 		propagator: o.Propagator,
 		transport:  tr,
 		cache:      o.Cache,
+		authz:      authorizer,
 		log:        o.Logger,
 	}
 }
@@ -109,6 +120,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Make the parsed namespace visible to the observability middleware.
 	if labels := observability.LabelsFromContext(r.Context()); labels != nil {
 		labels.SandboxNamespace = target.Namespace
+	}
+
+	// Authorization. Implementations are expected to pull whatever
+	// credential they need (TLS cert, Bearer token, custom header) off
+	// the request and either allow or return one of the sentinel
+	// errors in package authz. The default AllowAll authorizer wired in
+	// by NewHandler always permits, preserving the Python router's
+	// no-auth contract.
+	if err := h.authz.Authorize(r.Context(), r, target.Namespace, target.ID); err != nil {
+		status := authz.HTTPStatusFor(err)
+		observability.LoggerFromContext(r.Context(), h.log).Info("authorization denied",
+			"sandbox", target.ID,
+			"namespace", target.Namespace,
+			"status", status,
+			"error", err.Error(),
+		)
+		if h.metrics != nil {
+			h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
+		}
+		WriteJSONError(w, &Error{Status: status, Detail: err.Error()})
+		return
+	}
+	if h.metrics != nil {
+		h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "allow").Inc()
 	}
 
 	target0 := target // capture for closures

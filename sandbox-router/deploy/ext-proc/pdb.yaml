@@ -1,0 +1,17 @@
+# Keep at least one ext_proc replica available during voluntary
+# disruptions; otherwise Envoy's failure_mode_allow=false would 503 all
+# proxy traffic while the fleet is draining.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ext-proc-sandbox-router
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ext-proc-sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ext-proc-sandbox-router
+      app.kubernetes.io/component: sandbox-router

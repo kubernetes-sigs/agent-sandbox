@@ -1,0 +1,292 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package extproc
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/go-logr/logr"
+
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	"sigs.k8s.io/agent-sandbox/sandbox-router/internal/cache"
+)
+
+// stubCache satisfies Lookup with a fixed in-memory map. Lets tests drive
+// hit / miss behavior without spinning up an informer.
+type stubCache map[types.UID]cache.Entry
+
+func (s stubCache) Get(uid types.UID) (cache.Entry, bool) {
+	e, ok := s[uid]
+	return e, ok
+}
+
+// newServer builds a Server with a stub cache. Returns the server and
+// the stub so individual tests can mutate the map.
+func newServer(t *testing.T) (*Server, stubCache) {
+	t.Helper()
+	stub := stubCache{}
+	s, err := NewServer(Options{
+		Cache:         stub,
+		ClusterDomain: "cluster.local",
+		Log:           logr.Discard(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return s, stub
+}
+
+// hdrs builds an Envoy HttpHeaders message from a key→value map. Lower
+// cases keys to match Envoy's normalization.
+func hdrs(kv map[string]string) *extprocv3.HttpHeaders {
+	hm := &corev3.HeaderMap{}
+	for k, v := range kv {
+		hm.Headers = append(hm.Headers, &corev3.HeaderValue{
+			Key:      strings.ToLower(k),
+			RawValue: []byte(v),
+		})
+	}
+	return &extprocv3.HttpHeaders{Headers: hm}
+}
+
+// reqHeaders wraps hdrs into a ProcessingRequest of the RequestHeaders
+// phase, which is the only phase our handler actually does work on.
+func reqHeaders(kv map[string]string) *extprocv3.ProcessingRequest {
+	return &extprocv3.ProcessingRequest{
+		Request: &extprocv3.ProcessingRequest_RequestHeaders{
+			RequestHeaders: hdrs(kv),
+		},
+	}
+}
+
+// originalDstHostFrom extracts the value of the x-envoy-original-dst-host
+// header from a successful HeadersResponse, returning ("", false) if the
+// response is an ImmediateResponse or the mutation isn't present.
+func originalDstHostFrom(resp *extprocv3.ProcessingResponse) (string, bool) {
+	hr := resp.GetRequestHeaders()
+	if hr == nil {
+		return "", false
+	}
+	for _, h := range hr.Response.HeaderMutation.SetHeaders {
+		if h.Header.Key == HeaderOriginalDstHost {
+			return string(h.Header.RawValue), true
+		}
+	}
+	return "", false
+}
+
+func TestHandle_CacheHitSetsOriginalDstFromPodIP(t *testing.T) {
+	s, stub := newServer(t)
+	uid := types.UID("11111111-2222-3333-4444-555555555555")
+	stub[uid] = cache.Entry{PodIP: "10.0.0.7", SandboxName: "alpha", Namespace: "tenant-a"}
+
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID:        "alpha",
+		HeaderSandboxUID:       string(uid),
+		HeaderSandboxNamespace: "tenant-a",
+		HeaderSandboxPort:      "9090",
+	}))
+
+	host, ok := originalDstHostFrom(resp)
+	if !ok {
+		t.Fatalf("expected header mutation; got: %+v", resp)
+	}
+	if host != "10.0.0.7:9090" {
+		t.Errorf("original-dst-host: got %q want %q", host, "10.0.0.7:9090")
+	}
+	if !resp.GetRequestHeaders().Response.ClearRouteCache {
+		t.Errorf("ClearRouteCache must be set so Envoy re-routes after our mutation")
+	}
+}
+
+func TestHandle_CacheMissFallsBackToDNS(t *testing.T) {
+	s, _ := newServer(t)
+
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID:        "ghost",
+		HeaderSandboxUID:       "no-such-uid",
+		HeaderSandboxNamespace: "tenant-b",
+		HeaderSandboxPort:      "8888",
+	}))
+
+	host, ok := originalDstHostFrom(resp)
+	if !ok {
+		t.Fatalf("expected mutation, got: %+v", resp)
+	}
+	want := "ghost.tenant-b.svc.cluster.local:8888"
+	if host != want {
+		t.Errorf("DNS form: got %q want %q", host, want)
+	}
+}
+
+func TestHandle_NoUIDStillRoutesViaDNS(t *testing.T) {
+	s, _ := newServer(t)
+
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID:        "alpha",
+		HeaderSandboxNamespace: "default",
+	}))
+
+	host, ok := originalDstHostFrom(resp)
+	if !ok {
+		t.Fatalf("expected mutation, got: %+v", resp)
+	}
+	if host != "alpha.default.svc.cluster.local:8888" {
+		t.Errorf("DNS form with default port: got %q", host)
+	}
+}
+
+func TestHandle_DefaultsAppliedForNamespaceAndPort(t *testing.T) {
+	s, _ := newServer(t)
+
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID: "alpha",
+	}))
+	host, _ := originalDstHostFrom(resp)
+	if host != "alpha.default.svc.cluster.local:8888" {
+		t.Errorf("defaults: got %q", host)
+	}
+}
+
+func TestHandle_MissingSandboxIDReturnsImmediate400(t *testing.T) {
+	s, _ := newServer(t)
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{}))
+
+	ir := resp.GetImmediateResponse()
+	if ir == nil {
+		t.Fatalf("expected ImmediateResponse, got: %+v", resp)
+	}
+	if ir.Status.Code != 400 {
+		t.Errorf("status: got %d want 400", ir.Status.Code)
+	}
+	if !strings.Contains(string(ir.Body), "X-Sandbox-ID") {
+		t.Errorf("body should mention X-Sandbox-ID: %s", ir.Body)
+	}
+}
+
+func TestHandle_InvalidNamespaceRejected(t *testing.T) {
+	s, _ := newServer(t)
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID:        "alpha",
+		HeaderSandboxNamespace: "bad namespace!",
+	}))
+	ir := resp.GetImmediateResponse()
+	if ir == nil || ir.Status.Code != 400 {
+		t.Fatalf("expected 400 immediate; got: %+v", resp)
+	}
+	if !strings.Contains(string(ir.Body), "namespace") {
+		t.Errorf("body should mention namespace: %s", ir.Body)
+	}
+}
+
+func TestHandle_InvalidPortRejected(t *testing.T) {
+	s, _ := newServer(t)
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID:   "alpha",
+		HeaderSandboxPort: "abc",
+	}))
+	ir := resp.GetImmediateResponse()
+	if ir == nil || ir.Status.Code != 400 {
+		t.Fatalf("expected 400 immediate; got: %+v", resp)
+	}
+	if !strings.Contains(string(ir.Body), "port") {
+		t.Errorf("body should mention port: %s", ir.Body)
+	}
+}
+
+// TestHandle_NonRequestHeadersPhasePassesThrough confirms we don't fail
+// the stream when Envoy is misconfigured to call us for body/response
+// phases — we just CONTINUE.
+func TestHandle_NonRequestHeadersPhasePassesThrough(t *testing.T) {
+	s, _ := newServer(t)
+	resp := s.handle(context.Background(), &extprocv3.ProcessingRequest{
+		Request: &extprocv3.ProcessingRequest_ResponseHeaders{
+			ResponseHeaders: hdrs(nil),
+		},
+	})
+	hr := resp.GetRequestHeaders()
+	if hr == nil {
+		t.Fatalf("expected CONTINUE shaped response")
+	}
+	if hr.Response.HeaderMutation != nil {
+		t.Errorf("no mutation should be set for non-RequestHeaders phase")
+	}
+}
+
+func TestValidNamespace(t *testing.T) {
+	cases := map[string]bool{
+		"default": true,
+		"prod":    true,
+		"my-ns":   true,
+		"my-ns-1": true,
+		"MY-NS":   true,
+		"a":       true,
+		"":        false,
+		"-":       false,
+		"---":     false,
+		"my_ns":   false,
+		"my.ns":   false,
+		" ns":     false,
+		"ns ":     false,
+		"bad!":    false,
+	}
+	for in, want := range cases {
+		if got := validNamespace(in); got != want {
+			t.Errorf("validNamespace(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestReadHeaders_AcceptsBothRawAndStringValues(t *testing.T) {
+	hm := &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+		{Key: HeaderSandboxID, RawValue: []byte("from-raw")},
+		{Key: HeaderSandboxNamespace, Value: "from-string"},
+	}}
+	r := readHeaders(hm)
+	if r.id != "from-raw" {
+		t.Errorf("RawValue not honored: got %q", r.id)
+	}
+	if r.namespace != "from-string" {
+		t.Errorf("legacy Value not honored: got %q", r.namespace)
+	}
+}
+
+func TestJoinHostPort(t *testing.T) {
+	if got := joinHostPort("10.0.0.1", 8888); got != "10.0.0.1:8888" {
+		t.Errorf("joinHostPort got %q", got)
+	}
+}
+
+func TestResolve_PrefersCacheOverDNS(t *testing.T) {
+	s, stub := newServer(t)
+	uid := types.UID("aaaa-bbbb")
+	stub[uid] = cache.Entry{PodIP: "10.20.30.40"}
+
+	target, source := s.resolve(request{
+		id: "alpha", uid: string(uid), namespace: "default", port: 8888,
+	})
+	if target != "10.20.30.40:8888" {
+		t.Errorf("target: got %q", target)
+	}
+	if source != "cache" {
+		t.Errorf("source: got %q want cache", source)
+	}
+}

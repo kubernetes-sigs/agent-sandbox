@@ -16,6 +16,7 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 )
@@ -39,8 +40,11 @@ func (t Target) UpstreamURL(scheme, clusterDomain, path, rawQuery string) *url.U
 		host = fmt.Sprintf("%s.%s.svc.%s", t.ID, t.Namespace, clusterDomain)
 	}
 	return &url.URL{
-		Scheme:   scheme,
-		Host:     host + ":" + strconv.Itoa(t.Port),
+		Scheme: scheme,
+		// net.JoinHostPort brackets IPv6 literals — needed for sandbox
+		// Pods on dual-stack / IPv6-only clusters where t.PodIP comes
+		// from Pod.Status.PodIP as a bare IPv6 string.
+		Host:     net.JoinHostPort(host, strconv.Itoa(t.Port)),
 		Path:     path,
 		RawQuery: rawQuery,
 	}

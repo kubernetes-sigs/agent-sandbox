@@ -115,3 +115,30 @@ func TestResolvePreservesPathAndQuery(t *testing.T) {
 		t.Fatalf("got %q want %q", got.String(), want)
 	}
 }
+
+func TestResolveBracketsIPv6PodIP(t *testing.T) {
+	// Cache returns a bare IPv6 string (matches what Pod.Status.PodIP
+	// looks like on dual-stack / IPv6-only clusters). The resolved URL
+	// must bracket the literal so net/http can parse it.
+	lookup := &fakeLookup{entries: map[types.UID]cache.Entry{
+		"v6": {PodIP: "2001:db8::42"},
+	}}
+	tgt := Target{ID: "id", UID: "v6", Namespace: "ns", Port: 8888}
+	got, src := tgt.Resolve("http", "cluster.local", "/api", "", lookup)
+	if got.String() != "http://[2001:db8::42]:8888/api" {
+		t.Fatalf("ipv6 cache hit: got %q want http://[2001:db8::42]:8888/api", got.String())
+	}
+	if src != SourceCache {
+		t.Fatalf("source: got %q want cache", src)
+	}
+
+	// Same expectation for an explicit X-Sandbox-Pod-IP override.
+	tgt = Target{ID: "id", Namespace: "ns", Port: 8888, PodIP: "fe80::1"}
+	got, src = tgt.Resolve("http", "cluster.local", "/", "", nil)
+	if got.String() != "http://[fe80::1]:8888/" {
+		t.Fatalf("ipv6 override: got %q want http://[fe80::1]:8888/", got.String())
+	}
+	if src != SourcePodIP {
+		t.Fatalf("source: got %q want pod-ip", src)
+	}
+}

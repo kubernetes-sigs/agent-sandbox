@@ -71,6 +71,25 @@ func TestUpstreamURL(t *testing.T) {
 			path:          "/",
 			want:          "https://x.ns.svc.cluster.local:8888/",
 		},
+		{
+			// Pod IPs on dual-stack / IPv6-only clusters arrive as bare
+			// IPv6 strings from Pod.Status.PodIP — must be bracketed in
+			// the URL so net/http parses host:port correctly. Without
+			// brackets "::1:8888" is ambiguous and the request fails
+			// before it leaves the router.
+			name:          "ipv6 pod ip bracketed",
+			target:        Target{ID: "x", Namespace: "ns", Port: 8888, PodIP: "2001:db8::1"},
+			clusterDomain: "cluster.local",
+			path:          "/api",
+			want:          "http://[2001:db8::1]:8888/api",
+		},
+		{
+			name:          "ipv6 loopback pod ip bracketed",
+			target:        Target{ID: "x", Namespace: "ns", Port: 9000, PodIP: "::1"},
+			clusterDomain: "cluster.local",
+			path:          "/",
+			want:          "http://[::1]:9000/",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

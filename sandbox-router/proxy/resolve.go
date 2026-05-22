@@ -15,6 +15,7 @@
 package proxy
 
 import (
+	"net"
 	"net/url"
 	"strconv"
 
@@ -88,8 +89,13 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 	}
 
 	return &url.URL{
-		Scheme:   scheme,
-		Host:     host + ":" + strconv.Itoa(t.Port),
+		Scheme: scheme,
+		// net.JoinHostPort brackets IPv6 literals per RFC 3986. Pod IPs
+		// on dual-stack or IPv6-only clusters surface as bare IPv6
+		// strings in Pod.Status.PodIP, and an unbracketed "::1:8080" is
+		// ambiguous with the address itself; net/http would fail to
+		// parse the resulting URL.
+		Host:     net.JoinHostPort(host, strconv.Itoa(t.Port)),
 		Path:     path,
 		RawQuery: rawQuery,
 	}, src

@@ -128,7 +128,23 @@ Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produce
 
 The `sandbox_router_authz_decisions_total{decision="allow|deny",sandbox_namespace="…"}` counter records every verdict so deployments can see whether `AllowAll` is actually allowing the traffic shape they expect.
 
-A KEP-NNNN-aligned TokenReview-based authorizer that validates Bearer tokens against the cluster authn API ships alongside this — see the section that follows.
+### TokenReview authorizer
+
+Set `--authz-mode=tokenreview` to enable the built-in authorizer that authenticates every request by submitting its `Authorization: Bearer <token>` header to the cluster's `authentication.k8s.io/v1.TokenReview` API. The decision (positive or negative) is cached in an LRU by SHA-256 hash of the token — raw tokens are never stored — for `--authz-tokenreview-ttl` (default `30s`). Apiserver-error responses are cached briefly (1/3 of the TTL, minimum 1s) so a flapping apiserver doesn't get pummeled but transient failures self-heal quickly.
+
+Flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--authz-mode` | `allow-all` | `allow-all` or `tokenreview`. |
+| `--authz-tokenreview-ttl` | `30s` | Cache TTL for both positive and negative decisions. |
+| `--authz-tokenreview-cache-size` | `2048` | LRU bound. |
+| `--authz-tokenreview-require-token` | `false` | When false, tokenless requests pass (transitional). When true, missing token → 401. |
+| `--authz-tokenreview-audiences` | `""` | Comma-separated audience filter — required for projected ServiceAccount tokens minted with `--audience`. |
+
+RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants exactly this and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac.yaml` example wires it.
+
+**Scope of v1.** TokenReview only **authenticates** the caller — it verifies the token belongs to a known principal in the cluster. It does **not** check whether that principal is allowed to access the specific sandbox they named in `X-Sandbox-ID`. Tightening to per-sandbox authorization needs an agreed identity contract on the Sandbox CR (owner label, annotation, or a SubjectAccessReview-style policy) and is tracked as follow-up after KEP-NNNN lands.
 
 ## TLS / mTLS
 

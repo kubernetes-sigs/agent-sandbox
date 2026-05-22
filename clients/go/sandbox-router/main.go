@@ -38,6 +38,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
@@ -149,13 +150,22 @@ func run(cfg *config.Config, log logr.Logger) error {
 		}
 	}
 
+	// --- Kubernetes client (shared by cache + tokenreview) ----------------
+	// Build once if either feature needs it so we don't load kubeconfig
+	// twice. Nil when neither feature is on; helpers below handle that.
+	var k8sClient kubernetes.Interface
+	if cfg.CacheEnabled || cfg.AuthzMode == config.AuthzTokenReview {
+		c, err := buildKubernetesClient(cfg.Kubeconfig)
+		if err != nil {
+			return fmt.Errorf("kubernetes client: %w", err)
+		}
+		k8sClient = c
+	}
+
 	// --- Pod-IP cache (optional, KEP-NNNN fast path) ----------------------
 	var podCache *cache.Cache
 	if cfg.CacheEnabled {
-		k8sClient, err := buildKubernetesClient(cfg.Kubeconfig)
-		if err != nil {
-			return fmt.Errorf("kubernetes client for cache: %w", err)
-		}
+		var err error
 		podCache, err = cache.New(cache.Options{
 			Client:    k8sClient,
 			Log:       log.WithName("cache"),
@@ -178,12 +188,31 @@ func run(cfg *config.Config, log logr.Logger) error {
 		log.Info("pod cache synced", "entries", podCache.Len(), "namespace", cfg.CacheNamespace)
 	}
 
+	// --- Authorization -----------------------------------------------------
+	var authorizer authz.Authorizer = authz.AllowAll{}
+	if cfg.AuthzMode == config.AuthzTokenReview {
+		tr, err := authz.NewTokenReviewAuthorizer(authz.TokenReviewOptions{
+			Client:         k8sClient,
+			Log:            log.WithName("authz"),
+			TTL:            cfg.AuthzTokenReviewTTL,
+			CacheSize:      cfg.AuthzTokenReviewCacheSize,
+			RequireToken:   cfg.AuthzTokenReviewRequireToken,
+			Audiences:      cfg.AuthzTokenReviewAudiences,
+			RequestTimeout: 0,
+		})
+		if err != nil {
+			return fmt.Errorf("build tokenreview authorizer: %w", err)
+		}
+		authorizer = tr
+	}
+
 	// --- Proxy handler -----------------------------------------------------
 	proxyOpts := proxy.Options{
 		Config:     cfg,
 		Metrics:    metrics,
 		Propagator: otel.GetTextMapPropagator(),
 		Logger:     log.WithName("proxy"),
+		Authorizer: authorizer,
 	}
 	if podCache != nil {
 		proxyOpts.Cache = podCache
@@ -250,6 +279,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		"tracing", cfg.EnableTracing,
 		"otelMetrics", cfg.EnableOTelMetrics,
 		"cache", cfg.CacheEnabled,
+		"authz", cfg.AuthzMode,
 	)
 	return srv.Run(ctx)
 }

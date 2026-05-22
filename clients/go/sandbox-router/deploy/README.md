@@ -7,7 +7,7 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 | File | What it does |
 |---|---|
 | `serviceaccount.yaml` | Identity for the router pods. |
-| `rbac.yaml` | ClusterRole + ClusterRoleBinding for `pods` get/list/watch. Required when `--cache-enabled=true` (the KEP-NNNN fast path) so the Pod informer can build the UID → IP map. Skip this file to run DNS-only. |
+| `rbac.yaml` | ClusterRole + ClusterRoleBinding for `pods` get/list/watch (required when `--cache-enabled=true`) and a binding to the stock `system:auth-delegator` ClusterRole (required when `--authz-mode=tokenreview`). Skip this file entirely when running DNS-only + allow-all. |
 | `deployment.yaml` | 2 replicas, topology spread, distroless image, restricted SecurityContext, liveness/readiness probes. Enables `--cache-enabled=true` by default. |
 | `service.yaml` | Cluster-IP service named `sandbox-router-svc` (preserves the Python router's name — existing Gateway/HTTPRoute resources work unchanged). |
 | `pdb.yaml` | Prevents voluntary disruptions from taking the whole fleet offline. |

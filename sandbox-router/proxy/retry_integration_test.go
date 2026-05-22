@@ -32,8 +32,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 )
 
 // pickFreePort returns a port that was free at call time. There is a small

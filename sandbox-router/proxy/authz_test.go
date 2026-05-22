@@ -26,8 +26,8 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/authz"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
 // recordingAuthz lets a test pin the verdict for every call and inspect

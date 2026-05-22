@@ -225,7 +225,7 @@ enable-otel-metrics: true
 Example K8s manifests live in [`deploy/`](deploy/) — Deployment, Service, PodDisruptionBudget, NetworkPolicy, plus a README that walks through what to tighten before production.
 
 ```sh
-kubectl apply -f clients/go/sandbox-router/deploy/
+kubectl apply -f sandbox-router/deploy/
 ```
 
 ## Scaling guidance
@@ -266,11 +266,11 @@ If you stay all-Go, the access log, OTel signals, hot-reloading certs, and retry
 
 ```sh
 make build-sandbox-router         # writes bin/sandbox-router
-go test ./clients/go/sandbox-router/...                  # unit tests
-go test -tags=integration ./clients/go/sandbox-router/...# integration tests (TLS handshakes, real backends)
+go test ./sandbox-router/...                  # unit tests
+go test -tags=integration ./sandbox-router/...# integration tests (TLS handshakes, real backends)
 ```
 
-The Docker image is built by `dev/tools/push-images`, which is patched to use the repo root as the build context for `clients/go/sandbox-router/Dockerfile` and to name the image `sandbox-router-go` (to avoid colliding with the Python router's `sandbox-router` image). Final stage is `gcr.io/distroless/static:nonroot`.
+The Docker image is built by `dev/tools/push-images`, which is patched to use the repo root as the build context for `sandbox-router/Dockerfile` and to name the image `sandbox-router-go` (to avoid colliding with the Python router's `sandbox-router` image). Final stage is `gcr.io/distroless/static:nonroot`.
 
 ```sh
 ./dev/tools/push-images --images sandbox-router-go --image-tag dev

@@ -31,9 +31,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/cache"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/observability"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 )
 
 // newRouter builds a Handler that routes to backend via X-Sandbox-Pod-IP.

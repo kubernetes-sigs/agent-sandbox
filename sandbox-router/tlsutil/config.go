@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"os"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
 // BuildServerTLS assembles a *tls.Config for the HTTPS server. The reloader

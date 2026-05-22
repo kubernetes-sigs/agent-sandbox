@@ -25,7 +25,7 @@
 # Requirements: kind, kubectl, docker.
 #
 # Usage:
-#   ./clients/go/sandbox-router/dev/smoke-test/run.sh
+#   ./sandbox-router/dev/smoke-test/run.sh
 #
 # Env overrides:
 #   CLUSTER_NAME   (default: sandbox-router-smoke)
@@ -38,14 +38,14 @@ CLUSTER_NAME="${CLUSTER_NAME:-sandbox-router-smoke}"
 ROUTER_IMAGE="${ROUTER_IMAGE:-kind.local/sandbox-router-go:smoke}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
 # wait_router_endpoints blocks until the sandbox-router-svc Endpoints
-# object has at least one address. Use after a deployment rollout so
-# subsequent curls don't race the service VIP.
+# object has at least one address. Use after the initial rollout when
+# smoke-curl doesn't exist yet to do an actively-serving probe.
 wait_router_endpoints() {
   for _ in $(seq 1 30); do
     if kubectl get endpoints sandbox-router-svc -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -q .; then
@@ -54,6 +54,24 @@ wait_router_endpoints() {
     sleep 1
   done
   echo "FAIL: sandbox-router-svc has no endpoints after 30s" >&2
+  return 1
+}
+
+# wait_router_serving blocks until the sandbox-router-svc actually
+# responds over the cluster network. Endpoints existing isn't enough —
+# kube-proxy still needs a beat to plumb iptables/IPVS rules after a
+# rollout, especially when the patch replaces both replicas. Probe via
+# /healthz (no headers required, always 200). Requires the smoke-curl
+# pod to be running.
+wait_router_serving() {
+  for _ in $(seq 1 30); do
+    if kubectl exec smoke-curl -- curl -sS --max-time 2 -o /dev/null \
+        "http://sandbox-router-svc.default.svc.cluster.local:8080/healthz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "FAIL: sandbox-router-svc not serving after 30s" >&2
   return 1
 }
 
@@ -79,7 +97,7 @@ kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 # --- 2. Build the router image and load it. ------------------------------
 log "Building router image ${ROUTER_IMAGE}"
 docker build \
-  -f clients/go/sandbox-router/Dockerfile \
+  -f sandbox-router/Dockerfile \
   -t "${ROUTER_IMAGE}" \
   .
 log "Loading image into kind"
@@ -87,16 +105,16 @@ kind load docker-image "${ROUTER_IMAGE}" --name "${CLUSTER_NAME}"
 
 # --- 3. Apply deploy manifests, with the smoke image. --------------------
 log "Applying deploy manifests"
-kubectl apply -f clients/go/sandbox-router/deploy/serviceaccount.yaml
-kubectl apply -f clients/go/sandbox-router/deploy/rbac.yaml
-kubectl apply -f clients/go/sandbox-router/deploy/service.yaml
+kubectl apply -f sandbox-router/deploy/serviceaccount.yaml
+kubectl apply -f sandbox-router/deploy/rbac.yaml
+kubectl apply -f sandbox-router/deploy/service.yaml
 # Use sed to swap the image and to add the tokenreview flags. The example
 # deployment.yaml uses :latest with imagePullPolicy=IfNotPresent; we
 # pin to the locally-loaded smoke image and Never so kubelet doesn't
 # attempt a pull.
 sed -e "s|registry.k8s.io/agent-sandbox/sandbox-router-go:latest|${ROUTER_IMAGE}|" \
     -e "s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|" \
-    clients/go/sandbox-router/deploy/deployment.yaml \
+    sandbox-router/deploy/deployment.yaml \
   | kubectl apply -f -
 
 log "Waiting for router rollout"
@@ -286,7 +304,7 @@ kubectl -n default patch deploy sandbox-router --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--authz-tokenreview-require-token=true"}
 ]'
 kubectl -n default rollout status deploy/sandbox-router --timeout=120s
-wait_router_endpoints
+wait_router_serving
 
 log "Test: tokenreview rejects requests without Bearer"
 STATUS=$(in_cluster_curl \

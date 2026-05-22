@@ -20,7 +20,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox-router/cache"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 )
 
 // Lookup is the slice of the Pod-IP cache the proxy depends on. Defined

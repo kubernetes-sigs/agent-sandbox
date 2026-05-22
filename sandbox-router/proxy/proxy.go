@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/propagation"
+	"golang.org/x/net/http/httpguts"
 	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
@@ -191,10 +192,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// Bound the upstream request lifetime by the configured proxy timeout.
-	ctx, cancel := context.WithTimeout(r.Context(), h.cfg.ProxyTimeout)
-	defer cancel()
+	// Bound the upstream request lifetime by the configured proxy timeout,
+	// EXCEPT for protocol upgrades (WebSockets, raw TCP via CONNECT). An
+	// upgraded connection is long-lived by design — e.g. code-server holds
+	// a single WebSocket open for the whole editing session — and applying
+	// ProxyTimeout to it would tear down a healthy session at the timeout
+	// boundary (180s default → client sees WebSocket close 1006). Once the
+	// 101 handshake is done the connection's TCP keepalive is the
+	// liveness signal, not our handler context.
+	ctx := r.Context()
+	if !isUpgradeRequest(r) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.cfg.ProxyTimeout)
+		defer cancel()
+	}
 	rp.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// isUpgradeRequest reports whether r is asking the server to switch
+// protocols (RFC 7230 §6.7). The check follows the same rule
+// httputil.ReverseProxy uses internally to recognize upgrade requests:
+// a Connection header with a "Upgrade" token AND a non-empty Upgrade
+// header. WebSockets are the common case; SPDY / HTTP/2 cleartext
+// upgrade also qualify.
+func isUpgradeRequest(r *http.Request) bool {
+	if !httpguts.HeaderValuesContainsToken(r.Header["Connection"], "Upgrade") {
+		return false
+	}
+	return r.Header.Get("Upgrade") != ""
 }
 
 // defaultTransport builds the shared *http.Transport used for upstream

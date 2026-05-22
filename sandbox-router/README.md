@@ -70,6 +70,14 @@ Defaults: 3 retries (4 attempts total), 200 ms → 400 ms → 800 ms backoff. Tu
 
 The retry budget never exceeds `--proxy-timeout`; the per-request context cuts it short.
 
+## WebSockets and other protocol upgrades
+
+`Connection: Upgrade` / `Upgrade: websocket` requests are forwarded transparently via `httputil.ReverseProxy`'s built-in upgrade handling. This is what makes things like `code-server` (VS Code in the browser, holds a single long-lived WebSocket per editing session) work through the router unchanged.
+
+One important carve-out: **`--proxy-timeout` does NOT apply to upgraded connections.** A WebSocket is long-lived by design, so we cancel only the per-request context for non-upgraded HTTP; once the `101 Switching Protocols` response has gone back to the client, the connection's TCP keepalive is the liveness signal. Without this carve-out, the 180s default would tear down a healthy WebSocket at the 3-minute mark and the client would see WebSocket close `1006`.
+
+Metrics for upgraded requests record `code="101"` once the handshake completes; the duration histogram records the full lifetime of the upgraded connection.
+
 ## Flags
 
 Run `sandbox-router --help` for the full list. The most relevant:

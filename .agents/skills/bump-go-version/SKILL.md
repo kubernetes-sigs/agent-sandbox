@@ -16,7 +16,7 @@ This skill guides AI agents to update the Go version used throughout the `agent-
         ./.agents/skills/bump-go-version/scripts/get-latest-go
         ```
     *   Note the exact version strings needed:
-        *   For `go mod edit -go`, use the numeric format `1.x.y` (e.g., `1.26.3`).
+        *   For `go mod edit -go`, use the numeric format `1.x` (e.g., `1.26`).  This is the language version and should not specify a patch version.
         *   For `go mod edit -toolchain`, use the `go1.x.y` format (e.g., `go1.26.3`).
         *   For `Dockerfiles`, identify the corresponding official `golang` image tag (e.g., `golang:1.26.3`).
 

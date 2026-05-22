@@ -1,6 +1,6 @@
 module sigs.k8s.io/agent-sandbox
 
-go 1.26.2
+go 1.26
 
 toolchain go1.26.3
 

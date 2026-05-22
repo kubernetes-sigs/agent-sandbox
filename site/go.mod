@@ -2,4 +2,4 @@ module github.com/kubernetes-sigs/agent-sandbox
 
 go 1.26.2
 
-toolchain go1.26.3
+require github.com/google/docsy v0.12.0 // indirect

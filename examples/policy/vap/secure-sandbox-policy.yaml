@@ -54,16 +54,6 @@ spec:
         )
       message: "Security Violation: 'agents.x-k8s.io/trusted-init-containers' may only name init containers. Main and ephemeral containers cannot be trusted."
 
-    # 0b. Trusted Init Annotation Safety — no sidecar (continuous) init containers.
-    # K8s 1.28+ allows init containers with restartPolicy: Always, which run for the
-    # entire pod lifetime alongside main containers. A trusted init container with
-    # elevated capabilities that stays alive during agent execution creates an
-    # intra-pod escalation path. Trusted init containers must run to completion and exit.
-    - expression: >-
-        variables.trustedInitContainers.all(c,
-          !has(c.restartPolicy) || c.restartPolicy != 'Always'
-        )
-      message: "Security Violation: Trusted init containers must not use 'restartPolicy: Always'. Sidecar (continuous) init containers cannot be granted elevated capabilities as they remain alive during agent execution."
 
     # 1. Runtime Isolation
     - expression: "has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'gvisor'"

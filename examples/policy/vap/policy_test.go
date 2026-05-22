@@ -471,10 +471,7 @@ func TestSecureSandboxVAP(t *testing.T) {
 			expectAllowed: false,
 		},
 		{
-			// K8s 1.28+ sidecar containers (restartPolicy: Always) run for the entire pod
-			// lifetime. A trusted init container with elevated caps that stays alive during
-			// agent execution creates an intra-pod escalation path.
-			name:        "Violation: Trusted init container uses restartPolicy Always (sidecar)",
+			name:        "Success: Trusted init container with restartPolicy Always is permitted",
 			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "sidecar-init"},
 			mutateSpec: func(spec *corev1.PodSpec) {
 				restartAlways := corev1.ContainerRestartPolicyAlways
@@ -498,7 +495,7 @@ func TestSecureSandboxVAP(t *testing.T) {
 					},
 				}
 			},
-			expectAllowed: false,
+			expectAllowed: true,
 		},
 		{
 			name:        "Violation: Trusted init container is privileged",

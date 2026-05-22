@@ -16,6 +16,7 @@ package extproc
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -215,19 +216,83 @@ func TestHandle_InvalidPortRejected(t *testing.T) {
 // TestHandle_NonRequestHeadersPhasePassesThrough confirms we don't fail
 // the stream when Envoy is misconfigured to call us for body/response
 // phases — we just CONTINUE.
-func TestHandle_NonRequestHeadersPhasePassesThrough(t *testing.T) {
+// TestHandle_PhaseMatchedContinue exercises the protocol-correctness
+// guarantee: the ProcessingResponse oneof variant must match the
+// ProcessingRequest oneof variant for every phase Envoy can send.
+// Sending the wrong variant (e.g. a RequestHeaders envelope in reply
+// to a RequestBody request) is a protocol violation that aborts the
+// ext_proc stream and therefore the user's request.
+func TestHandle_PhaseMatchedContinue(t *testing.T) {
 	s, _ := newServer(t)
-	resp := s.handle(context.Background(), &extprocv3.ProcessingRequest{
-		Request: &extprocv3.ProcessingRequest_ResponseHeaders{
-			ResponseHeaders: hdrs(nil),
+
+	cases := []struct {
+		name string
+		req  *extprocv3.ProcessingRequest
+		// pick returns the matching variant from the response; nil
+		// means the test failed the variant check.
+		pick func(*extprocv3.ProcessingResponse) any
+	}{
+		{
+			name: "ResponseHeaders → ResponseHeaders",
+			req: &extprocv3.ProcessingRequest{
+				Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: hdrs(nil)},
+			},
+			pick: func(r *extprocv3.ProcessingResponse) any { return r.GetResponseHeaders() },
 		},
-	})
-	hr := resp.GetRequestHeaders()
-	if hr == nil {
-		t.Fatalf("expected CONTINUE shaped response")
+		{
+			name: "RequestBody → RequestBody",
+			req: &extprocv3.ProcessingRequest{
+				Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{}},
+			},
+			pick: func(r *extprocv3.ProcessingResponse) any { return r.GetRequestBody() },
+		},
+		{
+			name: "ResponseBody → ResponseBody",
+			req: &extprocv3.ProcessingRequest{
+				Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{}},
+			},
+			pick: func(r *extprocv3.ProcessingResponse) any { return r.GetResponseBody() },
+		},
+		{
+			name: "RequestTrailers → RequestTrailers",
+			req: &extprocv3.ProcessingRequest{
+				Request: &extprocv3.ProcessingRequest_RequestTrailers{RequestTrailers: &extprocv3.HttpTrailers{}},
+			},
+			pick: func(r *extprocv3.ProcessingResponse) any { return r.GetRequestTrailers() },
+		},
+		{
+			name: "ResponseTrailers → ResponseTrailers",
+			req: &extprocv3.ProcessingRequest{
+				Request: &extprocv3.ProcessingRequest_ResponseTrailers{ResponseTrailers: &extprocv3.HttpTrailers{}},
+			},
+			pick: func(r *extprocv3.ProcessingResponse) any { return r.GetResponseTrailers() },
+		},
 	}
-	if hr.Response.HeaderMutation != nil {
-		t.Errorf("no mutation should be set for non-RequestHeaders phase")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := s.handle(context.Background(), tc.req)
+			if resp == nil {
+				t.Fatalf("nil response for known phase")
+			}
+			// Guard: a wrong-variant response would have GetRequestHeaders
+			// non-nil for, say, the RequestBody case. Assert the matching
+			// variant is set AND that no other variant leaked in.
+			matched := tc.pick(resp)
+			if matched == nil || reflect.ValueOf(matched).IsNil() {
+				t.Fatalf("phase-matched variant missing on %T; got %+v", tc.req.Request, resp.Response)
+			}
+		})
+	}
+}
+
+// TestHandle_UnknownPhaseReturnsNil documents the contract for unknown
+// (future) ProcessingRequest oneof variants: handle returns nil and the
+// Process loop drops the message rather than sending a wrong-phase
+// reply that would abort the stream.
+func TestHandle_UnknownPhaseReturnsNil(t *testing.T) {
+	if got := continueFor(&extprocv3.ProcessingRequest{Request: nil}); got != nil {
+		t.Fatalf("unknown oneof should yield nil ProcessingResponse, got %+v", got)
 	}
 }
 

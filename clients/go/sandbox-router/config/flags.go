@@ -17,6 +17,7 @@ package config
 import (
 	"flag"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -105,6 +106,24 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"OTEL_EXPORTER_OTLP_ENDPOINT (or OTEL_EXPORTER_OTLP_METRICS_ENDPOINT). "+
 			"Auto-enabled when either env var is set; pass --enable-otel-metrics=false "+
 			"to override.")
+	stringEnumVar(fs, (*string)(&c.AuthzMode), "authz-mode", string(c.AuthzMode),
+		"Per-request authorization strategy: allow-all (default, no auth) "+
+			"or tokenreview (validate Bearer tokens via the K8s TokenReview API). "+
+			"tokenreview requires either in-cluster config or --kubeconfig.")
+	fs.DurationVar(&c.AuthzTokenReviewTTL, "authz-tokenreview-ttl", c.AuthzTokenReviewTTL,
+		"How long a TokenReview decision is cached. Shorter values catch "+
+			"token revocations sooner at the cost of more apiserver load.")
+	fs.IntVar(&c.AuthzTokenReviewCacheSize, "authz-tokenreview-cache-size", c.AuthzTokenReviewCacheSize,
+		"Maximum number of cached TokenReview decisions before LRU eviction.")
+	fs.BoolVar(&c.AuthzTokenReviewRequireToken, "authz-tokenreview-require-token", c.AuthzTokenReviewRequireToken,
+		"When true, reject requests that arrive without an Authorization: "+
+			"Bearer header with 401. When false (default), tokenless requests "+
+			"are allowed — useful during client rollouts.")
+	stringSliceVar(fs, &c.AuthzTokenReviewAudiences, "authz-tokenreview-audiences",
+		"Comma-separated audience values to verify against the token's aud claim. "+
+			"Empty disables the audience check. Required when authenticating "+
+			"projected ServiceAccount tokens minted with --audience.")
+
 	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
 		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+
 			"the router watches sandbox-owned Pods and dials cached IPs for "+
@@ -190,4 +209,43 @@ func applyEnvDefaults(c *Config, lookup LookupEnvFunc) {
 // flag help text uses a stable doc-style and to keep RegisterFlags scannable.
 func stringEnumVar(fs *flag.FlagSet, dst *string, name, def, usage string) {
 	fs.StringVar(dst, name, def, usage)
+}
+
+// stringSliceVar registers a flag whose value is a comma-separated list of
+// strings. Empty input clears the slice; the default value (when the flag is
+// not set) is whatever *dst already contains.
+func stringSliceVar(fs *flag.FlagSet, dst *[]string, name, usage string) {
+	fs.Var(&csvFlag{dst: dst}, name, usage)
+}
+
+// csvFlag is a flag.Value backed by a *[]string and a comma-separated
+// surface syntax.
+type csvFlag struct {
+	dst *[]string
+	set bool
+}
+
+func (c *csvFlag) String() string {
+	if c == nil || c.dst == nil {
+		return ""
+	}
+	return strings.Join(*c.dst, ",")
+}
+
+func (c *csvFlag) Set(v string) error {
+	c.set = true
+	if v == "" {
+		*c.dst = nil
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	*c.dst = out
+	return nil
 }

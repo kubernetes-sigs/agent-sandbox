@@ -113,6 +113,39 @@ func TestRegisterFlagsOverridesEnv(t *testing.T) {
 	}
 }
 
+func TestAudiencesCSVFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "default empty", args: nil, want: nil},
+		{name: "single", args: []string{"--authz-tokenreview-audiences=sandbox-router"}, want: []string{"sandbox-router"}},
+		{name: "multi", args: []string{"--authz-tokenreview-audiences=a,b,c"}, want: []string{"a", "b", "c"}},
+		{name: "trims whitespace", args: []string{"--authz-tokenreview-audiences=a, b , c"}, want: []string{"a", "b", "c"}},
+		{name: "skips empty", args: []string{"--authz-tokenreview-audiences=a,,b"}, want: []string{"a", "b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Defaults()
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(&strings.Builder{})
+			RegisterFlags(fs, &c, func(string) (string, bool) { return "", false })
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(c.AuthzTokenReviewAudiences) != len(tc.want) {
+				t.Fatalf("got %v want %v", c.AuthzTokenReviewAudiences, tc.want)
+			}
+			for i, v := range c.AuthzTokenReviewAudiences {
+				if v != tc.want[i] {
+					t.Fatalf("idx %d: got %q want %q", i, v, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestApplyPostParseEnvDefaults(t *testing.T) {
 	type expect struct {
 		tracing bool
@@ -281,6 +314,30 @@ func TestValidate(t *testing.T) {
 				c.TLSKeyFile = "/k"
 				c.TLSClientCAFile = "/ca"
 				c.MTLSMode = MTLSRequired
+			},
+			wantErr: "",
+		},
+		{
+			name:    "invalid authz mode",
+			mut:     func(c *Config) { c.AuthzMode = "bogus" },
+			wantErr: "invalid --authz-mode",
+		},
+		{
+			name:    "zero tokenreview ttl",
+			mut:     func(c *Config) { c.AuthzTokenReviewTTL = 0 },
+			wantErr: "authz-tokenreview-ttl",
+		},
+		{
+			name:    "zero tokenreview cache size",
+			mut:     func(c *Config) { c.AuthzTokenReviewCacheSize = 0 },
+			wantErr: "authz-tokenreview-cache-size",
+		},
+		{
+			name: "valid tokenreview configuration",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzTokenReview
+				c.AuthzTokenReviewRequireToken = true
+				c.AuthzTokenReviewAudiences = []string{"sandbox-router"}
 			},
 			wantErr: "",
 		},

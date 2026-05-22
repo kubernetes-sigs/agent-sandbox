@@ -36,6 +36,18 @@ const (
 	MTLSRequired MTLSMode = "required"
 )
 
+// AuthzMode selects the per-request authorization strategy.
+type AuthzMode string
+
+const (
+	// AuthzAllowAll permits every request (Python router default).
+	AuthzAllowAll AuthzMode = "allow-all"
+	// AuthzTokenReview authenticates each request via the K8s
+	// TokenReview API. Per-sandbox authorization beyond authentication
+	// is out of v1 scope.
+	AuthzTokenReview AuthzMode = "tokenreview"
+)
+
 // Config is the parsed runtime configuration. All fields are populated by
 // RegisterFlags + flag.Parse and validated by Validate.
 type Config struct {
@@ -121,6 +133,28 @@ type Config struct {
 	// informer client. Empty means use in-cluster config. Honors the
 	// standard KUBECONFIG env var.
 	Kubeconfig string
+
+	// AuthzMode selects how every inbound request is authorized.
+	// Defaults to allow-all (Python compatibility); set to tokenreview
+	// to enforce Bearer-token authentication via the K8s TokenReview
+	// API.
+	AuthzMode AuthzMode
+	// AuthzTokenReviewTTL bounds how long a TokenReview decision is
+	// cached. Shorter values catch revocations sooner; longer values
+	// reduce apiserver load.
+	AuthzTokenReviewTTL time.Duration
+	// AuthzTokenReviewCacheSize is the maximum number of cached
+	// TokenReview decisions before LRU eviction starts.
+	AuthzTokenReviewCacheSize int
+	// AuthzTokenReviewRequireToken, when true, rejects requests that
+	// arrive without an Authorization: Bearer ... header. When false,
+	// tokenless requests are allowed through — useful during rollouts.
+	AuthzTokenReviewRequireToken bool
+	// AuthzTokenReviewAudiences, when non-empty, asks the apiserver to
+	// verify that the token was minted for one of these audiences.
+	// Projected ServiceAccount tokens carry an aud claim that must
+	// match. Empty disables the audience check.
+	AuthzTokenReviewAudiences []string
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -140,6 +174,9 @@ func Defaults() Config {
 		UpstreamRetryInitialDelay: 200 * time.Millisecond,
 		UpstreamRetryMaxDelay:     800 * time.Millisecond,
 		AccessLog:                 true,
+		AuthzMode:                 AuthzAllowAll,
+		AuthzTokenReviewTTL:       30 * time.Second,
+		AuthzTokenReviewCacheSize: 2048,
 	}
 }
 
@@ -194,6 +231,18 @@ func (c *Config) Validate() error {
 	}
 	if c.UpstreamRetryMaxDelay < 0 {
 		return fmt.Errorf("--upstream-retry-max-delay must be non-negative, got %s", c.UpstreamRetryMaxDelay)
+	}
+
+	switch c.AuthzMode {
+	case AuthzAllowAll, AuthzTokenReview:
+	default:
+		return fmt.Errorf("invalid --authz-mode %q (want allow-all or tokenreview)", c.AuthzMode)
+	}
+	if c.AuthzTokenReviewTTL <= 0 {
+		return fmt.Errorf("--authz-tokenreview-ttl must be positive, got %s", c.AuthzTokenReviewTTL)
+	}
+	if c.AuthzTokenReviewCacheSize <= 0 {
+		return fmt.Errorf("--authz-tokenreview-cache-size must be positive, got %d", c.AuthzTokenReviewCacheSize)
 	}
 	return nil
 }

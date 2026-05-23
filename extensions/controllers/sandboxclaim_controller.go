@@ -1105,6 +1105,17 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	return sandbox, nil
 }
 
+// migrateLegacyAssignedSandboxLabel migrates legacy assigned Sandbox name from label to annotation.
+func (r *SandboxClaimReconciler) migrateLegacyAssignedSandboxLabel(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sbName string) error {
+	patch := client.MergeFrom(claim.DeepCopy())
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = sbName
+	delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
+	return r.Patch(ctx, claim, patch)
+}
+
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
@@ -1115,13 +1126,15 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		sandbox := &v1beta1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
-				logger.Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
+				logger.V(4).Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 				return sandbox, nil
 			}
 		} else if !k8errors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
 		}
-	} // Check if a previously adopted sandbox is recorded in claim annotations or legacy labels
+	}
+
+	// Check if a previously adopted sandbox is recorded in claim annotations or legacy labels
 	var sbName string
 	var fromLabel bool
 	if claim.Annotations != nil {
@@ -1133,26 +1146,19 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			fromLabel = true
 		}
 	}
-		}
-	}
 
 	if sbName != "" {
 		logger.V(1).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
-				logger.Info("Found existing adopted sandbox", "sandbox", sbName, "claim", claim.Name)
+				logger.V(4).Info("Found existing adopted sandbox", "sandbox", sbName, "claim", claim.Name)
 				if fromLabel {
-					patch := client.MergeFrom(claim.DeepCopy())
-					if claim.Annotations == nil {
-						claim.Annotations = make(map[string]string)
-					}
-					claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = sbName
-					delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
-					if err := r.Patch(ctx, claim, patch); err != nil {
+					if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
 						logger.Error(err, "Failed to migrate legacy sandbox label to annotation (non-fatal)", "claim", claim.Name)
+					} else {
+						logger.Info("Successfully migrated legacy sandbox label to annotation", "claim", claim.Name)
 					}
-					logger.Info("Successfully migrated legacy sandbox label to annotation", "claim", claim.Name)
 				}
 				return sandbox, nil
 			}
@@ -1161,31 +1167,39 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
 				// Still in warm pool. Try to complete adoption!
 				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
-				if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
-					if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
-						logger.Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
+				if err := verifySandboxCandidate(sandbox, claim); err != nil {
+					logger.Info("Sandbox recorded in claim metadata cannot be adopted, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "reason", err.Error())
+					patch := client.MergeFrom(claim.DeepCopy())
+					if fromLabel {
+						delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
 					} else {
-						return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
+						delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+					}
+					if err := r.Patch(ctx, claim, patch); err != nil {
+						return nil, fmt.Errorf("failed to remove invalid sandbox reference: %w", err)
 					}
 				} else {
-					if fromLabel {
-						patch := client.MergeFrom(claim.DeepCopy())
-						if claim.Annotations == nil {
-							claim.Annotations = make(map[string]string)
+					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
+						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
+							logger.V(4).Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
+						} else {
+							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
-						claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = sbName
-						delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
-						if err := r.Patch(ctx, claim, patch); err != nil {
-							logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
+					} else {
+						if fromLabel {
+							if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
+								logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
+							} else {
+								logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
+							}
 						}
-						logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
+						// If succeeded, return error to retry so next reconcile sees it controlled by us!
+						logger.Info("Triggered adoption completion for sandbox, retry", "sandbox", sbName, "claim", claim.Name)
+						return nil, fmt.Errorf("triggered adoption completion for sandbox %s, retry", sbName)
 					}
-					// If succeeded, return error to retry so next reconcile sees it controlled by us!
-					logger.Info("Triggered adoption completion for sandbox, retry", "sandbox", sbName, "claim", claim.Name)
-					return nil, fmt.Errorf("triggered adoption completion for sandbox %s, retry", sbName)
 				}
 			}
-			logger.Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
+			logger.V(4).Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
 		} else if k8errors.IsNotFound(err) {
 			logger.Info("Sandbox recorded in claim metadata not found, removing stale reference", "sandboxName", sbName, "claim", claim.Name)
 			patch := client.MergeFrom(claim.DeepCopy())
@@ -1219,7 +1233,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	if sandbox != nil {
-		logger.Info("sandbox already exists, skipping update", "name", sandbox.Name)
+		logger.V(4).Info("sandbox already exists, skipping update", "name", sandbox.Name)
 		if !metav1.IsControlledBy(sandbox, claim) {
 			err := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", sandbox.Name, claim.Name)
 			logger.Error(err, "Sandbox controller mismatch")
@@ -1238,7 +1252,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	if policy == extensionsv1beta1.WarmPoolPolicyNone {
-		logger.Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
+		logger.V(4).Info("Skipping warm pool adoption based on warmpool policy", "claim", claim.Name, "warmpool", policy)
 		return nil, nil
 	}
 

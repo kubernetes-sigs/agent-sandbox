@@ -137,8 +137,10 @@ type SandboxSpec struct {
 
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// This field is immutable after creation.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="volumeClaimTemplates is immutable"
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.

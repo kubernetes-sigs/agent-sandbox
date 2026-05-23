@@ -3956,6 +3956,9 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: volumeClaimTemplates is immutable
+                  rule: self == oldSelf
             required:
             - podTemplate
             type: object

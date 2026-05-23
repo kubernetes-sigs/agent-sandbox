@@ -63,6 +63,27 @@ def _get_cluster_domain() -> str:
     return cluster_domain
 
 
+def _get_request_timeout(request: Request) -> float:
+    raw = request.headers.get("X-Sandbox-Timeout")
+    if raw is None:
+        return proxy_timeout
+    try:
+        value = float(raw)
+    except (ValueError, TypeError):
+        print(
+            f"WARNING: Invalid X-Sandbox-Timeout='{raw}', "
+            f"falling back to {proxy_timeout}s"
+        )
+        return proxy_timeout
+    if value <= 0:
+        print(
+            f"WARNING: X-Sandbox-Timeout must be positive, got {value}, "
+            f"falling back to {proxy_timeout}s"
+        )
+        return proxy_timeout
+    return value
+
+
 cluster_domain = _get_cluster_domain()
 
 DNS_LABEL_REGEX = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
@@ -173,6 +194,7 @@ async def proxy_request(request: Request, full_path: str):
     print(f"Proxying request for sandbox '{sandbox_id}' to URL: {target_url}")
 
     try:
+        timeout = _get_request_timeout(request)
         headers = {
             key: value
             for (key, value) in request.headers.items()
@@ -186,7 +208,8 @@ async def proxy_request(request: Request, full_path: str):
             content=request.stream()
         )
 
-        resp = await client.send(req, stream=True)
+        # Allow a request-level timeout to override the router's default timeout.
+        resp = await client.send(req, stream=True, timeout=timeout)
 
         async def stream_generator():
             try:

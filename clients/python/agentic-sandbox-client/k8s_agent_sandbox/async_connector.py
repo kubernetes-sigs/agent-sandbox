@@ -167,6 +167,9 @@ class AsyncSandboxConnector:
             headers["X-Sandbox-ID"] = self.id
             headers["X-Sandbox-Namespace"] = self.namespace
             headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+            timeout = kwargs.get("timeout")
+            if timeout is not None:
+                headers["X-Sandbox-Timeout"] = str(timeout)
             if self._get_pod_ip and not self._pod_ip_auth_failed:
                 if not self._pod_ip_resolved:
                     try:

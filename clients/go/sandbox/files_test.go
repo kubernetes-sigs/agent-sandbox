@@ -24,6 +24,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -502,6 +503,17 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 	}
 	if _, ok := capturedHeaders[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
 		t.Errorf("expected header %s to be absent, but it was present", headerSandboxPodIP)
+	}
+	timeoutHeader := headers.Get(headerSandboxTimeout)
+	if timeoutHeader == "" {
+		t.Fatalf("expected %s to be set", headerSandboxTimeout)
+	}
+	seconds, err := strconv.ParseFloat(timeoutHeader, 64)
+	if err != nil {
+		t.Fatalf("failed to parse timeout header %q: %v", timeoutHeader, err)
+	}
+	if seconds <= 0 {
+		t.Fatalf("expected propagated timeout to be positive, got %f", seconds)
 	}
 }
 

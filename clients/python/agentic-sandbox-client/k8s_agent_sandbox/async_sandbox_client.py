@@ -19,6 +19,7 @@ Requires the ``async`` optional dependencies::
     pip install k8s-agent-sandbox[async]
 """
 
+import atexit
 import asyncio
 import logging
 import re
@@ -51,10 +52,14 @@ class AsyncSandboxClient(Generic[T]):
     ``connection_config`` is required — the async client does not support
     ``SandboxLocalTunnelConnectionConfig``.
 
-    Unlike the sync ``SandboxClient``, there is no ``atexit`` fallback because
-    async cleanup cannot run in an atexit handler. Use the ``async with``
-    context manager or explicitly call ``await client.delete_all()`` followed
-    by ``await client.close()`` to avoid orphaned claims.
+    Pass ``cleanup=True`` to register an atexit hook that deletes all tracked
+    sandboxes on program termination::
+
+        client = AsyncSandboxClient(connection_config=config, cleanup=True)
+
+    Alternatively, use the ``async with`` context manager or explicitly call
+    ``await client.delete_all()`` followed by ``await client.close()`` to
+    avoid orphaned claims.
     """
 
     sandbox_class: type[T] = AsyncSandbox  # type: ignore
@@ -63,7 +68,21 @@ class AsyncSandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
+        cleanup: bool = False,
     ):
+        """
+        Args:
+            connection_config: Configuration for connecting to the sandboxes.
+                Required — the async client does not support
+                ``SandboxLocalTunnelConnectionConfig``.
+            tracer_config: Configuration for OpenTelemetry tracing.
+                Defaults to an empty SandboxTracerConfig (tracing disabled).
+            cleanup: If True, registers an atexit hook to automatically delete
+                all tracked sandboxes when the program terminates. The hook
+                runs ``asyncio.run(self.delete_all())`` after the main event
+                loop has exited, creating a short-lived loop for cleanup.
+                Defaults to False.
+        """
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
@@ -83,6 +102,11 @@ class AsyncSandboxClient(Generic[T]):
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
+
+        # asyncio.run() creates a fresh event loop, which is safe to call
+        # from an atexit handler after the main event loop has already exited.
+        if cleanup:
+            atexit.register(lambda: asyncio.run(self.delete_all()))
 
     async def __aenter__(self) -> "AsyncSandboxClient[T]":
         return self

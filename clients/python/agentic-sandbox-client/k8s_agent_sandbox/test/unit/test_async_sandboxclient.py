@@ -202,6 +202,20 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             AsyncSandboxClient(connection_config=None)
         self.assertIn("connection_config is required", str(ctx.exception))
 
+    def test_cleanup_true_registers_atexit(self):
+        """cleanup=True should register an atexit handler that calls delete_all."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            AsyncSandboxClient(connection_config=self.config, cleanup=True)
+            mock_atexit.register.assert_called_once()
+            registered_fn = mock_atexit.register.call_args[0][0]
+            self.assertTrue(callable(registered_fn))
+
+    def test_cleanup_false_does_not_register_atexit(self):
+        """cleanup=False (default) should not register any atexit handler."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            AsyncSandboxClient(connection_config=self.config, cleanup=False)
+            mock_atexit.register.assert_not_called()
+
     async def test_validate_labels_rejects_invalid_value(self):
         with self.assertRaises(ValueError):
             await self.client.create_sandbox("t", labels={"agent": "invalid value!"})

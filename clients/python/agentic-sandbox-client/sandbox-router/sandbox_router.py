@@ -13,10 +13,11 @@
 # limitations under the License.
 
 
+import math
 import os
+import ipaddress
 import re
 import secrets
-import ipaddress
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -33,6 +34,7 @@ DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
 DEFAULT_PROXY_TIMEOUT = 180.0
 DEFAULT_CLUSTER_DOMAIN = "cluster.local"
+MAX_REQUEST_TIMEOUT = 3600.0
 
 
 def _get_proxy_timeout() -> float:
@@ -75,9 +77,10 @@ def _get_request_timeout(request: Request) -> float:
             f"falling back to {proxy_timeout}s"
         )
         return proxy_timeout
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0 or value > MAX_REQUEST_TIMEOUT:
         print(
-            f"WARNING: X-Sandbox-Timeout must be positive, got {value}, "
+            f"WARNING: X-Sandbox-Timeout must be finite and within "
+            f"(0, {MAX_REQUEST_TIMEOUT}], got {value}, "
             f"falling back to {proxy_timeout}s"
         )
         return proxy_timeout

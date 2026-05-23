@@ -376,6 +376,44 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         sent_headers = call_kwargs.get("headers", {})
         self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123")
 
+    async def test_timeout_object_uses_read_timeout_for_router_requests(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        await connector.send_request("GET", "health", timeout=httpx.Timeout(123.0))
+
+        _, call_kwargs = connector.client.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123.0")
+
+    async def test_unsupported_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        await connector.send_request("GET", "health", timeout=object())
+
+        _, call_kwargs = connector.client.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
     async def test_timeout_header_is_not_sent_for_in_cluster_requests(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(

@@ -79,9 +79,10 @@ class AsyncSandboxClient(Generic[T]):
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
             cleanup: If True, registers an atexit hook to automatically delete
                 all tracked sandboxes when the program terminates. The hook
-                runs ``asyncio.run(self.delete_all())`` after the main event
-                loop has exited, creating a short-lived loop for cleanup.
-                Defaults to False.
+                snapshots the tracked claim names and opens fresh async
+                resources in a new event loop, so it is safe to call after
+                the main event loop has exited. Cleanup is best-effort —
+                errors are silently ignored. Defaults to False.
         """
         if connection_config is None:
             raise ValueError(
@@ -103,10 +104,8 @@ class AsyncSandboxClient(Generic[T]):
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
 
-        # asyncio.run() creates a fresh event loop, which is safe to call
-        # from an atexit handler after the main event loop has already exited.
         if cleanup:
-            atexit.register(lambda: asyncio.run(self.delete_all()))
+            atexit.register(self._atexit_cleanup)
 
     async def __aenter__(self) -> "AsyncSandboxClient[T]":
         return self
@@ -335,6 +334,34 @@ class AsyncSandboxClient(Generic[T]):
                 await self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
                 logger.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
+
+    def _atexit_cleanup(self):
+        """Best-effort atexit handler that deletes all tracked sandbox claims.
+
+        Uses a snapshot of the tracked claims and a fresh :class:`AsyncK8sHelper`
+        so that no loop-bound objects from the original client are reused across
+        event loop boundaries.  All errors are silently suppressed — atexit
+        cleanup is best-effort.
+        """
+        claims = list(self._active_connection_sandboxes.keys())
+        if not claims:
+            return
+
+        async def _do_cleanup():
+            helper = AsyncK8sHelper()
+            try:
+                for (ns, claim_name) in claims:
+                    try:
+                        await helper.delete_sandbox_claim(claim_name, ns)
+                    except Exception:
+                        pass
+            finally:
+                await helper.close()
+
+        try:
+            asyncio.run(_do_cleanup())
+        except Exception:
+            pass
 
     # --- Label validation (shared with sync client) ---
 

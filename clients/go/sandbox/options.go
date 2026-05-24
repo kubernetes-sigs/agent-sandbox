@@ -80,8 +80,8 @@ type Options struct {
 	PortForwardReadyTimeout time.Duration
 
 	// CleanupTimeout is how long to wait for claim deletion during both Open
-	// rollback and Close. Uses a detached context so cleanup succeeds even if
-	// the caller's context is already cancelled. Default: 30s.
+	// rollback and Client Close/DeleteAll. Uses a detached context so cleanup
+	// succeeds even if the caller's context is already cancelled. Default: 30s.
 	CleanupTimeout time.Duration
 
 	// RequestTimeout is the total timeout for a single SDK method call
@@ -112,6 +112,12 @@ type Options struct {
 	// Quiet suppresses the default stderr logger. Has no effect when a
 	// custom Logger is provided (non-zero-value).
 	Quiet bool
+
+	// Cleanup registers a signal handler to automatically delete all tracked
+	// sandboxes on SIGINT/SIGTERM. When enabled, it is highly recommended to
+	// also call or defer client.Close(ctx) to handle cleanups on normal exits.
+	// Default: false.
+	Cleanup bool
 
 	// K8sHelper provides pre-constructed Kubernetes clients. If nil, a new
 	// K8sHelper is created from RestConfig. Use this to share clients

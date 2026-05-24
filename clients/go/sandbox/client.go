@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -27,6 +28,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+var ErrClosed = errors.New("sandbox: client is closed")
 
 // Key identifies a tracked sandbox in the registry.
 type Key struct {
@@ -42,9 +45,11 @@ type Client struct {
 	tracer  trace.Tracer
 	svcName string
 
-	mu         sync.Mutex
-	registry   map[Key]*Sandbox
-	stopSignal context.CancelFunc // non-nil when signal handler is active
+	mu          sync.Mutex
+	registry    map[Key]*Sandbox
+	closed      bool
+	stopSignal  context.CancelFunc // non-nil when signal handler is active
+	cleanupStop func()             // stores the cancel/stop callback from EnableAutoCleanup
 }
 
 // NewClient creates a Client with shared configuration.
@@ -65,14 +70,20 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 
 	tracer, svcName := newTracer(opts)
 
-	return &Client{
+	c := &Client{
 		opts:     opts,
 		k8s:      k8s,
 		log:      opts.Logger,
 		tracer:   tracer,
 		svcName:  svcName,
 		registry: make(map[Key]*Sandbox),
-	}, nil
+	}
+
+	if opts.Cleanup {
+		_ = c.EnableAutoCleanup()
+	}
+
+	return c, nil
 }
 
 // CreateSandbox provisions a new sandbox and returns a managed handle.
@@ -84,6 +95,13 @@ func (c *Client) CreateSandbox(ctx context.Context, template, namespace string) 
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, ErrClosed
+	}
+	c.mu.Unlock()
 
 	sandboxOpts := c.opts
 	sandboxOpts.TemplateName = template
@@ -101,6 +119,11 @@ func (c *Client) CreateSandbox(ctx context.Context, template, namespace string) 
 
 	key := Key{Namespace: namespace, ClaimName: sb.ClaimName()}
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		_ = sb.Close(ctx)
+		return nil, ErrClosed
+	}
 	c.registry[key] = sb
 	c.mu.Unlock()
 
@@ -116,6 +139,10 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	key := Key{Namespace: namespace, ClaimName: claimName}
 
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, ErrClosed
+	}
 	existing := c.registry[key]
 	c.mu.Unlock()
 
@@ -159,6 +186,11 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	}
 
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		_ = sb.Close(ctx)
+		return nil, ErrClosed
+	}
 	c.registry[key] = sb
 	c.mu.Unlock()
 
@@ -169,6 +201,10 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 func (c *Client) ListActiveSandboxes() []Key {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil
+	}
 
 	active := make([]Key, 0, len(c.registry))
 	for key, sb := range c.registry {
@@ -183,6 +219,13 @@ func (c *Client) ListActiveSandboxes() []Key {
 
 // ListAllSandboxes lists all SandboxClaim names in the given namespace.
 func (c *Client) ListAllSandboxes(ctx context.Context, namespace string) ([]string, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, ErrClosed
+	}
+	c.mu.Unlock()
+
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
@@ -205,6 +248,10 @@ func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string)
 	key := Key{Namespace: namespace, ClaimName: claimName}
 
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClosed
+	}
 	sb := c.registry[key]
 	delete(c.registry, key)
 	c.mu.Unlock()
@@ -217,29 +264,84 @@ func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string)
 
 // DeleteAll closes and deletes all tracked sandboxes. Best-effort.
 func (c *Client) DeleteAll(ctx context.Context) {
+	_ = c.deleteAll(ctx)
+}
+
+func (c *Client) deleteAll(ctx context.Context) error {
 	c.mu.Lock()
 	snapshot := make(map[Key]*Sandbox, len(c.registry))
 	maps.Copy(snapshot, c.registry)
 	c.registry = make(map[Key]*Sandbox)
 	c.mu.Unlock()
 
-	for key, sb := range snapshot {
-		if err := sb.Close(ctx); err != nil {
-			c.log.Error(err, "cleanup failed", "claim", key.ClaimName, "namespace", key.Namespace)
-		}
+	if len(snapshot) == 0 {
+		return nil
 	}
+
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var errs []error
+
+	for key, sb := range snapshot {
+		wg.Add(1)
+		go func(k Key, s *Sandbox) {
+			defer wg.Done()
+			if err := s.Close(ctx); err != nil {
+				c.log.Error(err, "cleanup failed", "claim", k.ClaimName, "namespace", k.Namespace)
+				errMu.Lock()
+				errs = append(errs, err)
+				errMu.Unlock()
+			}
+		}(key, sb)
+	}
+
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// Close stops the auto-cleanup signal handler (if active) and deletes all tracked sandboxes.
+// Returns an error if any of the cleanups fail (best-effort).
+func (c *Client) Close(ctx context.Context) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	stopFn := c.cleanupStop
+	c.cleanupStop = nil
+	c.mu.Unlock()
+
+	if stopFn != nil {
+		stopFn()
+	}
+
+	return c.deleteAll(ctx)
 }
 
 // EnableAutoCleanup calls DeleteAll on SIGINT/SIGTERM.
 // Call the returned function to stop the signal handler.
 func (c *Client) EnableAutoCleanup() (stop func()) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return func() {}
+	}
 	if c.stopSignal != nil {
 		c.mu.Unlock()
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopSignal = cancel
+
+	stopFn := func() {
+		c.mu.Lock()
+		c.stopSignal = nil
+		c.cleanupStop = nil
+		c.mu.Unlock()
+		cancel()
+	}
+	c.cleanupStop = stopFn
 	c.mu.Unlock()
 
 	ch := make(chan os.Signal, 1)
@@ -248,9 +350,9 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 	go func() {
 		select {
 		case sig := <-ch:
+			signal.Stop(ch)
 			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
 			c.DeleteAll(context.Background())
-			signal.Stop(ch)
 			// Re-raise so the default handler terminates the process.
 			p, _ := os.FindProcess(os.Getpid())
 			_ = p.Signal(sig)
@@ -259,7 +361,5 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 		}
 	}()
 
-	return func() {
-		cancel()
-	}
+	return stopFn
 }

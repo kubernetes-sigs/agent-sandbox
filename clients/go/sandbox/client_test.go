@@ -16,7 +16,11 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
+
 	"sync"
 	"testing"
 	"time"
@@ -265,6 +269,63 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	stop2()
 }
 
+func TestClient_CleanupOption(t *testing.T) {
+	// 1. With Cleanup false (default)
+	c1, _ := newTestClient(t)
+	c1.mu.Lock()
+	stopSignalNil := c1.stopSignal == nil
+	cleanupStopNil := c1.cleanupStop == nil
+	c1.mu.Unlock()
+
+	if !stopSignalNil {
+		t.Error("expected stopSignal to be nil by default")
+	}
+	if !cleanupStopNil {
+		t.Error("expected cleanupStop to be nil by default")
+	}
+
+	// 2. With Cleanup true
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck
+	opts := Options{
+		TemplateName: "test-template",
+		Namespace:    "default",
+		APIURL:       "http://localhost:9999",
+		Quiet:        true,
+		Cleanup:      true,
+	}
+	opts.setDefaults()
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+	c2, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c2.mu.Lock()
+	stopSignalActive := c2.stopSignal != nil
+	cleanupStopActive := c2.cleanupStop != nil
+	c2.mu.Unlock()
+
+	if !stopSignalActive {
+		t.Error("expected stopSignal to be active when Cleanup is true")
+	}
+	if !cleanupStopActive {
+		t.Error("expected cleanupStop to be active when Cleanup is true")
+	}
+
+	// Clean up resources / stop signal handler for test environment
+	if cleanupStopActive {
+		c2.mu.Lock()
+		stopFn := c2.cleanupStop
+		c2.mu.Unlock()
+		stopFn()
+	}
+}
+
 // TestResolveSandboxName_FromClaimStatus verifies the new resolution path.
 func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
@@ -332,5 +393,157 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 	}
 	if state.SandboxName != "warm-pool-sandbox-xyz" {
 		t.Errorf("expected warm-pool-sandbox-xyz, got %s", state.SandboxName)
+	}
+}
+
+func TestClient_Close(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	// Inject a custom cleanupStop hook to track if Close() stops it
+	stopCalled := false
+	c.mu.Lock()
+	c.cleanupStop = func() {
+		stopCalled = true
+	}
+	c.mu.Unlock()
+
+	// Track a dummy sandbox in registry to verify registry deletion on Close()
+	sb := &Sandbox{
+		k8s:  c.k8s,
+		log:  logr.Discard(),
+		opts: c.opts,
+		connector: &connector{
+			strategy:   &DirectStrategy{URL: "http://fake"},
+			httpClient: &http.Client{},
+		},
+		inflightOps:  &sync.WaitGroup{},
+		lifecycleSem: make(chan struct{}, 1),
+	}
+	sb.connector.baseURL = "http://fake"
+	sb.mu.Lock()
+	sb.claimName = "tracked-claim-close"
+	sb.sandboxName = "sb-tracked-close"
+	sb.mu.Unlock()
+
+	key := Key{Namespace: "default", ClaimName: "tracked-claim-close"}
+	c.mu.Lock()
+	c.registry[key] = sb
+	c.mu.Unlock()
+
+	// Call Close
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Verify stop was called
+	if !stopCalled {
+		t.Error("expected cleanupStop to be called during Close")
+	}
+
+	// Verify cleanupStop is now nil
+	c.mu.Lock()
+	cleanupStopNil := c.cleanupStop == nil
+	remaining := len(c.registry)
+	c.mu.Unlock()
+
+	if !cleanupStopNil {
+		t.Error("expected cleanupStop to be nil after Close")
+	}
+	if remaining != 0 {
+		t.Errorf("expected empty registry after Close, got %d", remaining)
+	}
+}
+
+func TestClient_ClosedClientErrors(t *testing.T) {
+	c, _ := newTestClient(t)
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected error closing client: %v", err)
+	}
+
+	// 1. CreateSandbox returns ErrClosed
+	_, err := c.CreateSandbox(context.Background(), "template", "default")
+	if !errors.Is(err, ErrClosed) {
+		t.Errorf("expected ErrClosed, got %v", err)
+	}
+
+	// 2. GetSandbox returns ErrClosed
+	_, err = c.GetSandbox(context.Background(), "claim", "default")
+	if !errors.Is(err, ErrClosed) {
+		t.Errorf("expected ErrClosed, got %v", err)
+	}
+
+	// 3. DeleteSandbox returns ErrClosed
+	err = c.DeleteSandbox(context.Background(), "claim", "default")
+	if !errors.Is(err, ErrClosed) {
+		t.Errorf("expected ErrClosed, got %v", err)
+	}
+
+	// 4. ListActiveSandboxes returns nil
+	if active := c.ListActiveSandboxes(); active != nil {
+		t.Errorf("expected nil active list, got %v", active)
+	}
+
+	// 5. ListAllSandboxes returns ErrClosed
+	_, err = c.ListAllSandboxes(context.Background(), "default")
+	if !errors.Is(err, ErrClosed) {
+		t.Errorf("expected ErrClosed, got %v", err)
+	}
+}
+
+func TestClient_Close_Idempotent(t *testing.T) {
+	c, _ := newTestClient(t)
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatalf("second close failed (expected no error): %v", err)
+	}
+}
+
+func TestClient_Close_ErrorAggregation(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	// Inject two fake sandboxes: one succeeds and one fails to delete
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(ktesting.DeleteAction)
+		if deleteAction.GetName() == "fail-claim" {
+			return true, nil, fmt.Errorf("injected deletion error")
+		}
+		return true, nil, nil
+	})
+
+	for _, name := range []string{"success-claim", "fail-claim"} {
+		sb := &Sandbox{
+			k8s:  c.k8s,
+			log:  logr.Discard(),
+			opts: c.opts,
+			connector: &connector{
+				strategy:   &DirectStrategy{URL: "http://fake"},
+				httpClient: &http.Client{},
+			},
+			inflightOps:  &sync.WaitGroup{},
+			lifecycleSem: make(chan struct{}, 1),
+		}
+		sb.connector.baseURL = "http://fake"
+		sb.mu.Lock()
+		sb.claimName = name
+		sb.sandboxName = "sb-" + name
+		sb.mu.Unlock()
+
+		key := Key{Namespace: "default", ClaimName: name}
+		c.mu.Lock()
+		c.registry[key] = sb
+		c.mu.Unlock()
+	}
+
+	err := c.Close(context.Background())
+	if err == nil {
+		t.Error("expected Close to return aggregated errors, got nil")
+	} else if !strings.Contains(err.Error(), "injected deletion error") {
+		t.Errorf("expected error to contain target failure details, got: %v", err)
 	}
 }

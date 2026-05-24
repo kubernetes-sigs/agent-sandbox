@@ -15,11 +15,21 @@
 package sandbox
 
 import (
+	"os"
 	"testing"
 
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	// Skip goleak checks during live cluster integration tests to prevent
+	// client-go / Kubernetes connection pools from flagging goroutine leaks.
+	if os.Getenv("INTEGRATION_TEST") != "" {
+		os.Exit(m.Run())
+	}
+	goleak.VerifyTestMain(m,
+		goleak.IgnoreTopFunction("golang.org/x/net/http2.(*clientConnReadLoop).run"),
+		goleak.IgnoreTopFunction("net/http.(*persistConn).readLoop"),
+		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
+	)
 }

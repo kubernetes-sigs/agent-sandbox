@@ -22,6 +22,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 var (
@@ -164,4 +166,69 @@ func newIntegrationClient(t *testing.T) *Sandbox {
 		t.Fatalf("New() error: %v", err)
 	}
 	return client
+}
+
+func TestIntegration_ClientCleanupAndClose(t *testing.T) {
+	if os.Getenv("INTEGRATION_TEST") == "" && *gatewayName == "" && *apiURL == "" {
+		t.Skip("set INTEGRATION_TEST=1 or provide --gateway-name/--api-url to run integration tests")
+	}
+
+	gwNS := *gatewayNamespace
+	if gwNS == "" {
+		gwNS = *namespace
+	}
+
+	// Create client with Cleanup = true
+	opts := Options{
+		TemplateName:        *templateName,
+		Namespace:           *namespace,
+		GatewayName:         *gatewayName,
+		GatewayNamespace:    gwNS,
+		APIURL:              *apiURL,
+		ServerPort:          *serverPort,
+		SandboxReadyTimeout: 180 * time.Second,
+		Cleanup:             true, // Enable auto-cleanup!
+	}
+
+	client, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("NewClient() error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	t.Log("Creating sandbox...")
+	sb, err := client.CreateSandbox(ctx, *templateName, *namespace)
+	if err != nil {
+		t.Fatalf("CreateSandbox() error: %v", err)
+	}
+	claimName := sb.ClaimName()
+	t.Logf("Sandbox created: %s", claimName)
+
+	// Verify it is active in cluster
+	if err := client.k8s.verifyClaimExists(ctx, claimName, *namespace, client.tracer, client.svcName); err != nil {
+		t.Fatalf("Expected claim to exist on cluster: %v", err)
+	}
+
+	t.Log("Closing client (should trigger parallel deletion of the sandbox)...")
+	if err := client.Close(ctx); err != nil {
+		t.Fatalf("Client Close() error: %v", err)
+	}
+
+	// Verify it was successfully deleted from the cluster
+	t.Log("Verifying claim was deleted from cluster...")
+	start := time.Now()
+	deleted := false
+	for time.Since(start) < 30*time.Second {
+		err := client.k8s.verifyClaimExists(ctx, claimName, *namespace, client.tracer, client.svcName)
+		if err != nil && k8serrors.IsNotFound(err) {
+			deleted = true
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if !deleted {
+		t.Errorf("expected claim %s to be deleted from cluster after client Close(), but it still exists", claimName)
+	}
 }

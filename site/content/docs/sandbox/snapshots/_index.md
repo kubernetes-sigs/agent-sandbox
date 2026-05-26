@@ -33,7 +33,7 @@ The following example demonstrates creating a sandbox, modifying its filesystem,
 > Note: this example uses `simple-sandbox-template`, which you should create in your GKE cluster first. The associated resources can be found [here](https://github.com/volatilemolotov/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source).
 
 > [!NOTE]
-> A sandbox can only be restored from its own previous snapshots (via the `suspend()` and `resume()` lifecycle). A new sandbox cannot be restored from the snapshot of another sandbox.
+> A sandbox can only be restored from its own previous snapshots (via the `suspend()` and `resume()` lifecycle).
 
 
 ```python

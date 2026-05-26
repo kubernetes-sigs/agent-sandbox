@@ -178,7 +178,7 @@ func TestIntegration_ClientCleanupAndClose(t *testing.T) {
 		gwNS = *namespace
 	}
 
-	// Create client with Cleanup = true
+	// Create client with CleanupOnSignal = true
 	opts := Options{
 		TemplateName:        *templateName,
 		Namespace:           *namespace,
@@ -187,7 +187,7 @@ func TestIntegration_ClientCleanupAndClose(t *testing.T) {
 		APIURL:              *apiURL,
 		ServerPort:          *serverPort,
 		SandboxReadyTimeout: 180 * time.Second,
-		Cleanup:             true, // Enable auto-cleanup!
+		CleanupOnSignal:     true, // Enable auto-cleanup!
 	}
 
 	client, err := NewClient(context.Background(), opts)

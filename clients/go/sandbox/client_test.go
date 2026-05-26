@@ -234,10 +234,6 @@ func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 
 	// Inject a blocked delete to stall the queue
 	blockCh := make(chan struct{})
-	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		<-blockCh
-		return true, nil, nil
-	})
 
 	// Add 12 fake sandboxes (maxCleanupConcurrency is 10, so 2 will block)
 	const numSandboxes = 12
@@ -421,8 +417,8 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	stop2()
 }
 
-func TestClient_CleanupOption(t *testing.T) {
-	// 1. With Cleanup false (default)
+func TestClient_CleanupOnSignalOption(t *testing.T) {
+	// 1. With CleanupOnSignal false (default)
 	c1, _ := newTestClient(t)
 	c1.mu.Lock()
 	stopSignalNil := c1.stopSignal == nil
@@ -436,15 +432,15 @@ func TestClient_CleanupOption(t *testing.T) {
 		t.Error("expected cleanupStop to be nil by default")
 	}
 
-	// 2. With Cleanup true
+	// 2. With CleanupOnSignal true
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck
 	opts := Options{
-		TemplateName: "test-template",
-		Namespace:    "default",
-		APIURL:       "http://localhost:9999",
-		Quiet:        true,
-		Cleanup:      true,
+		TemplateName:    "test-template",
+		Namespace:       "default",
+		APIURL:          "http://localhost:9999",
+		Quiet:           true,
+		CleanupOnSignal: true,
 	}
 	opts.setDefaults()
 	opts.K8sHelper = &K8sHelper{
@@ -463,10 +459,10 @@ func TestClient_CleanupOption(t *testing.T) {
 	c2.mu.Unlock()
 
 	if !stopSignalActive {
-		t.Error("expected stopSignal to be active when Cleanup is true")
+		t.Error("expected stopSignal to be active when CleanupOnSignal is true")
 	}
 	if !cleanupStopActive {
-		t.Error("expected cleanupStop to be active when Cleanup is true")
+		t.Error("expected cleanupStop to be active when CleanupOnSignal is true")
 	}
 
 	// Clean up resources / stop signal handler for test environment

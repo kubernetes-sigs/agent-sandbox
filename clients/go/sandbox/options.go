@@ -113,11 +113,11 @@ type Options struct {
 	// custom Logger is provided (non-zero-value).
 	Quiet bool
 
-	// Cleanup registers a signal handler to automatically delete all tracked
+	// CleanupOnSignal registers a signal handler to automatically delete all tracked
 	// sandboxes on SIGINT/SIGTERM. When enabled, it is highly recommended to
 	// also call or defer client.Close(ctx) to handle cleanups on normal exits.
 	// Default: false.
-	Cleanup bool
+	CleanupOnSignal bool
 
 	// K8sHelper provides pre-constructed Kubernetes clients. If nil, a new
 	// K8sHelper is created from RestConfig. Use this to share clients

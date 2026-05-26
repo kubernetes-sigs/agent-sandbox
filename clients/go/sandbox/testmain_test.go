@@ -15,6 +15,7 @@
 package sandbox
 
 import (
+	"flag"
 	"os"
 	"testing"
 
@@ -24,7 +25,7 @@ import (
 func TestMain(m *testing.M) {
 	// Skip goleak checks during live cluster integration tests to prevent
 	// client-go / Kubernetes connection pools from flagging goroutine leaks.
-	if os.Getenv("INTEGRATION_TEST") != "" {
+	if isIntegrationTest() {
 		os.Exit(m.Run())
 	}
 	goleak.VerifyTestMain(m,
@@ -32,4 +33,18 @@ func TestMain(m *testing.M) {
 		goleak.IgnoreTopFunction("net/http.(*persistConn).readLoop"),
 		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
 	)
+}
+
+func isIntegrationTest() bool {
+	if os.Getenv("INTEGRATION_TEST") != "" {
+		return true
+	}
+	// Use flag.Lookup to safely check flags that are only defined when build tag is 'integration'.
+	if f := flag.Lookup("gateway-name"); f != nil && f.Value.String() != "" {
+		return true
+	}
+	if f := flag.Lookup("api-url"); f != nil && f.Value.String() != "" {
+		return true
+	}
+	return false
 }

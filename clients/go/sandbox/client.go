@@ -81,7 +81,7 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 		registry: make(map[Key]*Sandbox),
 	}
 
-	if opts.Cleanup {
+	if opts.CleanupOnSignal {
 		_ = c.EnableAutoCleanup()
 	}
 
@@ -370,7 +370,6 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 			c.mu.Unlock()
 			cancel()
 			signal.Stop(ch)
-			close(ch)
 		})
 	}
 	c.cleanupStop = stopFn

@@ -708,7 +708,7 @@ func TestClient_DeleteAll_RestoresFailedRegistry(t *testing.T) {
 	c, extensionsCS := newTestClient(t)
 
 	// Inject a deletion failure
-	extensionsCS.PrependReactor("delete", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("injected deletion error")
 	})
 

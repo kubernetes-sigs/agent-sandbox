@@ -130,7 +130,7 @@ var errNotYetComplete = errors.New("snapshot not yet complete")
 func extractSnapshotResult(obj *unstructured.Unstructured) (snapshotResult, error) {
 	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	for _, raw := range conditions {
-		cond, ok := raw.(map[string]interface{})
+		cond, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}

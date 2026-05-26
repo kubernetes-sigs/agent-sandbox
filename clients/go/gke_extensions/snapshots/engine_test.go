@@ -35,16 +35,16 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newTestEngine(dynCS *fakedynamic.FakeDynamicClient, podName, hash string) *SnapshotEngine {
+func newTestEngine(dynCS *fakedynamic.FakeDynamicClient) *SnapshotEngine {
 	return &SnapshotEngine{
 		namespace: "default",
 		dynClient: dynCS,
 		log:       logr.Discard(),
 		getPodName: func(_ context.Context) (string, error) {
-			return podName, nil
+			return "my-pod", nil
 		},
 		getSandboxNameHash: func(_ context.Context) (string, error) {
-			return hash, nil
+			return "abc123", nil
 		},
 	}
 }
@@ -61,21 +61,21 @@ func newDynClient(extra ...runtime.Object) *fakedynamic.FakeDynamicClient {
 }
 
 func makeSnapshot(name, hashLabel string, ready bool) *unstructured.Unstructured {
-	status := map[string]interface{}{}
+	status := map[string]any{}
 	if ready {
-		status["conditions"] = []interface{}{
-			map[string]interface{}{"type": "Ready", "status": "True"},
+		status["conditions"] = []any{
+			map[string]any{"type": "Ready", "status": "True"},
 		}
 	}
 	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
 			"kind":       "PodSnapshot",
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":              name,
 				"namespace":         "default",
 				"creationTimestamp": "2026-01-01T00:00:00Z",
-				"labels":            map[string]interface{}{SandboxNameHashLabel: hashLabel},
+				"labels":            map[string]any{SandboxNameHashLabel: hashLabel},
 			},
 			"status": status,
 		},
@@ -108,7 +108,7 @@ func TestSanitizeTriggerName(t *testing.T) {
 				t.Error("trigger name must not be empty")
 			}
 			for _, ch := range result {
-				if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
+				if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
 					t.Errorf("invalid character %q in trigger name %q", ch, result)
 				}
 			}
@@ -160,7 +160,7 @@ func TestSnapshotEngine_List_AllReady(t *testing.T) {
 	snap1 := makeSnapshot("snap-1", "abc123", true)
 	snap2 := makeSnapshot("snap-2", "abc123", false)
 	dynCS := newDynClient(snap1, snap2)
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	result := eng.List(context.Background(), SnapshotFilter{ReadyOnly: true})
 
@@ -179,7 +179,7 @@ func TestSnapshotEngine_List_IncludeNotReady(t *testing.T) {
 	snap1 := makeSnapshot("snap-1", "abc123", true)
 	snap2 := makeSnapshot("snap-2", "abc123", false)
 	dynCS := newDynClient(snap1, snap2)
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	result := eng.List(context.Background(), SnapshotFilter{ReadyOnly: false})
 
@@ -232,11 +232,11 @@ func TestSnapshotEngine_List_NoHash(t *testing.T) {
 func TestSnapshotEngine_Delete_Success(t *testing.T) {
 	snap := makeSnapshot("snap-1", "abc123", true)
 	dynCS := newDynClient(snap)
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	// Inject a watch that immediately returns DELETED.
 	snapWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshots", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshots", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() {
 			snapWatcher.Delete(snap)
 		}()
@@ -254,7 +254,7 @@ func TestSnapshotEngine_Delete_Success(t *testing.T) {
 
 func TestSnapshotEngine_Delete_AlreadyGone(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	// Object doesn't exist; waitForSnapshotDeletion first GETs the object to check.
 	// The GET will return 404, so deletion is considered successful immediately.
@@ -270,17 +270,17 @@ func TestSnapshotEngine_Delete_AlreadyGone(t *testing.T) {
 
 func TestSnapshotEngine_DeleteManualTriggers(t *testing.T) {
 	trigger := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
 			"kind":       PodSnapshotTriggerKind,
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      "my-trigger",
 				"namespace": "default",
 			},
 		},
 	}
 	dynCS := newDynClient(trigger)
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 	eng.createdManualTriggers = []string{"my-trigger"}
 
 	eng.DeleteManualTriggers(context.Background())
@@ -292,7 +292,7 @@ func TestSnapshotEngine_DeleteManualTriggers(t *testing.T) {
 
 func TestSnapshotEngine_DeleteManualTriggers_AlreadyGone(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 	eng.createdManualTriggers = []string{"ghost-trigger"}
 
 	eng.DeleteManualTriggers(context.Background())
@@ -309,24 +309,24 @@ func TestSnapshotEngine_DeleteManualTriggers_AlreadyGone(t *testing.T) {
 
 func TestSnapshotEngine_Create_Success(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	// Inject a watch reactor that immediately fires MODIFIED with completion status.
 	trigWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() {
 			completedTrigger := &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
 					"kind":       PodSnapshotTriggerKind,
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name":      "snap",
 						"namespace": "default",
 					},
-					"status": map[string]interface{}{
-						"snapshotCreated": map[string]interface{}{"name": "snap-uid-123"},
-						"conditions": []interface{}{
-							map[string]interface{}{
+					"status": map[string]any{
+						"snapshotCreated": map[string]any{"name": "snap-uid-123"},
+						"conditions": []any{
+							map[string]any{
 								"type":               "Triggered",
 								"status":             "True",
 								"reason":             "Complete",
@@ -355,19 +355,19 @@ func TestSnapshotEngine_Create_Success(t *testing.T) {
 
 func TestSnapshotEngine_Create_Failure(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	trigWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() {
 			failedTrigger := &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
 					"kind":       PodSnapshotTriggerKind,
-					"metadata": map[string]interface{}{"name": "snap", "namespace": "default"},
-					"status": map[string]interface{}{
-						"conditions": []interface{}{
-							map[string]interface{}{
+					"metadata":   map[string]any{"name": "snap", "namespace": "default"},
+					"status": map[string]any{
+						"conditions": []any{
+							map[string]any{
 								"type":    "Triggered",
 								"status":  "False",
 								"reason":  "Failed",
@@ -390,10 +390,10 @@ func TestSnapshotEngine_Create_Failure(t *testing.T) {
 
 func TestSnapshotEngine_Create_Timeout(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	// Return a watcher that never fires.
-	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		return true, watch.NewFake(), nil
 	})
 
@@ -412,7 +412,7 @@ func TestSnapshotEngine_Create_Timeout(t *testing.T) {
 
 func TestSnapshotEngine_DeleteAll_Empty(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	result, err := eng.DeleteAll(context.Background(), "all", nil, 5*time.Second)
 	if err != nil {
@@ -428,7 +428,7 @@ func TestSnapshotEngine_DeleteAll_Empty(t *testing.T) {
 
 func TestSnapshotEngine_DeleteAll_InvalidStrategy(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	_, err := eng.DeleteAll(context.Background(), "unknown", nil, 5*time.Second)
 	if err == nil {
@@ -438,7 +438,7 @@ func TestSnapshotEngine_DeleteAll_InvalidStrategy(t *testing.T) {
 
 func TestSnapshotEngine_DeleteAll_ByLabelsRequiresLabels(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	_, err := eng.DeleteAll(context.Background(), "labels", nil, 5*time.Second)
 	if err == nil {
@@ -471,10 +471,10 @@ func TestSnapshotEngine_Create_EmptyPodName(t *testing.T) {
 
 func TestSnapshotEngine_Create_APIError(t *testing.T) {
 	dynCS := newDynClient()
-	dynCS.PrependReactor("create", "podsnapshotmanualtriggers", func(action ktesting.Action) (bool, runtime.Object, error) {
+	dynCS.PrependReactor("create", "podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("server error")
 	})
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	resp := eng.Create(context.Background(), "test", 5*time.Second)
 	if resp.Success {
@@ -493,7 +493,7 @@ func TestSnapshotEngine_Create_APIError(t *testing.T) {
 func TestSnapshotEngine_List_WithGroupingLabels(t *testing.T) {
 	snap := makeSnapshot("snap-1", "abc123", true)
 	dynCS := newDynClient(snap)
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	result := eng.List(context.Background(), SnapshotFilter{
 		ReadyOnly:      true,
@@ -509,10 +509,10 @@ func TestSnapshotEngine_List_WithGroupingLabels(t *testing.T) {
 
 func TestSnapshotEngine_List_APIError(t *testing.T) {
 	dynCS := newDynClient()
-	dynCS.PrependReactor("list", "podsnapshots", func(action ktesting.Action) (bool, runtime.Object, error) {
+	dynCS.PrependReactor("list", "podsnapshots", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("network error")
 	})
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	result := eng.List(context.Background(), SnapshotFilter{ReadyOnly: false})
 	if result.Success {
@@ -523,11 +523,11 @@ func TestSnapshotEngine_List_APIError(t *testing.T) {
 func TestSnapshotEngine_List_WithPodAnnotation(t *testing.T) {
 	snap := makeSnapshot("snap-1", "abc123", true)
 	// Add the pod annotation.
-	annotations := map[string]interface{}{PodSnapshotPodAnnotation: "origin-pod-xyz"}
-	snap.Object["metadata"].(map[string]interface{})["annotations"] = annotations
+	annotations := map[string]any{PodSnapshotPodAnnotation: "origin-pod-xyz"}
+	snap.Object["metadata"].(map[string]any)["annotations"] = annotations
 
 	dynCS := newDynClient(snap)
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	result := eng.List(context.Background(), SnapshotFilter{ReadyOnly: false})
 	if !result.Success {
@@ -548,11 +548,11 @@ func TestSnapshotEngine_List_WithPodAnnotation(t *testing.T) {
 func TestSnapshotEngine_DeleteAll_ByLabels_Success(t *testing.T) {
 	snap := makeSnapshot("snap-1", "abc123", true)
 	dynCS := newDynClient(snap)
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	// Inject DELETED event so waitForSnapshotDeletion sees it gone immediately.
 	snapWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshots", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshots", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() { snapWatcher.Delete(snap) }()
 		return true, snapWatcher, nil
 	})
@@ -573,10 +573,10 @@ func TestSnapshotEngine_DeleteAll_ByLabels_Success(t *testing.T) {
 func TestSnapshotEngine_DeleteManualTriggers_RetryAndLeak(t *testing.T) {
 	dynCS := newDynClient()
 	// Always fail with a non-404 error so retries are exhausted.
-	dynCS.PrependReactor("delete", "podsnapshotmanualtriggers", func(action ktesting.Action) (bool, runtime.Object, error) {
+	dynCS.PrependReactor("delete", "podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("server unavailable")
 	})
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 	eng.createdManualTriggers = []string{"trigger-1"}
 
 	eng.DeleteManualTriggers(context.Background())
@@ -595,10 +595,10 @@ func TestSnapshotEngine_executeDeletion_DeleteAPIError(t *testing.T) {
 	snap := makeSnapshot("snap-1", "abc123", true)
 	dynCS := newDynClient(snap)
 	// Fail delete with a non-404 error.
-	dynCS.PrependReactor("delete", "podsnapshots", func(action ktesting.Action) (bool, runtime.Object, error) {
+	dynCS.PrependReactor("delete", "podsnapshots", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("forbidden")
 	})
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	result := eng.executeDeletion(context.Background(), "snap-1", "", nil, 5*time.Second)
 	if result.Success {
@@ -617,18 +617,18 @@ func TestSnapshotEngine_executeDeletion_PartialFailure(t *testing.T) {
 	// snap-1 deletes successfully; snap-2 gets a DELETED event.
 	// snap-1: let the first delete succeed; snap-2: return an error.
 	callCount := 0
-	dynCS.PrependReactor("delete", "podsnapshots", func(action ktesting.Action) (bool, runtime.Object, error) {
+	dynCS.PrependReactor("delete", "podsnapshots", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		callCount++
 		if callCount == 1 {
 			return true, nil, fmt.Errorf("network error for snap-1")
 		}
 		return false, nil, nil // let snap-2 go through default handling
 	})
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	// For snap-2: inject a DELETED watch event.
 	snapWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshots", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshots", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() { snapWatcher.Delete(snap2) }()
 		return true, snapWatcher, nil
 	})
@@ -656,7 +656,7 @@ func assertValidK8sName(t *testing.T, result string) {
 		t.Error("name must not be empty")
 	}
 	for _, ch := range result {
-		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
+		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
 			t.Errorf("invalid char %q in %q", ch, result)
 		}
 	}
@@ -712,23 +712,22 @@ func TestSanitizeTriggerName_OnlyInvalidChars(t *testing.T) {
 	assertValidK8sName(t, result)
 }
 
-
 // ---------------------------------------------------------------------------
 // Issue 4: deterministic GroupingLabels label selector
 // ---------------------------------------------------------------------------
 
 func TestSnapshotEngine_List_GroupingLabelsDeterministic(t *testing.T) {
 	dynCS := newDynClient()
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 
 	var selectors []string
-	dynCS.PrependReactor("list", "podsnapshots", func(action ktesting.Action) (bool, runtime.Object, error) {
-		la := action.(ktesting.ListAction)
+	dynCS.PrependReactor("list", "podsnapshots", func(a ktesting.Action) (bool, runtime.Object, error) {
+		la := a.(ktesting.ListAction)
 		selectors = append(selectors, la.GetListRestrictions().Labels.String())
 		return true, &unstructured.UnstructuredList{}, nil
 	})
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		eng.List(context.Background(), SnapshotFilter{
 			ReadyOnly:      false,
 			GroupingLabels: map[string]string{"env": "prod", "team": "platform", "app": "agent"},
@@ -753,10 +752,10 @@ func TestSnapshotEngine_List_GroupingLabelsDeterministic(t *testing.T) {
 func TestDeleteManualTriggers_CtxCancelDuringRetry(t *testing.T) {
 	dynCS := newDynClient()
 	// Always fail with a non-404 error to force retries.
-	dynCS.PrependReactor("delete", "podsnapshotmanualtriggers", func(action ktesting.Action) (bool, runtime.Object, error) {
+	dynCS.PrependReactor("delete", "podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("server unavailable")
 	})
-	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng := newTestEngine(dynCS)
 	eng.createdManualTriggers = []string{"trigger-1"}
 
 	ctx, cancel := context.WithCancel(context.Background())

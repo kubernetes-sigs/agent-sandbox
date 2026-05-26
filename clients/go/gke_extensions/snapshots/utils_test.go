@@ -37,10 +37,10 @@ import (
 // checkPodRestoredFromSnapshot
 // ---------------------------------------------------------------------------
 
-func makePod(name string, conditions []corev1.PodCondition) *corev1.Pod {
+func makePod(conditions []corev1.PodCondition) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      "my-pod",
 			Namespace: "default",
 		},
 		Status: corev1.PodStatus{
@@ -51,7 +51,7 @@ func makePod(name string, conditions []corev1.PodCondition) *corev1.Pod {
 
 func TestCheckPodRestoredFromSnapshot_Success(t *testing.T) {
 	snapshotUID := "snap-123"
-	pod := makePod("my-pod", []corev1.PodCondition{
+	pod := makePod([]corev1.PodCondition{
 		{
 			Type:    "PodRestored",
 			Status:  corev1.ConditionTrue,
@@ -75,7 +75,7 @@ func TestCheckPodRestoredFromSnapshot_Success(t *testing.T) {
 }
 
 func TestCheckPodRestoredFromSnapshot_WrongUID(t *testing.T) {
-	pod := makePod("my-pod", []corev1.PodCondition{
+	pod := makePod([]corev1.PodCondition{
 		{
 			Type:    "PodRestored",
 			Status:  corev1.ConditionTrue,
@@ -99,7 +99,7 @@ func TestCheckPodRestoredFromSnapshot_WrongUID(t *testing.T) {
 }
 
 func TestCheckPodRestoredFromSnapshot_NoCondition(t *testing.T) {
-	pod := makePod("my-pod", nil)
+	pod := makePod(nil)
 	kubeCS := fakekube.NewSimpleClientset(pod)
 
 	result := checkPodRestoredFromSnapshot(
@@ -117,7 +117,7 @@ func TestCheckPodRestoredFromSnapshot_NoCondition(t *testing.T) {
 }
 
 func TestCheckPodRestoredFromSnapshot_FreshStart(t *testing.T) {
-	pod := makePod("my-pod", []corev1.PodCondition{
+	pod := makePod([]corev1.PodCondition{
 		{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 	})
 	kubeCS := fakekube.NewSimpleClientset(pod)
@@ -154,7 +154,7 @@ func TestCheckPodRestoredFromSnapshot_PodNotFound(t *testing.T) {
 }
 
 func TestCheckPodRestoredFromSnapshot_RestoreFailed(t *testing.T) {
-	pod := makePod("my-pod", []corev1.PodCondition{
+	pod := makePod([]corev1.PodCondition{
 		{
 			Type:    "PodRestored",
 			Status:  corev1.ConditionFalse,
@@ -351,11 +351,11 @@ func TestWaitForPodReady_SkipsTerminating(t *testing.T) {
 
 func TestExtractSnapshotResult_Complete(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"snapshotCreated": map[string]interface{}{"name": "snap-abc"},
-				"conditions": []interface{}{
-					map[string]interface{}{
+		Object: map[string]any{
+			"status": map[string]any{
+				"snapshotCreated": map[string]any{"name": "snap-abc"},
+				"conditions": []any{
+					map[string]any{
 						"type":               "Triggered",
 						"status":             "True",
 						"reason":             "Complete",
@@ -376,10 +376,10 @@ func TestExtractSnapshotResult_Complete(t *testing.T) {
 
 func TestExtractSnapshotResult_Failed(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{
-					map[string]interface{}{
+		Object: map[string]any{
+			"status": map[string]any{
+				"conditions": []any{
+					map[string]any{
 						"type":    "Triggered",
 						"status":  "False",
 						"reason":  "Failed",
@@ -397,10 +397,10 @@ func TestExtractSnapshotResult_Failed(t *testing.T) {
 
 func TestExtractSnapshotResult_NotYetComplete(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{
-					map[string]interface{}{
+		Object: map[string]any{
+			"status": map[string]any{
+				"conditions": []any{
+					map[string]any{
 						"type":   "Triggered",
 						"status": "False",
 						"reason": "InProgress",
@@ -426,7 +426,7 @@ func init() {
 
 func TestDrainDeletionWatch_Deleted(t *testing.T) {
 	watcher := watch.NewFake()
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{"metadata": map[string]interface{}{"name": "snap-1"}}}
+	obj := &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "snap-1"}}}
 	go func() { watcher.Delete(obj) }()
 
 	done, err := drainDeletionWatch(context.Background(), watcher, "snap-1", logr.Discard())
@@ -476,10 +476,10 @@ func TestDrainDeletionWatch_ContextCancelled(t *testing.T) {
 
 func TestWaitForSnapshotDeletion_WatchPath(t *testing.T) {
 	snap := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
 			"kind":       "PodSnapshot",
-			"metadata":   map[string]interface{}{"name": "snap-1", "namespace": "default"},
+			"metadata":   map[string]any{"name": "snap-1", "namespace": "default"},
 		},
 	}
 	dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
@@ -489,7 +489,7 @@ func TestWaitForSnapshotDeletion_WatchPath(t *testing.T) {
 	)
 
 	snapWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshots", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshots", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() { snapWatcher.Delete(snap) }()
 		return true, snapWatcher, nil
 	})
@@ -506,7 +506,7 @@ func TestWaitForSnapshotDeletion_WatchPath(t *testing.T) {
 
 func TestDrainTriggerWatch_Deleted(t *testing.T) {
 	watcher := watch.NewFake()
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{"metadata": map[string]interface{}{"name": "t"}}}
+	obj := &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "t"}}}
 	go func() { watcher.Delete(obj) }()
 
 	_, done, err := drainTriggerWatch(context.Background(), watcher, "t", logr.Discard())
@@ -553,7 +553,7 @@ func TestWaitForPodTermination_APIError_ThenGone(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "my-pod", Namespace: "default", UID: "uid-old"},
 	}
 	kubeCS := fakekube.NewSimpleClientset(pod)
-	kubeCS.PrependReactor("get", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+	kubeCS.PrependReactor("get", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		callCount++
 		if callCount == 1 {
 			return true, nil, fmt.Errorf("server error")

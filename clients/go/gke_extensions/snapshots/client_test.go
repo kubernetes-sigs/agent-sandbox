@@ -165,17 +165,17 @@ func TestIsGroupNotFound_ErrGroupDiscoveryFailed_NonNotFound(t *testing.T) {
 func TestPodSnapshotClient_StructFields(t *testing.T) {
 	// Guard against accidental re-introduction of the opts field using reflection
 	// so a keyed literal that silently omits fields does not hide regressions.
-	typ := reflect.TypeOf(PodSnapshotClient{})
-	for i := 0; i < typ.NumField(); i++ {
-		if typ.Field(i).Name == "opts" {
+	typ := reflect.TypeFor[PodSnapshotClient]()
+	for f := range typ.Fields() {
+		if f.Name == "opts" {
 			t.Errorf("PodSnapshotClient must not have an 'opts' field (removed as dead state)")
 		}
 	}
 	// Ensure the expected fields are still present.
 	expected := map[string]bool{"inner": false, "k8s": false, "log": false}
-	for i := 0; i < typ.NumField(); i++ {
-		if _, ok := expected[typ.Field(i).Name]; ok {
-			expected[typ.Field(i).Name] = true
+	for f := range typ.Fields() {
+		if _, ok := expected[f.Name]; ok {
+			expected[f.Name] = true
 		}
 	}
 	for name, found := range expected {

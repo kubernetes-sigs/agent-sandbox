@@ -33,8 +33,8 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,10 +46,10 @@ type stubHandle struct {
 	closed   bool
 }
 
-func (s *stubHandle) Open(_ context.Context) error      { return nil }
-func (s *stubHandle) Close(_ context.Context) error     { s.closed = true; return s.closeErr }
+func (s *stubHandle) Open(_ context.Context) error       { return nil }
+func (s *stubHandle) Close(_ context.Context) error      { s.closed = true; return s.closeErr }
 func (s *stubHandle) Disconnect(_ context.Context) error { return nil }
-func (s *stubHandle) IsReady() bool                     { return true }
+func (s *stubHandle) IsReady() bool                      { return true }
 func (s *stubHandle) Run(_ context.Context, _ string, _ ...sandbox.CallOption) (*sandbox.ExecutionResult, error) {
 	return nil, nil
 }
@@ -73,9 +73,9 @@ type stubInfo struct {
 	annotations map[string]string
 }
 
-func (s *stubInfo) ClaimName() string            { return s.claimName }
-func (s *stubInfo) SandboxName() string          { return s.sandboxName }
-func (s *stubInfo) PodName() string              { return s.podName }
+func (s *stubInfo) ClaimName() string              { return s.claimName }
+func (s *stubInfo) SandboxName() string            { return s.sandboxName }
+func (s *stubInfo) PodName() string                { return s.podName }
 func (s *stubInfo) Annotations() map[string]string { return s.annotations }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ func (s *stubInfo) Annotations() map[string]string { return s.annotations }
 
 func newTestK8sHelper(agentsCS *fakeagents.Clientset, dynCS *fakedynamic.FakeDynamicClient, kubeCS *fakekube.Clientset) *sandbox.K8sHelper {
 	return &sandbox.K8sHelper{
-		AgentsClient: agentsCS.AgentsV1beta1(),
+		AgentsClient:  agentsCS.AgentsV1beta1(),
 		DynamicClient: dynCS,
 		CoreClient:    kubeCS.CoreV1(),
 		Log:           logr.Discard(),
@@ -92,7 +92,6 @@ func newTestK8sHelper(agentsCS *fakeagents.Clientset, dynCS *fakedynamic.FakeDyn
 }
 
 func newTestSandboxWrapper(
-	sandboxName, podName string,
 	agentsCS *fakeagents.Clientset,
 	dynCS *fakedynamic.FakeDynamicClient,
 	kubeCS *fakekube.Clientset,
@@ -100,8 +99,8 @@ func newTestSandboxWrapper(
 	handle := &stubHandle{}
 	info := &stubInfo{
 		claimName:   "my-claim",
-		sandboxName: sandboxName,
-		podName:     podName,
+		sandboxName: "my-sandbox",
+		podName:     "my-pod",
 	}
 	k8s := newTestK8sHelper(agentsCS, dynCS, kubeCS)
 	return NewSandboxWithSnapshotSupport(handle, info, k8s, "default", logr.Discard())
@@ -119,11 +118,11 @@ func makeAgentsClientset(sb *sandboxv1beta1.Sandbox) *fakeagents.Clientset { //n
 	return cs
 }
 
-func makeSandbox(name string, replicas int32, selector string) *sandboxv1beta1.Sandbox {
+func makeSandbox(replicas int32, selector string) *sandboxv1beta1.Sandbox {
 	r := replicas
 	return &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      "my-sandbox",
 			Namespace: "default",
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
@@ -153,9 +152,9 @@ func newTestDynClient() *fakedynamic.FakeDynamicClient {
 // ---------------------------------------------------------------------------
 
 func TestIsSuspended_True(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 0, "agents.x-k8s.io/sandbox-name-hash=abc123")
+	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=abc123")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	suspended, err := wrapper.IsSuspended(context.Background())
 	if err != nil {
@@ -167,9 +166,9 @@ func TestIsSuspended_True(t *testing.T) {
 }
 
 func TestIsSuspended_False(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=abc123")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=abc123")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	suspended, err := wrapper.IsSuspended(context.Background())
 	if err != nil {
@@ -189,7 +188,7 @@ func TestIsSuspended_NilReplicas(t *testing.T) {
 		},
 	}
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	suspended, err := wrapper.IsSuspended(context.Background())
 	if err != nil {
@@ -205,9 +204,9 @@ func TestIsSuspended_NilReplicas(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestResolveSandboxNameHash_Success(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=hash42")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=hash42")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	hash, err := wrapper.resolveSandboxNameHash(context.Background())
 	if err != nil {
@@ -219,9 +218,9 @@ func TestResolveSandboxNameHash_Success(t *testing.T) {
 }
 
 func TestResolveSandboxNameHash_Caches(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=cached")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=cached")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	h1, _ := wrapper.resolveSandboxNameHash(context.Background())
 	// Delete from k8s so a second call that hits the API would fail.
@@ -236,9 +235,9 @@ func TestResolveSandboxNameHash_Caches(t *testing.T) {
 }
 
 func TestResolveSandboxNameHash_EmptySelector(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "")
+	sb := makeSandbox(1, "")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	hash, err := wrapper.resolveSandboxNameHash(context.Background())
 	if err != nil {
@@ -254,7 +253,7 @@ func TestResolveSandboxNameHash_EmptySelector(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsRestoredFromSnapshot_EmptyUID(t *testing.T) {
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod",
+	wrapper := newTestSandboxWrapper(
 		makeAgentsClientset(nil), newTestDynClient(), fakekube.NewSimpleClientset())
 
 	result := wrapper.IsRestoredFromSnapshot(context.Background(), "")
@@ -313,9 +312,9 @@ func TestClose_PropagatesHandleError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSuspend_AlreadySuspended(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 0, "agents.x-k8s.io/sandbox-name-hash=hash1")
+	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=hash1")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Suspend(context.Background(), false, 5*time.Second)
 	if !resp.Success {
@@ -324,9 +323,9 @@ func TestSuspend_AlreadySuspended(t *testing.T) {
 }
 
 func TestResume_AlreadyRunning(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=hash1")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=hash1")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
 	if !resp.Success {
@@ -335,11 +334,11 @@ func TestResume_AlreadyRunning(t *testing.T) {
 }
 
 func TestSuspend_ScalesDownAndWaitsForTermination(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=hash1")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=hash1")
 	agentsCS := makeAgentsClientset(sb)
 	// Pod doesn't exist → termination is immediate.
 	kubeCS := fakekube.NewSimpleClientset()
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), kubeCS)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), kubeCS)
 
 	resp := wrapper.Suspend(context.Background(), false, 5*time.Second)
 	if !resp.Success {
@@ -357,7 +356,7 @@ func TestSuspend_ScalesDownAndWaitsForTermination(t *testing.T) {
 }
 
 func TestResume_ScalesUpAndWaitsForReady(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 0, "agents.x-k8s.io/sandbox-name-hash=hash1")
+	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=hash1")
 	agentsCS := makeAgentsClientset(sb)
 
 	// Pod exists and is Ready.
@@ -370,7 +369,7 @@ func TestResume_ScalesUpAndWaitsForReady(t *testing.T) {
 		},
 	}
 	kubeCS := fakekube.NewSimpleClientset(pod)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), kubeCS)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), kubeCS)
 
 	// No snapshots exist → skip restore verification.
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
@@ -393,19 +392,20 @@ func TestResume_ScalesUpAndWaitsForReady(t *testing.T) {
 
 func TestSuspend_FailsWhenHashNotResolvable(t *testing.T) {
 	// Sandbox CR has empty selector → hash unavailable.
-	sb := makeSandbox("my-sandbox", 1, "")
+	sb := makeSandbox(1, "")
 	agentsCS := makeAgentsClientset(sb)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Suspend(context.Background(), false, 5*time.Second)
 	// Empty hash is allowed (returns "" without error); suspend should still
 	// proceed unless the hash lookup itself errors.
-	// We just verify no panic and the state is consistent.
-	_ = resp
+	if resp.ErrorCode != SuccessCode {
+		t.Errorf("expected SuccessCode, got %d: %s", resp.ErrorCode, resp.ErrorReason)
+	}
 }
 
 func TestResume_Timeout(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 0, "agents.x-k8s.io/sandbox-name-hash=hash1")
+	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=hash1")
 	agentsCS := makeAgentsClientset(sb)
 
 	// Pod is not ready.
@@ -418,7 +418,7 @@ func TestResume_Timeout(t *testing.T) {
 		},
 	}
 	kubeCS := fakekube.NewSimpleClientset(pod)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), kubeCS)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), kubeCS)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -436,7 +436,7 @@ func TestResume_Timeout(t *testing.T) {
 func TestSuspend_IsSuspendedError(t *testing.T) {
 	// No sandbox CR → IsSuspended returns not-found error.
 	agentsCS := makeAgentsClientset(nil)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Suspend(context.Background(), false, 5*time.Second)
 	if resp.Success {
@@ -445,13 +445,13 @@ func TestSuspend_IsSuspendedError(t *testing.T) {
 }
 
 func TestSuspend_SetReplicasError(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=h1")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=h1")
 	agentsCS := makeAgentsClientset(sb)
 	// Make patch fail.
-	agentsCS.PrependReactor("patch", "sandboxes", func(action ktesting.Action) (bool, runtime.Object, error) {
+	agentsCS.PrependReactor("patch", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("patch forbidden")
 	})
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Suspend(context.Background(), false, 5*time.Second)
 	if resp.Success {
@@ -460,23 +460,23 @@ func TestSuspend_SetReplicasError(t *testing.T) {
 }
 
 func TestSuspend_WithSnapshotSuccess(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=h1")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=h1")
 	agentsCS := makeAgentsClientset(sb)
 	dynCS := newTestDynClient()
 
 	// Snapshot trigger watch fires with completion.
 	trigWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() {
 			trigWatcher.Modify(&unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
 					"kind":       PodSnapshotTriggerKind,
-					"metadata":   map[string]interface{}{"name": "t", "namespace": "default"},
-					"status": map[string]interface{}{
-						"snapshotCreated": map[string]interface{}{"name": "snap-uid"},
-						"conditions": []interface{}{
-							map[string]interface{}{
+					"metadata":   map[string]any{"name": "t", "namespace": "default"},
+					"status": map[string]any{
+						"snapshotCreated": map[string]any{"name": "snap-uid"},
+						"conditions": []any{
+							map[string]any{
 								"type":               "Triggered",
 								"status":             "True",
 								"reason":             "Complete",
@@ -491,7 +491,7 @@ func TestSuspend_WithSnapshotSuccess(t *testing.T) {
 	})
 
 	// Pod doesn't exist → termination is immediate.
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, dynCS, fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, dynCS, fakekube.NewSimpleClientset())
 
 	resp := wrapper.Suspend(context.Background(), true, 5*time.Second)
 	if !resp.Success {
@@ -503,20 +503,20 @@ func TestSuspend_WithSnapshotSuccess(t *testing.T) {
 }
 
 func TestSuspend_WithSnapshotFail(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 1, "agents.x-k8s.io/sandbox-name-hash=h1")
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=h1")
 	agentsCS := makeAgentsClientset(sb)
 	dynCS := newTestDynClient()
 
 	// Snapshot trigger watch fires with failure.
 	trigWatcher := watch.NewFake()
-	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(action ktesting.Action) (bool, watch.Interface, error) {
+	dynCS.PrependWatchReactor("podsnapshotmanualtriggers", func(_ ktesting.Action) (bool, watch.Interface, error) {
 		go func() {
 			trigWatcher.Modify(&unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{"name": "t", "namespace": "default"},
-					"status": map[string]interface{}{
-						"conditions": []interface{}{
-							map[string]interface{}{
+				Object: map[string]any{
+					"metadata": map[string]any{"name": "t", "namespace": "default"},
+					"status": map[string]any{
+						"conditions": []any{
+							map[string]any{
 								"type":    "Triggered",
 								"status":  "False",
 								"reason":  "Failed",
@@ -530,7 +530,7 @@ func TestSuspend_WithSnapshotFail(t *testing.T) {
 		return true, trigWatcher, nil
 	})
 
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, dynCS, fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, dynCS, fakekube.NewSimpleClientset())
 
 	resp := wrapper.Suspend(context.Background(), true, 5*time.Second)
 	if resp.Success {
@@ -548,7 +548,7 @@ func TestSuspend_WithSnapshotFail(t *testing.T) {
 func TestResume_IsSuspendedError(t *testing.T) {
 	// No sandbox CR.
 	agentsCS := makeAgentsClientset(nil)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
 	if resp.Success {
@@ -557,12 +557,12 @@ func TestResume_IsSuspendedError(t *testing.T) {
 }
 
 func TestResume_SetReplicasError(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 0, "agents.x-k8s.io/sandbox-name-hash=h1")
+	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=h1")
 	agentsCS := makeAgentsClientset(sb)
-	agentsCS.PrependReactor("patch", "sandboxes", func(action ktesting.Action) (bool, runtime.Object, error) {
+	agentsCS.PrependReactor("patch", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("patch error")
 	})
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
 	if resp.Success {
@@ -571,7 +571,7 @@ func TestResume_SetReplicasError(t *testing.T) {
 }
 
 func TestResume_WithSnapshotRestored(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 0, "agents.x-k8s.io/sandbox-name-hash=h1")
+	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=h1")
 	agentsCS := makeAgentsClientset(sb)
 	dynCS := newTestDynClient()
 
@@ -598,7 +598,7 @@ func TestResume_WithSnapshotRestored(t *testing.T) {
 		},
 	}
 	kubeCS := fakekube.NewSimpleClientset(pod)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, dynCS2, kubeCS)
+	wrapper := newTestSandboxWrapper(agentsCS, dynCS2, kubeCS)
 
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
 	if !resp.Success {
@@ -613,7 +613,7 @@ func TestResume_WithSnapshotRestored(t *testing.T) {
 }
 
 func TestResume_WithSnapshotNotRestored(t *testing.T) {
-	sb := makeSandbox("my-sandbox", 0, "agents.x-k8s.io/sandbox-name-hash=h1")
+	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=h1")
 	agentsCS := makeAgentsClientset(sb)
 
 	snap := makeSnapshot("snap-uid-1", "h1", true)
@@ -636,7 +636,7 @@ func TestResume_WithSnapshotNotRestored(t *testing.T) {
 		},
 	}
 	kubeCS := fakekube.NewSimpleClientset(pod)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, dynCS, kubeCS)
+	wrapper := newTestSandboxWrapper(agentsCS, dynCS, kubeCS)
 
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
 	if resp.Success {
@@ -662,7 +662,7 @@ func TestIsRestoredFromSnapshot_Delegated(t *testing.T) {
 	}
 	kubeCS := fakekube.NewSimpleClientset(pod)
 	agentsCS := makeAgentsClientset(nil)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), kubeCS)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), kubeCS)
 
 	result := wrapper.IsRestoredFromSnapshot(context.Background(), "snap-xyz")
 	if !result.Success {
@@ -695,7 +695,7 @@ func TestSnapshots_EmptyPodName_PropagatesError(t *testing.T) {
 func TestResolveSandboxNameHash_PropagatesNotFoundError(t *testing.T) {
 	// No sandbox CR — the API call returns not-found, which becomes an error.
 	agentsCS := makeAgentsClientset(nil)
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	_, err := wrapper.resolveSandboxNameHash(context.Background())
 	if err == nil {
@@ -705,7 +705,7 @@ func TestResolveSandboxNameHash_PropagatesNotFoundError(t *testing.T) {
 
 func TestResolveSandboxNameHash_CacheHitSkipsAPICall(t *testing.T) {
 	agentsCS := makeAgentsClientset(nil) // no sandbox in cluster
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	// Pre-populate the cache — no API call should happen.
 	wrapper.snapshotHash = "pre-cached"
@@ -723,11 +723,11 @@ func TestResolveSandboxNameHash_CacheHitSkipsAPICall(t *testing.T) {
 // when the sandbox CR does not exist (which triggers hash resolution failure).
 func TestSuspend_CtxCancelledBeforeHashResolve(t *testing.T) {
 	// Sandbox is running (replicas=1) but no CR → hash resolution fails.
-	sb := makeSandbox("my-sandbox", 1, "")
+	sb := makeSandbox(1, "")
 	agentsCS := makeAgentsClientset(sb)
 
 	// Replace the sandbox so hash resolution fails (empty selector → returns "").
-	wrapper := newTestSandboxWrapper("my-sandbox", "my-pod", agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	// The empty selector means hash = "" — Suspend should succeed (no error from hash
 	// resolution itself, since "" is a valid "not found" return). Test the overall

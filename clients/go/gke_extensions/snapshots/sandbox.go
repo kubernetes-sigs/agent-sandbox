@@ -69,7 +69,7 @@ func (s *SandboxWithSnapshotSupport) Snapshots() *SnapshotEngine {
 		s.engine = NewSnapshotEngine(
 			s.namespace,
 			s.k8s,
-			func(ctx context.Context) (string, error) {
+			func(_ context.Context) (string, error) {
 				name := s.Info.PodName()
 				if name == "" {
 					return "", fmt.Errorf("pod name not yet available; ensure the sandbox is open")
@@ -308,15 +308,11 @@ func (s *SandboxWithSnapshotSupport) resolveSandboxNameHash(ctx context.Context)
 
 	// LabelSelector format: "agents.x-k8s.io/sandbox-name-hash=<value>"
 	sel := sb.Status.LabelSelector
-	if idx := strings.Index(sel, "="); idx >= 0 {
-		key := sel[:idx]
-		val := sel[idx+1:]
-		if key == SandboxNameHashLabel && val != "" {
-			s.mu.Lock()
-			s.snapshotHash = val
-			s.mu.Unlock()
-			return val, nil
-		}
+	if key, val, found := strings.Cut(sel, "="); found && key == SandboxNameHashLabel && val != "" {
+		s.mu.Lock()
+		s.snapshotHash = val
+		s.mu.Unlock()
+		return val, nil
 	}
 	return "", nil
 }

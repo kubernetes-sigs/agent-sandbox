@@ -17,7 +17,7 @@ package snapshots
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -79,14 +79,14 @@ func (e *SnapshotEngine) Create(ctx context.Context, triggerName string, timeout
 	}
 
 	manifest := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
 			"kind":       PodSnapshotTriggerKind,
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      safeName,
 				"namespace": e.namespace,
 			},
-			"spec": map[string]interface{}{
+			"spec": map[string]any{
 				"targetPod": podName,
 			},
 		},
@@ -153,18 +153,23 @@ func (e *SnapshotEngine) List(ctx context.Context, filter SnapshotFilter) ListSn
 		}
 	}
 
-	labelSelector := SandboxNameHashLabel + "=" + hash
+	var sb strings.Builder
+	sb.WriteString(SandboxNameHashLabel + "=" + hash)
 	if len(filter.GroupingLabels) > 0 {
 		// Sort keys for a deterministic selector string.
 		keys := make([]string, 0, len(filter.GroupingLabels))
 		for k := range filter.GroupingLabels {
 			keys = append(keys, k)
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		for _, k := range keys {
-			labelSelector += "," + k + "=" + filter.GroupingLabels[k]
+			sb.WriteByte(',')
+			sb.WriteString(k)
+			sb.WriteByte('=')
+			sb.WriteString(filter.GroupingLabels[k])
 		}
 	}
+	labelSelector := sb.String()
 
 	e.log.Info("listing snapshots", "labelSelector", labelSelector)
 
@@ -185,7 +190,7 @@ func (e *SnapshotEngine) List(ctx context.Context, filter SnapshotFilter) ListSn
 		conditions, _, _ := unstructured.NestedSlice(item.Object, "status", "conditions")
 		isReady := false
 		for _, raw := range conditions {
-			cond, ok := raw.(map[string]interface{})
+			cond, ok := raw.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -225,8 +230,8 @@ func (e *SnapshotEngine) List(ctx context.Context, filter SnapshotFilter) ListSn
 		})
 	}
 
-	sort.Slice(details, func(i, j int) bool {
-		return details[i].CreationTimestamp.After(details[j].CreationTimestamp)
+	slices.SortFunc(details, func(a, b SnapshotDetail) int {
+		return b.CreationTimestamp.Compare(a.CreationTimestamp)
 	})
 
 	e.log.Info("found snapshots", "count", len(details))

@@ -30,7 +30,7 @@ const (
 	SandboxAPIVersion = "v1beta1"
 	SandboxPlural     = "sandboxes"
 
-	SandboxNameHashLabel    = "agents.x-k8s.io/sandbox-name-hash"
+	SandboxNameHashLabel     = "agents.x-k8s.io/sandbox-name-hash"
 	PodSnapshotPodAnnotation = "podsnapshot.gke.io/origin-pod"
 )
 
@@ -40,7 +40,7 @@ const (
 )
 
 var (
-	ErrCRDNotInstalled = errors.New("Pod Snapshot Controller is not ready; install the PodSnapshotPolicy CRD before using this client")
+	ErrCRDNotInstalled = errors.New("pod snapshot controller is not ready; install the PodSnapshotPolicy CRD before using this client")
 	ErrSnapshotTimeout = errors.New("snapshot creation timed out")
 	ErrSnapshotFailed  = errors.New("snapshot creation failed")
 )

@@ -82,7 +82,7 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 	}
 
 	if opts.CleanupOnSignal {
-		_ = c.EnableAutoCleanup()
+		c.EnableAutoCleanup()
 	}
 
 	return c, nil
@@ -394,12 +394,7 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 			if !ok {
 				return
 			}
-			signal.Stop(ch)
-			c.mu.Lock()
-			c.stopSignal = nil
-			c.cleanupStop = nil
-			c.mu.Unlock()
-			cancel()
+			stopFn()
 
 			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
 			c.DeleteAll(context.Background())

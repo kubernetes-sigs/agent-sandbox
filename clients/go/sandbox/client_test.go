@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	fakeextensions "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
@@ -146,6 +148,156 @@ func TestClient_DeleteAll(t *testing.T) {
 	c.mu.Unlock()
 	if remaining != 0 {
 		t.Errorf("expected empty registry after DeleteAll, got %d", remaining)
+	}
+}
+
+func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	var activeDeletes atomic.Int32
+	var maxActiveDeletes atomic.Int32
+
+	customExtensions := &customExtensionsClient{
+		ExtensionsV1beta1Interface: extensionsCS.ExtensionsV1beta1(),
+		onDelete: func(_ string) {
+			active := activeDeletes.Add(1)
+			for {
+				currentMax := maxActiveDeletes.Load()
+				if active <= currentMax {
+					break
+				}
+				if maxActiveDeletes.CompareAndSwap(currentMax, active) {
+					break
+				}
+			}
+			// Artificial delay outside fake client lock.
+			time.Sleep(50 * time.Millisecond)
+			activeDeletes.Add(-1)
+		},
+	}
+	c.k8s.ExtensionsClient = customExtensions
+
+	// Setup fake reactor to succeed claim deletion immediately (inside fake client lock)
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	// Track 15 fake sandboxes (more than maxCleanupConcurrency = 10).
+	const numSandboxes = 15
+	for i := range numSandboxes {
+		name := fmt.Sprintf("claim-%d", i)
+		sb := &Sandbox{
+			k8s:  c.k8s,
+			log:  logr.Discard(),
+			opts: c.opts,
+			connector: &connector{
+				strategy:   &DirectStrategy{URL: "http://fake"},
+				httpClient: &http.Client{},
+			},
+			inflightOps:  &sync.WaitGroup{},
+			lifecycleSem: make(chan struct{}, 1),
+		}
+		sb.connector.baseURL = "http://fake"
+		sb.mu.Lock()
+		sb.claimName = name
+		sb.sandboxName = "sb-" + name
+		sb.mu.Unlock()
+
+		key := Key{Namespace: "default", ClaimName: name}
+		c.mu.Lock()
+		c.registry[key] = sb
+		c.mu.Unlock()
+	}
+
+	c.DeleteAll(context.Background())
+
+	c.mu.Lock()
+	remaining := len(c.registry)
+	c.mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("expected empty registry after DeleteAll, got %d", remaining)
+	}
+
+	maxSeen := maxActiveDeletes.Load()
+	if maxSeen > maxCleanupConcurrency {
+		t.Errorf("concurrency limit exceeded: expected at most %d parallel close calls, got %d", maxCleanupConcurrency, maxSeen)
+	}
+	if maxSeen < maxCleanupConcurrency {
+		// Just a sanity check that we actually reached maximum target concurrency.
+		// Since we have 15 elements and delay is 50ms, the semaphore of 10 should be fully utilized.
+		t.Errorf("concurrency too low: expected concurrency to reach %d, got %d", maxCleanupConcurrency, maxSeen)
+	}
+}
+
+func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	// Inject a blocked delete to stall the queue
+	blockCh := make(chan struct{})
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		<-blockCh
+		return true, nil, nil
+	})
+
+	// Add 12 fake sandboxes (maxCleanupConcurrency is 10, so 2 will block)
+	const numSandboxes = 12
+	for i := range numSandboxes {
+		name := fmt.Sprintf("claim-%d", i)
+		sb := &Sandbox{
+			k8s:  c.k8s,
+			log:  logr.Discard(),
+			opts: c.opts,
+			connector: &connector{
+				strategy:   &DirectStrategy{URL: "http://fake"},
+				httpClient: &http.Client{},
+			},
+			inflightOps:  &sync.WaitGroup{},
+			lifecycleSem: make(chan struct{}, 1),
+		}
+		sb.connector.baseURL = "http://fake"
+		sb.mu.Lock()
+		sb.claimName = name
+		sb.sandboxName = "sb-" + name
+		sb.mu.Unlock()
+
+		key := Key{Namespace: "default", ClaimName: name}
+		c.mu.Lock()
+		c.registry[key] = sb
+		c.mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Create a wait group to wait for the first delete to start
+	var firstDeleteActive sync.WaitGroup
+	firstDeleteActive.Add(1)
+
+	var once sync.Once
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		once.Do(func() {
+			firstDeleteActive.Done()
+		})
+		<-blockCh
+		return true, nil, nil
+	})
+
+	go func() {
+		firstDeleteActive.Wait()
+		// Small sleep to allow other 9 to also enter/queue up at the reactor
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+		close(blockCh) // unblock all to let them complete
+	}()
+
+	c.DeleteAll(ctx)
+
+	// Verify that the 2 blocked sandboxes are restored in the registry!
+	c.mu.Lock()
+	remaining := len(c.registry)
+	c.mu.Unlock()
+
+	if remaining != 2 {
+		t.Errorf("expected exactly 2 remaining sandboxes in registry, got %d", remaining)
 	}
 }
 
@@ -545,5 +697,30 @@ func TestClient_Close_ErrorAggregation(t *testing.T) {
 		t.Error("expected Close to return aggregated errors, got nil")
 	} else if !strings.Contains(err.Error(), "injected deletion error") {
 		t.Errorf("expected error to contain target failure details, got: %v", err)
+	}
+}
+
+type customSandboxClaims struct {
+	extensionsv1beta1.SandboxClaimInterface
+	onDelete func(name string)
+}
+
+func (c *customSandboxClaims) Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error {
+	if c.onDelete != nil {
+		c.onDelete(name)
+	}
+	return c.SandboxClaimInterface.Delete(ctx, name, opts)
+}
+
+type customExtensionsClient struct {
+	extensionsv1beta1.ExtensionsV1beta1Interface
+	onDelete func(name string)
+}
+
+func (c *customExtensionsClient) SandboxClaims(namespace string) extensionsv1beta1.SandboxClaimInterface {
+	realClaims := c.ExtensionsV1beta1Interface.SandboxClaims(namespace)
+	return &customSandboxClaims{
+		SandboxClaimInterface: realClaims,
+		onDelete:              c.onDelete,
 	}
 }

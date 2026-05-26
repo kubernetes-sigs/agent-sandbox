@@ -31,6 +31,8 @@ import (
 
 var ErrClosed = errors.New("sandbox: client is closed")
 
+const maxCleanupConcurrency = 10
+
 // Key identifies a tracked sandbox in the registry.
 type Key struct {
 	Namespace string
@@ -282,10 +284,32 @@ func (c *Client) deleteAll(ctx context.Context) error {
 	var errMu sync.Mutex
 	var errs []error
 
+	sem := make(chan struct{}, maxCleanupConcurrency)
+
+loop:
 	for key, sb := range snapshot {
+		select {
+		case sem <- struct{}{}:
+			delete(snapshot, key)
+		case <-ctx.Done():
+			errMu.Lock()
+			errs = append(errs, ctx.Err())
+			errMu.Unlock()
+
+			c.mu.Lock()
+			if !c.closed {
+				maps.Copy(c.registry, snapshot)
+			}
+			c.mu.Unlock()
+			break loop
+		}
+
 		wg.Add(1)
 		go func(k Key, s *Sandbox) {
-			defer wg.Done()
+			defer func() {
+				<-sem
+				wg.Done()
+			}()
 			if err := s.Close(ctx); err != nil {
 				c.log.Error(err, "cleanup failed", "claim", k.ClaimName, "namespace", k.Namespace)
 				errMu.Lock()
@@ -334,22 +358,30 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopSignal = cancel
 
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+
+	var stopOnce sync.Once
 	stopFn := func() {
-		c.mu.Lock()
-		c.stopSignal = nil
-		c.cleanupStop = nil
-		c.mu.Unlock()
-		cancel()
+		stopOnce.Do(func() {
+			c.mu.Lock()
+			c.stopSignal = nil
+			c.cleanupStop = nil
+			c.mu.Unlock()
+			cancel()
+			signal.Stop(ch)
+			close(ch)
+		})
 	}
 	c.cleanupStop = stopFn
 	c.mu.Unlock()
 
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-
 	go func() {
 		select {
-		case sig := <-ch:
+		case sig, ok := <-ch:
+			if !ok {
+				return
+			}
 			signal.Stop(ch)
 			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
 			c.DeleteAll(context.Background())

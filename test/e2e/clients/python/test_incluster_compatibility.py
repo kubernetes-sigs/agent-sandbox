@@ -135,7 +135,7 @@ spec:
         env["KUBECONFIG"] = tc.kubeconfig_path
 
     # Copy files
-    subprocess.run(["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--", "mkdir", "-p", "/app"], check=True, env=env)
+    subprocess.run(["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--", "mkdir", "-p", "/app"], check=True, env=env, timeout=30)
     
     # Copy SDK directory recursively by tar-ing it (standard work-around for copying whole dirs with kubectl) using safe pipelining
     tar_proc = subprocess.Popen(
@@ -155,8 +155,18 @@ spec:
         env=env,
     )
     tar_proc.stdout.close()
-    stdout, stderr = k_proc.communicate()
-    tar_rc = tar_proc.wait()
+    try:
+        stdout, stderr = k_proc.communicate(timeout=60)
+        tar_rc = tar_proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        tar_proc.kill()
+        k_proc.kill()
+        tar_proc.wait()
+        stdout, stderr = k_proc.communicate()
+        raise TimeoutError(
+            f"Tar copy operation timed out. stdout: {stdout.decode() if stdout else ''}, stderr: {stderr.decode() if stderr else ''}"
+        ) from None
+
     if tar_rc != 0 or k_proc.returncode != 0:
         raise RuntimeError(
             f"Tar copy failed. tar exit code: {tar_rc}, "
@@ -164,11 +174,25 @@ spec:
         )
 
     # Copy the script itself
-    subprocess.run(["kubectl", "cp", str(TEST_SCRIPT_PATH), f"{temp_namespace}/py-sdk-incluster-test:/app/incluster_test_script.py"], check=True, env=env)
+    subprocess.run(["kubectl", "cp", str(TEST_SCRIPT_PATH), f"{temp_namespace}/py-sdk-incluster-test:/app/incluster_test_script.py"], check=True, env=env, timeout=30)
 
     # Helper function to run a command inside the Pod
     def exec_in_pod(cmd_list):
-        res = subprocess.run(["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--"] + cmd_list, capture_output=True, text=True, env=env)
+        try:
+            res = subprocess.run(
+                ["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--"] + cmd_list,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as e:
+            print(f"CMD TIMEOUT: {' '.join(cmd_list)}")
+            if e.stdout:
+                print(f"Stdout (before timeout):\n{e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout}")
+            if e.stderr:
+                print(f"Stderr (before timeout):\n{e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr}")
+            raise
         print(f"CMD: {' '.join(cmd_list)}")
         print(f"Stdout:\n{res.stdout}")
         if res.stderr:

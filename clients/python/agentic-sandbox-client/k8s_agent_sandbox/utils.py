@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
@@ -114,14 +115,17 @@ def patch_k8s_config(client_module):
         _sync_k8s_bearer_token(c)
         orig_hook = c.refresh_api_key_hook
         if orig_hook is not None and not getattr(orig_hook, "_is_patched_for_bearer_token", False):
+            @wraps(orig_hook)
             def new_hook(cfg):
                 _sync_k8s_bearer_token(cfg)
-                orig_hook(cfg)
-                _sync_k8s_bearer_token(cfg)
+                try:
+                    orig_hook(cfg)
+                finally:
+                    _sync_k8s_bearer_token(cfg)
             new_hook._is_patched_for_bearer_token = True
             c.refresh_api_key_hook = new_hook
         client_module.Configuration.set_default(c)
-    except Exception as e:
+    except Exception:
         import logging
         logging.warning(
             "Failed to patch default Kubernetes configuration; bearer token compatibility workaround was not applied.",

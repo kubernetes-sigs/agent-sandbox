@@ -24,14 +24,12 @@ from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNo
 class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
     def setUp(self):
-        self.load_incluster_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config")
-        self.load_kube_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config")
-        self.mock_load_incluster = self.load_incluster_patcher.start()
-        self.mock_load_kube = self.load_kube_patcher.start()
-
-    def tearDown(self):
-        self.load_incluster_patcher.stop()
-        self.load_kube_patcher.stop()
+        load_incluster_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config")
+        load_kube_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config")
+        self.mock_load_incluster = load_incluster_patcher.start()
+        self.mock_load_kube = load_kube_patcher.start()
+        self.addCleanup(load_incluster_patcher.stop)
+        self.addCleanup(load_kube_patcher.stop)
 
     def test_labels_and_annotations_coexist_in_manifest(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
@@ -141,14 +139,12 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 class TestK8sHelperResolveSandboxName(unittest.TestCase):
 
     def setUp(self):
-        self.load_incluster_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config")
-        self.load_kube_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config")
-        self.mock_load_incluster = self.load_incluster_patcher.start()
-        self.mock_load_kube = self.load_kube_patcher.start()
-
-    def tearDown(self):
-        self.load_incluster_patcher.stop()
-        self.load_kube_patcher.stop()
+        load_incluster_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config")
+        load_kube_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config")
+        self.mock_load_incluster = load_incluster_patcher.start()
+        self.mock_load_kube = load_kube_patcher.start()
+        self.addCleanup(load_incluster_patcher.stop)
+        self.addCleanup(load_kube_patcher.stop)
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_resolve_sandbox_name_template_not_found(self, mock_watch_class, mock_api_cls, mock_core_cls):

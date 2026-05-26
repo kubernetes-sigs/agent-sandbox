@@ -15,13 +15,13 @@ Kueue is designed for batch workloads that run to completion, while Agent Sandbo
 ## Step 1: Create Kueue Queues
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: default
 spec: {}
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: cluster-queue
@@ -37,7 +37,7 @@ spec:
       - name: memory
         nominalQuota: 1Gi
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: user-queue
@@ -66,7 +66,7 @@ spec:
   podTemplate:
     metadata:
       labels:
-        kueue.x-k8s.io/queue-name: sandbox-local-queue
+        kueue.x-k8s.io/queue-name: user-queue
     spec:
       restartPolicy: Never
       containers:
@@ -93,7 +93,7 @@ kubectl apply -f sandbox-kueue.yaml
 Kueue uses this label to associate sandbox pods with a queue for admission control:
 
 ```
-kueue.x-k8s.io/queue-name: sandbox-local-queue
+kueue.x-k8s.io/queue-name: user-queue
 ```
 
 ## How it works

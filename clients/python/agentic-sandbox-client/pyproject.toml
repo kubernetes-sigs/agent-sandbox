@@ -48,14 +48,14 @@ root = "../../.."
 [project.optional-dependencies]
 async = [
     "httpx",
-    "kubernetes_asyncio",
+    "kubernetes_asyncio<34.0.0",
 ]
 test = [
     "pytest",
     "pytest-xdist",
     "pytest-asyncio",
     "httpx",
-    "kubernetes_asyncio",
+    "kubernetes_asyncio<34.0.0",
 ]
 tracing = [
     "opentelemetry-api~=1.39.0",

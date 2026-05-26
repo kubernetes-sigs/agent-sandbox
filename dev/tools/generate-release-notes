@@ -16,31 +16,36 @@
 import os
 import sys
 import json
-import urllib.request
-import urllib.error
 import subprocess
 import argparse
 import re
 
 
-def get_previous_tag(current_tag):
+def get_previous_release_tag(current_tag):
+    """Queries the latest stable release tag directly from GitHub using the gh CLI."""
     try:
-        tags_out = subprocess.run(
-            ["git", "tag", "--list", "v*", "--sort=-v:refname"],
+        # Assumption: Currently only patching of the latest minor release happens. 
+        # TODO: Support patching older minor releases
+        latest_stable = subprocess.run(
+            [
+                "gh", "release", "list",
+                "--json", "tagName,isLatest",
+                "--jq", ".[] | select(.isLatest).tagName",
+                "--repo", "kubernetes-sigs/agent-sandbox"
+            ],
             check=True,
             text=True,
             stdout=subprocess.PIPE,
-        ).stdout.splitlines()
-
-        if current_tag in tags_out:
-            idx = tags_out.index(current_tag)
-            if idx + 1 < len(tags_out):
-                return tags_out[idx + 1]
-        if len(tags_out) > 0:
-            return tags_out[0]
+        ).stdout.strip()
+        
+        if latest_stable:
+            print(f"INFO: Found latest stable release on GitHub: {latest_stable}")
+            return latest_stable
+            
         return None
-    except subprocess.CalledProcessError:
-        return None
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error: Failed to fetch latest release via gh CLI: {e}")
+        sys.exit(1)
 
 
 def get_commits(prev_tag, current_tag):
@@ -83,9 +88,9 @@ def get_pr_numbers(commits):
     return list(set(pr_numbers))
 
 
-def get_breaking_changes(pr_numbers):
-    """Fetches breaking changes from PRs with specific label."""
-    breaking_changes = []
+def fetch_prs_data(pr_numbers):
+    """Fetches PR details (labels, body, author) once per PR to minimize API overhead."""
+    prs_data = {}
     for pr in pr_numbers:
         try:
             out = subprocess.run(
@@ -95,7 +100,7 @@ def get_breaking_changes(pr_numbers):
                     "view",
                     str(pr),
                     "--json",
-                    "labels,body",
+                    "labels,body,author",
                     "--repo",
                     "kubernetes-sigs/agent-sandbox",
                 ],
@@ -103,51 +108,98 @@ def get_breaking_changes(pr_numbers):
                 text=True,
                 stdout=subprocess.PIPE,
             ).stdout
-            data = json.loads(out)
-            labels = [l["name"] for l in data.get("labels", [])]
-
-            if "release-note-action-required" in labels:
-                body = data.get("body", "").strip()
-                if body:
-                    breaking_changes.append(f"PR #{pr}: {body}")
+            prs_data[pr] = json.loads(out)
         except subprocess.CalledProcessError:
             print(f"⚠️ Warning: Failed to fetch PR #{pr} details.")
-            continue
+    return prs_data
+
+
+def get_contributors(prs_data):
+    """Extracts verified GitHub handles of all PR authors."""
+    contributors = set()
+    for data in prs_data.values():
+        author = data.get("author", {}).get("login")
+        if author:
+            contributors.add(f"@{author}")
+    return sorted(list(contributors))
+
+
+def get_breaking_changes(prs_data):
+    """Extracts breaking changes from fetched PR data with action required label."""
+    breaking_changes = []
+    for pr, data in prs_data.items():
+        labels = [l["name"] for l in data.get("labels", [])]
+        if "release-note-action-required" in labels:
+            body = data.get("body", "").strip()
+            if body:
+                breaking_changes.append(f"PR #{pr}: {body}")
     return breaking_changes
 
 
-def get_pr_descriptions(pr_numbers):
-    """Fetches PR descriptions for given PR numbers."""
+def get_pr_descriptions(prs_data):
+    """Extracts PR descriptions from fetched PR data."""
     pr_descriptions = []
-    for pr in pr_numbers:
-        try:
-            out = subprocess.run(
-                ["gh", "pr", "view", str(pr), "--json", "body", "--repo", "kubernetes-sigs/agent-sandbox"],
-                check=True, text=True, stdout=subprocess.PIPE
-            ).stdout
-            data = json.loads(out)
-            body = data.get("body", "").strip()
-            if body:
-                pr_descriptions.append(f"PR #{pr}: {body}")
-        except subprocess.CalledProcessError:
-            print(f"⚠️ Warning: Failed to fetch PR #{pr} description.")
-            continue
+    for pr, data in prs_data.items():
+        body = data.get("body", "").strip()
+        if body:
+            pr_descriptions.append(f"PR #{pr}: {body}")
     return pr_descriptions
 
 
-def generate_highlights(commits, breaking_changes, pr_descriptions, tag, model="gemini-2.5-flash"):
-    # TODO: Use Vertex AI for Gemini API 
+def get_new_authors(prev_tag, current_tag):
+    """Returns the list of Name <email> for verified first-time contributors in this release."""
+    if not prev_tag:
+        return []
+    try:
+        past_emails = set(
+            subprocess.run(
+                ["git", "log", prev_tag, "--pretty=format:%ae"],
+                check=True, text=True, stdout=subprocess.PIPE
+            ).stdout.splitlines()
+        )
+        
+        current_commits = subprocess.run(
+            ["git", "log", f"{prev_tag}..{current_tag}", "--pretty=format:%an <%ae>"],
+            check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.splitlines()
+        
+        new_authors = set()
+        for commit in current_commits:
+            commit = commit.strip()
+            if not commit:
+                continue
+            match = re.search(r'<([^>]+)>$', commit)
+            if match:
+                email = match.group(1)
+                if email not in past_emails:
+                    new_authors.add(commit)
+        return sorted(list(new_authors))
+    except subprocess.CalledProcessError:
+        return []
 
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        print("⚠️ GEMINI_API_KEY not set. Skipping Gemini highlights.")
+
+def generate_highlights(commits, breaking_changes, pr_descriptions, contributors, new_authors, tag, model="gemini-2.5-flash"):
+    """Generates release highlights using Gemini via the Vertex AI API platform."""
+    # Try importing the modern SDK
+    try:
+        from google import genai
+        from google.genai import errors
+    except ImportError:
+        print("❌ Error: 'google-genai' library not installed. Run 'pip install google-genai'.")
         return None
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    project_id = os.getenv("GCP_PROJECT", "").strip()
+    location = os.getenv("GCP_LOCATION", "us-central1").strip()
+
+    if not project_id:
+        print("⚠️ GCP_PROJECT environment variable not set. Skipping Gemini highlights.")
+        return None
 
     commit_titles = "\n".join([c["title"] for c in commits])
     commit_messages = "\n".join([f"- {c['title']}\n  {c['body']}" for c in commits])
     pr_desc_str = "\n".join([f"- {desc}" for desc in pr_descriptions])
+    contributors_str = ", ".join(contributors)
+    new_authors_str = "\n".join([f"- {a}" for a in new_authors])
 
     prompt = f"""**Task:** Generate curated release notes for **Agent Sandbox release draft** {tag} from the provided information, following the structure and tone of the ideal example below.
 
@@ -155,7 +207,15 @@ def generate_highlights(commits, breaking_changes, pr_descriptions, tag, model="
 - Generate only the **Key Highlights**, **Contributors**, and **New Contributors** sections.
 - Summarize the highlights into a few key areas with bold titles describing the feature area (e.g., **Python SDK Advancements**, **Core Stability**).
 - Synthesize information from full commit messages and PR descriptions to describe changes accurately.
-- List contributors as handles (e.g., @handle), extracting them from the provided data.
+- List all contributors as @handle from the verified contributors list below.
+- The verified contributors list and the verified first-time authors list use different identifier formats. Do not try to match or convert between them.
+- For the "New Contributors" section, list **only** the @handle from the verified new authors list below, exactly as provided. If the verified new authors list is empty, omit the "New Contributors" section entirely.
+
+Verified Contributors:
+{contributors_str}
+
+Verified New Authors (First-Time Contributors):
+{new_authors_str}
 
 Input Commit Titles:
 {commit_titles}
@@ -170,34 +230,27 @@ Breaking Changes:
 {breaking_changes}
 """
 
-    data = {"contents": [{"parts": [{"text": prompt}]}]}
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(data).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            resp_data = json.loads(response.read().decode("utf-8"))
-            candidates = resp_data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text")
-            return None
-    except urllib.error.HTTPError as e:
-        print(f"⚠️ HTTP Error calling Gemini API ({e.code}: {e.reason}). Skipping Gemini highlights.")
-        try:
-            error_body = e.read().decode("utf-8")
-            print(f"   Response body: {error_body}")
-        except Exception:
-            pass
+        # Initialize the GenAI Client pointing at Vertex AI
+        client = genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=location
+        )
+
+        # Call Vertex AI Gemini Model
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+        )
+        
+        return response.text
+
+    except errors.APIError as e:
+        print(f"⚠️ Vertex AI API Error calling Gemini ({e.code}: {e.message}). Skipping highlights.")
         return None
     except Exception as e:
-        print(f"⚠️ Error calling Gemini API ({type(e).__name__}: {e}). Skipping Gemini highlights.")
+        print(f"⚠️ Unexpected Error calling Vertex AI ({type(e).__name__}: {e}). Skipping highlights.")
         return None
 
 
@@ -216,19 +269,28 @@ def main():
 
     tag = args.tag
 
-    prev_tag = get_previous_tag(tag)
+    prev_tag = get_previous_release_tag(tag)
     print(f"INFO: Found previous tag: {prev_tag}")
     commits = get_commits(prev_tag, tag)
 
-    # Extract PR numbers and breaking changes
+    # Extract PR numbers and fetch details once per PR to minimize API overhead
     pr_numbers = get_pr_numbers(commits)
-    breaking_changes = get_breaking_changes(pr_numbers)
-    pr_descriptions = get_pr_descriptions(pr_numbers)
+    prs_data = fetch_prs_data(pr_numbers)
+    contributors = get_contributors(prs_data)
+    new_authors = get_new_authors(prev_tag, tag)
+    breaking_changes = get_breaking_changes(prs_data)
+    pr_descriptions = get_pr_descriptions(prs_data)
 
-    # Generate highlights using breaking changes and PR descriptions
-    highlights = generate_highlights(
-        commits, "\n".join(breaking_changes), pr_descriptions, tag, model=args.model
-    )
+    # Generate highlights using breaking changes, PR descriptions, verified contributors, and verified new authors
+    if not commits:
+        print("INFO: No commits found between tags. Skipping highlights generation.")
+        highlights = None
+    else:
+        highlights = generate_highlights(
+            commits, "\n".join(breaking_changes), pr_descriptions, contributors, new_authors, tag, model=args.model
+        )
+        if not highlights:
+            print("⚠️ Warning: Failed to generate release highlights using Gemini. Proceeding best-effort.", file=sys.stderr)
 
     installation_notes = f"""
 ### Installation

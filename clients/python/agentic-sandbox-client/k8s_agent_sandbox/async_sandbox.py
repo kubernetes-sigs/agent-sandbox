@@ -60,16 +60,12 @@ class AsyncSandbox:
 
         self.k8s_helper = k8s_helper or AsyncK8sHelper()
 
-        use_pod_ip = (
-            isinstance(self.connection_config, SandboxInClusterConnectionConfig)
-            and self.connection_config.use_pod_ip
-        )
         self.connector = AsyncSandboxConnector(
             sandbox_id=self.sandbox_id,
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
-            get_pod_ip=self.get_pod_ip if use_pod_ip else None,
+            get_pod_ip=self.get_pod_ip,
         )
 
         self.tracer_config = tracer_config or SandboxTracerConfig()

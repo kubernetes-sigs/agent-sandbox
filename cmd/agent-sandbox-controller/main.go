@@ -31,7 +31,7 @@ import (
 	"github.com/felixge/fgprof"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/agent-sandbox/internal/goruntime"
@@ -67,6 +67,7 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var memlimitRatio float64
+	var sandboxWarmPoolMaxBatchSize int
 	var printVersion bool
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
@@ -96,6 +97,7 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.Float64Var(&memlimitRatio, "auto-gomemlimit-ratio", 0.0, "The ratio of reserved GOMEMLIMIT memory to the detected maximum container or system memory. The value should be greater than 0.0 and less than 1.0. Default: 0.0 (disabled).")
+	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -118,11 +120,17 @@ func main() {
 		"sandboxClaim", sandboxClaimConcurrentWorkers,
 		"sandboxWarmPool", sandboxWarmPoolConcurrentWorkers,
 		"sandboxTemplate", sandboxTemplateConcurrentWorkers,
+		"sandboxWarmPoolMaxBatchSize", sandboxWarmPoolMaxBatchSize,
 	)
 
 	// Validation checks for concurrency flags
 	if sandboxConcurrentWorkers <= 0 || sandboxClaimConcurrentWorkers <= 0 || sandboxWarmPoolConcurrentWorkers <= 0 {
 		setupLog.Error(nil, "concurrent workers must be greater than 0")
+		os.Exit(1)
+	}
+	// Validation checks for sandboxWarmPoolMaxBatchSize (maximum batch size for sandbox creation and deletion in SandboxWarmPool controller)
+	if sandboxWarmPoolMaxBatchSize <= 0 {
+		setupLog.Error(nil, "sandbox-warm-pool-max-batch-size must be greater than 0")
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -172,7 +180,7 @@ func main() {
 
 	scheme := controllers.Scheme
 	if extensions {
-		utilruntime.Must(extensionsv1alpha1.AddToScheme(scheme))
+		utilruntime.Must(extensionsv1beta1.AddToScheme(scheme))
 	}
 
 	metricsOpts := metricsserver.Options{
@@ -266,8 +274,9 @@ func main() {
 		}
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
+			Client:       mgr.GetClient(),
+			Scheme:       mgr.GetScheme(),
+			MaxBatchSize: sandboxWarmPoolMaxBatchSize,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)

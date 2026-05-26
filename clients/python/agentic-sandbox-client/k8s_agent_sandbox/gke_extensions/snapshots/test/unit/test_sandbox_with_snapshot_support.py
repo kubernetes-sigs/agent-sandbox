@@ -56,6 +56,9 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         mock_ctm.return_value = (None, None)
 
         self.mock_k8s_helper = MagicMock()
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {"selector": f"{SANDBOX_NAME_HASH_LABEL}=test-hash"}
+        }
 
         # Create SandboxWithSnapshotSupport
         self.sandbox = SandboxWithSnapshotSupport(
@@ -1142,6 +1145,18 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertIn("Timed out", result.error_reason)
 
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
+    def test_suspend_missing_name_hash(self, mock_is_suspended):
+        """Test suspend fails gracefully when sandbox name hash is missing/not found."""
+        self.sandbox._sandbox_name_hash = None
+        self.mock_k8s_helper.get_sandbox.return_value = {} # No selector info in status
+        
+        result = self.sandbox.suspend(snapshot_before_suspend=False)
+        
+        self.assertFalse(result.success)
+        self.assertIn("Failed to resolve sandbox name hash", result.error_reason)
+        self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_not_called()
+
 
     def test_is_suspended_true(self):
         self.mock_k8s_helper.custom_objects_api.get_namespaced_custom_object.return_value = {
@@ -1159,6 +1174,10 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
     def test_get_sandbox_name_hash_success(self):
         """Test get_sandbox_name_hash reads from status.selector and caches it."""
+        # Reset mock from calls made during eager fetch in Sandbox __init__
+        self.mock_k8s_helper.get_sandbox.reset_mock()
+        self.sandbox._sandbox_name_hash = None
+        
         self.mock_k8s_helper.get_sandbox.return_value = {
             "status": {"selector": f"{SANDBOX_NAME_HASH_LABEL}=test-hash-value"}
         }
@@ -1176,6 +1195,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
     def test_get_sandbox_name_hash_not_found(self):
         """Test get_sandbox_name_hash returns None when not found."""
+        self.sandbox._sandbox_name_hash = None
         self.mock_k8s_helper.get_sandbox.return_value = {}
         
         res = self.sandbox.get_sandbox_name_hash()

@@ -32,7 +32,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -55,7 +55,7 @@ func GetKubeconfig() string {
 
 func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(controllers.Scheme))
-	utilruntime.Must(extensionsv1alpha1.AddToScheme(controllers.Scheme))
+	utilruntime.Must(extensionsv1beta1.AddToScheme(controllers.Scheme))
 }
 
 func getRepoRoot() string {

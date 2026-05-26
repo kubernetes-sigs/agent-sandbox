@@ -9,7 +9,7 @@ tool (
 	sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter
 )
 
-require k8s.io/klog/v2 v2.130.1
+require k8s.io/klog/v2 v2.140.0
 
 require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect

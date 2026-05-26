@@ -70,13 +70,15 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
 
 ### Test Phases:
 
-1.  **Phase 1: Starting Counter Sandbox & Snapshotting**:
-    *   Starts a sandbox with a counter application.
-    *   Takes a snapshot (`test-snapshot-10`) after ~10 seconds.
-    *   Takes a snapshot (`test-snapshot-20`) after ~20 seconds.
-2.  **Phase 2: Restoring from Recent Snapshot**:
-    *   Restores a sandbox from the second snapshot.
-    *   Verifies that the sandbox has been restored from the recent snapshot. 
+1.  **Phase 1: Starting Counter Sandbox, Suspend, Resume & Snapshot Deletion**:
+    - Starts a sandbox with a counter application.
+    - Takes two manual snapshots (`test-snapshot-10` and `test-snapshot-20`).
+    - Suspends and resumes the active sandbox.
+    - Verifies lists of all snapshots, deletes a specific snapshot by UID, and cleans up the rest.
+2.  **Phase 2: Testing Suspend/Resume on a New Sandbox Instance**:
+    - Launches a new sandbox instance and suspends it to take a state snapshot.
+    - Resumes the new sandbox instance, which restores from the sandbox's snapshot.
+    - Cleans up the snapshot from the system.
 
 ### Prerequisites
 

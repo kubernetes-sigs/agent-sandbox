@@ -57,11 +57,11 @@ The router can be configured using the following environment variables:
 The Sandbox Router (or similar reverse proxy service) is needed for both the "Gateway Mode" and
 "Tunnel Mode" interactions with the Python client.
 
-In `sandbox_router.yaml` replace `IMAGE_PLACEHOLDER` with the `$SANDBOX_ROUTER_IMG` from the
+In `sandbox_router.yaml` replace `${ROUTER_IMAGE}` with the `$SANDBOX_ROUTER_IMG` from the
 previous step, and then apply the manifest.
 
 ```bash
-sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
+sed -i "s|\${ROUTER_IMAGE}|$SANDBOX_ROUTER_IMG|g" sandbox_router.yaml
 kubectl apply -f sandbox_router.yaml
 ```
 

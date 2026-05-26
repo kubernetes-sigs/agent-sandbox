@@ -274,7 +274,7 @@ func TestWaitForPodReady_Ready(t *testing.T) {
 		context.Background(),
 		kubeCS.CoreV1(),
 		"default",
-		"my-pod",
+		func() string { return "my-pod" },
 		5*time.Second,
 		logr.Discard(),
 	)
@@ -304,7 +304,7 @@ func TestWaitForPodReady_Timeout(t *testing.T) {
 		ctx,
 		kubeCS.CoreV1(),
 		"default",
-		"my-pod",
+		func() string { return "my-pod" },
 		5*time.Second,
 		logr.Discard(),
 	)
@@ -336,12 +336,50 @@ func TestWaitForPodReady_SkipsTerminating(t *testing.T) {
 		ctx,
 		kubeCS.CoreV1(),
 		"default",
-		"my-pod",
+		func() string { return "my-pod" },
 		5*time.Second,
 		logr.Discard(),
 	)
 	if done {
 		t.Error("expected false for terminating pod even if conditions say Ready")
+	}
+}
+
+func TestWaitForPodReady_EmptyNameEventuallyPopulates(t *testing.T) {
+	// Simulates the case where pod name is not yet known immediately after scale-up.
+	// The first call to getPodName returns ""; subsequent calls return "my-pod".
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-pod", Namespace: "default"},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	kubeCS := fakekube.NewSimpleClientset(pod)
+
+	callCount := 0
+	getPodName := func() string {
+		callCount++
+		if callCount == 1 {
+			return "" // first iteration: name not yet assigned
+		}
+		return "my-pod"
+	}
+
+	done := waitForPodReady(
+		context.Background(),
+		kubeCS.CoreV1(),
+		"default",
+		getPodName,
+		10*time.Second,
+		logr.Discard(),
+	)
+	if !done {
+		t.Error("expected true when pod name eventually becomes available")
+	}
+	if callCount < 2 {
+		t.Errorf("expected at least 2 getPodName calls, got %d", callCount)
 	}
 }
 

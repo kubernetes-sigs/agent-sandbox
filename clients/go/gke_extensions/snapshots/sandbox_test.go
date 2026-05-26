@@ -49,7 +49,7 @@ type stubHandle struct {
 func (s *stubHandle) Open(_ context.Context) error       { return nil }
 func (s *stubHandle) Close(_ context.Context) error      { s.closed = true; return s.closeErr }
 func (s *stubHandle) Disconnect(_ context.Context) error { return nil }
-func (s *stubHandle) IsReady() bool                      { return true }
+func (s *stubHandle) IsReady() bool                      { return !s.closed }
 func (s *stubHandle) Run(_ context.Context, _ string, _ ...sandbox.CallOption) (*sandbox.ExecutionResult, error) {
 	return nil, nil
 }
@@ -683,6 +683,45 @@ func TestSnapshots_EmptyPodName_PropagatesError(t *testing.T) {
 	resp := wrapper.Snapshots().Create(context.Background(), "test", 5*time.Second)
 	if resp.Success {
 		t.Error("expected failure when pod name is empty")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IsActive
+// ---------------------------------------------------------------------------
+
+func TestIsActive_FalseBeforeEngineInit(t *testing.T) {
+	// A freshly constructed wrapper has no engine; IsActive must return false.
+	agentsCS := makeAgentsClientset(nil)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+
+	if wrapper.IsActive() {
+		t.Error("expected IsActive()=false before Snapshots() is called")
+	}
+}
+
+func TestIsActive_TrueAfterEngineInit(t *testing.T) {
+	// Calling Snapshots() lazily initialises the engine; IsActive must then return true.
+	agentsCS := makeAgentsClientset(nil)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+
+	_ = wrapper.Snapshots() // triggers engine init
+	if !wrapper.IsActive() {
+		t.Error("expected IsActive()=true after Snapshots() is called")
+	}
+}
+
+func TestIsActive_FalseAfterClose(t *testing.T) {
+	// After Close() the underlying handle is no longer ready; IsActive must return false.
+	agentsCS := makeAgentsClientset(nil)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	_ = wrapper.Snapshots() // init engine so both conditions could be true
+
+	if err := wrapper.Close(context.Background()); err != nil {
+		t.Fatalf("Close returned unexpected error: %v", err)
+	}
+	if wrapper.IsActive() {
+		t.Error("expected IsActive()=false after Close()")
 	}
 }
 

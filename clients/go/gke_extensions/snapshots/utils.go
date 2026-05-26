@@ -314,23 +314,29 @@ func waitForPodTermination(
 }
 
 // waitForPodReady polls until the pod has Ready=True.
+// getPodName is called on every iteration so callers can supply a name that
+// may not yet be populated at call time (e.g. immediately after scale-up).
 // Returns true if the pod became ready within the timeout.
 func waitForPodReady(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
-	namespace, podName string,
+	namespace string,
+	getPodName func() string,
 	timeout time.Duration,
 	log logr.Logger,
 ) bool {
-	log.Info("waiting for pod to become ready", "pod", podName, "timeout", timeout)
+	log.Info("waiting for pod to become ready", "timeout", timeout)
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		pod, err := coreClient.Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err == nil && pod.DeletionTimestamp == nil {
-			for _, cond := range pod.Status.Conditions {
-				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-					return true
+		podName := getPodName()
+		if podName != "" {
+			pod, err := coreClient.Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+			if err == nil && pod.DeletionTimestamp == nil {
+				for _, cond := range pod.Status.Conditions {
+					if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+						return true
+					}
 				}
 			}
 		}
@@ -342,6 +348,6 @@ func waitForPodReady(
 		}
 	}
 
-	log.Info("timed out waiting for pod to become ready", "pod", podName)
+	log.Info("timed out waiting for pod to become ready", "pod", getPodName())
 	return false
 }

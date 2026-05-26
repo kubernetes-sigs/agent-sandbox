@@ -61,6 +61,15 @@ func NewSandboxWithSnapshotSupport(
 	}
 }
 
+// IsActive reports whether the sandbox handle is ready for communication and
+// the snapshot engine has been initialised.
+// Mirrors Python's SandboxWithSnapshotSupport.is_active().
+func (s *SandboxWithSnapshotSupport) IsActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Handle.IsReady() && s.engine != nil
+}
+
 // Snapshots returns the SnapshotEngine for this sandbox, initialising it lazily.
 func (s *SandboxWithSnapshotSupport) Snapshots() *SnapshotEngine {
 	s.mu.Lock()
@@ -236,8 +245,7 @@ func (s *SandboxWithSnapshotSupport) Resume(ctx context.Context, timeout time.Du
 	}
 	s.log.Info("sandbox scaled to 1 replica", "sandbox", s.Info.SandboxName())
 
-	podName := s.Info.PodName()
-	if !waitForPodReady(ctx, s.k8s.CoreClient, s.namespace, podName, timeout, s.log) {
+	if !waitForPodReady(ctx, s.k8s.CoreClient, s.namespace, s.Info.PodName, timeout, s.log) {
 		s.log.Info("timed out waiting for pod to become ready", "sandbox", s.Info.SandboxName())
 		return ResumeResponse{
 			Success:     false,

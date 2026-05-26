@@ -266,8 +266,11 @@ func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string)
 }
 
 // DeleteAll closes and deletes all tracked sandboxes. Best-effort.
+// Failures and cancellations are logged but not returned.
 func (c *Client) DeleteAll(ctx context.Context) {
-	_ = c.deleteAll(ctx)
+	if err := c.deleteAll(ctx); err != nil {
+		c.log.Error(err, "cleanup completed with errors")
+	}
 }
 
 func (c *Client) deleteAll(ctx context.Context) error {

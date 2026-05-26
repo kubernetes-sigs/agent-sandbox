@@ -52,14 +52,13 @@ func NewSandboxWithSnapshotSupport(
 	namespace string,
 	log logr.Logger,
 ) *SandboxWithSnapshotSupport {
-	s := &SandboxWithSnapshotSupport{
+	return &SandboxWithSnapshotSupport{
 		Handle:    handle,
 		Info:      info,
 		k8s:       k8s,
 		namespace: namespace,
 		log:       log,
 	}
-	return s
 }
 
 // Snapshots returns the SnapshotEngine for this sandbox, initialising it lazily.
@@ -70,15 +69,15 @@ func (s *SandboxWithSnapshotSupport) Snapshots() *SnapshotEngine {
 		s.engine = NewSnapshotEngine(
 			s.namespace,
 			s.k8s,
-			func() (string, error) {
+			func(ctx context.Context) (string, error) {
 				name := s.Info.PodName()
 				if name == "" {
 					return "", fmt.Errorf("pod name not yet available; ensure the sandbox is open")
 				}
 				return name, nil
 			},
-			func() (string, error) {
-				return s.resolveSandboxNameHash()
+			func(ctx context.Context) (string, error) {
+				return s.resolveSandboxNameHash(ctx)
 			},
 			s.log,
 		)
@@ -137,7 +136,9 @@ func (s *SandboxWithSnapshotSupport) Suspend(ctx context.Context, snapshotBefore
 	}
 
 	// Pre-resolve sandbox name hash while the sandbox is still running.
-	if _, err := s.resolveSandboxNameHash(); err != nil {
+	// The hash must be cached before scaling to 0 replicas, since the
+	// Sandbox CR's status.selector may be cleared once the pod terminates.
+	if _, err := s.resolveSandboxNameHash(ctx); err != nil {
 		s.log.Error(err, "cannot suspend: failed to resolve sandbox name hash")
 		return SuspendResponse{
 			Success:     false,
@@ -289,8 +290,9 @@ func (s *SandboxWithSnapshotSupport) Close(ctx context.Context) error {
 }
 
 // resolveSandboxNameHash fetches (and caches) the sandbox-name-hash label value
-// from the Sandbox CR's status.selector field.
-func (s *SandboxWithSnapshotSupport) resolveSandboxNameHash() (string, error) {
+// from the Sandbox CR's status.selector field. The provided ctx is forwarded to
+// the Kubernetes API call so that caller timeouts and cancellation are respected.
+func (s *SandboxWithSnapshotSupport) resolveSandboxNameHash(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	if s.snapshotHash != "" {
 		h := s.snapshotHash
@@ -299,7 +301,7 @@ func (s *SandboxWithSnapshotSupport) resolveSandboxNameHash() (string, error) {
 	}
 	s.mu.Unlock()
 
-	sb, err := s.k8s.AgentsClient.Sandboxes(s.namespace).Get(context.Background(), s.Info.SandboxName(), metav1.GetOptions{})
+	sb, err := s.k8s.AgentsClient.Sandboxes(s.namespace).Get(ctx, s.Info.SandboxName(), metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("getting sandbox CR: %w", err)
 	}

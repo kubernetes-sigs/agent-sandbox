@@ -17,6 +17,7 @@ package snapshots
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,10 +40,10 @@ func newTestEngine(dynCS *fakedynamic.FakeDynamicClient, podName, hash string) *
 		namespace: "default",
 		dynClient: dynCS,
 		log:       logr.Discard(),
-		getPodName: func() (string, error) {
+		getPodName: func(_ context.Context) (string, error) {
 			return podName, nil
 		},
-		getSandboxNameHash: func() (string, error) {
+		getSandboxNameHash: func(_ context.Context) (string, error) {
 			return hash, nil
 		},
 	}
@@ -196,8 +197,8 @@ func TestSnapshotEngine_List_NoPodName(t *testing.T) {
 		namespace:  "default",
 		dynClient:  dynCS,
 		log:        logr.Discard(),
-		getPodName: func() (string, error) { return "", nil },
-		getSandboxNameHash: func() (string, error) {
+		getPodName: func(_ context.Context) (string, error) { return "", nil },
+		getSandboxNameHash: func(_ context.Context) (string, error) {
 			return "abc123", nil
 		},
 	}
@@ -214,8 +215,8 @@ func TestSnapshotEngine_List_NoHash(t *testing.T) {
 		namespace:          "default",
 		dynClient:          dynCS,
 		log:                logr.Discard(),
-		getPodName:         func() (string, error) { return "my-pod", nil },
-		getSandboxNameHash: func() (string, error) { return "", nil },
+		getPodName:         func(_ context.Context) (string, error) { return "my-pod", nil },
+		getSandboxNameHash: func(_ context.Context) (string, error) { return "", nil },
 	}
 
 	result := eng.List(context.Background(), SnapshotFilter{ReadyOnly: true})
@@ -458,8 +459,8 @@ func TestSnapshotEngine_Create_EmptyPodName(t *testing.T) {
 		namespace:          "default",
 		dynClient:          dynCS,
 		log:                logr.Discard(),
-		getPodName:         func() (string, error) { return "", nil },
-		getSandboxNameHash: func() (string, error) { return "abc123", nil },
+		getPodName:         func(_ context.Context) (string, error) { return "", nil },
+		getSandboxNameHash: func(_ context.Context) (string, error) { return "abc123", nil },
 	}
 
 	resp := eng.Create(context.Background(), "test", 5*time.Second)
@@ -639,5 +640,137 @@ func TestSnapshotEngine_executeDeletion_PartialFailure(t *testing.T) {
 	}
 	if len(result.DeletedSnapshots) == 0 {
 		t.Error("expected at least one successfully deleted snapshot in partial failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue 1: sanitizeTriggerName — invalid character stripping
+// ---------------------------------------------------------------------------
+
+func assertValidK8sName(t *testing.T, result string) {
+	t.Helper()
+	if len(result) > 63 {
+		t.Errorf("name too long (%d): %q", len(result), result)
+	}
+	if result == "" {
+		t.Error("name must not be empty")
+	}
+	for _, ch := range result {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
+			t.Errorf("invalid char %q in %q", ch, result)
+		}
+	}
+	if result[0] == '-' || result[len(result)-1] == '-' {
+		t.Errorf("name must not start or end with dash: %q", result)
+	}
+}
+
+func TestSanitizeTriggerName_Space(t *testing.T) {
+	result := sanitizeTriggerName("my trigger")
+	assertValidK8sName(t, result)
+}
+
+func TestSanitizeTriggerName_Dot(t *testing.T) {
+	result := sanitizeTriggerName("snap.v2")
+	assertValidK8sName(t, result)
+	if !strings.Contains(result, "snap") || !strings.Contains(result, "v2") {
+		t.Errorf("expected base to contain snap and v2, got %q", result)
+	}
+}
+
+func TestSanitizeTriggerName_Slash(t *testing.T) {
+	result := sanitizeTriggerName("ns/pod")
+	assertValidK8sName(t, result)
+}
+
+func TestSanitizeTriggerName_AtSign(t *testing.T) {
+	result := sanitizeTriggerName("user@domain")
+	assertValidK8sName(t, result)
+}
+
+func TestSanitizeTriggerName_Mixed(t *testing.T) {
+	result := sanitizeTriggerName("My Trigger/v2.0@host")
+	assertValidK8sName(t, result)
+}
+
+func TestSanitizeTriggerName_ConsecutiveDashes(t *testing.T) {
+	// underscores → dashes, then consecutive dashes must be collapsed
+	result := sanitizeTriggerName("a__b")
+	assertValidK8sName(t, result)
+	if strings.Contains(result, "--") {
+		t.Errorf("consecutive dashes not collapsed: %q", result)
+	}
+}
+
+func TestSanitizeTriggerName_LeadingInvalidChars(t *testing.T) {
+	result := sanitizeTriggerName("...abc")
+	assertValidK8sName(t, result)
+}
+
+func TestSanitizeTriggerName_OnlyInvalidChars(t *testing.T) {
+	result := sanitizeTriggerName("@@@")
+	assertValidK8sName(t, result)
+}
+
+
+// ---------------------------------------------------------------------------
+// Issue 4: deterministic GroupingLabels label selector
+// ---------------------------------------------------------------------------
+
+func TestSnapshotEngine_List_GroupingLabelsDeterministic(t *testing.T) {
+	dynCS := newDynClient()
+	eng := newTestEngine(dynCS, "my-pod", "abc123")
+
+	var selectors []string
+	dynCS.PrependReactor("list", "podsnapshots", func(action ktesting.Action) (bool, runtime.Object, error) {
+		la := action.(ktesting.ListAction)
+		selectors = append(selectors, la.GetListRestrictions().Labels.String())
+		return true, &unstructured.UnstructuredList{}, nil
+	})
+
+	for i := 0; i < 10; i++ {
+		eng.List(context.Background(), SnapshotFilter{
+			ReadyOnly:      false,
+			GroupingLabels: map[string]string{"env": "prod", "team": "platform", "app": "agent"},
+		})
+	}
+
+	if len(selectors) == 0 {
+		t.Fatal("no list calls recorded")
+	}
+	first := selectors[0]
+	for i, sel := range selectors[1:] {
+		if sel != first {
+			t.Errorf("call %d produced different selector: got %q, want %q", i+1, sel, first)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue 5: DeleteManualTriggers respects context cancellation during retry sleep
+// ---------------------------------------------------------------------------
+
+func TestDeleteManualTriggers_CtxCancelDuringRetry(t *testing.T) {
+	dynCS := newDynClient()
+	// Always fail with a non-404 error to force retries.
+	dynCS.PrependReactor("delete", "podsnapshotmanualtriggers", func(action ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("server unavailable")
+	})
+	eng := newTestEngine(dynCS, "my-pod", "abc123")
+	eng.createdManualTriggers = []string{"trigger-1"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel the context right away so the retry sleep is interrupted.
+	cancel()
+
+	start := time.Now()
+	eng.DeleteManualTriggers(ctx)
+	elapsed := time.Since(start)
+
+	// With a cancelled context the retry sleep should be skipped.
+	// Allow generous margin — should complete in well under 1 second.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("DeleteManualTriggers blocked too long with cancelled ctx: %v (want < 500ms)", elapsed)
 	}
 }

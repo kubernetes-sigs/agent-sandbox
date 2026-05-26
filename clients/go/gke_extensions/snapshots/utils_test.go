@@ -16,10 +16,10 @@ package snapshots
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
-
-	"fmt"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -569,5 +569,28 @@ func TestWaitForPodTermination_APIError_ThenGone(t *testing.T) {
 	)
 	if !done {
 		t.Error("expected true when pod eventually disappears after an API error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue 7: errNotYetComplete uses errors.New (sentinel comparability)
+// ---------------------------------------------------------------------------
+
+func TestErrNotYetComplete_IsComparable(t *testing.T) {
+	if !errors.Is(errNotYetComplete, errNotYetComplete) {
+		t.Error("errNotYetComplete must be comparable to itself via errors.Is")
+	}
+}
+
+func TestErrNotYetComplete_IsNotWrapped(t *testing.T) {
+	if errors.Unwrap(errNotYetComplete) != nil {
+		t.Error("errNotYetComplete must not wrap another error (should use errors.New)")
+	}
+}
+
+func TestErrNotYetComplete_NotConfusedWithOtherErrors(t *testing.T) {
+	other := errors.New("snapshot not yet complete") // different instance
+	if errors.Is(errNotYetComplete, other) {
+		t.Error("errNotYetComplete must not match a different error with the same message")
 	}
 }

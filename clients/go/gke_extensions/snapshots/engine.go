@@ -28,7 +28,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
-	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
@@ -37,29 +36,27 @@ import (
 type SnapshotEngine struct {
 	namespace          string
 	dynClient          dynamic.Interface
-	coreClient         corev1client.CoreV1Interface
-	getPodName         func() (string, error)
-	getSandboxNameHash func() (string, error)
+	getPodName         func(ctx context.Context) (string, error)
+	getSandboxNameHash func(ctx context.Context) (string, error)
 	log                logr.Logger
 
-	mu                   sync.Mutex
+	mu                    sync.Mutex
 	createdManualTriggers []string
 }
 
 // NewSnapshotEngine creates a SnapshotEngine backed by the provided K8sHelper.
 // getPodName and getSandboxNameHash are callbacks that resolve dynamic identity
-// values; they may be called on every operation.
+// values; ctx is forwarded from each engine operation to the callbacks.
 func NewSnapshotEngine(
 	namespace string,
 	k8s *sandbox.K8sHelper,
-	getPodName func() (string, error),
-	getSandboxNameHash func() (string, error),
+	getPodName func(ctx context.Context) (string, error),
+	getSandboxNameHash func(ctx context.Context) (string, error),
 	log logr.Logger,
 ) *SnapshotEngine {
 	return &SnapshotEngine{
 		namespace:          namespace,
 		dynClient:          k8s.DynamicClient,
-		coreClient:         k8s.CoreClient,
 		getPodName:         getPodName,
 		getSandboxNameHash: getSandboxNameHash,
 		log:                log,
@@ -71,7 +68,7 @@ func NewSnapshotEngine(
 func (e *SnapshotEngine) Create(ctx context.Context, triggerName string, timeout time.Duration) SnapshotResponse {
 	safeName := sanitizeTriggerName(triggerName)
 
-	podName, err := e.getPodName()
+	podName, err := e.getPodName(ctx)
 	if err != nil || podName == "" {
 		return SnapshotResponse{
 			Success:     false,
@@ -138,7 +135,7 @@ func (e *SnapshotEngine) Create(ctx context.Context, triggerName string, timeout
 
 // List returns snapshots matching the filter, sorted newest-first.
 func (e *SnapshotEngine) List(ctx context.Context, filter SnapshotFilter) ListSnapshotResult {
-	podName, err := e.getPodName()
+	podName, err := e.getPodName(ctx)
 	if err != nil || podName == "" {
 		return ListSnapshotResult{
 			Success:     false,
@@ -147,7 +144,7 @@ func (e *SnapshotEngine) List(ctx context.Context, filter SnapshotFilter) ListSn
 		}
 	}
 
-	hash, err := e.getSandboxNameHash()
+	hash, err := e.getSandboxNameHash(ctx)
 	if err != nil || hash == "" {
 		return ListSnapshotResult{
 			Success:     false,
@@ -158,11 +155,15 @@ func (e *SnapshotEngine) List(ctx context.Context, filter SnapshotFilter) ListSn
 
 	labelSelector := SandboxNameHashLabel + "=" + hash
 	if len(filter.GroupingLabels) > 0 {
-		var parts []string
-		for k, v := range filter.GroupingLabels {
-			parts = append(parts, k+"="+v)
+		// Sort keys for a deterministic selector string.
+		keys := make([]string, 0, len(filter.GroupingLabels))
+		for k := range filter.GroupingLabels {
+			keys = append(keys, k)
 		}
-		labelSelector += "," + strings.Join(parts, ",")
+		sort.Strings(keys)
+		for _, k := range keys {
+			labelSelector += "," + k + "=" + filter.GroupingLabels[k]
+		}
 	}
 
 	e.log.Info("listing snapshots", "labelSelector", labelSelector)
@@ -261,7 +262,7 @@ func (e *SnapshotEngine) DeleteAll(ctx context.Context, deleteBy string, labelVa
 }
 
 // DeleteManualTriggers cleans up PodSnapshotManualTrigger resources created by
-// this engine. Best-effort with up to maxRetries attempts.
+// this engine. Best-effort with up to maxRetries attempts; respects ctx cancellation.
 func (e *SnapshotEngine) DeleteManualTriggers(ctx context.Context) {
 	const maxRetries = 3
 	const retryDelay = time.Second
@@ -288,10 +289,15 @@ func (e *SnapshotEngine) DeleteManualTriggers(ctx context.Context) {
 		}
 		remaining = failed
 		if len(remaining) > 0 && attempt < maxRetries {
-			time.Sleep(retryDelay)
+			select {
+			case <-ctx.Done():
+				goto done
+			case <-time.After(retryDelay):
+			}
 		}
 	}
 
+done:
 	e.mu.Lock()
 	e.createdManualTriggers = remaining
 	e.mu.Unlock()
@@ -393,14 +399,31 @@ func (e *SnapshotEngine) executeDeletion(
 
 // sanitizeTriggerName converts an arbitrary string to a valid Kubernetes
 // resource name and appends a timestamp+UUID suffix for uniqueness.
+// Output always matches [a-z0-9]([-a-z0-9]*[a-z0-9])? and is ≤ 63 chars.
 func sanitizeTriggerName(name string) string {
 	safe := strings.ToLower(name)
-	safe = strings.ReplaceAll(safe, "_", "-")
-	// "-YYYYMMDD-HHMMSS-xxxxxxxx" is 25 chars; leave 38 for the base
+
+	// Replace every character that is not [a-z0-9-] with a dash.
+	var b strings.Builder
+	for _, r := range safe {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	safe = b.String()
+
+	// Collapse consecutive dashes produced by replacements.
+	for strings.Contains(safe, "--") {
+		safe = strings.ReplaceAll(safe, "--", "-")
+	}
+
+	// "-YYYYMMDD-HHMMSS-xxxxxxxx" is 25 chars; leave 38 for the base.
 	if len(safe) > 38 {
 		safe = safe[:38]
 	}
-	safe = strings.TrimRight(safe, "-")
+	safe = strings.Trim(safe, "-")
 	if safe == "" {
 		safe = "snap"
 	}

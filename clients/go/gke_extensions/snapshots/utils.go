@@ -16,6 +16,7 @@ package snapshots
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -122,7 +123,9 @@ func drainTriggerWatch(ctx context.Context, watcher watch.Interface, triggerName
 	}
 }
 
-var errNotYetComplete = fmt.Errorf("snapshot not yet complete")
+// errNotYetComplete is a sentinel returned by extractSnapshotResult when the
+// trigger has not yet reached a terminal state.
+var errNotYetComplete = errors.New("snapshot not yet complete")
 
 func extractSnapshotResult(obj *unstructured.Unstructured) (snapshotResult, error) {
 	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")

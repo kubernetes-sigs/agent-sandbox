@@ -38,7 +38,6 @@ type PodSnapshotClient struct {
 	inner *sandbox.Client
 	k8s   *sandbox.K8sHelper
 	log   logr.Logger
-	opts  sandbox.Options
 }
 
 // NewPodSnapshotClient creates a PodSnapshotClient. It fails immediately if the
@@ -71,7 +70,6 @@ func NewPodSnapshotClient(ctx context.Context, opts sandbox.Options) (*PodSnapsh
 		inner: inner,
 		k8s:   k8s,
 		log:   opts.Logger,
-		opts:  opts,
 	}, nil
 }
 

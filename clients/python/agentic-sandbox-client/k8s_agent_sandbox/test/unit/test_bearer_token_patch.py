@@ -62,6 +62,8 @@ class TestBearerTokenPatch(unittest.TestCase):
 
     def setUp(self):
         FakeConfiguration._default = None
+        import k8s_agent_sandbox.utils
+        k8s_agent_sandbox.utils._is_patched = False
 
 
     def test_sync_bearer_token_from_authorization(self):

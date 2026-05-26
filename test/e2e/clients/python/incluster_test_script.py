@@ -44,7 +44,8 @@ def run_incluster_test(template_name, namespace):
             addr_info = socket.getaddrinfo(dns_name, None)
             resolved_ips = [info[4][0] for info in addr_info if info[4]]
             print(f"Successfully resolved direct DNS {dns_name} to IPs: {resolved_ips}")
-            assert resolved_ips, "DNS resolution returned no IPs"
+            if not resolved_ips:
+                raise RuntimeError("DNS resolution returned no IPs")
         except socket.gaierror as e:
             raise RuntimeError(f"Direct cluster DNS resolution failed for hostname {dns_name}: {e}") from e
 
@@ -52,8 +53,10 @@ def run_incluster_test(template_name, namespace):
         res = sandbox.commands.run("echo 'Hello from In-Cluster!'")
         print(f"Stdout: {res.stdout}")
         print(f"Stderr: {res.stderr}")
-        assert "Hello from In-Cluster!" in res.stdout, f"Unexpected stdout: {res.stdout}"
-        assert res.exit_code == 0, f"Unexpected exit code: {res.exit_code}"
+        if "Hello from In-Cluster!" not in res.stdout:
+            raise RuntimeError(f"Unexpected stdout: {res.stdout}")
+        if res.exit_code != 0:
+            raise RuntimeError(f"Unexpected exit code: {res.exit_code}")
         print("In-cluster compatibility and direct DNS routing E2E test completed successfully!")
     finally:
         if sandbox is not None:

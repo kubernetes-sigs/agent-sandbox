@@ -14,6 +14,17 @@
 
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+import threading
+
+_patch_lock = threading.Lock()
+_is_patched = False
+
+
+def _safe_setattr(obj, attr, val):
+    try:
+        setattr(obj, attr, val)
+    except AttributeError:
+        pass
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
@@ -73,29 +84,29 @@ def _sync_k8s_bearer_token(config_obj):
 
         if auth_val == bearer_val:
             # Already in sync! Update state tracker.
-            setattr(config_obj, last_known_attr, auth_val)
+            _safe_setattr(config_obj, last_known_attr, auth_val)
             return
 
         # Propagate the field that was actually modified
         if auth_val != last_known and bearer_val == last_known:
             d["BearerToken"] = auth_val
-            setattr(config_obj, last_known_attr, auth_val)
+            _safe_setattr(config_obj, last_known_attr, auth_val)
         elif bearer_val != last_known and auth_val == last_known:
             d["authorization"] = bearer_val
-            setattr(config_obj, last_known_attr, bearer_val)
+            _safe_setattr(config_obj, last_known_attr, bearer_val)
         else:
             # Initial load or fallback synchronization
             if auth_val is not None and bearer_val is None:
                 d["BearerToken"] = auth_val
-                setattr(config_obj, last_known_attr, auth_val)
+                _safe_setattr(config_obj, last_known_attr, auth_val)
             elif bearer_val is not None and auth_val is None:
                 d["authorization"] = bearer_val
-                setattr(config_obj, last_known_attr, bearer_val)
+                _safe_setattr(config_obj, last_known_attr, bearer_val)
             else:
                 preferred = bearer_val if bearer_val is not None else auth_val
                 d["authorization"] = preferred
                 d["BearerToken"] = preferred
-                setattr(config_obj, last_known_attr, preferred)
+                _safe_setattr(config_obj, last_known_attr, preferred)
 
     if getattr(config_obj, "api_key", None) is not None:
         sync_dict(config_obj.api_key, "_last_known_bearer_token")
@@ -106,29 +117,36 @@ def _sync_k8s_bearer_token(config_obj):
 
 def patch_k8s_config(client_module):
     """Patches the active default configuration and refresh hook of a Kubernetes client module to keep token keys synchronized."""
-    if not hasattr(client_module, "Configuration"):
+    global _is_patched
+    if _is_patched:
         return
-    try:
-        c = client_module.Configuration.get_default_copy()
-        if c is None:
+    with _patch_lock:
+        if _is_patched:
             return
-        _sync_k8s_bearer_token(c)
-        orig_hook = c.refresh_api_key_hook
-        if orig_hook is not None and not getattr(orig_hook, "_is_patched_for_bearer_token", False):
-            @wraps(orig_hook)
-            def new_hook(cfg):
-                _sync_k8s_bearer_token(cfg)
-                try:
-                    orig_hook(cfg)
-                finally:
+        if not hasattr(client_module, "Configuration"):
+            return
+        try:
+            c = client_module.Configuration.get_default_copy()
+            if c is None:
+                return
+            _sync_k8s_bearer_token(c)
+            orig_hook = c.refresh_api_key_hook
+            if orig_hook is not None and not getattr(orig_hook, "_is_patched_for_bearer_token", False):
+                @wraps(orig_hook)
+                def new_hook(cfg):
                     _sync_k8s_bearer_token(cfg)
-            new_hook._is_patched_for_bearer_token = True
-            c.refresh_api_key_hook = new_hook
-        client_module.Configuration.set_default(c)
-    except Exception:
-        import logging
-        logging.warning(
-            "Failed to patch default Kubernetes configuration; bearer token compatibility workaround was not applied.",
-            exc_info=True,
-        )
+                    try:
+                        orig_hook(cfg)
+                    finally:
+                        _sync_k8s_bearer_token(cfg)
+                new_hook._is_patched_for_bearer_token = True
+                c.refresh_api_key_hook = new_hook
+            client_module.Configuration.set_default(c)
+            _is_patched = True
+        except Exception:
+            import logging
+            logging.warning(
+                "Failed to patch default Kubernetes configuration; bearer token compatibility workaround was not applied.",
+                exc_info=True,
+            )
 

@@ -315,6 +315,14 @@ loop:
 				errMu.Lock()
 				errs = append(errs, err)
 				errMu.Unlock()
+
+				c.mu.Lock()
+				if !c.closed {
+					if _, exists := c.registry[k]; !exists {
+						c.registry[k] = s
+					}
+				}
+				c.mu.Unlock()
 			}
 		}(key, sb)
 	}

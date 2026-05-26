@@ -23,6 +23,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if !flag.Parsed() {
+		flag.Parse()
+	}
 	// Skip goleak checks during live cluster integration tests to prevent
 	// client-go / Kubernetes connection pools from flagging goroutine leaks.
 	if isIntegrationTest() {

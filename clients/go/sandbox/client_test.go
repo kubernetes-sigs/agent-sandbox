@@ -191,7 +191,7 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 
 	// Track 15 fake sandboxes (more than maxCleanupConcurrency = 10).
 	const numSandboxes = 15
-	for i := 0; i < numSandboxes; i++ {
+	for i := range numSandboxes {
 		name := fmt.Sprintf("claim-%d", i)
 		sb := &Sandbox{
 			k8s:  c.k8s,
@@ -231,7 +231,7 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 	}
 	if maxSeen < maxCleanupConcurrency {
 		// Just a sanity check that we actually reached maximum target concurrency.
-		// Since we have 15 elements and delay is 50ms, the semaphore of 10 should be fully utilized.
+		// The synchronization barrier releaseCh ensures the first 10 operations are held concurrently.
 		t.Errorf("concurrency too low: expected concurrency to reach %d, got %d", maxCleanupConcurrency, maxSeen)
 	}
 }
@@ -244,7 +244,7 @@ func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 
 	// Add 12 fake sandboxes (maxCleanupConcurrency is 10, so 2 will block)
 	const numSandboxes = 12
-	for i := 0; i < numSandboxes; i++ {
+	for i := range numSandboxes {
 		name := fmt.Sprintf("claim-%d", i)
 		sb := &Sandbox{
 			k8s:  c.k8s,
@@ -701,6 +701,53 @@ func TestClient_Close_ErrorAggregation(t *testing.T) {
 		t.Error("expected Close to return aggregated errors, got nil")
 	} else if !strings.Contains(err.Error(), "injected deletion error") {
 		t.Errorf("expected error to contain target failure details, got: %v", err)
+	}
+}
+
+func TestClient_DeleteAll_RestoresFailedRegistry(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	// Inject a deletion failure
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("injected deletion error")
+	})
+
+	sb := &Sandbox{
+		k8s:  c.k8s,
+		log:  logr.Discard(),
+		opts: c.opts,
+		connector: &connector{
+			strategy:   &DirectStrategy{URL: "http://fake"},
+			httpClient: &http.Client{},
+		},
+		inflightOps:  &sync.WaitGroup{},
+		lifecycleSem: make(chan struct{}, 1),
+	}
+	sb.connector.baseURL = "http://fake"
+	sb.mu.Lock()
+	sb.claimName = "fail-claim"
+	sb.sandboxName = "sb-fail"
+	sb.mu.Unlock()
+
+	key := Key{Namespace: "default", ClaimName: "fail-claim"}
+	c.mu.Lock()
+	c.registry[key] = sb
+	c.mu.Unlock()
+
+	// Call DeleteAll
+	c.DeleteAll(context.Background())
+
+	// Verify that the failed sandbox was restored in the registry!
+	c.mu.Lock()
+	remaining := len(c.registry)
+	restoredSb := c.registry[key]
+	c.mu.Unlock()
+
+	if remaining != 1 {
+		t.Errorf("expected exactly 1 remaining sandbox in registry, got %d", remaining)
+	}
+	if restoredSb != sb {
+		t.Error("expected the exact same sandbox handle to be restored")
 	}
 }
 

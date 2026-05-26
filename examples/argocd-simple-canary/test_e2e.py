@@ -110,7 +110,17 @@ def main():
     print("Starting E2E SDK Routing Canary Simulation...\n")
 
     # 1. Apply prerequisites
-    run_command("kubectl apply -f templates.yaml")
+    import os
+    image = os.getenv("IMAGE", "python:3.11-slim")
+    with open("templates.yaml", "r") as f:
+        templates_content = f.read().replace("${IMAGE}", image)
+    print(f"[Exec] Applying templates.yaml with IMAGE={image}")
+    subprocess.run(
+        shlex.split("kubectl apply -f -"),
+        input=templates_content,
+        text=True,
+        check=True
+    )
     run_command("kubectl apply -f pools.yaml")
     run_command("kubectl apply -f canary-config.yaml")
     time.sleep(2)

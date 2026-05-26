@@ -390,10 +390,7 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 
 	go func() {
 		select {
-		case sig, ok := <-ch:
-			if !ok {
-				return
-			}
+		case sig := <-ch:
 			stopFn()
 
 			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())

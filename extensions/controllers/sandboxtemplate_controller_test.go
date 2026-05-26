@@ -219,6 +219,15 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			if tc.expectNetworkPolicy && tc.validateNetworkPolicy != nil {
 				tc.validateNetworkPolicy(t, &np)
 			}
+
+			var updatedTemplate extensionsv1beta1.SandboxTemplate
+			if err := client.Get(context.Background(), req.NamespacedName, &updatedTemplate); err != nil {
+				t.Fatalf("get sandbox template: %v", err)
+			}
+			expectedTemplateHash := SandboxTemplateRefHash(tc.templateToReconcile.Name)
+			if val := updatedTemplate.Labels[sandboxTemplateRefHash]; val != expectedTemplateHash {
+				t.Errorf("expected SandboxTemplate to have label %q=%q, got %q", sandboxTemplateRefHash, expectedTemplateHash, val)
+			}
 		})
 	}
 }

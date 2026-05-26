@@ -357,14 +357,24 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			if mergedMeta.Labels == nil {
 				mergedMeta.Labels = make(map[string]string)
 			}
+			templateHash := SandboxTemplateRefHash(template.Name)
 			mergedMeta.Labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
-			mergedMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+			mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 
 			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 				return nil, err
 			}
 
-			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
+			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
+			if sandbox.Labels[sandboxTemplateRefHash] != templateHash {
+				if sandbox.Labels == nil {
+					sandbox.Labels = make(map[string]string)
+				}
+				sandbox.Labels[sandboxTemplateRefHash] = templateHash
+				needsUpdate = true
+			}
+
+			if needsUpdate {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
 				if err := r.Update(ctx, sandbox); err != nil {
@@ -737,7 +747,6 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 
 	// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 	delete(adopted.Labels, warmPoolSandboxLabel)
-	delete(adopted.Labels, sandboxTemplateRefHash)
 	delete(adopted.Labels, v1beta1.SandboxPodTemplateHashLabel)
 	if adopted.Labels == nil {
 		adopted.Labels = make(map[string]string)
@@ -778,6 +787,12 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateHash == "" && template != nil {
 		templateHash = SandboxTemplateRefHash(template.Name)
+	}
+
+	// Keep the template ref hash on the adopted sandbox's top-level labels so
+	// discovery by template hash keeps working after adoption.
+	if templateHash != "" {
+		adopted.Labels[sandboxTemplateRefHash] = templateHash
 	}
 
 	if templateErr == nil && template != nil {
@@ -1021,6 +1036,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Sandbox.metadata.labels).
 	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
 	sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] = v1beta1.SandboxLaunchTypeCold
+	sandbox.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
 

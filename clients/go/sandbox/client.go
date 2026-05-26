@@ -290,26 +290,35 @@ func (c *Client) deleteAll(ctx context.Context) error {
 
 	sem := make(chan struct{}, maxCleanupConcurrency)
 
+	cancelAndRestore := func(err error) {
+		c.log.Info("cleanup cancelled", "error", err)
+		errMu.Lock()
+		errs = append(errs, err)
+		errMu.Unlock()
+
+		c.mu.Lock()
+		if !c.closed {
+			for k, v := range snapshot {
+				if _, exists := c.registry[k]; !exists {
+					c.registry[k] = v
+				}
+			}
+		}
+		c.mu.Unlock()
+	}
+
 loop:
 	for key, sb := range snapshot {
+		if err := ctx.Err(); err != nil {
+			cancelAndRestore(err)
+			break loop
+		}
+
 		select {
 		case sem <- struct{}{}:
 			delete(snapshot, key)
 		case <-ctx.Done():
-			c.log.Info("cleanup cancelled", "error", ctx.Err())
-			errMu.Lock()
-			errs = append(errs, ctx.Err())
-			errMu.Unlock()
-
-			c.mu.Lock()
-			if !c.closed {
-				for k, v := range snapshot {
-					if _, exists := c.registry[k]; !exists {
-						c.registry[k] = v
-					}
-				}
-			}
-			c.mu.Unlock()
+			cancelAndRestore(ctx.Err())
 			break loop
 		}
 

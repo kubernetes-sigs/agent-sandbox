@@ -219,10 +219,13 @@ func TestIntegration_ClientCleanupAndClose(t *testing.T) {
 	// Verify it was successfully deleted from the cluster
 	t.Log("Verifying claim was deleted from cluster...")
 	const deletionVerificationTimeout = 2 * time.Minute
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), deletionVerificationTimeout+10*time.Second)
+	defer verifyCancel()
+
 	start := time.Now()
 	deleted := false
 	for time.Since(start) < deletionVerificationTimeout {
-		err := client.k8s.verifyClaimExists(ctx, claimName, *namespace, client.tracer, client.svcName)
+		err := client.k8s.verifyClaimExists(verifyCtx, claimName, *namespace, client.tracer, client.svcName)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				deleted = true

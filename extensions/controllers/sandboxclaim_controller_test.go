@@ -646,7 +646,10 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectSandbox:   false,
 			expectError:     false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+				Type:    string(sandboxv1beta1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  "InvalidMetadata",
+				Message: "invalid additionalPodMetadata: failed to validate label \"app\": restricted system label value: \"app\"=\"sandbox-router\" is not allowed in AdditionalPodMetadata",
 			},
 		},
 		{
@@ -871,6 +874,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			if tc.expectedCondition.Reason == "ReconcilerError" || tc.expectedCondition.Reason == "InvalidMetadata" {
 				if condition.Reason != tc.expectedCondition.Reason {
 					t.Errorf("expected condition reason %q, got %q", tc.expectedCondition.Reason, condition.Reason)
+				}
+				if tc.expectedCondition.Message != "" && condition.Message != tc.expectedCondition.Message {
+					t.Errorf("expected condition message %q, got %q", tc.expectedCondition.Message, condition.Message)
 				}
 			} else {
 				if len(tc.expectedPodIPs) > 0 {

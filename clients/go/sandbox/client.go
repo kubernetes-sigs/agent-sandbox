@@ -205,7 +205,7 @@ func (c *Client) ListActiveSandboxes() []Key {
 	defer c.mu.Unlock()
 
 	if c.closed {
-		return nil
+		return []Key{}
 	}
 
 	active := make([]Key, 0, len(c.registry))

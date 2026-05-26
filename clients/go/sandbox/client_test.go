@@ -158,6 +158,12 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 	var maxActiveDeletes atomic.Int32
 	var enteredCount atomic.Int32
 	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseBarrier := func() {
+		releaseOnce.Do(func() {
+			close(releaseCh)
+		})
+	}
 
 	customExtensions := &customExtensionsClient{
 		ExtensionsV1beta1Interface: extensionsCS.ExtensionsV1beta1(),
@@ -173,11 +179,13 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 				}
 			}
 			if enteredCount.Add(1) == maxCleanupConcurrency {
-				close(releaseCh)
+				releaseBarrier()
 			}
 			select {
 			case <-releaseCh:
 			case <-time.After(5 * time.Second):
+				t.Error("timeout waiting for BoundedConcurrency barrier")
+				releaseBarrier()
 			}
 			activeDeletes.Add(-1)
 		},
@@ -271,15 +279,22 @@ func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Track when exactly 10 deletions have entered the reactor
+	// Track when exactly 10 deletions have entered the routine
 	tenDeletesActiveCh := make(chan struct{})
 	var enteredCount atomic.Int32
 
+	customExtensions := &customExtensionsClient{
+		ExtensionsV1beta1Interface: extensionsCS.ExtensionsV1beta1(),
+		onDelete: func(_ string) {
+			if enteredCount.Add(1) == maxCleanupConcurrency {
+				close(tenDeletesActiveCh)
+			}
+			<-blockCh
+		},
+	}
+	c.k8s.ExtensionsClient = customExtensions
+
 	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		if enteredCount.Add(1) == maxCleanupConcurrency {
-			close(tenDeletesActiveCh)
-		}
-		<-blockCh
 		return true, nil, nil
 	})
 
@@ -288,6 +303,7 @@ func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 		select {
 		case <-tenDeletesActiveCh:
 		case <-time.After(5 * time.Second): // safety fallback
+			t.Error("timeout waiting for restores registry barrier")
 		}
 		cancel()
 		close(blockCh) // unblock all to let them complete
@@ -638,9 +654,9 @@ func TestClient_ClosedClientErrors(t *testing.T) {
 		t.Errorf("expected ErrClosed, got %v", err)
 	}
 
-	// 4. ListActiveSandboxes returns nil
-	if active := c.ListActiveSandboxes(); active != nil {
-		t.Errorf("expected nil active list, got %v", active)
+	// 4. ListActiveSandboxes returns empty list
+	if active := c.ListActiveSandboxes(); len(active) != 0 {
+		t.Errorf("expected empty active list, got %v", active)
 	}
 
 	// 5. ListAllSandboxes returns ErrClosed

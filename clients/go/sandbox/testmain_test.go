@@ -31,11 +31,7 @@ func TestMain(m *testing.M) {
 	if isIntegrationTest() {
 		os.Exit(m.Run())
 	}
-	goleak.VerifyTestMain(m,
-		goleak.IgnoreTopFunction("golang.org/x/net/http2.(*clientConnReadLoop).run"),
-		goleak.IgnoreTopFunction("net/http.(*persistConn).readLoop"),
-		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
-	)
+	goleak.VerifyTestMain(m)
 }
 
 func isIntegrationTest() bool {

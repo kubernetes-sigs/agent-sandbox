@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ErrClosed is returned when an operation is attempted on a closed client.
 var ErrClosed = errors.New("sandbox: client is closed")
 
 const maxCleanupConcurrency = 10

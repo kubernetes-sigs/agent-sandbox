@@ -292,13 +292,18 @@ loop:
 		case sem <- struct{}{}:
 			delete(snapshot, key)
 		case <-ctx.Done():
+			c.log.Info("cleanup cancelled", "error", ctx.Err().Error())
 			errMu.Lock()
 			errs = append(errs, ctx.Err())
 			errMu.Unlock()
 
 			c.mu.Lock()
 			if !c.closed {
-				maps.Copy(c.registry, snapshot)
+				for k, v := range snapshot {
+					if _, exists := c.registry[k]; !exists {
+						c.registry[k] = v
+					}
+				}
 			}
 			c.mu.Unlock()
 			break loop
@@ -390,6 +395,12 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 				return
 			}
 			signal.Stop(ch)
+			c.mu.Lock()
+			c.stopSignal = nil
+			c.cleanupStop = nil
+			c.mu.Unlock()
+			cancel()
+
 			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
 			c.DeleteAll(context.Background())
 			// Re-raise so the default handler terminates the process.

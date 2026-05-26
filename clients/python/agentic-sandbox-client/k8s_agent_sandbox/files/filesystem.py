@@ -12,21 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 import os
 import posixpath
 import urllib.parse
-from typing import List
+from typing import Any, List
+
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import FileEntry
-from k8s_agent_sandbox.trace_manager import trace_span, trace
+from k8s_agent_sandbox.trace_manager import trace, trace_span
+
 
 class Filesystem:
     """
     Handles file operations within the sandbox.
     """
-    def __init__(self, connector: SandboxConnector, tracer, trace_service_name: str):
+    def __init__(
+        self, connector: SandboxConnector, tracer: Any, trace_service_name: str
+    ) -> None:
         self.connector = connector
         self.tracer = tracer
         self.trace_service_name = trace_service_name
@@ -44,7 +47,7 @@ class Filesystem:
             span.set_attribute("sandbox.file.size", len(content))
 
         if isinstance(content, str):
-            content = content.encode('utf-8')
+            content = content.encode("utf-8")
 
         # The sandbox runtime uses the multipart ``filename`` field as a
         # relative destination path under its base directory (e.g. /app).

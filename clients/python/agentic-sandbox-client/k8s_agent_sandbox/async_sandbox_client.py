@@ -24,13 +24,14 @@ import logging
 import re
 import time
 import uuid
+from types import TracebackType
 from typing import Generic, TypeVar
 
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ class AsyncSandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
-    ):
+    ) -> None:
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
@@ -87,13 +88,18 @@ class AsyncSandboxClient(Generic[T]):
     async def __aenter__(self) -> "AsyncSandboxClient[T]":
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         try:
             await self.delete_all()
         finally:
             await self.close()
 
-    async def close(self):
+    async def close(self) -> None:
         """Shuts down all tracked sandbox connections and the K8s API client."""
         async with self._lock:
             for sandbox in self._active_connection_sandboxes.values():
@@ -284,7 +290,7 @@ class AsyncSandboxClient(Generic[T]):
         """
         return await self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
 
-    async def delete_sandbox(self, claim_name: str, namespace: str = "default"):
+    async def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources."""
         key = (namespace, claim_name)
         async with self._lock:
@@ -301,7 +307,7 @@ class AsyncSandboxClient(Generic[T]):
                 f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}"
             )
 
-    async def delete_all(self):
+    async def delete_all(self) -> None:
         """Cleanup all tracked sandboxes managed by this client."""
         async with self._lock:
             items = list(self._active_connection_sandboxes.items())
@@ -320,7 +326,7 @@ class AsyncSandboxClient(Generic[T]):
     _LABEL_PREFIX_MAX_LENGTH = 253
 
     @staticmethod
-    def _validate_label_name(name: str, context: str):
+    def _validate_label_name(name: str, context: str) -> None:
         if len(name) > AsyncSandboxClient._LABEL_NAME_MAX_LENGTH:
             raise ValueError(
                 f"Label {context} '{name}' exceeds max length of "
@@ -333,7 +339,7 @@ class AsyncSandboxClient(Generic[T]):
             )
 
     @staticmethod
-    def _validate_labels(labels: dict[str, str]):
+    def _validate_labels(labels: dict[str, str]) -> None:
         for key, value in labels.items():
             if not key:
                 raise ValueError("Label key cannot be empty.")
@@ -367,9 +373,9 @@ class AsyncSandboxClient(Generic[T]):
         template_name: str,
         namespace: str,
         labels: dict[str, str] | None = None,
-        lifecycle: dict | None = None,
+        lifecycle: dict[str, str] | None = None,
         warmpool: str | None = None,
-    ):
+    ) -> None:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", claim_name)
@@ -388,11 +394,13 @@ class AsyncSandboxClient(Generic[T]):
         )
 
     @async_trace_span("wait_for_sandbox_ready")
-    async def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
+    async def _wait_for_sandbox_ready(
+        self, sandbox_id: str, namespace: str, timeout: int
+    ) -> None:
         await self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @async_trace_span("delete_claim")
-    async def _delete_claim(self, claim_name: str, namespace: str):
+    async def _delete_claim(self, claim_name: str, namespace: str) -> None:
         try:
             await self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
         except Exception as e:

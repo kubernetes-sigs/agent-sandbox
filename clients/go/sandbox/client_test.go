@@ -156,6 +156,8 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 
 	var activeDeletes atomic.Int32
 	var maxActiveDeletes atomic.Int32
+	var enteredCount atomic.Int32
+	releaseCh := make(chan struct{})
 
 	customExtensions := &customExtensionsClient{
 		ExtensionsV1beta1Interface: extensionsCS.ExtensionsV1beta1(),
@@ -170,8 +172,13 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 					break
 				}
 			}
-			// Artificial delay outside fake client lock.
-			time.Sleep(50 * time.Millisecond)
+			if enteredCount.Add(1) == maxCleanupConcurrency {
+				close(releaseCh)
+			}
+			select {
+			case <-releaseCh:
+			case <-time.After(5 * time.Second):
+			}
 			activeDeletes.Add(-1)
 		},
 	}
@@ -184,7 +191,7 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 
 	// Track 15 fake sandboxes (more than maxCleanupConcurrency = 10).
 	const numSandboxes = 15
-	for i := range numSandboxes {
+	for i := 0; i < numSandboxes; i++ {
 		name := fmt.Sprintf("claim-%d", i)
 		sb := &Sandbox{
 			k8s:  c.k8s,
@@ -237,7 +244,7 @@ func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 
 	// Add 12 fake sandboxes (maxCleanupConcurrency is 10, so 2 will block)
 	const numSandboxes = 12
-	for i := range numSandboxes {
+	for i := 0; i < numSandboxes; i++ {
 		name := fmt.Sprintf("claim-%d", i)
 		sb := &Sandbox{
 			k8s:  c.k8s,
@@ -264,23 +271,24 @@ func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create a wait group to wait for the first delete to start
-	var firstDeleteActive sync.WaitGroup
-	firstDeleteActive.Add(1)
+	// Track when exactly 10 deletions have entered the reactor
+	tenDeletesActiveCh := make(chan struct{})
+	var enteredCount atomic.Int32
 
-	var once sync.Once
 	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		once.Do(func() {
-			firstDeleteActive.Done()
-		})
+		if enteredCount.Add(1) == maxCleanupConcurrency {
+			close(tenDeletesActiveCh)
+		}
 		<-blockCh
 		return true, nil, nil
 	})
 
 	go func() {
-		firstDeleteActive.Wait()
-		// Small sleep to allow other 9 to also enter/queue up at the reactor
-		time.Sleep(10 * time.Millisecond)
+		// Wait until exactly 10 are active/blocked
+		select {
+		case <-tenDeletesActiveCh:
+		case <-time.After(5 * time.Second): // safety fallback
+		}
 		cancel()
 		close(blockCh) // unblock all to let them complete
 	}()

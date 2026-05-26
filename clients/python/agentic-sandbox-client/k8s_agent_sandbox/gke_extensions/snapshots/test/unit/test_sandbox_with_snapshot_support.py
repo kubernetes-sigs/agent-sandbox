@@ -693,6 +693,69 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.assertEqual(result.snapshots[0].snapshot_uid, "snap-2")
         self.assertEqual(result.snapshots[1].snapshot_uid, "snap-1")
 
+    def test_snapshots_list_invalid_timestamp_warning(self):
+        """Test list snapshots doesn't crash but logs a warning when creationTimestamp is invalid."""
+        mock_response = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "snap-1",
+                        "uid": "uid-1",
+                        "creationTimestamp": "invalid-iso-string",
+                        "labels": {SANDBOX_NAME_HASH_LABEL: "test-hash"},
+                        "annotations": {PODSNAPSHOT_POD_NAME_ANNOTATION: "test-pod"},
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+            ]
+        }
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = (
+            mock_response
+        )
+
+        with self.assertLogs(
+            "k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine", level="WARNING"
+        ) as log:
+            result = self.engine.list()
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 1)
+        self.assertEqual(result.snapshots[0].snapshot_uid, "snap-1")
+        self.assertTrue(
+            any("Invalid creationTimestamp format 'invalid-iso-string'" in line for line in log.output)
+        )
+
+    def test_snapshots_list_invalid_timestamp_skipped_by_filter(self):
+        """Test that list snapshots with filters skips snapshots with invalid creationTimestamp and logs a warning."""
+        mock_response = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "snap-1",
+                        "uid": "uid-1",
+                        "creationTimestamp": "invalid-iso-string",
+                        "labels": {SANDBOX_NAME_HASH_LABEL: "test-hash"},
+                        "annotations": {PODSNAPSHOT_POD_NAME_ANNOTATION: "test-pod"},
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                },
+            ]
+        }
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = (
+            mock_response
+        )
+
+        with self.assertLogs(
+            "k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine", level="WARNING"
+        ) as log:
+            result = self.engine.list(filter_by={"created_after": "2023-01-01T00:00:00Z"})
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.snapshots), 0)
+        self.assertTrue(
+            any("Invalid creationTimestamp format 'invalid-iso-string'" in line for line in log.output)
+        )
+
     def test_snapshots_list_no_results(self):
         """Test list snapshots returns successfully with empty list if none found."""
         self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {

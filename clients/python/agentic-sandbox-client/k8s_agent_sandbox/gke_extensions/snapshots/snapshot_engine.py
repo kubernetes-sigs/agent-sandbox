@@ -344,13 +344,14 @@ class SnapshotEngine:
 
                 # Filter by creation timestamp if requested
                 creation_time_str = metadata.get("creationTimestamp")
+                creation_time = None
                 if creation_time_str:
                     try:
-                        creation_time = datetime.fromisoformat(creation_time_str.replace("Z", "+00:00"))
-                    except ValueError:
-                        creation_time = None
-                else:
-                    creation_time = None
+                        creation_time = normalize_datetime(creation_time_str)
+                    except (ValueError, TypeError) as e:
+                        logger.warning(
+                            f"Invalid creationTimestamp format '{creation_time_str}' for snapshot '{metadata.get('name', 'Unknown')}': {e}"
+                        )
 
                 if filter_by.created_after and (not creation_time or creation_time < filter_by.created_after):
                     continue

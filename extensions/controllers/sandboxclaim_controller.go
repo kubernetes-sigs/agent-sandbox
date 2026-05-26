@@ -830,7 +830,7 @@ func validateAdditionalPodMetadata(claimMeta *v1beta1.PodMetadata) error {
 		}
 
 		// Block spoofing of system components
-		if isLabel && strings.ToLower(key) == "app" && strings.ToLower(value) == "sandbox-router" {
+		if isLabel && strings.EqualFold(key, "app") && strings.EqualFold(value, "sandbox-router") {
 			return fmt.Errorf("restricted system label value: %q=%q is not allowed in AdditionalPodMetadata", key, value)
 		}
 

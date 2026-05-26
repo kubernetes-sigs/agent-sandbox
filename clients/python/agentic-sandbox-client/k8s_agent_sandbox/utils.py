@@ -91,7 +91,7 @@ def _sync_k8s_bearer_token(config_obj):
                 d["authorization"] = bearer_val
                 setattr(config_obj, last_known_attr, bearer_val)
             else:
-                preferred = auth_val if auth_val is not None else bearer_val
+                preferred = bearer_val if bearer_val is not None else auth_val
                 d["authorization"] = preferred
                 d["BearerToken"] = preferred
                 setattr(config_obj, last_known_attr, preferred)
@@ -115,6 +115,7 @@ def patch_k8s_config(client_module):
         orig_hook = c.refresh_api_key_hook
         if orig_hook is not None and not getattr(orig_hook, "_is_patched_for_bearer_token", False):
             def new_hook(cfg):
+                _sync_k8s_bearer_token(cfg)
                 orig_hook(cfg)
                 _sync_k8s_bearer_token(cfg)
             new_hook._is_patched_for_bearer_token = True
@@ -122,5 +123,8 @@ def patch_k8s_config(client_module):
         client_module.Configuration.set_default(c)
     except Exception as e:
         import logging
-        logging.debug(f"Failed to patch default Kubernetes configuration: {e}")
+        logging.warning(
+            "Failed to patch default Kubernetes configuration; bearer token compatibility workaround was not applied.",
+            exc_info=True,
+        )
 

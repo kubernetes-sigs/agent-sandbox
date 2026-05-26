@@ -212,22 +212,19 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
-class MockConfig(MagicMock):
-    ConfigException = Exception
-
-
 class TestAsyncK8sHelperInitPatch(unittest.IsolatedAsyncioTestCase):
 
     @patch("k8s_agent_sandbox.utils.patch_k8s_config")
     @patch("k8s_agent_sandbox.async_k8s_helper.client.CoreV1Api")
     @patch("k8s_agent_sandbox.async_k8s_helper.client.CustomObjectsApi")
     @patch("k8s_agent_sandbox.async_k8s_helper.client.ApiClient")
-    @patch("k8s_agent_sandbox.async_k8s_helper.config", new_callable=MockConfig)
-    async def test_ensure_initialized_calls_patch_k8s_config(self, mock_config, mock_api_client_cls, mock_api_cls, mock_core_cls, mock_patch):
-        from k8s_agent_sandbox.async_k8s_helper import client
-        helper = AsyncK8sHelper()
-        await helper._ensure_initialized()
-        mock_patch.assert_called_once_with(client)
+    async def test_ensure_initialized_calls_patch_k8s_config(self, mock_api_client_cls, mock_api_cls, mock_core_cls, mock_patch):
+        with patch("k8s_agent_sandbox.async_k8s_helper.config.load_incluster_config") as mock_load_incluster, \
+             patch("k8s_agent_sandbox.async_k8s_helper.config.load_kube_config") as mock_load_kube:
+            from k8s_agent_sandbox.async_k8s_helper import client
+            helper = AsyncK8sHelper()
+            await helper._ensure_initialized()
+            mock_patch.assert_called_once_with(client)
 
 
 if __name__ == "__main__":

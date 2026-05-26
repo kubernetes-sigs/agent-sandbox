@@ -31,7 +31,6 @@ from k8s_agent_sandbox.sandbox_client import SandboxClient
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-@patch("k8s_agent_sandbox.k8s_helper.config")
 @patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
 class TestLifecycleIntegration(unittest.TestCase):
     """End-to-end integration: SandboxClient -> K8sHelper -> manifest body.
@@ -42,7 +41,7 @@ class TestLifecycleIntegration(unittest.TestCase):
     """
 
     def test_create_sandbox_with_shutdown_produces_lifecycle_in_manifest(
-        self, MockClientK8sHelper, mock_config, mock_api_cls, mock_core_cls
+        self, MockClientK8sHelper, mock_api_cls, mock_core_cls
     ):
         """Full path: create_sandbox(shutdown_after_seconds=300) embeds
         spec.lifecycle in the K8s API call body."""
@@ -88,7 +87,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "my-template")
 
     def test_create_sandbox_without_shutdown_omits_lifecycle_in_manifest(
-        self, MockClientK8sHelper, mock_config, mock_api_cls, mock_core_cls
+        self, MockClientK8sHelper, mock_api_cls, mock_core_cls
     ):
         """Full path: create_sandbox() without shutdown_after_seconds
         produces no spec.lifecycle."""
@@ -119,7 +118,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "my-template")
 
     def test_invalid_shutdown_never_reaches_k8s_api(
-        self, MockClientK8sHelper, mock_config, mock_api_cls, mock_core_cls
+        self, MockClientK8sHelper, mock_api_cls, mock_core_cls
     ):
         """Validation fires before any K8s API call."""
         mock_api = MagicMock()

@@ -19,16 +19,21 @@ from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
 
 
-class MockConfig(MagicMock):
-    ConfigException = Exception
-
-
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-@patch("k8s_agent_sandbox.k8s_helper.config", new_callable=MockConfig)
 class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
-    def test_labels_and_annotations_coexist_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
+    def setUp(self):
+        self.load_incluster_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config")
+        self.load_kube_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config")
+        self.mock_load_incluster = self.load_incluster_patcher.start()
+        self.mock_load_kube = self.load_kube_patcher.start()
+
+    def tearDown(self):
+        self.load_incluster_patcher.stop()
+        self.load_kube_patcher.stop()
+
+    def test_labels_and_annotations_coexist_in_manifest(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -44,7 +49,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         self.assertEqual(body["metadata"]["annotations"], {"opentelemetry.io/trace-context": "trace-data"})
         self.assertEqual(body["metadata"]["labels"], {"agent": "code-agent", "team": "platform"})
 
-    def test_labels_only_no_annotations(self, mock_config, mock_api_cls, mock_core_cls):
+    def test_labels_only_no_annotations(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -58,7 +63,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         self.assertEqual(body["metadata"]["annotations"], {})
         self.assertEqual(body["metadata"]["labels"], {"agent": "code-agent"})
 
-    def test_no_labels_no_annotations(self, mock_config, mock_api_cls, mock_core_cls):
+    def test_no_labels_no_annotations(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -69,7 +74,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         self.assertEqual(body["metadata"]["annotations"], {})
         self.assertNotIn("labels", body["metadata"])
 
-    def test_lifecycle_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
+    def test_lifecycle_included_in_manifest(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -86,7 +91,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         self.assertEqual(body["spec"]["lifecycle"], lifecycle)
         self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "test-template")
 
-    def test_no_lifecycle_omits_key(self, mock_config, mock_api_cls, mock_core_cls):
+    def test_no_lifecycle_omits_key(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -96,7 +101,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertNotIn("lifecycle", body["spec"])
 
-    def test_create_claim_with_warmpool_none(self, mock_config, mock_api_cls, mock_core_cls):
+    def test_create_claim_with_warmpool_none(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -108,7 +113,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertEqual(body["spec"]["warmpool"], "none")
 
-    def test_create_claim_with_specific_warmpool(self, mock_config, mock_api_cls, mock_core_cls):
+    def test_create_claim_with_specific_warmpool(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -120,7 +125,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertEqual(body["spec"]["warmpool"], "custom-pool")
 
-    def test_create_claim_warmpool_omitted(self, mock_config, mock_api_cls, mock_core_cls):
+    def test_create_claim_warmpool_omitted(self, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
@@ -133,11 +138,20 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-@patch("k8s_agent_sandbox.k8s_helper.config", new_callable=MockConfig)
 class TestK8sHelperResolveSandboxName(unittest.TestCase):
 
+    def setUp(self):
+        self.load_incluster_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config")
+        self.load_kube_patcher = patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config")
+        self.mock_load_incluster = self.load_incluster_patcher.start()
+        self.mock_load_kube = self.load_kube_patcher.start()
+
+    def tearDown(self):
+        self.load_incluster_patcher.stop()
+        self.load_kube_patcher.stop()
+
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
-    def test_resolve_sandbox_name_template_not_found(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+    def test_resolve_sandbox_name_template_not_found(self, mock_watch_class, mock_api_cls, mock_core_cls):
         mock_watch = MagicMock()
         mock_event = {
             "type": "MODIFIED",
@@ -166,7 +180,7 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("Template 'non-existent-template' not found", str(context.exception))
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
-    def test_resolve_sandbox_name_deleted_event(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+    def test_resolve_sandbox_name_deleted_event(self, mock_watch_class, mock_api_cls, mock_core_cls):
         mock_watch = MagicMock()
         mock_event = {
             "type": "DELETED",
@@ -191,11 +205,12 @@ class TestK8sHelperInitPatch(unittest.TestCase):
     @patch("k8s_agent_sandbox.utils.patch_k8s_config")
     @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
     @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-    @patch("k8s_agent_sandbox.k8s_helper.config", new_callable=MockConfig)
-    def test_init_calls_patch_k8s_config(self, mock_config, mock_api_cls, mock_core_cls, mock_patch):
-        from k8s_agent_sandbox.k8s_helper import client
-        K8sHelper()
-        mock_patch.assert_called_once_with(client)
+    def test_init_calls_patch_k8s_config(self, mock_api_cls, mock_core_cls, mock_patch):
+        with patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config"), \
+             patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config"):
+            from k8s_agent_sandbox.k8s_helper import client
+            K8sHelper()
+            mock_patch.assert_called_once_with(client)
 
 
 if __name__ == '__main__':

@@ -29,20 +29,22 @@ def run_incluster_test(template_name, namespace):
     config = SandboxInClusterConnectionConfig()
     client = SandboxClient(connection_config=config)
     
-    print(f"Creating sandbox from template '{template_name}'...")
-    sandbox = client.create_sandbox(
-        template=template_name,
-        namespace=namespace,
-        warmpool="none",
-    )
+    sandbox = None
     try:
+        print(f"Creating sandbox from template '{template_name}'...")
+        sandbox = client.create_sandbox(
+            template=template_name,
+            namespace=namespace,
+            warmpool="none",
+        )
         # Explicit DNS Resolution test on target service hostname
         dns_name = f"{sandbox.sandbox_id}.{namespace}.svc.cluster.local"
         print(f"Resolving direct DNS name inside the cluster: {dns_name}...")
         try:
-            resolved_ip = socket.gethostbyname(dns_name)
-            print(f"Successfully resolved direct DNS {dns_name} to IP: {resolved_ip}")
-            assert resolved_ip, "DNS resolution returned an empty IP"
+            addr_info = socket.getaddrinfo(dns_name, None)
+            resolved_ips = [info[4][0] for info in addr_info if info[4]]
+            print(f"Successfully resolved direct DNS {dns_name} to IPs: {resolved_ips}")
+            assert resolved_ips, "DNS resolution returned no IPs"
         except socket.gaierror as e:
             raise RuntimeError(f"Direct cluster DNS resolution failed for hostname {dns_name}: {e}") from e
 
@@ -54,8 +56,9 @@ def run_incluster_test(template_name, namespace):
         assert res.exit_code == 0, f"Unexpected exit code: {res.exit_code}"
         print("In-cluster compatibility and direct DNS routing E2E test completed successfully!")
     finally:
-        print("Terminating sandbox...")
-        sandbox.terminate()
+        if sandbox is not None:
+            print("Terminating sandbox...")
+            sandbox.terminate()
         client.delete_all()
 
 if __name__ == "__main__":

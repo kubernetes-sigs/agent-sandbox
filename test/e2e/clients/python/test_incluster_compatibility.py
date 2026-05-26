@@ -72,15 +72,27 @@ metadata:
   name: incluster-test-sa
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incluster-test-role
+rules:
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims"]
+  verbs: ["create", "get", "list", "watch", "delete"]
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: incluster-test-admin-binding
+  name: incluster-test-role-binding
 subjects:
 - kind: ServiceAccount
   name: incluster-test-sa
 roleRef:
-  kind: ClusterRole
-  name: cluster-admin
+  kind: Role
+  name: incluster-test-role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1

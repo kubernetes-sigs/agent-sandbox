@@ -177,6 +177,45 @@ class TestBearerTokenPatch(unittest.TestCase):
         self.assertEqual(config.api_key["authorization"], "refreshed-token")
         self.assertEqual(config.api_key["BearerToken"], "refreshed-token")
 
+    def test_sync_both_keys_exist_but_differ_no_last_known_prefers_bearer_token(self):
+        config = FakeConfiguration()
+        config.api_key["authorization"] = "stale-token"
+        config.api_key["BearerToken"] = "new-token"
+
+        _sync_k8s_bearer_token(config)
+
+        self.assertEqual(config.api_key["authorization"], "new-token")
+        self.assertEqual(config.api_key["BearerToken"], "new-token")
+        self.assertEqual(getattr(config, "_last_known_bearer_token"), "new-token")
+
+    def test_patch_k8s_config_pre_synchronizes_before_refresh_hook_execution(self):
+        client_module = FakeClientModule()
+        config = FakeConfiguration()
+        config.api_key["authorization"] = "pre-hook-token"
+
+        hook_called = False
+        def orig_hook(cfg):
+            nonlocal hook_called
+            hook_called = True
+            # Verify that BearerToken has been pre-synchronized BEFORE the hook runs!
+            self.assertEqual(cfg.api_key.get("BearerToken"), "pre-hook-token")
+            cfg.api_key["authorization"] = "post-hook-token"
+
+        config.refresh_api_key_hook = orig_hook
+        client_module.set_default(config)
+
+        patch_k8s_config(client_module)
+        patched_config = client_module.get_default_copy()
+
+        test_cfg = FakeConfiguration()
+        test_cfg.api_key = {"authorization": "pre-hook-token"}
+        patched_config.refresh_api_key_hook(test_cfg)
+
+        self.assertTrue(hook_called)
+        self.assertEqual(test_cfg.api_key["authorization"], "post-hook-token")
+        self.assertEqual(test_cfg.api_key["BearerToken"], "post-hook-token")
+
+
 
 
 if __name__ == '__main__':

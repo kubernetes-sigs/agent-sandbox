@@ -64,6 +64,8 @@ def sandbox_template(tc, temp_namespace):
 def test_incluster_compatibility_both_versions(tc, temp_namespace, sandbox_template):
     """Verifies that the Python SDK in-cluster mode works correctly under both older (v35.0.0) and newer (v36.0.0) kubernetes client versions."""
     
+    DEFAULT_POD_EXEC_TIMEOUT = int(os.environ.get("POD_EXEC_TIMEOUT", "120"))
+
     # 1. Create RBAC and Pod manifests
     manifest = f"""
 apiVersion: v1
@@ -177,14 +179,16 @@ spec:
     subprocess.run(["kubectl", "cp", str(TEST_SCRIPT_PATH), f"{temp_namespace}/py-sdk-incluster-test:/app/incluster_test_script.py"], check=True, env=env, timeout=30)
 
     # Helper function to run a command inside the Pod
-    def exec_in_pod(cmd_list):
+    def exec_in_pod(cmd_list, timeout=None):
+        if timeout is None:
+            timeout = DEFAULT_POD_EXEC_TIMEOUT
         try:
             res = subprocess.run(
                 ["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--"] + cmd_list,
                 capture_output=True,
                 text=True,
                 env=env,
-                timeout=120,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as e:
             print(f"CMD TIMEOUT: {' '.join(cmd_list)}")
@@ -197,20 +201,26 @@ spec:
         print(f"Stdout:\n{res.stdout}")
         if res.stderr:
             print(f"Stderr:\n{res.stderr}")
-        assert res.returncode == 0, f"Command failed with exit code {res.returncode}"
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"Command failed with exit code {res.returncode}.\n"
+                f"Command: {' '.join(cmd_list)}\n"
+                f"Stdout:\n{res.stdout}\n"
+                f"Stderr:\n{res.stderr}"
+            )
 
     # 3. Install the SDK package in editable mode
     print("Installing python SDK in editable mode inside the pod...")
-    exec_in_pod(["env", "SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0", "pip", "install", "-e", "/app"])
+    exec_in_pod(["env", "SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0", "pip", "install", "-e", "/app"], timeout=240)
 
     # 4. PATH A: Test compatibility with kubernetes==35.0.0
     print("\n--- [PATH A] Testing compatibility with kubernetes==35.0.0 ---")
-    exec_in_pod(["pip", "install", "kubernetes==35.0.0"])
+    exec_in_pod(["pip", "install", "kubernetes==35.0.0"], timeout=240)
     exec_in_pod(["python", "/app/incluster_test_script.py", sandbox_template, temp_namespace])
     print("[PATH A] Passed!")
 
     # 5. PATH B: Test compatibility with kubernetes==36.0.0 (or current latest)
     print("\n--- [PATH B] Testing compatibility with kubernetes==36.0.0 ---")
-    exec_in_pod(["pip", "install", "kubernetes==36.0.0"])
+    exec_in_pod(["pip", "install", "kubernetes==36.0.0"], timeout=240)
     exec_in_pod(["python", "/app/incluster_test_script.py", sandbox_template, temp_namespace])
     print("[PATH B] Passed!")

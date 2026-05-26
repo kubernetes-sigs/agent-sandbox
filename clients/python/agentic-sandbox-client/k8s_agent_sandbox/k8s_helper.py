@@ -37,6 +37,10 @@ class K8sHelper:
             config.load_incluster_config()
         except config.ConfigException:
             config.load_kube_config()
+        # Import patch utility and keep token keys in sync for v36.0.0+ support
+        from .utils import patch_k8s_config
+        patch_k8s_config(client)
+
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 

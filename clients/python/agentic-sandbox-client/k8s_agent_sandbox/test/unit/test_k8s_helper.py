@@ -19,9 +19,13 @@ from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
 
 
+class MockConfig(MagicMock):
+    ConfigException = Exception
+
+
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-@patch("k8s_agent_sandbox.k8s_helper.config")
+@patch("k8s_agent_sandbox.k8s_helper.config", new_callable=MockConfig)
 class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
     def test_labels_and_annotations_coexist_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
@@ -129,7 +133,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-@patch("k8s_agent_sandbox.k8s_helper.config")
+@patch("k8s_agent_sandbox.k8s_helper.config", new_callable=MockConfig)
 class TestK8sHelperResolveSandboxName(unittest.TestCase):
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
@@ -180,6 +184,18 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
             helper.resolve_sandbox_name("test-claim", "default", timeout=5)
             
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+
+
+class TestK8sHelperInitPatch(unittest.TestCase):
+
+    @patch("k8s_agent_sandbox.utils.patch_k8s_config")
+    @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+    @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+    @patch("k8s_agent_sandbox.k8s_helper.config", new_callable=MockConfig)
+    def test_init_calls_patch_k8s_config(self, mock_config, mock_api_cls, mock_core_cls, mock_patch):
+        from k8s_agent_sandbox.k8s_helper import client
+        K8sHelper()
+        mock_patch.assert_called_once_with(client)
 
 
 if __name__ == '__main__':

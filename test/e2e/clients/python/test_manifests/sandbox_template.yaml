@@ -3,6 +3,8 @@ kind: SandboxTemplate
 metadata:
   name: python-sdk-test-template
 spec:
+  service: true
+  networkPolicyManagement: Unmanaged
   podTemplate:
     metadata:
       labels:

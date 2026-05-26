@@ -17,7 +17,6 @@ from functools import wraps
 import threading
 
 _patch_lock = threading.Lock()
-_is_patched = False
 
 
 def _safe_setattr(obj, attr, val):
@@ -117,21 +116,21 @@ def _sync_k8s_bearer_token(config_obj):
 
 def patch_k8s_config(client_module):
     """Patches the active default configuration and refresh hook of a Kubernetes client module to keep token keys synchronized."""
-    global _is_patched
-    if _is_patched:
+    if not hasattr(client_module, "Configuration"):
         return
     with _patch_lock:
-        if _is_patched:
-            return
-        if not hasattr(client_module, "Configuration"):
-            return
         try:
             c = client_module.Configuration.get_default_copy()
             if c is None:
                 return
-            _sync_k8s_bearer_token(c)
+            if getattr(c, "_is_patched_for_bearer_token", False):
+                return
             orig_hook = c.refresh_api_key_hook
-            if orig_hook is not None and not getattr(orig_hook, "_is_patched_for_bearer_token", False):
+            if orig_hook is not None and getattr(orig_hook, "_is_patched_for_bearer_token", False):
+                return
+
+            _sync_k8s_bearer_token(c)
+            if orig_hook is not None:
                 @wraps(orig_hook)
                 def new_hook(cfg):
                     _sync_k8s_bearer_token(cfg)
@@ -141,8 +140,9 @@ def patch_k8s_config(client_module):
                         _sync_k8s_bearer_token(cfg)
                 new_hook._is_patched_for_bearer_token = True
                 c.refresh_api_key_hook = new_hook
+
+            _safe_setattr(c, "_is_patched_for_bearer_token", True)
             client_module.Configuration.set_default(c)
-            _is_patched = True
         except Exception:
             import logging
             logging.warning(

@@ -204,8 +204,6 @@ class TestK8sHelperInitPatch(unittest.TestCase):
     def test_init_calls_patch_k8s_config(self, mock_api_cls, mock_core_cls, mock_patch):
         with patch("k8s_agent_sandbox.k8s_helper.config.load_incluster_config"), \
              patch("k8s_agent_sandbox.k8s_helper.config.load_kube_config"):
-            import k8s_agent_sandbox.utils
-            k8s_agent_sandbox.utils._is_patched = False
             from k8s_agent_sandbox.k8s_helper import client
             K8sHelper()
             mock_patch.assert_called_once_with(client)

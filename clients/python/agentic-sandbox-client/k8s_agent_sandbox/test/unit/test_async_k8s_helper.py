@@ -221,8 +221,6 @@ class TestAsyncK8sHelperInitPatch(unittest.IsolatedAsyncioTestCase):
     async def test_ensure_initialized_calls_patch_k8s_config(self, mock_api_client_cls, mock_api_cls, mock_core_cls, mock_patch):
         with patch("k8s_agent_sandbox.async_k8s_helper.config.load_incluster_config") as mock_load_incluster, \
              patch("k8s_agent_sandbox.async_k8s_helper.config.load_kube_config") as mock_load_kube:
-            import k8s_agent_sandbox.utils
-            k8s_agent_sandbox.utils._is_patched = False
             from k8s_agent_sandbox.async_k8s_helper import client
             helper = AsyncK8sHelper()
             await helper._ensure_initialized()

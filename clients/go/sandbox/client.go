@@ -292,7 +292,7 @@ loop:
 		case sem <- struct{}{}:
 			delete(snapshot, key)
 		case <-ctx.Done():
-			c.log.Info("cleanup cancelled", "error", ctx.Err().Error())
+			c.log.Info("cleanup cancelled", "error", ctx.Err())
 			errMu.Lock()
 			errs = append(errs, ctx.Err())
 			errMu.Unlock()

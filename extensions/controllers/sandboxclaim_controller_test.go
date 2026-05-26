@@ -632,6 +632,24 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "claim with spoofed router app label is rejected",
+			claimToReconcile: &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-spoofed-app-label", Namespace: "default", UID: "uid-spoofed-app-label"},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{"app": "sandbox-router"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "InvalidMetadata",
+			},
+		},
+		{
 			name:             "sandbox is created with injected environment variables from claim",
 			claimToReconcile: claimWithEnv,
 			existingObjects:  []client.Object{templateWithEnvOverride},

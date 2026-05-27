@@ -66,8 +66,8 @@ type SandboxWarmPoolRef struct {
 * **Avoids Ambiguity**: Resolves the mutually exclusive fields problem elegantly.
 
 **Cons:**
-* **Platform Team Bottleneck**: Developers cannot test a brand-new template directly; they must first create a `SandboxWarmPool` to wrap the template. This adds friction if pool creation requires elevated permissions.
 * **Cascade Latency**: Reconciliations are delayed by an extra step. A template update must finish updating the warm pool before the claim controller even gets notified that its sandbox needs to be rolled over.
+* **Platform Team Bottleneck**: Developers cannot test a brand-new template directly; they must first create a `SandboxWarmPool` to wrap the template. *This is by design though*
 
 #### Impact and Migration
 

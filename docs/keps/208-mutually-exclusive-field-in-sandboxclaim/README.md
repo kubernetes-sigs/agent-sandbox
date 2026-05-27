@@ -2,12 +2,12 @@
 - [KEP-0208: Resolving Mutually Exclusive Fields in SandboxClaim for Beta](#kep-0208-resolving-mutually-exclusive-fields-in-sandboxclaim-for-beta)
   - [Motivation](#motivation)
   - [Preferred Solution](#preferred-solution)
-      - [Pure WarmPoolRef and remove <code>TemplateRef</code> field. <em>Preferred</em>](#pure-warmpoolref-and-remove-templateref-field-preferred)
+      - [Pure WarmPoolRef and remove <code>TemplateRef</code> field.](#pure-warmpoolref-and-remove-templateref-field)
       - [Impact and Migration](#impact-and-migration)
       - [Controller Implementation Details](#controller-implementation-details)
   - [Alternatives Considered](#alternatives-considered)
     - [Option 1: Keep Schema as is and perform API validation](#option-1-keep-schema-as-is-and-perform-api-validation)
-    - [Option 2: Pure TemplateRef and remove <code>WarmPoolPolicy</code> field.](#option-2-pure-templateref-and-remove-warmpoolpolicy-field)
+    - [Option 2: Pure TemplateRef and remove WarmPoolPolicy field.](#option-2-pure-templateref-and-remove-warmpoolpolicy-field)
     - [Option 3: Union Model (oneOf)](#option-3-union-model-oneof)
 <!-- /toc -->
 # KEP-0208: Resolving Mutually Exclusive Fields in SandboxClaim for Beta

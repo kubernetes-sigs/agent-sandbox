@@ -1519,7 +1519,7 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	// PodIPs is the adoption boundary: without it, the backing Pod is missing
 	// or not networked yet. Not-Ready sandboxes with PodIPs are still useful.
 	if len(candidate.Status.PodIPs) == 0 {
-		return fmt.Errorf("sandbox is not yet networked (Status.PodIPs is empty)")
+		return fmt.Errorf("sandbox has no assigned pod IPs yet")
 	}
 	return nil
 }

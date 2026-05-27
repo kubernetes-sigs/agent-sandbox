@@ -49,6 +49,11 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
+// testNetworkedPodIP is a placeholder Pod IP used by warm-pool sandbox
+// fixtures to mark "backing Pod exists and is networked" (the condition
+// isAdoptable checks via len(Status.PodIPs) > 0).
+const testNetworkedPodIP = "10.244.0.5"
+
 func TestSandboxClaimReconcile(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
@@ -1605,7 +1610,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				// PodIPs populated regardless of Ready state: the backing Pod exists
 				// and has been networked. isAdoptable requires this to avoid adopting
 				// a sandbox whose pod has been deleted during warm-pool rotation.
-				PodIPs: []string{"10.244.0.5"},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 	}
@@ -2336,7 +2341,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				Conditions: []metav1.Condition{{
 					Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 				}},
-				PodIPs: []string{"10.244.0.5"},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 
@@ -2485,7 +2490,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 						Reason: "DependenciesReady",
 					},
 				},
-				PodIPs: []string{"10.244.0.5"},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 	}

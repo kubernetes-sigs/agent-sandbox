@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ray-sandbox-manager-role
+  namespace: default
+rules:
+# 1. Permission to claim and recycle the sandboxes
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# 2. Permission to watch the underlying sandbox status
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ray-sandbox-manager-binding
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default
+roleRef:
+  kind: Role
+  name: ray-sandbox-manager-role
+  apiGroup: rbac.authorization.k8s.io

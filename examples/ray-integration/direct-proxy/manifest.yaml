@@ -1,0 +1,26 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: ray-native-template
+  namespace: default
+spec:
+  envVarsInjectionPolicy: Disallowed
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    spec:
+      automountServiceAccountToken: true
+      runtimeClassName: gvisor
+      containers:
+      - name: runtime
+        # Insert your python runtime image
+        image: us-docker.pkg.dev/vicenteferrara-gke-dev/python-runtime/sandbox:latest
+        imagePullPolicy: Always
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: ray-native-pool
+spec:
+  replicas: 6
+  sandboxTemplateRef:
+    name: ray-native-template

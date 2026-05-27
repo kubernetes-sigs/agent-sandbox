@@ -2315,7 +2315,7 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 					Kind:       "SandboxWarmPool",
 					Name:       "test-pool",
 					UID:        "pool-uid",
-					Controller: ptr.To(true),
+					Controller: new(true),
 				},
 			},
 		},

@@ -256,5 +256,18 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
 
         connector.send_request("GET", "/execute")
 
+    def test_300_does_not_raise_redirect_error(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 300
+        mock_resp.is_redirect = False
+        mock_resp.raise_for_status.return_value = None
+        mock_session.request.return_value = mock_resp
+
+        connector.send_request("GET", "/execute")
+
 if __name__ == "__main__":
     unittest.main()

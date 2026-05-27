@@ -484,6 +484,19 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
+    async def test_300_does_not_raise_redirect_error(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 300
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
+        finally:
+            await connector.close()
+
     async def test_post_execute(self):
         connector = self._make_connector()
         try:

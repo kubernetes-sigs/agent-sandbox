@@ -123,11 +123,44 @@ class AsyncSandboxConnector:
         return self._base_url
 
     async def send_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
+        """Sends an HTTP request asynchronously to the sandbox with standard parameters.
+
+        This method automatically resolves the gateway connection, appends the router/sandbox
+        identity headers, overrides redirect options to disable client-side automatic
+        redirection (for security/SSRF mitigation), and raises appropriate exceptions on errors.
+
+        Args:
+            method: The HTTP method (e.g., "GET", "POST").
+            endpoint: The API endpoint path.
+            **kwargs: Extra keyword arguments passed directly to the underlying
+                `httpx.AsyncClient.request` invocation. Note that 'follow_redirects'
+                is explicitly popped and overridden.
+
+        Returns:
+            The `httpx.Response` object representing the response from the sandbox.
+
+        Raises:
+            SandboxRequestError: If a connection/HTTP status error occurs, or if a redirect is
+                returned (status codes 301, 302, 303, 307, 308).
+
+        Note on Redirect Handling:
+            Automatic redirection (SSRF risk mitigation) is explicitly disabled in the
+            HTTP client. If a redirect status code recognized by httpx (301, 302,
+            303, 307, 308) is returned, a SandboxRequestError wrapping HTTPStatusError is
+            raised. Non-redirect 3xx status codes, such as 300 (Multiple Choices), 304
+            (Not Modified), 305 (Use Proxy), and 306 (Switch Proxy), do not trigger
+            automatic client redirection or raise redirect errors; they are returned
+            directly to the caller because httpx does not consider them redirects
+            and raise_for_status only raises for status codes 400 and above.
+        """
         base_url = await self._resolve_base_url()
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.pop("headers", {}).copy()
-        # Ensure follow_redirects is not passed in kwargs to prevent duplicate parameter TypeError
+        # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
+        # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
+        # ignored. We pop 'follow_redirects' here to prevent a TypeError due to duplicate keyword
+        # arguments when calling httpx.AsyncClient.request.
         kwargs.pop("follow_redirects", None)
 
         if self._inject_router_headers:

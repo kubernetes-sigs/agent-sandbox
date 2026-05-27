@@ -31,7 +31,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	extensionsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 func main() {
@@ -117,9 +117,9 @@ func main() {
 
 	// 3. Create SandboxClaim using the selected pool
 
-	warmPoolPolicy := extv1alpha1.WarmPoolPolicy(selectedPool)
+	warmPoolPolicy := extv1beta1.WarmPoolPolicy(selectedPool)
 
-	claim := &extv1alpha1.SandboxClaim{
+	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claimName,
 			Namespace: "default",
@@ -127,15 +127,15 @@ func main() {
 				"app": "argocd-sdk-test", // Label used by analysis job to find these claims
 			},
 		},
-		Spec: extv1alpha1.SandboxClaimSpec{
-			TemplateRef: extv1alpha1.SandboxTemplateRef{
+		Spec: extv1beta1.SandboxClaimSpec{
+			TemplateRef: extv1beta1.SandboxTemplateRef{
 				Name: selectedTemplate, // Template defining the sandbox environment
 			},
 			WarmPool: &warmPoolPolicy, // Here we specify which pool to use
 		},
 	}
 
-	createdClaim, err := extClient.ExtensionsV1alpha1().SandboxClaims("default").Create(ctx, claim, metav1.CreateOptions{})
+	createdClaim, err := extClient.ExtensionsV1beta1().SandboxClaims("default").Create(ctx, claim, metav1.CreateOptions{})
 	if err != nil {
 		log.Fatalf("Failed to create SandboxClaim: %v", err)
 	}

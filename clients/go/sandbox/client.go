@@ -396,13 +396,17 @@ func (c *Client) Close(ctx context.Context) error {
 func (c *Client) EnableAutoCleanup() (stop func()) {
 	c.mu.Lock()
 	if c.closed {
-		c.log.Info("EnableAutoCleanup: ignored because client is already closed")
 		c.mu.Unlock()
+		c.log.Info("auto-cleanup not enabled: client is already closed")
 		return func() {}
 	}
 	if c.stopSignal != nil {
-		c.log.Info("EnableAutoCleanup: ignored because signal handler is already active")
+		existingStop := c.cleanupStop
 		c.mu.Unlock()
+		c.log.Info("auto-cleanup already enabled; returning existing stop function")
+		if existingStop != nil {
+			return existingStop
+		}
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())

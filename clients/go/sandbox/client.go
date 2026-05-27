@@ -20,7 +20,6 @@ import (
 	"maps"
 	"os"
 	"os/signal"
-	"runtime"
 	"sync"
 	"syscall"
 
@@ -84,9 +83,6 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 
 		// Register signal handler for SIGINT/SIGTERM
 		c.EnableAutoCleanup()
-
-		// Register finalizer for best-effort cleanup on normal exit
-		runtime.SetFinalizer(c, (*Client).cleanup)
 	}
 
 	return c, nil
@@ -279,18 +275,4 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 	return func() {
 		cancel()
 	}
-}
-
-// cleanup is called by the runtime finalizer for best-effort cleanup on normal exit.
-// This is not guaranteed to run and should not be relied upon for production code.
-func (c *Client) cleanup() {
-	c.mu.Lock()
-	if !c.cleanupEnabled {
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-
-	c.log.V(1).Info("finalizer triggered, attempting cleanup")
-	c.DeleteAll(context.Background())
 }

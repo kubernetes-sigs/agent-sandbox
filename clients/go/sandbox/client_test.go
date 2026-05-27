@@ -35,6 +35,11 @@ import (
 
 func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 	t.Helper()
+	return newTestClientWithOptions(t, nil)
+}
+
+func newTestClientWithOptions(t *testing.T, customize func(*Options)) (*Client, *fakeextensions.Clientset) {
+	t.Helper()
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts := Options{
@@ -43,6 +48,9 @@ func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 		APIURL:              "http://localhost:9999",
 		SandboxReadyTimeout: 2 * time.Second,
 		Quiet:               true,
+	}
+	if customize != nil {
+		customize(&opts)
 	}
 	opts.setDefaults()
 	opts.K8sHelper = &K8sHelper{
@@ -266,27 +274,9 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 }
 
 func TestClientCleanupIdempotent(t *testing.T) {
-	opts := Options{
-		TemplateName:    "test-template",
-		Namespace:       "default",
-		CleanupOnSignal: true,
-		Quiet:           true,
-	}
-
-	opts.setDefaults()
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	opts.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1beta1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
-		Log:              logr.Discard(),
-	}
-
-	ctx := context.Background()
-	client, err := NewClient(ctx, opts)
-	if err != nil {
-		t.Fatalf("NewClient failed: %v", err)
-	}
+	client, _ := newTestClientWithOptions(t, func(opts *Options) {
+		opts.CleanupOnSignal = true
+	})
 
 	// Manually call EnableAutoCleanup again (should be safe/idempotent)
 	stop := client.EnableAutoCleanup()
@@ -380,33 +370,14 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 }
 
 func TestClientCleanupOnSignalDefault(t *testing.T) {
-	opts := Options{
-		TemplateName: "test-template",
-		Namespace:    "default",
-		Quiet:        true,
-	}
-
 	// Verify CleanupOnSignal defaults to false
+	var opts Options
 	if opts.CleanupOnSignal {
 		t.Error("CleanupOnSignal should default to false")
 	}
 
-	// Set up with proper K8s clients
-	opts.setDefaults()
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	opts.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1beta1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
-		Log:              logr.Discard(),
-	}
-
 	// Create client with default options
-	ctx := context.Background()
-	client, err := NewClient(ctx, opts)
-	if err != nil {
-		t.Fatalf("NewClient failed: %v", err)
-	}
+	client, _ := newTestClient(t)
 
 	// Verify cleanup is not enabled
 	client.mu.Lock()
@@ -419,28 +390,9 @@ func TestClientCleanupOnSignalDefault(t *testing.T) {
 }
 
 func TestClientCleanupOnSignalEnabled(t *testing.T) {
-	opts := Options{
-		TemplateName:    "test-template",
-		Namespace:       "default",
-		CleanupOnSignal: true,
-		Quiet:           true,
-	}
-
-	// Set up with proper K8s clients
-	opts.setDefaults()
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	opts.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1beta1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
-		Log:              logr.Discard(),
-	}
-
-	ctx := context.Background()
-	client, err := NewClient(ctx, opts)
-	if err != nil {
-		t.Fatalf("NewClient failed: %v", err)
-	}
+	client, _ := newTestClientWithOptions(t, func(opts *Options) {
+		opts.CleanupOnSignal = true
+	})
 
 	// Verify cleanup is enabled
 	client.mu.Lock()
@@ -465,47 +417,13 @@ func TestClientCleanupOnSignalEnabled(t *testing.T) {
 }
 
 func TestClientMultipleClientsIndependent(t *testing.T) {
-	ctx := context.Background()
-
 	// Client 1 with cleanup enabled
-	opts1 := Options{
-		TemplateName:    "test-template",
-		Namespace:       "default",
-		CleanupOnSignal: true,
-		Quiet:           true,
-	}
-	opts1.setDefaults()
-	agentsCS1 := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS1 := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	opts1.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS1.AgentsV1beta1(),
-		ExtensionsClient: extensionsCS1.ExtensionsV1beta1(),
-		Log:              logr.Discard(),
-	}
-	client1, err := NewClient(ctx, opts1)
-	if err != nil {
-		t.Fatalf("NewClient 1 failed: %v", err)
-	}
+	client1, _ := newTestClientWithOptions(t, func(opts *Options) {
+		opts.CleanupOnSignal = true
+	})
 
 	// Client 2 with cleanup disabled
-	opts2 := Options{
-		TemplateName:    "test-template",
-		Namespace:       "default",
-		CleanupOnSignal: false,
-		Quiet:           true,
-	}
-	opts2.setDefaults()
-	agentsCS2 := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS2 := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	opts2.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS2.AgentsV1beta1(),
-		ExtensionsClient: extensionsCS2.ExtensionsV1beta1(),
-		Log:              logr.Discard(),
-	}
-	client2, err := NewClient(ctx, opts2)
-	if err != nil {
-		t.Fatalf("NewClient 2 failed: %v", err)
-	}
+	client2, _ := newTestClient(t)
 
 	// Verify client 1 has cleanup enabled
 	client1.mu.Lock()

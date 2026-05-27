@@ -137,19 +137,15 @@ type Options struct {
 	// If nil, falls back to otel.GetTracerProvider (noop by default).
 	TracerProvider trace.TracerProvider
 
-	// CleanupOnSignal enables automatic cleanup of sandboxes when the program
-	// receives SIGINT or SIGTERM signals, and makes a best-effort attempt to
-	// cleanup on normal program exit.
+	// CleanupOnSignal enables best-effort automatic cleanup of sandboxes when
+	// the program receives SIGINT or SIGTERM signals.
 	//
-	// Signal handling (SIGINT/SIGTERM): Reliable. When a signal is received,
-	// DeleteAll() is called before the process terminates.
+	// When enabled, a signal handler is registered that calls DeleteAll() before
+	// the process terminates. The cleanup is best-effort: DeleteAll() may fail or
+	// be interrupted by a second signal. Other signals (SIGKILL, forced termination)
+	// bypass cleanup entirely.
 	//
-	// Normal exit cleanup: Best-effort only. Uses runtime.SetFinalizer to trigger
-	// cleanup when the Client is garbage collected. Because finalizers are not
-	// guaranteed to run (GC timing is non-deterministic), this should not be
-	// relied upon for production code.
-	//
-	// For guaranteed cleanup on normal exit, use defer:
+	// For guaranteed cleanup on normal program exit, use defer:
 	//
 	//     ctx := context.Background()
 	//     client, err := sandbox.NewClient(ctx, sandbox.Options{

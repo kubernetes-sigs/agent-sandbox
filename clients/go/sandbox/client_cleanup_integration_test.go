@@ -17,13 +17,111 @@
 package sandbox
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// TestMain handles subprocess helper process requests.
+func TestMain(m *testing.M) {
+	// Check if we're running as a helper process
+	if os.Getenv("GO_TEST_HELPER_PROCESS") == "1" {
+		runHelperProcess()
+		os.Exit(0)
+	}
+
+	// Run normal tests
+	os.Exit(m.Run())
+}
+
+// runHelperProcess executes the requested helper mode.
+func runHelperProcess() {
+	mode := os.Getenv("GO_TEST_HELPER_MODE")
+	template := os.Getenv("SANDBOX_TEMPLATE")
+
+	ctx := context.Background()
+
+	switch mode {
+	case "cleanup-on-signal":
+		// Create client with CleanupOnSignal=true and wait for signal
+		client, err := NewClient(ctx, Options{
+			TemplateName:    template,
+			Namespace:       "default",
+			CleanupOnSignal: true,
+			Quiet:           true,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "NewClient failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		sb, err := client.CreateSandbox(ctx, template, "default")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CreateSandbox failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("CLAIM:%s\n", sb.ClaimName())
+		time.Sleep(60 * time.Second)
+
+	case "cleanup-disabled":
+		// Create client with CleanupOnSignal=false and exit normally
+		client, err := NewClient(ctx, Options{
+			TemplateName:    template,
+			Namespace:       "default",
+			CleanupOnSignal: false,
+			Quiet:           true,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "NewClient failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		sb, err := client.CreateSandbox(ctx, template, "default")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CreateSandbox failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("CLAIM:%s\n", sb.ClaimName())
+
+	case "defer-pattern":
+		// Demonstrate recommended pattern with defer
+		client, err := NewClient(ctx, Options{
+			TemplateName:    template,
+			Namespace:       "default",
+			CleanupOnSignal: true,
+			Quiet:           true,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "NewClient failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		defer client.DeleteAll(ctx)
+
+		sb, err := client.CreateSandbox(ctx, template, "default")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CreateSandbox failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("CLAIM:%s\n", sb.ClaimName())
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown helper mode: %s\n", mode)
+		os.Exit(1)
+	}
+}
 
 // TestCleanupOnSignalWithSIGTERM verifies that sandboxes are cleaned up
 // when a program with CleanupOnSignal=true receives SIGTERM.
@@ -32,88 +130,61 @@ func TestCleanupOnSignalWithSIGTERM(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// This test requires SANDBOX_TEMPLATE env var
 	template := os.Getenv("SANDBOX_TEMPLATE")
 	if template == "" {
 		t.Skip("SANDBOX_TEMPLATE not set, skipping")
 	}
 
-	// Build a subprocess that creates sandboxes with CleanupOnSignal=true
-	subprocessCode := fmt.Sprintf(`
-package main
-
-import (
-	"context"
-	"fmt"
-	"os"
-	"time"
-
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
-)
-
-func main() {
-	ctx := context.Background()
-	client, err := sandbox.NewClient(ctx, sandbox.Options{
-		TemplateName:    %q,
-		Namespace:       "default",
-		CleanupOnSignal: true,
-		Quiet:           true,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "NewClient failed: %%v\n", err)
-		os.Exit(1)
-	}
-
-	// Create a sandbox
-	sb, err := client.CreateSandbox(ctx, %q, "default")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "CreateSandbox failed: %%v\n", err)
-		os.Exit(1)
-	}
-
-	// Print the claim name so parent test can verify cleanup
-	fmt.Printf("CLAIM:%%s\n", sb.ClaimName())
-
-	// Wait for signal
-	time.Sleep(60 * time.Second)
-}
-`, template, template)
-
-	// Write subprocess code to temp file
-	tmpDir := t.TempDir()
-	mainFile := tmpDir + "/main.go"
-	if err := os.WriteFile(mainFile, []byte(subprocessCode), 0644); err != nil {
-		t.Fatalf("failed to write subprocess code: %v", err)
-	}
-
-	// Start subprocess
-	cmd := exec.Command("go", "run", mainFile)
-	cmd.Stdout = os.Stdout
+	// Start subprocess using TestHelperProcess pattern
+	var stdout bytes.Buffer
+	cmd := exec.Command(os.Args[0], "-test.run=TestCleanupOnSignalWithSIGTERM")
+	cmd.Env = append(os.Environ(),
+		"GO_TEST_HELPER_PROCESS=1",
+		"GO_TEST_HELPER_MODE=cleanup-on-signal",
+		"SANDBOX_TEMPLATE="+template,
+	)
+	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
+
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start subprocess: %v", err)
 	}
 
-	// Give subprocess time to create sandbox
+	// Wait for sandbox to be created and claim name to be printed
 	time.Sleep(10 * time.Second)
 
-	// Send SIGTERM to subprocess
+	// Send SIGTERM
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("failed to send SIGTERM: %v", err)
 	}
 
 	// Wait for subprocess to exit
-	if err := cmd.Wait(); err != nil {
-		// SIGTERM causes non-zero exit, which is expected
-		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() == 0 {
-			t.Logf("subprocess exit: %v (expected non-zero from signal)", err)
-		}
+	_ = cmd.Wait() // Expected to exit non-zero from signal
+
+	// Parse claim name from output
+	claimName := parseClaimName(t, stdout.String())
+	if claimName == "" {
+		t.Fatal("failed to parse claim name from subprocess output")
 	}
 
-	// TODO: Verify sandbox was actually deleted
-	// This requires parsing the claim name from subprocess output
-	// and checking if it still exists in the cluster
-	t.Log("Signal handling test completed - manual verification needed")
+	// Verify sandbox was deleted
+	ctx := context.Background()
+	opts := Options{
+		TemplateName: template,
+		Quiet:        true,
+	}
+	opts.setDefaults()
+
+	k8s, err := NewK8sHelper(nil)
+	if err != nil {
+		t.Fatalf("failed to create k8s helper: %v", err)
+	}
+
+	// Poll for claim deletion with timeout
+	deleted := waitForClaimDeletion(t, ctx, k8s, claimName, "default", 30*time.Second)
+	if !deleted {
+		t.Errorf("claim %s was not deleted after SIGTERM", claimName)
+	}
 }
 
 // TestCleanupOnSignalDisabled verifies that sandboxes persist
@@ -123,158 +194,134 @@ func TestCleanupOnSignalDisabled(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// This test requires SANDBOX_TEMPLATE env var
 	template := os.Getenv("SANDBOX_TEMPLATE")
 	if template == "" {
 		t.Skip("SANDBOX_TEMPLATE not set, skipping")
 	}
 
-	// Build a subprocess that creates sandboxes with CleanupOnSignal=false
-	subprocessCode := fmt.Sprintf(`
-package main
-
-import (
-	"context"
-	"fmt"
-	"os"
-
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
-)
-
-func main() {
-	ctx := context.Background()
-	client, err := sandbox.NewClient(ctx, sandbox.Options{
-		TemplateName:    %q,
-		Namespace:       "default",
-		CleanupOnSignal: false,
-		Quiet:           true,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "NewClient failed: %%v\n", err)
-		os.Exit(1)
-	}
-
-	// Create a sandbox
-	sb, err := client.CreateSandbox(ctx, %q, "default")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "CreateSandbox failed: %%v\n", err)
-		os.Exit(1)
-	}
-
-	// Print the claim name so parent test can verify persistence
-	fmt.Printf("CLAIM:%%s\n", sb.ClaimName())
-
-	// Exit normally without cleanup
-}
-`, template, template)
-
-	// Write subprocess code to temp file
-	tmpDir := t.TempDir()
-	mainFile := tmpDir + "/main.go"
-	if err := os.WriteFile(mainFile, []byte(subprocessCode), 0644); err != nil {
-		t.Fatalf("failed to write subprocess code: %v", err)
-	}
-
 	// Start subprocess
-	cmd := exec.Command("go", "run", mainFile)
-	cmd.Stdout = os.Stdout
+	var stdout bytes.Buffer
+	cmd := exec.Command(os.Args[0], "-test.run=TestCleanupOnSignalDisabled")
+	cmd.Env = append(os.Environ(),
+		"GO_TEST_HELPER_PROCESS=1",
+		"GO_TEST_HELPER_MODE=cleanup-disabled",
+		"SANDBOX_TEMPLATE="+template,
+	)
+	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start subprocess: %v", err)
-	}
 
-	// Wait for subprocess to complete
-	if err := cmd.Wait(); err != nil {
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("subprocess failed: %v", err)
 	}
 
-	// TODO: Verify sandbox was NOT deleted
-	// This requires parsing the claim name from subprocess output
-	// and checking if it still exists in the cluster
-	t.Log("Cleanup disabled test completed - manual verification needed")
+	// Parse claim name
+	claimName := parseClaimName(t, stdout.String())
+	if claimName == "" {
+		t.Fatal("failed to parse claim name from subprocess output")
+	}
+
+	// Verify sandbox still exists
+	ctx := context.Background()
+	k8s, err := NewK8sHelper(nil)
+	if err != nil {
+		t.Fatalf("failed to create k8s helper: %v", err)
+	}
+
+	claim, err := k8s.SandboxClaimClient.SandboxClaims("default").Get(ctx, claimName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("claim %s was deleted (should persist): %v", claimName, err)
+	}
+
+	t.Logf("claim %s persisted as expected", claimName)
+
+	// Clean up manually
+	client, err := NewClient(ctx, Options{
+		TemplateName: template,
+		Quiet:        true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client for cleanup: %v", err)
+	}
+
+	if err := client.Delete(ctx, Key{Namespace: "default", ClaimName: claim.Name}); err != nil {
+		t.Logf("warning: manual cleanup failed: %v", err)
+	}
 }
 
-// TestCleanupWithDeferPattern verifies the recommended production pattern
-// of using both CleanupOnSignal and defer client.DeleteAll() for maximum reliability.
+// TestCleanupWithDeferPattern verifies the recommended production pattern.
 func TestCleanupWithDeferPattern(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// This test requires SANDBOX_TEMPLATE env var
 	template := os.Getenv("SANDBOX_TEMPLATE")
 	if template == "" {
 		t.Skip("SANDBOX_TEMPLATE not set, skipping")
 	}
 
-	// Build a subprocess that uses the recommended pattern:
-	// CleanupOnSignal=true for signal handling + defer DeleteAll() for normal exit
-	subprocessCode := fmt.Sprintf(`
-package main
-
-import (
-	"context"
-	"fmt"
-	"os"
-
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
-)
-
-func main() {
-	ctx := context.Background()
-	client, err := sandbox.NewClient(ctx, sandbox.Options{
-		TemplateName:    %q,
-		Namespace:       "default",
-		CleanupOnSignal: true,
-		Quiet:           true,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "NewClient failed: %%v\n", err)
-		os.Exit(1)
-	}
-
-	// Ensure cleanup even on normal exit
-	defer client.DeleteAll(ctx)
-
-	// Create a sandbox
-	sb, err := client.CreateSandbox(ctx, %q, "default")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "CreateSandbox failed: %%v\n", err)
-		os.Exit(1)
-	}
-
-	// Print the claim name so parent test can verify cleanup
-	fmt.Printf("CLAIM:%%s\n", sb.ClaimName())
-
-	// Exit normally - defer will handle cleanup
-}
-`, template, template)
-
-	// Write subprocess code to temp file
-	tmpDir := t.TempDir()
-	mainFile := tmpDir + "/main.go"
-	if err := os.WriteFile(mainFile, []byte(subprocessCode), 0644); err != nil {
-		t.Fatalf("failed to write subprocess code: %v", err)
-	}
-
 	// Start subprocess
-	cmd := exec.Command("go", "run", mainFile)
-	cmd.Stdout = os.Stdout
+	var stdout bytes.Buffer
+	cmd := exec.Command(os.Args[0], "-test.run=TestCleanupWithDeferPattern")
+	cmd.Env = append(os.Environ(),
+		"GO_TEST_HELPER_PROCESS=1",
+		"GO_TEST_HELPER_MODE=defer-pattern",
+		"SANDBOX_TEMPLATE="+template,
+	)
+	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start subprocess: %v", err)
-	}
 
-	// Wait for subprocess to complete
-	if err := cmd.Wait(); err != nil {
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("subprocess failed: %v", err)
 	}
 
-	// Wait for cleanup operations to complete
-	time.Sleep(5 * time.Second)
+	// Parse claim name
+	claimName := parseClaimName(t, stdout.String())
+	if claimName == "" {
+		t.Fatal("failed to parse claim name from subprocess output")
+	}
 
-	// TODO: Verify sandbox was deleted
-	// This requires parsing the claim name from subprocess output
-	// and checking if it still exists in the cluster
-	t.Log("Defer pattern test completed - manual verification needed")
+	// Verify sandbox was deleted via defer
+	ctx := context.Background()
+	k8s, err := NewK8sHelper(nil)
+	if err != nil {
+		t.Fatalf("failed to create k8s helper: %v", err)
+	}
+
+	deleted := waitForClaimDeletion(t, ctx, k8s, claimName, "default", 30*time.Second)
+	if !deleted {
+		t.Errorf("claim %s was not deleted (defer should have cleaned up)", claimName)
+	}
+}
+
+// parseClaimName extracts the claim name from subprocess output.
+func parseClaimName(t *testing.T, output string) string {
+	t.Helper()
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "CLAIM:") {
+			return strings.TrimPrefix(line, "CLAIM:")
+		}
+	}
+	return ""
+}
+
+// waitForClaimDeletion polls for claim deletion with exponential backoff.
+func waitForClaimDeletion(t *testing.T, ctx context.Context, k8s *K8sHelper, name, namespace string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		_, err := k8s.SandboxClaimClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			// Claim is deleted (or never existed)
+			t.Logf("claim %s deleted successfully", name)
+			return true
+		}
+
+		// Still exists, wait and retry
+		time.Sleep(2 * time.Second)
+	}
+
+	return false
 }

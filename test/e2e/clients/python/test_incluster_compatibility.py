@@ -53,10 +53,12 @@ def get_image_prefix(env_var="IMAGE_PREFIX", default="kind.local/"):
 @pytest.fixture(scope="function")
 def sandbox_template(tc, temp_namespace):
     """Deploys the sandbox template into the test namespace"""
+    from string import Template
     image_tag = get_image_tag()
     image_prefix = get_image_prefix()
     with open(TEMPLATE_YAML_PATH, "r") as f:
-        manifest = f.read().format(image_prefix=image_prefix, image_tag=image_tag)
+        template = Template(f.read())
+        manifest = template.substitute(image_prefix=image_prefix, image_tag=image_tag)
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     return "python-sdk-test-template"
 

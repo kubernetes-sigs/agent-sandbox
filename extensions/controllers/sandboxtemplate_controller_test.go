@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -109,8 +110,22 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if len(np.Spec.Ingress) != 1 || np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "sandbox-router" {
 					t.Errorf("Expected Default Ingress rule to target sandbox-router")
 				}
-				if len(np.Spec.Egress) != 1 || np.Spec.Egress[0].To[0].IPBlock.CIDR != "0.0.0.0/0" {
+				if len(np.Spec.Egress) != 1 {
+					t.Fatalf("Expected 1 Default Egress rule, got %d", len(np.Spec.Egress))
+				}
+				if len(np.Spec.Egress[0].To) != 2 {
+					t.Fatalf("Expected 2 Egress peers (IPv4 and IPv6), got %d", len(np.Spec.Egress[0].To))
+				}
+				if np.Spec.Egress[0].To[0].IPBlock == nil || np.Spec.Egress[0].To[0].IPBlock.CIDR != "0.0.0.0/0" {
 					t.Fatalf("Expected Default Egress IPBlock 0.0.0.0/0")
+				}
+				ipv6Peer := np.Spec.Egress[0].To[1]
+				if ipv6Peer.IPBlock == nil || ipv6Peer.IPBlock.CIDR != "::/0" {
+					t.Fatalf("Expected Default Egress IPv6 IPBlock ::/0")
+				}
+				hasIPv6LinkLocalExcept := slices.Contains(ipv6Peer.IPBlock.Except, "fe80::/10")
+				if !hasIPv6LinkLocalExcept {
+					t.Errorf("Expected IPv6 Egress Except list to contain fe80::/10, got %v", ipv6Peer.IPBlock.Except)
 				}
 				expectedLabelKey := "agents.x-k8s.io/sandbox-template-ref-hash"
 				if _, ok := np.Spec.PodSelector.MatchLabels[expectedLabelKey]; !ok {

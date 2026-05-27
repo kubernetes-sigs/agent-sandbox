@@ -317,9 +317,9 @@ class TestProxyTimeout:
             importlib.reload(sandbox_router)
             assert sandbox_router.proxy_timeout == 180.0
 
-    def test_request_header_overrides_proxy_timeout(self, client):
+    def test_request_header_below_proxy_timeout_overrides_default(self, client):
         async def capture_send(req, **kwargs):
-            capture_send.timeout = kwargs.get("timeout")
+            capture_send.timeout = req.extensions.get("timeout")
             raise httpx.ConnectError("stop here")
 
         capture_send.timeout = None
@@ -328,16 +328,17 @@ class TestProxyTimeout:
                 "/execute",
                 headers={
                     "X-Sandbox-ID": "my-sandbox",
-                    "X-Sandbox-Timeout": "600",
+                    "X-Sandbox-Timeout": "60",
                 },
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout == 600.0
+        assert capture_send.timeout["connect"] == 60.0
+        assert capture_send.timeout["read"] == 60.0
 
     def test_invalid_request_header_falls_back_to_default_timeout(self, client):
         async def capture_send(req, **kwargs):
-            capture_send.timeout = kwargs.get("timeout")
+            capture_send.timeout = req.extensions.get("timeout")
             raise httpx.ConnectError("stop here")
 
         capture_send.timeout = None
@@ -351,11 +352,12 @@ class TestProxyTimeout:
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout == sandbox_router.proxy_timeout
+        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
 
     def test_non_finite_request_header_falls_back_to_default_timeout(self, client):
         async def capture_send(req, **kwargs):
-            capture_send.timeout = kwargs.get("timeout")
+            capture_send.timeout = req.extensions.get("timeout")
             raise httpx.ConnectError("stop here")
 
         capture_send.timeout = None
@@ -369,11 +371,15 @@ class TestProxyTimeout:
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout == sandbox_router.proxy_timeout
+        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
 
-    def test_oversized_request_header_falls_back_to_default_timeout(self, client):
+    @pytest.mark.parametrize("timeout_value", ["0", "-1"])
+    def test_non_positive_request_header_falls_back_to_default_timeout(
+        self, client, timeout_value
+    ):
         async def capture_send(req, **kwargs):
-            capture_send.timeout = kwargs.get("timeout")
+            capture_send.timeout = req.extensions.get("timeout")
             raise httpx.ConnectError("stop here")
 
         capture_send.timeout = None
@@ -382,12 +388,32 @@ class TestProxyTimeout:
                 "/execute",
                 headers={
                     "X-Sandbox-ID": "my-sandbox",
-                    "X-Sandbox-Timeout": "3601",
+                    "X-Sandbox-Timeout": timeout_value,
                 },
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout == sandbox_router.proxy_timeout
+        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
+
+    def test_request_header_above_proxy_timeout_is_capped(self, client):
+        async def capture_send(req, **kwargs):
+            capture_send.timeout = req.extensions.get("timeout")
+            raise httpx.ConnectError("stop here")
+
+        capture_send.timeout = None
+        with patch.object(sandbox_router.client, "send", side_effect=capture_send):
+            resp = client.post(
+                "/execute",
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "X-Sandbox-Timeout": "600",
+                },
+            )
+
+        assert resp.status_code == 502
+        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
 
 
 class TestProxyRouting:
@@ -406,6 +432,22 @@ class TestProxyRouting:
             )
             assert resp.status_code == 502
             assert "unreachable-sandbox" in resp.json()["detail"]
+
+    def test_timeout_error_returns_504(self, client):
+        """When the target sandbox times out, the router should return 504."""
+        with patch.object(
+            sandbox_router.client,
+            "send",
+            new_callable=AsyncMock,
+            side_effect=httpx.TimeoutException("timed out"),
+        ):
+            resp = client.post(
+                "/execute",
+                headers={"X-Sandbox-ID": "slow-sandbox"},
+                content=b'{"command": "sleep 999"}',
+            )
+            assert resp.status_code == 504
+            assert "slow-sandbox" in resp.json()["detail"]
 
     def test_target_url_construction(self, client):
         """Verify the router builds the correct internal DNS URL."""

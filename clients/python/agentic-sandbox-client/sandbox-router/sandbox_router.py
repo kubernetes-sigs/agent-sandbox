@@ -34,7 +34,6 @@ DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
 DEFAULT_PROXY_TIMEOUT = 180.0
 DEFAULT_CLUSTER_DOMAIN = "cluster.local"
-MAX_REQUEST_TIMEOUT = 3600.0
 
 
 def _get_proxy_timeout() -> float:
@@ -77,11 +76,16 @@ def _get_request_timeout(request: Request) -> float:
             f"falling back to {proxy_timeout}s"
         )
         return proxy_timeout
-    if not math.isfinite(value) or value <= 0 or value > MAX_REQUEST_TIMEOUT:
+    if not math.isfinite(value) or value <= 0:
         print(
-            f"WARNING: X-Sandbox-Timeout must be finite and within "
-            f"(0, {MAX_REQUEST_TIMEOUT}], got {value}, "
+            f"WARNING: X-Sandbox-Timeout must be finite and positive, got {value}, "
             f"falling back to {proxy_timeout}s"
+        )
+        return proxy_timeout
+    if value > proxy_timeout:
+        print(
+            f"WARNING: X-Sandbox-Timeout={value} exceeds configured "
+            f"proxy timeout {proxy_timeout}s; capping to {proxy_timeout}s"
         )
         return proxy_timeout
     return value
@@ -204,15 +208,18 @@ async def proxy_request(request: Request, full_path: str):
             if key.lower() not in {"host", "authorization"}
         }
 
+        # Request-level timeouts are attached via HTTPX request extensions.
+        # The effective value is capped by the router's configured proxy timeout.
+        # https://www.python-httpx.org/advanced/extensions/
         req = client.build_request(
             method=request.method,
             url=target_url,
             headers=headers,
-            content=request.stream()
+            content=request.stream(),
+            timeout=timeout,
         )
 
-        # Allow a request-level timeout to override the router's default timeout.
-        resp = await client.send(req, stream=True, timeout=timeout)
+        resp = await client.send(req, stream=True)
 
         async def stream_generator():
             try:
@@ -233,7 +240,16 @@ async def proxy_request(request: Request, full_path: str):
             status_code=502,
             detail=f"Could not connect to the backend sandbox: {sandbox_id}",
         )
+    except httpx.TimeoutException as e:
+        print(
+            f"ERROR: Request to sandbox at {target_url} timed out. Error: {e}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Timed out waiting for the backend sandbox: {sandbox_id}",
+        ) from e
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(
-            status_code=500, detail="An internal error occurred in the proxy.")
+            status_code=500,
+            detail="An internal error occurred in the proxy.",
+        ) from e

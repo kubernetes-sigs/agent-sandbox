@@ -47,7 +47,7 @@ def _router_timeout_header_value(timeout) -> str | None:
     else:
         return None
 
-    if not math.isfinite(value) or value <= 0:
+    if value is None or not math.isfinite(value) or value <= 0:
         return None
     return str(value)
 

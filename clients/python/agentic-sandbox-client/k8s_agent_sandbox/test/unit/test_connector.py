@@ -218,6 +218,18 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         sent_headers = call_kwargs.get("headers", {})
         self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123")
 
+    def test_timeout_tuple_without_read_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=(5, None))
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
     def test_unsupported_timeout_does_not_send_header(self):
         config = SandboxDirectConnectionConfig(api_url="http://router")
         strategy = DirectConnectionStrategy(config)

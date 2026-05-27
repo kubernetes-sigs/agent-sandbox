@@ -450,10 +450,10 @@ func isSystemLabel(key string) bool {
 }
 
 func isSystemAnnotation(key string) bool {
-	return key == sandboxv1alpha1.SandboxPodNameAnnotation ||
-		key == sandboxv1alpha1.SandboxTemplateRefAnnotation ||
-		key == sandboxv1alpha1.SandboxPropagatedLabelsAnnotation ||
-		key == sandboxv1alpha1.SandboxPropagatedAnnotationsAnnotation ||
+	return key == sandboxv1beta1.SandboxPodNameAnnotation ||
+		key == sandboxv1beta1.SandboxTemplateRefAnnotation ||
+		key == sandboxv1beta1.SandboxPropagatedLabelsAnnotation ||
+		key == sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation ||
 		key == asmetrics.TraceContextAnnotation
 }
 

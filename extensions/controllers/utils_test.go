@@ -44,8 +44,8 @@ func TestSandboxTemplateRefHash(t *testing.T) {
 			hash1 := SandboxTemplateRefHash(tc.templateRefName)
 			hash2 := SandboxTemplateRefHash(tc.templateRefName)
 
-			if len(hash1) != 8 {
-				t.Errorf("SandboxTemplateRefHash(%q) length = %d, want 8", tc.templateRefName, len(hash1))
+			if len(hash1) != 32 {
+				t.Errorf("SandboxTemplateRefHash(%q) length = %d, want 32", tc.templateRefName, len(hash1))
 			}
 
 			if hash1 != hash2 {

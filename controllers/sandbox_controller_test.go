@@ -315,7 +315,7 @@ func TestReconcile(t *testing.T) {
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Replicas:      1,
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=48ef8902639c4db8ff663259d106869a",
 				Conditions: []metav1.Condition{
 					{
 						Type:               "Ready",
@@ -334,7 +334,7 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+							"agents.x-k8s.io/sandbox-name-hash": "48ef8902639c4db8ff663259d106869a",
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -630,7 +630,7 @@ func TestReconcile(t *testing.T) {
 						Name:      sandboxName,
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+							"agents.x-k8s.io/sandbox-name-hash": "48ef8902639c4db8ff663259d106869a",
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -654,7 +654,7 @@ func TestReconcile(t *testing.T) {
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Replicas:      1,
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=ab179450",
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=48ef8902639c4db8ff663259d106869a",
 				PodIPs:        []string{"10.244.0.5"},
 				Conditions: []metav1.Condition{
 					{
@@ -1183,19 +1183,19 @@ func TestReconcilePod(t *testing.T) {
 		},
 		{
 			name: "ignores user-supplied system-reserved labels and annotations to prevent hijacking",
-			sandbox: &sandboxv1alpha1.Sandbox{
+			sandbox: &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1alpha1.SandboxSpec{
+				Spec: sandboxv1beta1.SandboxSpec{
 					Replicas: new(int32(1)),
-					PodTemplate: sandboxv1alpha1.PodTemplate{
+					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
 						},
-						ObjectMeta: sandboxv1alpha1.PodMetadata{
+						ObjectMeta: sandboxv1beta1.PodMetadata{
 							Labels: map[string]string{
 								"agents.x-k8s.io/sandbox-name-hash": "malicious-hijacked-hash",
 								"custom-label":                      "label-val",

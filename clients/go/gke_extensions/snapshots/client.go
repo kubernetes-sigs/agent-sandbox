@@ -132,12 +132,22 @@ func checkSnapshotCRDInstalled(dc crdDiscoverer, log logr.Logger) error {
 		return fmt.Errorf("snapshots: checking for PodSnapshot CRD: %w", err)
 	}
 
+	snapshotFound, triggerFound := false, false
 	for _, r := range resources.APIResources {
-		if r.Kind == "PodSnapshot" {
-			return nil
+		switch r.Kind {
+		case "PodSnapshot":
+			snapshotFound = true
+		case "PodSnapshotManualTrigger":
+			triggerFound = true
 		}
 	}
-	return fmt.Errorf("%w: PodSnapshot resource not found in %s", ErrCRDNotInstalled, groupVersion)
+	if !snapshotFound {
+		return fmt.Errorf("%w: PodSnapshot resource not found in %s", ErrCRDNotInstalled, groupVersion)
+	}
+	if !triggerFound {
+		return fmt.Errorf("%w: PodSnapshotManualTrigger resource not found in %s", ErrCRDNotInstalled, groupVersion)
+	}
+	return nil
 }
 
 // isGroupNotFound returns true when the discovery client wraps a "group not found"

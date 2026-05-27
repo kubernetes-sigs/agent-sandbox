@@ -603,11 +603,10 @@ func TestResume_FailsWhenListFails(t *testing.T) {
 func TestResume_WithSnapshotRestored(t *testing.T) {
 	sb := makeSandbox(0, "agents.x-k8s.io/sandbox-name-hash=h1")
 	agentsCS := makeAgentsClientset(sb)
-	dynCS := newTestDynClient()
 
 	// Seed a ready snapshot so List returns it.
 	snap := makeSnapshot("snap-uid-1", "h1", true)
-	dynCS2 := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
+	dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
 			triggerGVR:  "PodSnapshotManualTriggerList",
@@ -615,7 +614,6 @@ func TestResume_WithSnapshotRestored(t *testing.T) {
 		},
 		snap,
 	)
-	_ = dynCS
 
 	// Pod is ready AND has PodRestored=True with correct UID.
 	pod := &corev1.Pod{
@@ -628,7 +626,7 @@ func TestResume_WithSnapshotRestored(t *testing.T) {
 		},
 	}
 	kubeCS := fakekube.NewSimpleClientset(pod)
-	wrapper := newTestSandboxWrapper(agentsCS, dynCS2, kubeCS)
+	wrapper := newTestSandboxWrapper(agentsCS, dynCS, kubeCS)
 
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
 	if !resp.Success {
@@ -808,5 +806,23 @@ func TestSuspend_CtxCancelledBeforeHashResolve(t *testing.T) {
 	// Suspend must fail: either hash resolution error or ctx-cancelled IsSuspended.
 	if resp.Success {
 		t.Error("expected Suspend to fail when hash cannot be resolved")
+	}
+}
+
+func TestSuspend_EmptyPodName_SkipsTerminationWait(t *testing.T) {
+	// Sandbox is running (replicas=1) with a valid selector, but the pod name is
+	// not yet populated. Suspend should scale down and return success immediately
+	// without making any pod API calls.
+	sb := makeSandbox(1, "agents.x-k8s.io/sandbox-name-hash=hash1")
+	agentsCS := makeAgentsClientset(sb)
+
+	handle := &stubHandle{}
+	info := &stubInfo{claimName: "my-claim", sandboxName: "my-sandbox", podName: ""}
+	k8s := newTestK8sHelper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+	wrapper := NewSandboxWithSnapshotSupport(handle, info, k8s, "default", logr.Discard())
+
+	resp := wrapper.Suspend(context.Background(), false, 5*time.Second)
+	if !resp.Success {
+		t.Fatalf("expected success when pod name is empty, got: %s", resp.ErrorReason)
 	}
 }

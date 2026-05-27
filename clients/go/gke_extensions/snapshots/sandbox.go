@@ -193,6 +193,11 @@ func (s *SandboxWithSnapshotSupport) Suspend(ctx context.Context, snapshotBefore
 	}
 	s.log.Info("sandbox scaled to 0 replicas", "sandbox", s.Info.SandboxName())
 
+	if podName == "" {
+		s.log.Info("pod name was unknown at suspend time; skipping termination wait", "sandbox", s.Info.SandboxName())
+		return SuspendResponse{Success: true, SnapshotResponse: snapshotResp, ErrorCode: SuccessCode}
+	}
+
 	if waitForPodTermination(ctx, s.k8s.CoreClient, s.namespace, podName, podUID, timeout, s.log) {
 		s.log.Info("sandbox pod terminated", "sandbox", s.Info.SandboxName())
 		return SuspendResponse{

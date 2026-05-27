@@ -222,6 +222,9 @@ func waitForSnapshotDeletion(
 	timeout time.Duration,
 	log logr.Logger,
 ) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// Quick check: already deleted?
 	_, err := dynClient.Resource(snapshotGVR).Namespace(namespace).Get(ctx, snapshotUID, metav1.GetOptions{})
 	if err != nil {
@@ -233,8 +236,6 @@ func waitForSnapshotDeletion(
 	}
 
 	log.Info("waiting for snapshot deletion", "uid", snapshotUID)
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	listOpts := metav1.ListOptions{FieldSelector: "metadata.name=" + snapshotUID}
 
@@ -318,7 +319,7 @@ func waitForPodTermination(
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(2 * time.Second):
+		case <-time.After(min(2*time.Second, time.Until(deadline))):
 		}
 	}
 
@@ -357,7 +358,7 @@ func waitForPodReady(
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(2 * time.Second):
+		case <-time.After(min(2*time.Second, time.Until(deadline))):
 		}
 	}
 

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -82,6 +83,18 @@ func TestCheckSnapshotCRDInstalled_KindMissing(t *testing.T) {
 	err := checkSnapshotCRDInstalled(dc, logr.Discard())
 	if !errors.Is(err, ErrCRDNotInstalled) {
 		t.Errorf("expected ErrCRDNotInstalled when PodSnapshot kind absent, got %v", err)
+	}
+}
+
+func TestCheckSnapshotCRDInstalled_TriggerMissing(t *testing.T) {
+	// PodSnapshot present but PodSnapshotManualTrigger absent → ErrCRDNotInstalled.
+	dc := &fakeCRDDiscoverer{resources: apiResourceList("PodSnapshot")}
+	err := checkSnapshotCRDInstalled(dc, logr.Discard())
+	if !errors.Is(err, ErrCRDNotInstalled) {
+		t.Errorf("expected ErrCRDNotInstalled when PodSnapshotManualTrigger absent, got %v", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "PodSnapshotManualTrigger") {
+		t.Errorf("error message should mention PodSnapshotManualTrigger, got %v", err)
 	}
 }
 

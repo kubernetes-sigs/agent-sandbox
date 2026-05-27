@@ -654,6 +654,36 @@ func TestWaitForSnapshotDeletion_DeletedDuringWatch(t *testing.T) {
 	}
 }
 
+func TestWaitForSnapshotDeletion_Timeout(t *testing.T) {
+	// Snapshot exists and is never deleted; timeout should fire and return an error.
+	snap := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
+			"kind":       "PodSnapshot",
+			"metadata":   map[string]any{"name": "snap-1", "namespace": "default"},
+		},
+	}
+	dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{snapshotGVR: "PodSnapshotList"},
+		snap,
+	)
+
+	// Watch that never sends any events.
+	dynCS.PrependWatchReactor("podsnapshots", func(_ ktesting.Action) (bool, watch.Interface, error) {
+		return true, watch.NewFake(), nil
+	})
+
+	start := time.Now()
+	err := waitForSnapshotDeletion(context.Background(), dynCS, "default", "snap-1", 50*time.Millisecond, logr.Discard())
+	if err == nil {
+		t.Error("expected a timeout error, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("function blocked far too long: %v", elapsed)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // drainTriggerWatch — edge cases
 // ---------------------------------------------------------------------------

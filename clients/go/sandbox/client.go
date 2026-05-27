@@ -290,6 +290,11 @@ func (c *Client) deleteAll(ctx context.Context) error {
 
 	sem := make(chan struct{}, maxCleanupConcurrency)
 
+	// cancelAndRestore is called when the context is cancelled mid-dispatch.
+	// It restores any remaining (undispatched) keys back into c.registry.
+	// NOTE: This relies on the invariant that keys are deleted from the snapshot (delete(snapshot, key))
+	// BEFORE their goroutines are spawned, ensuring that already-dispatched goroutines (which might concurrently
+	// fail and attempt to restore themselves through the standard error path) never double-restore the same key.
 	cancelAndRestore := func(err error) {
 		c.log.Info("cleanup cancelled", "error", err)
 		errMu.Lock()
@@ -407,7 +412,7 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 			stopFn()
 
 			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
-			c.DeleteAll(context.Background())
+			_ = c.Close(context.Background())
 			// Re-raise so the default handler terminates the process.
 			p, _ := os.FindProcess(os.Getpid())
 			_ = p.Signal(sig)

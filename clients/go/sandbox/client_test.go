@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -154,6 +153,7 @@ func TestClient_DeleteAll(t *testing.T) {
 func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 	c, extensionsCS := newTestClient(t)
 
+	var timeoutFired atomic.Bool
 	var activeDeletes atomic.Int32
 	var maxActiveDeletes atomic.Int32
 	var enteredCount atomic.Int32
@@ -184,7 +184,7 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 			select {
 			case <-releaseCh:
 			case <-time.After(5 * time.Second):
-				t.Error("timeout waiting for BoundedConcurrency barrier")
+				timeoutFired.Store(true)
 				releaseBarrier()
 			}
 			activeDeletes.Add(-1)
@@ -233,6 +233,10 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 		t.Errorf("expected empty registry after DeleteAll, got %d", remaining)
 	}
 
+	if timeoutFired.Load() {
+		t.Error("timeout waiting for BoundedConcurrency barrier")
+	}
+
 	maxSeen := maxActiveDeletes.Load()
 	if maxSeen > maxCleanupConcurrency {
 		t.Errorf("concurrency limit exceeded: expected at most %d parallel close calls, got %d", maxCleanupConcurrency, maxSeen)
@@ -246,6 +250,8 @@ func TestClient_DeleteAll_BoundedConcurrency(t *testing.T) {
 
 func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 	c, extensionsCS := newTestClient(t)
+
+	var timeoutFired atomic.Bool
 
 	// Inject a blocked delete to stall the queue
 	blockCh := make(chan struct{})
@@ -303,13 +309,17 @@ func TestClient_DeleteAll_ContextCancelled_RestoresRegistry(t *testing.T) {
 		select {
 		case <-tenDeletesActiveCh:
 		case <-time.After(5 * time.Second): // safety fallback
-			t.Error("timeout waiting for restores registry barrier")
+			timeoutFired.Store(true)
 		}
 		cancel()
 		close(blockCh) // unblock all to let them complete
 	}()
 
 	c.DeleteAll(ctx)
+
+	if timeoutFired.Load() {
+		t.Error("timeout waiting for restores registry barrier")
+	}
 
 	// Verify that the 2 blocked sandboxes are restored in the registry!
 	c.mu.Lock()

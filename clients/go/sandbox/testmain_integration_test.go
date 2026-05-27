@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !integration
+//go:build integration
 
 package sandbox
 
 import (
+	"os"
 	"testing"
-
-	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	// Skip goleak checks during live cluster integration tests to prevent
+	// client-go / Kubernetes connection pools from flagging goroutine leaks.
+	os.Exit(m.Run())
 }

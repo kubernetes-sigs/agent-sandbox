@@ -22,7 +22,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	// Skip goleak checks during live cluster integration tests to prevent
-	// client-go / Kubernetes connection pools from flagging goroutine leaks.
+	// Integration build of TestMain: omits goleak verification because
+	// client-go connection pools spawn long-lived goroutines that would
+	// be flagged as leaks.
 	os.Exit(m.Run())
 }

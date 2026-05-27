@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
@@ -83,7 +84,9 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 	}
 
 	if opts.CleanupOnSignal {
-		c.EnableAutoCleanup()
+		// Auto-cleanup stores the stop function internally inside c.cleanupStop,
+		// which will be automatically invoked on Client.Close().
+		_ = c.EnableAutoCleanup()
 	}
 
 	return c, nil
@@ -371,18 +374,34 @@ func (c *Client) Close(ctx context.Context) error {
 		stopFn()
 	}
 
-	return c.deleteAll(ctx)
+	// Use a detached context with CleanupTimeout budget so that best-effort
+	// cleanups are attempted even if the caller's context is already cancelled.
+	// We propagate any active trace context from the caller's context to the detached context.
+	timeout := c.opts.CleanupTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	cleanupCtx := trace.ContextWithSpan(context.Background(), trace.SpanFromContext(ctx))
+	cleanupCtx, cancel := context.WithTimeout(cleanupCtx, timeout)
+	defer cancel()
+
+	return c.deleteAll(cleanupCtx)
 }
 
-// EnableAutoCleanup calls DeleteAll on SIGINT/SIGTERM.
-// Call the returned function to stop the signal handler.
+// EnableAutoCleanup registers SIGINT/SIGTERM listeners to Close the client
+// and delete all tracked sandboxes. Call the returned function to stop
+// the signal handler manually.
+// NOTE: This also registers the stop function internally inside the client,
+// so that calling Client.Close() will automatically stop the handler.
 func (c *Client) EnableAutoCleanup() (stop func()) {
 	c.mu.Lock()
 	if c.closed {
+		c.log.Info("EnableAutoCleanup: ignored because client is already closed")
 		c.mu.Unlock()
 		return func() {}
 	}
 	if c.stopSignal != nil {
+		c.log.Info("EnableAutoCleanup: ignored because signal handler is already active")
 		c.mu.Unlock()
 		return func() {}
 	}

@@ -426,8 +426,9 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				WithScheme(scheme).
 				WithRuntimeObjects(template).
 				Build(),
-			Scheme:       scheme,
-			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Scheme:                 scheme,
+			MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
+			EnableWarmPoolEviction: true,
 		}
 
 		expectedPoolNameHash := sandboxcontrollers.NameHash(poolName)
@@ -452,6 +453,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 			// Verify pod template annotations
 			require.Equal(t, "from-podtemplate", sb.Spec.PodTemplate.ObjectMeta.Annotations["pod-annotation"])
+			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation])
 		}
 	})
 }
@@ -1532,6 +1534,84 @@ func TestSlowStartBatch(t *testing.T) {
 
 			require.Equal(t, tt.expectedSuccess, successes)
 			require.Equal(t, int32(tt.expectedCallCount), callCount.Load())
+		})
+	}
+}
+
+func TestReconcilePool_EvictionOverride(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(1)
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	testCases := []struct {
+		name                string
+		controllerEnable    bool
+		templateAnnotations map[string]string
+		expectEviction      bool
+	}{
+		{
+			name:             "controller true sets eviction annotation",
+			controllerEnable: true,
+			expectEviction:   true,
+		},
+		{
+			name:             "controller false does not set eviction annotation",
+			controllerEnable: false,
+			expectEviction:   false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			warmPool := &extensionsv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: poolNamespace,
+					UID:       "warmpool-uid-123",
+				},
+				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+					Replicas: replicas,
+					TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+						Name: templateName,
+					},
+				},
+			}
+
+			testTemplate := createTemplate(poolNamespace)
+			if tc.templateAnnotations != nil {
+				testTemplate.Spec.PodTemplate.ObjectMeta.Annotations = tc.templateAnnotations
+			}
+
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithRuntimeObjects(testTemplate).
+					Build(),
+				Scheme:                 scheme,
+				MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
+				EnableWarmPoolEviction: tc.controllerEnable,
+			}
+
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			list := &sandboxv1beta1.SandboxList{}
+			err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+			require.NoError(t, err)
+			require.Len(t, list.Items, 1)
+
+			sb := list.Items[0]
+			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]
+			if tc.expectEviction {
+				require.True(t, exists, "expected eviction annotation to exist")
+				require.Equal(t, "true", val)
+			} else {
+				require.False(t, exists, "expected eviction annotation to NOT exist")
+			}
 		})
 	}
 }

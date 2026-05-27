@@ -1608,6 +1608,11 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			Spec: sandboxv1beta1.SandboxSpec{
 				Replicas: &replicas,
 				PodTemplate: sandboxv1beta1.PodTemplate{
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Annotations: map[string]string{
+							warmPoolEvictionAnnotation: "true",
+						},
+					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
@@ -1891,6 +1896,11 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 				if _, exists := adoptedSandbox.Labels[sandboxTemplateRefHash]; exists {
 					t.Errorf("expected template ref label to be removed from adopted sandbox")
+				}
+
+				// Verify eviction annotation was removed
+				if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
+					t.Errorf("expected eviction annotation to be removed from adopted sandbox")
 				}
 
 				// 2. Verify SandboxID label was added to pod template

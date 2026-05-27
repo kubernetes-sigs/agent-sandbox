@@ -136,6 +136,32 @@ type Options struct {
 	// TracerProvider sets the OpenTelemetry TracerProvider for span creation.
 	// If nil, falls back to otel.GetTracerProvider (noop by default).
 	TracerProvider trace.TracerProvider
+
+	// CleanupOnSignal enables automatic cleanup of sandboxes when the program
+	// receives SIGINT or SIGTERM signals, and makes a best-effort attempt to
+	// cleanup on normal program exit.
+	//
+	// Signal handling (SIGINT/SIGTERM): Reliable. When a signal is received,
+	// DeleteAll() is called before the process terminates.
+	//
+	// Normal exit cleanup: Best-effort only. Uses runtime.SetFinalizer to trigger
+	// cleanup when the Client is garbage collected. Because finalizers are not
+	// guaranteed to run (GC timing is non-deterministic), this should not be
+	// relied upon for production code.
+	//
+	// For guaranteed cleanup on normal exit, use defer:
+	//
+	//     ctx := context.Background()
+	//     client, err := sandbox.NewClient(ctx, sandbox.Options{
+	//         CleanupOnSignal: true,
+	//     })
+	//     if err != nil {
+	//         return err
+	//     }
+	//     defer client.DeleteAll(ctx)
+	//
+	// Default: false (no automatic cleanup, preserves backward compatibility)
+	CleanupOnSignal bool
 }
 
 func (o *Options) setDefaults() {

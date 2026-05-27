@@ -20,6 +20,7 @@ import (
 	"maps"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 
@@ -42,9 +43,10 @@ type Client struct {
 	tracer  trace.Tracer
 	svcName string
 
-	mu         sync.Mutex
-	registry   map[Key]*Sandbox
-	stopSignal context.CancelFunc // non-nil when signal handler is active
+	mu             sync.Mutex
+	registry       map[Key]*Sandbox
+	stopSignal     context.CancelFunc // non-nil when signal handler is active
+	cleanupEnabled bool               // tracks whether cleanup has been enabled
 }
 
 // NewClient creates a Client with shared configuration.
@@ -65,14 +67,29 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 
 	tracer, svcName := newTracer(opts)
 
-	return &Client{
+	c := &Client{
 		opts:     opts,
 		k8s:      k8s,
 		log:      opts.Logger,
 		tracer:   tracer,
 		svcName:  svcName,
 		registry: make(map[Key]*Sandbox),
-	}, nil
+	}
+
+	// Enable automatic cleanup if requested
+	if opts.CleanupOnSignal {
+		c.mu.Lock()
+		c.cleanupEnabled = true
+		c.mu.Unlock()
+
+		// Register signal handler for SIGINT/SIGTERM
+		c.EnableAutoCleanup()
+
+		// Register finalizer for best-effort cleanup on normal exit
+		runtime.SetFinalizer(c, (*Client).cleanup)
+	}
+
+	return c, nil
 }
 
 // CreateSandbox provisions a new sandbox and returns a managed handle.
@@ -262,4 +279,18 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 	return func() {
 		cancel()
 	}
+}
+
+// cleanup is called by the runtime finalizer for best-effort cleanup on normal exit.
+// This is not guaranteed to run and should not be relied upon for production code.
+func (c *Client) cleanup() {
+	c.mu.Lock()
+	if !c.cleanupEnabled {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+
+	c.log.V(1).Info("finalizer triggered, attempting cleanup")
+	c.DeleteAll(context.Background())
 }

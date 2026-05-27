@@ -265,6 +265,50 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	stop2()
 }
 
+func TestClientCleanupIdempotent(t *testing.T) {
+	opts := Options{
+		TemplateName:    "test-template",
+		Namespace:       "default",
+		CleanupOnSignal: true,
+		Quiet:           true,
+	}
+
+	opts.setDefaults()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	ctx := context.Background()
+	client, err := NewClient(ctx, opts)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	// Manually call EnableAutoCleanup again (should be safe/idempotent)
+	stop := client.EnableAutoCleanup()
+
+	// Verify cleanup is still enabled (not broken by double-enable)
+	client.mu.Lock()
+	enabled := client.cleanupEnabled
+	client.mu.Unlock()
+
+	if !enabled {
+		t.Error("cleanup should still be enabled after calling EnableAutoCleanup twice")
+	}
+
+	// Clean up signal handlers
+	stop()
+	client.mu.Lock()
+	if client.stopSignal != nil {
+		client.stopSignal()
+	}
+	client.mu.Unlock()
+}
+
 // TestResolveSandboxName_FromClaimStatus verifies the new resolution path.
 func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
@@ -333,4 +377,164 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 	if state.SandboxName != "warm-pool-sandbox-xyz" {
 		t.Errorf("expected warm-pool-sandbox-xyz, got %s", state.SandboxName)
 	}
+}
+
+func TestClientCleanupOnSignalDefault(t *testing.T) {
+	opts := Options{
+		TemplateName: "test-template",
+		Namespace:    "default",
+		Quiet:        true,
+	}
+
+	// Verify CleanupOnSignal defaults to false
+	if opts.CleanupOnSignal {
+		t.Error("CleanupOnSignal should default to false")
+	}
+
+	// Set up with proper K8s clients
+	opts.setDefaults()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	// Create client with default options
+	ctx := context.Background()
+	client, err := NewClient(ctx, opts)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	// Verify cleanup is not enabled
+	client.mu.Lock()
+	enabled := client.cleanupEnabled
+	client.mu.Unlock()
+
+	if enabled {
+		t.Error("cleanup should not be enabled by default")
+	}
+}
+
+func TestClientCleanupOnSignalEnabled(t *testing.T) {
+	opts := Options{
+		TemplateName:    "test-template",
+		Namespace:       "default",
+		CleanupOnSignal: true,
+		Quiet:           true,
+	}
+
+	// Set up with proper K8s clients
+	opts.setDefaults()
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	ctx := context.Background()
+	client, err := NewClient(ctx, opts)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	// Verify cleanup is enabled
+	client.mu.Lock()
+	enabled := client.cleanupEnabled
+	hasStopSignal := client.stopSignal != nil
+	client.mu.Unlock()
+
+	if !enabled {
+		t.Error("cleanup should be enabled when CleanupOnSignal is true")
+	}
+
+	if !hasStopSignal {
+		t.Error("signal handler should be registered when CleanupOnSignal is true")
+	}
+
+	// Clean up signal handler
+	client.mu.Lock()
+	if client.stopSignal != nil {
+		client.stopSignal()
+	}
+	client.mu.Unlock()
+}
+
+func TestClientMultipleClientsIndependent(t *testing.T) {
+	ctx := context.Background()
+
+	// Client 1 with cleanup enabled
+	opts1 := Options{
+		TemplateName:    "test-template",
+		Namespace:       "default",
+		CleanupOnSignal: true,
+		Quiet:           true,
+	}
+	opts1.setDefaults()
+	agentsCS1 := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS1 := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	opts1.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS1.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS1.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+	client1, err := NewClient(ctx, opts1)
+	if err != nil {
+		t.Fatalf("NewClient 1 failed: %v", err)
+	}
+
+	// Client 2 with cleanup disabled
+	opts2 := Options{
+		TemplateName:    "test-template",
+		Namespace:       "default",
+		CleanupOnSignal: false,
+		Quiet:           true,
+	}
+	opts2.setDefaults()
+	agentsCS2 := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS2 := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	opts2.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS2.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS2.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+	client2, err := NewClient(ctx, opts2)
+	if err != nil {
+		t.Fatalf("NewClient 2 failed: %v", err)
+	}
+
+	// Verify client 1 has cleanup enabled
+	client1.mu.Lock()
+	enabled1 := client1.cleanupEnabled
+	client1.mu.Unlock()
+
+	if !enabled1 {
+		t.Error("client 1 should have cleanup enabled")
+	}
+
+	// Verify client 2 does not have cleanup enabled
+	client2.mu.Lock()
+	enabled2 := client2.cleanupEnabled
+	client2.mu.Unlock()
+
+	if enabled2 {
+		t.Error("client 2 should not have cleanup enabled")
+	}
+
+	// Clean up signal handlers
+	client1.mu.Lock()
+	if client1.stopSignal != nil {
+		client1.stopSignal()
+	}
+	client1.mu.Unlock()
+
+	client2.mu.Lock()
+	if client2.stopSignal != nil {
+		client2.stopSignal()
+	}
+	client2.mu.Unlock()
 }

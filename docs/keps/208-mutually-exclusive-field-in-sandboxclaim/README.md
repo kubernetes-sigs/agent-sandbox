@@ -2,12 +2,12 @@
 - [KEP-0208: Resolving Mutually Exclusive Fields in SandboxClaim for Beta](#kep-0208-resolving-mutually-exclusive-fields-in-sandboxclaim-for-beta)
   - [Motivation](#motivation)
   - [Preferred Solution](#preferred-solution)
-      - [Pure TemplateRef and remove <code>WarmPoolPolicy</code> field. <em>Preferred</em>](#pure-templateref-and-remove-warmpoolpolicy-field-preferred)
+      - [Pure WarmPoolRef and remove <code>TemplateRef</code> field. <em>Preferred</em>](#pure-warmpoolref-and-remove-templateref-field-preferred)
       - [Impact and Migration](#impact-and-migration)
-      - [Controller Implementation Details (Implicit Warm Pool Adoption)](#controller-implementation-details-implicit-warm-pool-adoption)
+      - [Controller Implementation Details](#controller-implementation-details)
   - [Alternatives Considered](#alternatives-considered)
     - [Option 1: Keep Schema as is and perform API validation](#option-1-keep-schema-as-is-and-perform-api-validation)
-    - [Option 2: Pure WarmPoolRef and remove <code>TemplateRef</code> field.](#option-2-pure-warmpoolref-and-remove-templateref-field)
+    - [Option 2: Pure TemplateRef and remove <code>WarmPoolPolicy</code> field.](#option-2-pure-templateref-and-remove-warmpoolpolicy-field)
     - [Option 3: Union Model (oneOf)](#option-3-union-model-oneof)
 <!-- /toc -->
 # KEP-0208: Resolving Mutually Exclusive Fields in SandboxClaim for Beta
@@ -25,67 +25,85 @@ Before we even implement #2, I think we should decide if it is even worth having
 
 ## Preferred Solution
 
-#### Pure TemplateRef and remove `WarmPoolPolicy` field. *Preferred*
+#### Pure WarmPoolRef and remove `TemplateRef` field.
 
-The user only provides a template reference in `SandboxClaim` spec. The concept of "warm pools" is entirely hidden from the end-user API. The controller automatically looks under the hood to see if a matching warm pool has an available sandbox; if it does, it grabs it, and if it doesn't, it falls back to a cold start. The concept of warm-pool is essentially an implementation detail for the sandbox claim controller.
+The user only provides a warm pool reference in `SandboxClaim` spec. The concept of "template" is hidden from the end-user API when claiming a sandbox. The controller looks at the specified warm pool to adopt a sandbox. 
+
+1. If the warmpool is empty, it falls back to a cold start using the template configured in the warmpool. 
+2. If the user explicitly wants a cold start, they can set `forceColdStart: true` in the claim and the Sandbox will be created based on the template configured in the warmpool.
+3. If a user provides custom environment variables, they must set `forceColdStart: true` to provision a Sandbox from scratch, otherwise the controller will reject the claim.
+4. If the warmpool has been deleted by the cluster admin, the claim controller will throw a permanent failure error.
 
 ```go
 type SandboxClaimSpec struct {
-	// Warm pool routing happens entirely implicitly behind the scenes based on the template's configuration.
+	// WarmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
 	// +required
-	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
+	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
+
+	// ForceColdStart, when true, bypasses the warm pool queue and explicitly 
+	// provisions a fresh sandbox using the pool's underlying template.
+	// This is required if injecting custom Env variables into a fresh instance.
+	// +optional
+	ForceColdStart bool `json:"forceColdStart,omitempty"`
+
+	// env is a list of environment variables to inject into the sandbox
+	// +listType=atomic
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
 }
 
-// SandboxTemplateRef references a SandboxTemplate.
-type SandboxTemplateRef struct {
-	// name of the SandboxTemplate
+// SandboxWarmPoolRef references a SandboxWarmPool.
+type SandboxWarmPoolRef struct {
+	// name of the SandboxWarmPool
 	// +required
 	Name string `json:"name,omitempty"`
 }
 ```
 
 **Pros:**
-* **Cleanest End-User UX:** The user-facing API is incredibly lean. End-users just ask for an application runtime and do not concern themselves with the operational mechanics.
-* **Zero Configuration Conflicts**: Impossible for a user to create a mismatch (e.g., asking for Template A but pointing to a pool running Template B).
+* **Clean Schema Contract**: The cleanest possible developer experience for teams using pre-warmed infrastructure. The user says, "Give me an environment out of the premium `data-science` pool," and they don't have to manage underlying templates. 
+* **Predictable Infrastructure Allocation**: Simplifies allocation calculations by mapping claims strictly into finite pool groupings. 
+* **Avoids Ambiguity**: Resolves the mutually exclusive fields problem elegantly.
 
 **Cons:**
-* **Loss of Priority Control**: Power users cannot explicitly guarantee their workload hits a premium, ultra-fast warm pool. Everything relies on the controller's internal scheduling logic. *Although, if the users need this feature today they can do it by creating a different template name per warmpool*.
-* **Opaque Debugging**: If a user gets a slow "cold start," it is harder for them to diagnose why from looking at their own manifest, since the pool state is completely abstracted away. 
+* **Platform Team Bottleneck**: Developers cannot test a brand-new template directly; they must first create a `SandboxWarmPool` to wrap the template. This adds friction if pool creation requires elevated permissions.
+* **Cascade Latency**: Reconciliations are delayed by an extra step. A template update must finish updating the warm pool before the claim controller even gets notified that its sandbox needs to be rolled over.
 
 #### Impact and Migration
 
-Adopting the preferred solution (removing the `WarmPoolPolicy` field) simplifies the API but introduces shifts in how users and the system interact. The impact and migration paths for the three primary scenarios are:
+Adopting the preferred solution (removing the `TemplateRef` field) simplifies the API but introduces shifts in how users and the system interact. The impact and migration paths for the primary scenarios are:
 
 *   **Scenario A: Targeting a specific warm pool (`warmpool: "my-fast-pool"`)**
-    *   **Impact:** Users can no longer explicitly target a specific warm pool from the claim if multiple pools use the same template. The controller's selection becomes non-deterministic to the user.
-    *   **Migration:** Users must adopt a 1:1 mapping between `SandboxTemplate` and `SandboxWarmPool` (e.g., creating `SandboxTemplate-fast` and `SandboxTemplate-slow`). The user dictates the pool implicitly by requesting the specific template.
+    * **Impact:** Users will specify `warmPoolRef.name: "my-fast-pool"`. The `TemplateRef` and `WarmPoolPolicy` fields are completely removed.
+    * **Migration:** Replace `templateRef` and `warmpool` policy fields with the single `warmPoolRef` field.
 
-*   **Scenario B: Explicitly requesting a cold start (`warmpool: "none"`)**
-    *   **Impact:** Users testing initialization logic or requiring a strictly fresh environment can no longer bypass warm pools using a `SandboxClaim` if a matching pool exists.
-    *   **Migration:** The user must bypass the `SandboxClaim` API entirely and directly provision a `Sandbox` resource to guarantee a cold start. If a customer really need to provide a support for disabling a warmpool, we can provide an optional `spec.disableWarmpool` option to support this usecase later.
+*   **Scenario B: Explicitly requesting a cold start (`warmpool: "none"`) from a template**
+    * **Impact:** The `warmpool: "none"` option is no longer supported directly on the claim.
+    * **Migration:** Users can point to an existing `SandboxWarmPool` and set `forceColdStart: true` in their claim to explicitly bypass the warm pool queue and get a fresh sandbox. If they are testing a completely new template, they must first create a `SandboxWarmPool` (e.g., with `replicas: 0`) referencing that template.
 
-*   **Scenario C: Environment Variable Injection (Customizing the Sandbox)**
-    *   **Impact:** Custom environment variables cannot be injected into an already-running warm pool Sandbox. Currently, the controller enforces this by rejecting claims with `Env` vars unless they explicitly opt out of warm pools.
-    *   **Migration:** The presence of custom environment variables (`len(claim.Spec.Env) > 0`) will now act as an *implicit* cold-start signal. The controller will automatically bypass the warm pool queue and route the request to provision a fresh Sandbox, removing a leaky abstraction and improving the user experience.
+*   **Scenario C: Default behavior / Implicit warm pool discovery (`warmpool: "default"` or omitted)**
+    *   **Impact:** Users can no longer rely on the controller to automatically discover and select an arbitrary warm pool based solely on a template reference. The implicit "default" discovery mechanism is removed.
+    *   **Migration:** Users must explicitly specify the exact warm pool they want to draw from using `warmPoolRef.name`.
 
+*   **Scenario D: Environment Variable Injection (Customizing the Sandbox)**
+    *   **Impact:** The system no longer relies on implicit magic or implicit cold-starts. Providing `Env` vars directly into a warm pool adoption is blocked.
+    *   **Migration:** If users inject custom `Env` variables, they must explicitly set `forceColdStart: true`. If `Env` variables are provided but `forceColdStart` is false, the admission webhook will immediately reject the claim with the error: "Custom environment variables require forceColdStart to be true."
 
-#### Controller Implementation Details (Implicit Warm Pool Adoption)
+#### Controller Implementation Details
 
 The controller logic will change as follows:
 
-1. **Implicit Cold Start Detection (Bypassing the Queue):**
-   Before touching any queues, the controller first inspects the `SandboxClaim` spec. If the claim contains custom environment variables (`len(claim.Spec.Env) > 0`), it knows it cannot inject these into an already-running pod. The controller immediately bypasses the warm pool queue and routes the request to a cold start.
+1. **Warm Pool Existence Check:**
+   The controller first looks up the `SandboxWarmPool` referenced in the claim's `warmPoolRef`. If the pool doesn't exist, it errors out immediately.
 
-2. **Querying the Cache by Template:**
-   If the claim is eligible for adoption, the controller no longer looks up a specific pool name. Instead, it queries its local cache (using an indexer on the `.spec.sandboxTemplateRef.name` field) for *all* `SandboxWarmPool` resources that match the claim's `TemplateRef`.
+2. **Explicit Cold Start Detection (Bypassing the Queue):**
+   If `claim.Spec.ForceColdStart` is `true`, the controller immediately bypasses the warm pool queue. It fetches the `SandboxTemplate` associated with the pool and routes the request directly to a cold start. Additionally, controller will enforce that if `len(claim.Spec.Env) > 0`, `ForceColdStart` must be `true`.
 
 3. **Queue Evaluation and Adoption:**
-   Based on the cache query results, the controller executes the following logic:
-   * **No matching pool found:** The controller proceeds to a cold start, creating a new `Sandbox` directly from the `SandboxTemplate`.
-   * **One matching pool found:** The controller checks the pool's queue of available, unadopted Sandboxes.
-     * If the queue has available Sandboxes, it pops one off the queue, adds the adoption labels/owner references linking it to the claim, and updates the pool's status.
-     * If the queue is empty (all warm Sandboxes are claimed or initializing), the controller falls back to a cold start to satisfy the claim immediately rather than waiting.
-   * **Multiple matching pools found (Edge Case):** Because users can no longer explicitly specify a pool name, multiple warm pools might reference the same template. The controller will use a deterministic tie-breaker (e.g., picking the pool with the highest number of ready replicas) to decide which queue to pop from first.
+   Because the claim no longer natively provides a template reference, the internal in-memory queue (`SimpleSandboxQueue`) will be refactored to use the `SandboxWarmPool`'s Name (or UID) as its primary routing key instead of the `TemplateRef` hash. When a claim is eligible:
+   * The controller performs a direct O(1) lookup against the specific warm pool's queue.
+   * If the queue has available Sandboxes, it pops one off the queue, assigns ownership to the claim, and updates the adoption labels (bypassing slow API list operations).
+   * If the queue is empty (all warm Sandboxes are claimed, initializing, or the pool size is 0), this empty return acts as the exact trigger for the fallback policy. The controller dynamically provisions a new `Sandbox` from scratch directly using the `SandboxTemplate` associated with the pool.
 
 ## Alternatives Considered 
 
@@ -133,36 +151,32 @@ type SandboxClaimSpec struct {
 * **Schema Redundancy**: The end-user has to provide both the template and the pool name, which can look slightly repetitive since the warm pool technically already knows its template.
 * **Active Code Overhead**: The eng team must maintain the validation logic inside the controller reconcile loop (or a validating webhook) to catch and reject mismatched specs.
 
-### Option 2: Pure WarmPoolRef and remove `TemplateRef` field. 
+### Option 2: Pure TemplateRef and remove WarmPoolPolicy field.
 
-Strictly speaking the existence of `SandboxClaim` is very closely tied to `SandboxWarmPool`. Claiming a sandbox without a warmpool is the same as creating a new Sandbox from scratch. We also currently cannot claim a sandbox from a warmpool if it is in a suspended state. `Suspend` and `Resume` can only work in `Sandbox` and has no meaning in the context of a `SandboxClaim` as well. So it is worth thinking if it actually makes sense to tie `SandboxClaim` and `SandboxWarmPool` together.
-
-To do this, we can have the `SandboxClaim` watch against the `SandboxWarmPool` instead of the `SandboxTemplate` and we remove the `SandboxTemplateRef` field entirely from the claim. This means the `SandboxClaim` now entirely depends on `SandboxWarmPool`. A sandbox can now only be claimed from a warmpool. To retain the ability for a fallback cold-start, we have to go through two hoops to figure out the template ref associated with the warmpool to create a sandbox from scratch.
-
-To support the other scenario, i.e create a sandbox easily from a template which isn't configured to any warmpool, we can create a new CRD like `SandboxTemplateClaim` which allows the user for easy creation of Sandboxes. Although this comes with it's own overhead to manage the controller and API surface area expansion.
+The user only provides a template reference in `SandboxClaim` spec. The concept of "warm pools" is entirely hidden from the end-user API. The controller automatically looks under the hood to see if a matching warm pool has an available sandbox; if it does, it grabs it, and if it doesn't, it falls back to a cold start. The concept of warm-pool is essentially an implementation detail for the sandbox claim controller. 
 
 ```go
 type SandboxClaimSpec struct {
-	// WarmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
-	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
+	// Warm pool routing happens entirely implicitly behind the scenes based on the template's configuration.
+	// +required
+	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
 }
 
-// SandboxWarmPoolRef references a SandboxWarmPool.
-type SandboxWarmPoolRef struct {
-	// name of the SandboxWarmPool
+// SandboxTemplateRef references a SandboxTemplate.
+type SandboxTemplateRef struct {
+	// name of the SandboxTemplate
 	// +required
 	Name string `json:"name,omitempty"`
 }
 ```
 
 **Pros:**
-* **Clean Schema Contract**: The cleanest possible developer experience for teams using pre-warmed infrastructure. The user says, "Give me an environment out of the premium data-science pool," and they don't have to manage underlying templates.
-* **Predictable Infrastructure Allocation:** Simplifies allocation calculations by mapping claims strictly into finite pool groupings.
+* **Clean End-User UX**: The user-facing API is lean. End-users just ask for an application runtime and do not concern themselves with the operational mechanics. 
+* **Zero Configuration Conflicts**: Impossible for a user to create a mismatch (e.g., asking for Template A but pointing to a pool running Template B).
 
 **Cons:**
-* **The "Cold Start" Dependency Risk**: If `premium-pool` is accidentally hard-deleted by an administrator, the SandboxClaims are blinded. Because the template isn't written directly on the claim, the controller cannot fall back to a dynamic cold start out of empty air if the pool resource itself ceases to exist in the cluster state.
-
-* **Cascade Latency**: Reconciliations are delayed by an extra step. A template update must finish updating the warm pool before the claim controller even gets notified that its sandbox needs to be rolled over.
+* **Loss of Priority Control:** Power users cannot explicitly guarantee their workload hits a premium, ultra-fast warm pool. Everything relies on the controller's internal scheduling logic. 
+* **Opaque Debugging**: If a user gets a slow "cold start," it is harder for them to diagnose why from looking at their own manifest, since the pool state is completely abstracted away.
 
 ### Option 3: Union Model (oneOf)
 

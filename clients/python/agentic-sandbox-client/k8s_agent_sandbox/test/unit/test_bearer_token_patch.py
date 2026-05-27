@@ -47,15 +47,7 @@ class FakeConfiguration:
         cls._default = c
 
 
-class FakeClientModule:
-    def __init__(self):
-        self.Configuration = FakeConfiguration
 
-    def set_default(self, c):
-        self.Configuration.set_default(c)
-
-    def get_default_copy(self):
-        return self.Configuration.get_default_copy()
 
 
 class TestBearerTokenPatch(unittest.TestCase):
@@ -89,7 +81,6 @@ class TestBearerTokenPatch(unittest.TestCase):
         self.assertEqual(config.api_key_prefix["BearerToken"], "Bearer")
 
     def test_patch_k8s_config_wraps_refresh_hook_and_avoids_nesting(self):
-        client_module = FakeClientModule()
         config = FakeConfiguration()
         
         # Original refresh hook
@@ -99,31 +90,26 @@ class TestBearerTokenPatch(unittest.TestCase):
             mock_orig_hook(cfg)
         
         config.refresh_api_key_hook = orig_hook
-        client_module.set_default(config)
 
         # First patch
-        patch_k8s_config(client_module)
-        patched_config = client_module.get_default_copy()
+        patch_k8s_config(config)
+        first_hook = config.refresh_api_key_hook
         
-        self.assertIsNotNone(patched_config.refresh_api_key_hook)
-        self.assertNotEqual(patched_config.refresh_api_key_hook, orig_hook)
+        self.assertIsNotNone(first_hook)
+        self.assertNotEqual(first_hook, orig_hook)
 
         # Trigger refresh hook and verify it syncs BearerToken
         test_cfg = FakeConfiguration()
         test_cfg.api_key = {"authorization": "old-token"}
-        patched_config.refresh_api_key_hook(test_cfg)
+        first_hook(test_cfg)
         
         mock_orig_hook.assert_called_once_with(test_cfg)
         self.assertEqual(test_cfg.api_key["authorization"], "refreshed-token")
         self.assertEqual(test_cfg.api_key["BearerToken"], "refreshed-token")
 
         # Second patch - should NOT wrap again
-        second_hook = patched_config.refresh_api_key_hook
-        client_module.set_default(patched_config)
-        patch_k8s_config(client_module)
-        
-        third_config = client_module.get_default_copy()
-        self.assertEqual(third_config.refresh_api_key_hook, second_hook)
+        patch_k8s_config(config)
+        self.assertEqual(config.refresh_api_key_hook, first_hook)
 
     def test_sync_bearer_token_empty_config(self):
         config = FakeConfiguration()
@@ -132,14 +118,11 @@ class TestBearerTokenPatch(unittest.TestCase):
         self.assertEqual(config.api_key_prefix, {})
 
     def test_patch_k8s_config_with_none_hook(self):
-        client_module = FakeClientModule()
         config = FakeConfiguration()
         config.refresh_api_key_hook = None
-        client_module.set_default(config)
 
-        patch_k8s_config(client_module)
-        patched_config = client_module.get_default_copy()
-        self.assertIsNone(patched_config.refresh_api_key_hook)
+        patch_k8s_config(config)
+        self.assertIsNone(config.refresh_api_key_hook)
 
     def test_sync_bearer_token_when_both_keys_exist_but_differ_after_refresh(self):
         config = FakeConfiguration()
@@ -189,7 +172,6 @@ class TestBearerTokenPatch(unittest.TestCase):
         self.assertEqual(getattr(config, "_last_known_bearer_token"), "new-token")
 
     def test_patch_k8s_config_pre_synchronizes_before_refresh_hook_execution(self):
-        client_module = FakeClientModule()
         config = FakeConfiguration()
         config.api_key["authorization"] = "pre-hook-token"
 
@@ -202,21 +184,17 @@ class TestBearerTokenPatch(unittest.TestCase):
             cfg.api_key["authorization"] = "post-hook-token"
 
         config.refresh_api_key_hook = orig_hook
-        client_module.set_default(config)
 
-        patch_k8s_config(client_module)
-        patched_config = client_module.get_default_copy()
+        patch_k8s_config(config)
+        patched_hook = config.refresh_api_key_hook
 
         test_cfg = FakeConfiguration()
         test_cfg.api_key = {"authorization": "pre-hook-token"}
-        patched_config.refresh_api_key_hook(test_cfg)
+        patched_hook(test_cfg)
 
         self.assertTrue(hook_called)
         self.assertEqual(test_cfg.api_key["authorization"], "post-hook-token")
         self.assertEqual(test_cfg.api_key["BearerToken"], "post-hook-token")
-
-
-
 
 if __name__ == '__main__':
     unittest.main()

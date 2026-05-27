@@ -139,6 +139,37 @@ spec:
     # Copy files
     subprocess.run(["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--", "mkdir", "-p", "/app"], check=True, env=env, timeout=30)
     
+    # Ensure tar is available in the pod container (required for kubectl cp / tar pipelines)
+    print("Checking if tar is installed in the pod...")
+    check_tar = subprocess.run(
+        ["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--", "which", "tar"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    if check_tar.returncode != 0:
+        print("tar not found in the pod container. Attempting self-healing install via apt-get...")
+        try:
+            subprocess.run(
+                ["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--", "apt-get", "update"],
+                check=True,
+                env=env,
+                timeout=60,
+            )
+            subprocess.run(
+                ["kubectl", "exec", "-n", temp_namespace, "py-sdk-incluster-test", "--", "apt-get", "install", "-y", "tar"],
+                check=True,
+                env=env,
+                timeout=60,
+            )
+            print("tar successfully installed in the pod container!")
+        except Exception as e:
+            raise RuntimeError(
+                f"tar command is missing in the pod container, and self-healing installation failed. "
+                f"E2E files copy cannot proceed. Error: {e}"
+            ) from e
+    
     # Copy SDK directory recursively by tar-ing it (standard work-around for copying whole dirs with kubectl) using safe pipelining
     tar_proc = subprocess.Popen(
         ["tar", "-cf", "-", "-C", str(SDK_PATH), "."],

@@ -37,12 +37,14 @@ class K8sHelper:
             config.load_incluster_config()
         except config.ConfigException:
             config.load_kube_config()
+        c = client.Configuration.get_default_copy()
         # Import patch utility and keep token keys in sync for v36.0.0+ support
         from .utils import patch_k8s_config
-        patch_k8s_config(client)
+        patch_k8s_config(c)
 
-        self.custom_objects_api = client.CustomObjectsApi()
-        self.core_v1_api = client.CoreV1Api()
+        self.api_client = client.ApiClient(configuration=c)
+        self.custom_objects_api = client.CustomObjectsApi(self.api_client)
+        self.core_v1_api = client.CoreV1Api(self.api_client)
 
     def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
         """Creates a SandboxClaim custom resource."""

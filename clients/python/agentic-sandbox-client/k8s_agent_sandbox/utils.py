@@ -14,9 +14,7 @@
 
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-import threading
 
-_patch_lock = threading.Lock()
 
 
 def _safe_setattr(obj, attr, val):
@@ -114,39 +112,34 @@ def _sync_k8s_bearer_token(config_obj):
         sync_dict(config_obj.api_key_prefix, "_last_known_bearer_token_prefix")
 
 
-def patch_k8s_config(client_module):
-    """Patches the active default configuration and refresh hook of a Kubernetes client module to keep token keys synchronized."""
-    if not hasattr(client_module, "Configuration"):
+def patch_k8s_config(c):
+    """Patches a specific Configuration instance to keep token keys synchronized."""
+    if c is None:
         return
-    with _patch_lock:
-        try:
-            c = client_module.Configuration.get_default_copy()
-            if c is None:
-                return
-            if getattr(c, "_is_patched_for_bearer_token", False):
-                return
-            orig_hook = c.refresh_api_key_hook
-            if orig_hook is not None and getattr(orig_hook, "_is_patched_for_bearer_token", False):
-                return
+    if getattr(c, "_is_patched_for_bearer_token", False):
+        return
+    orig_hook = c.refresh_api_key_hook
+    if orig_hook is not None and getattr(orig_hook, "_is_patched_for_bearer_token", False):
+        return
 
-            _sync_k8s_bearer_token(c)
-            if orig_hook is not None:
-                @wraps(orig_hook)
-                def new_hook(cfg):
+    try:
+        _sync_k8s_bearer_token(c)
+        if orig_hook is not None:
+            @wraps(orig_hook)
+            def new_hook(cfg):
+                _sync_k8s_bearer_token(cfg)
+                try:
+                    orig_hook(cfg)
+                finally:
                     _sync_k8s_bearer_token(cfg)
-                    try:
-                        orig_hook(cfg)
-                    finally:
-                        _sync_k8s_bearer_token(cfg)
-                new_hook._is_patched_for_bearer_token = True
-                c.refresh_api_key_hook = new_hook
+            new_hook._is_patched_for_bearer_token = True
+            c.refresh_api_key_hook = new_hook
 
-            _safe_setattr(c, "_is_patched_for_bearer_token", True)
-            client_module.Configuration.set_default(c)
-        except Exception:
-            import logging
-            logging.warning(
-                "Failed to patch default Kubernetes configuration; bearer token compatibility workaround was not applied.",
-                exc_info=True,
-            )
+        _safe_setattr(c, "_is_patched_for_bearer_token", True)
+    except Exception:
+        import logging
+        logging.warning(
+            "Failed to patch default Kubernetes configuration; bearer token compatibility workaround was not applied.",
+            exc_info=True,
+        )
 

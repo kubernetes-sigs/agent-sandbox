@@ -467,6 +467,33 @@ func TestSnapshotEngine_Create_EmptyPodName(t *testing.T) {
 	if resp.Success {
 		t.Error("expected failure when pod name is empty")
 	}
+	if !strings.Contains(resp.ErrorReason, "not yet available") {
+		t.Errorf("expected 'not yet available' in error reason, got %q", resp.ErrorReason)
+	}
+}
+
+func TestSnapshotEngine_Create_PodNameError(t *testing.T) {
+	dynCS := newDynClient()
+	eng := &SnapshotEngine{
+		namespace: "default",
+		dynClient: dynCS,
+		log:       logr.Discard(),
+		getPodName: func(_ context.Context) (string, error) {
+			return "", fmt.Errorf("pod lookup failed")
+		},
+		getSandboxNameHash: func(_ context.Context) (string, error) { return "abc123", nil },
+	}
+
+	resp := eng.Create(context.Background(), "test", 5*time.Second)
+	if resp.Success {
+		t.Error("expected failure when getPodName returns error")
+	}
+	if !strings.Contains(resp.ErrorReason, "failed to get pod name") {
+		t.Errorf("expected 'failed to get pod name' in error reason, got %q", resp.ErrorReason)
+	}
+	if !strings.Contains(resp.ErrorReason, "pod lookup failed") {
+		t.Errorf("expected underlying error text in reason, got %q", resp.ErrorReason)
+	}
 }
 
 func TestSnapshotEngine_Create_APIError(t *testing.T) {

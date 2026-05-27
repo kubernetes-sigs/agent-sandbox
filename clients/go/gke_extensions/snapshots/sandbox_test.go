@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,12 +240,21 @@ func TestResolveSandboxNameHash_EmptySelector(t *testing.T) {
 	agentsCS := makeAgentsClientset(sb)
 	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
-	hash, err := wrapper.resolveSandboxNameHash(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := wrapper.resolveSandboxNameHash(context.Background())
+	if err == nil {
+		t.Error("expected error when status.selector is empty")
 	}
-	if hash != "" {
-		t.Errorf("expected empty hash, got %q", hash)
+}
+
+func TestResolveSandboxNameHash_ErrorOnMalformedSelector(t *testing.T) {
+	// Selector contains the wrong label key; expected label is absent.
+	sb := makeSandbox(1, "some-other-label=abc123")
+	agentsCS := makeAgentsClientset(sb)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+
+	_, err := wrapper.resolveSandboxNameHash(context.Background())
+	if err == nil {
+		t.Error("expected error when selector does not contain the expected label")
 	}
 }
 
@@ -391,16 +401,17 @@ func TestResume_ScalesUpAndWaitsForReady(t *testing.T) {
 }
 
 func TestSuspend_FailsWhenHashNotResolvable(t *testing.T) {
-	// Sandbox CR has empty selector → hash unavailable.
+	// Sandbox CR has empty selector → resolveSandboxNameHash returns an error.
 	sb := makeSandbox(1, "")
 	agentsCS := makeAgentsClientset(sb)
 	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
 	resp := wrapper.Suspend(context.Background(), false, 5*time.Second)
-	// Empty hash is allowed (returns "" without error); suspend should still
-	// proceed unless the hash lookup itself errors.
-	if resp.ErrorCode != SuccessCode {
-		t.Errorf("expected SuccessCode, got %d: %s", resp.ErrorCode, resp.ErrorReason)
+	if resp.Success {
+		t.Error("expected failure when sandbox-name-hash cannot be resolved")
+	}
+	if resp.ErrorCode != ErrorCode {
+		t.Errorf("expected ErrorCode, got %d", resp.ErrorCode)
 	}
 }
 
@@ -567,6 +578,25 @@ func TestResume_SetReplicasError(t *testing.T) {
 	resp := wrapper.Resume(context.Background(), 5*time.Second)
 	if resp.Success {
 		t.Error("expected failure when setReplicas returns error")
+	}
+}
+
+func TestResume_FailsWhenListFails(t *testing.T) {
+	// Sandbox is suspended (replicas=0) but has empty selector → List will fail
+	// because resolveSandboxNameHash returns an error.
+	sb := makeSandbox(0, "")
+	agentsCS := makeAgentsClientset(sb)
+	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
+
+	resp := wrapper.Resume(context.Background(), 5*time.Second)
+	if resp.Success {
+		t.Error("expected failure when snapshot list fails")
+	}
+	if resp.ErrorCode != ErrorCode {
+		t.Errorf("expected ErrorCode, got %d", resp.ErrorCode)
+	}
+	if !strings.Contains(resp.ErrorReason, "failed to list snapshots") {
+		t.Errorf("expected 'failed to list snapshots' in reason, got %q", resp.ErrorReason)
 	}
 }
 
@@ -758,28 +788,25 @@ func TestResolveSandboxNameHash_CacheHitSkipsAPICall(t *testing.T) {
 	}
 }
 
-// TestSuspend_CtxCancelledBeforeHashResolve verifies Suspend exits with error
-// when the sandbox CR does not exist (which triggers hash resolution failure).
+// TestSuspend_CtxCancelledBeforeHashResolve verifies Suspend exits quickly when
+// hash resolution fails (empty selector) regardless of ctx cancellation state.
 func TestSuspend_CtxCancelledBeforeHashResolve(t *testing.T) {
-	// Sandbox is running (replicas=1) but no CR → hash resolution fails.
+	// Sandbox is running (replicas=1) with empty selector → resolveSandboxNameHash
+	// returns an error immediately, causing Suspend to fail fast.
 	sb := makeSandbox(1, "")
 	agentsCS := makeAgentsClientset(sb)
-
-	// Replace the sandbox so hash resolution fails (empty selector → returns "").
 	wrapper := newTestSandboxWrapper(agentsCS, newTestDynClient(), fakekube.NewSimpleClientset())
 
-	// The empty selector means hash = "" — Suspend should succeed (no error from hash
-	// resolution itself, since "" is a valid "not found" return). Test the overall
-	// control flow: when already-cancelled ctx is passed, IsSuspended should still
-	// work via the fake client which ignores ctx cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
 
-	// With a pre-cancelled context Suspend may or may not fail depending on how
-	// the fake client handles it; the key invariant we verify is that it does not hang.
 	start := time.Now()
-	_ = wrapper.Suspend(ctx, false, 10*time.Millisecond)
+	resp := wrapper.Suspend(ctx, false, 10*time.Millisecond)
 	if time.Since(start) > 2*time.Second {
 		t.Error("Suspend blocked too long with a cancelled context")
+	}
+	// Suspend must fail: either hash resolution error or ctx-cancelled IsSuspended.
+	if resp.Success {
+		t.Error("expected Suspend to fail when hash cannot be resolved")
 	}
 }

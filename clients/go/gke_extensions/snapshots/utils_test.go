@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -433,6 +434,32 @@ func TestExtractSnapshotResult_Failed(t *testing.T) {
 	}
 }
 
+func TestExtractSnapshotResult_EmptyUID(t *testing.T) {
+	// Triggered=True/Complete but snapshotCreated.name is absent.
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"status": map[string]any{
+				// snapshotCreated intentionally omitted
+				"conditions": []any{
+					map[string]any{
+						"type":               "Triggered",
+						"status":             "True",
+						"reason":             "Complete",
+						"lastTransitionTime": "2026-01-01T00:00:00Z",
+					},
+				},
+			},
+		},
+	}
+	_, err := extractSnapshotResult(obj)
+	if err == nil {
+		t.Error("expected error when snapshotCreated.name is empty")
+	}
+	if err == errNotYetComplete {
+		t.Error("expected a real error, not errNotYetComplete")
+	}
+}
+
 func TestExtractSnapshotResult_NotYetComplete(t *testing.T) {
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -513,6 +540,95 @@ func TestDrainDeletionWatch_ContextCancelled(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWaitForSnapshotDeletion_WatchPath(t *testing.T) {
+	snap := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
+			"kind":       "PodSnapshot",
+			"metadata":   map[string]any{"name": "snap-1", "namespace": "default"},
+		},
+	}
+	dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{snapshotGVR: "PodSnapshotList"},
+		snap,
+	)
+
+	snapWatcher := watch.NewFake()
+	dynCS.PrependWatchReactor("podsnapshots", func(_ ktesting.Action) (bool, watch.Interface, error) {
+		go func() { snapWatcher.Delete(snap) }()
+		return true, snapWatcher, nil
+	})
+
+	err := waitForSnapshotDeletion(context.Background(), dynCS, "default", "snap-1", 5*time.Second, logr.Discard())
+	if err != nil {
+		t.Errorf("expected nil error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// waitForSnapshotDeletion — additional paths
+// ---------------------------------------------------------------------------
+
+func TestWaitForSnapshotDeletion_AlreadyDeleted(t *testing.T) {
+	// Object does not exist at all; initial Get() returns 404 → fast-path nil.
+	dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{snapshotGVR: "PodSnapshotList"},
+	)
+
+	err := waitForSnapshotDeletion(context.Background(), dynCS, "default", "snap-1", 5*time.Second, logr.Discard())
+	if err != nil {
+		t.Errorf("expected nil error for already-deleted snapshot, got: %v", err)
+	}
+}
+
+func TestWaitForSnapshotDeletion_DeletedBeforeWatch(t *testing.T) {
+	// Simulate the TOCTOU race: snapshot exists when the initial Get() runs, but
+	// is deleted before the Watch fires any event. The watch channel closes without
+	// a DELETED event. The fix re-checks with Get() after the watch closes and finds
+	// 404, so it returns nil instead of re-establishing an endless watch loop.
+	//
+	// The reactor mutex prevents calling Delete() inside a watch reactor, so we
+	// simulate the deletion by having the second Get() call return NotFound.
+	snap := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,
+			"kind":       "PodSnapshot",
+			"metadata":   map[string]any{"name": "snap-1", "namespace": "default"},
+		},
+	}
+	dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{snapshotGVR: "PodSnapshotList"},
+		snap,
+	)
+
+	// First Get() (initial existence check) passes through to the fake store.
+	// Second Get() (post-watch-close re-check) returns NotFound to simulate the race.
+	getCallCount := 0
+	dynCS.PrependReactor("get", "podsnapshots", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		getCallCount++
+		if getCallCount <= 1 {
+			return false, nil, nil // let default handler return the snap
+		}
+		return true, nil, k8serrors.NewNotFound(snapshotGVR.GroupResource(), "snap-1")
+	})
+
+	// Watch closes immediately with no DELETED event.
+	dynCS.PrependWatchReactor("podsnapshots", func(_ ktesting.Action) (bool, watch.Interface, error) {
+		w := watch.NewFake()
+		go func() { w.Stop() }()
+		return true, w, nil
+	})
+
+	err := waitForSnapshotDeletion(context.Background(), dynCS, "default", "snap-1", 5*time.Second, logr.Discard())
+	if err != nil {
+		t.Errorf("expected nil when snapshot was deleted before watch fired, got: %v", err)
+	}
+}
+
+func TestWaitForSnapshotDeletion_DeletedDuringWatch(t *testing.T) {
+	// Happy-path regression: snapshot exists, watch fires DELETED → returns nil.
 	snap := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": PodSnapshotAPIGroup + "/" + PodSnapshotAPIVersion,

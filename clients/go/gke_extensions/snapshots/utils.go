@@ -143,6 +143,9 @@ func extractSnapshotResult(obj *unstructured.Unstructured) (snapshotResult, erro
 		}
 		if status == "True" && reason == "Complete" {
 			uid, _, _ := unstructured.NestedString(obj.Object, "status", "snapshotCreated", "name")
+			if uid == "" {
+				return snapshotResult{}, fmt.Errorf("trigger completed but status.snapshotCreated.name is empty")
+			}
 			tsStr, _ := cond["lastTransitionTime"].(string)
 			var ts time.Time
 			if tsStr != "" {
@@ -252,6 +255,16 @@ func waitForSnapshotDeletion(
 		}
 		if watchErr != nil {
 			return watchErr
+		}
+		// Watch channel closed; check if already deleted before re-establishing to
+		// close the race between the initial Get() check and Watch() setup.
+		_, err = dynClient.Resource(snapshotGVR).Namespace(namespace).Get(ctx, snapshotUID, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				log.V(1).Info("snapshot confirmed deleted after watch closed", "uid", snapshotUID)
+				return nil
+			}
+			// transient error — fall through to re-watch
 		}
 		log.V(1).Info("snapshot deletion watch closed, re-establishing", "uid", snapshotUID)
 	}

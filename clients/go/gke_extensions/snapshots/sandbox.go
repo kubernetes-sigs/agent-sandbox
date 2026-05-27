@@ -230,8 +230,16 @@ func (s *SandboxWithSnapshotSupport) Resume(ctx context.Context, timeout time.Du
 
 	// Capture the latest snapshot UID before scaling up to compare after resume.
 	listResult := s.Snapshots().List(ctx, SnapshotFilter{ReadyOnly: true})
+	if !listResult.Success {
+		s.log.Error(nil, "failed to list snapshots before resume", "reason", listResult.ErrorReason)
+		return ResumeResponse{
+			Success:     false,
+			ErrorReason: "failed to list snapshots: " + listResult.ErrorReason,
+			ErrorCode:   ErrorCode,
+		}
+	}
 	var latestSnapshotUID string
-	if listResult.Success && len(listResult.Snapshots) > 0 {
+	if len(listResult.Snapshots) > 0 {
 		latestSnapshotUID = listResult.Snapshots[0].SnapshotUID
 	}
 
@@ -316,13 +324,17 @@ func (s *SandboxWithSnapshotSupport) resolveSandboxNameHash(ctx context.Context)
 
 	// LabelSelector format: "agents.x-k8s.io/sandbox-name-hash=<value>"
 	sel := sb.Status.LabelSelector
+	if sel == "" {
+		return "", fmt.Errorf("sandbox %q has no status.selector yet; ensure the sandbox is running", s.Info.SandboxName())
+	}
 	if key, val, found := strings.Cut(sel, "="); found && key == SandboxNameHashLabel && val != "" {
 		s.mu.Lock()
 		s.snapshotHash = val
 		s.mu.Unlock()
 		return val, nil
 	}
-	return "", nil
+	return "", fmt.Errorf("sandbox %q status.selector %q does not contain expected label %q",
+		s.Info.SandboxName(), sel, SandboxNameHashLabel)
 }
 
 // setReplicas patches spec.replicas on the Sandbox CR.

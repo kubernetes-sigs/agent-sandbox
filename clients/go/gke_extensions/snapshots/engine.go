@@ -69,11 +69,19 @@ func (e *SnapshotEngine) Create(ctx context.Context, triggerName string, timeout
 	safeName := sanitizeTriggerName(triggerName)
 
 	podName, err := e.getPodName(ctx)
-	if err != nil || podName == "" {
+	if err != nil {
 		return SnapshotResponse{
 			Success:     false,
 			TriggerName: safeName,
-			ErrorReason: fmt.Sprintf("pod name not available: %v", err),
+			ErrorReason: fmt.Sprintf("failed to get pod name: %v", err),
+			ErrorCode:   ErrorCode,
+		}
+	}
+	if podName == "" {
+		return SnapshotResponse{
+			Success:     false,
+			TriggerName: safeName,
+			ErrorReason: "pod name is not yet available; ensure the sandbox is open and running",
 			ErrorCode:   ErrorCode,
 		}
 	}

@@ -240,15 +240,19 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             MockHelper.assert_not_called()
 
     def test_atexit_cleanup_suppresses_errors(self):
-        """_atexit_cleanup should not propagate exceptions — cleanup is best-effort."""
+        """_atexit_cleanup should not propagate exceptions — cleanup is best-effort.
+        A warning is printed to stderr so the user knows a sandbox was orphaned."""
         self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = AsyncMock(side_effect=Exception("network error"))
         mock_helper_instance.close = AsyncMock()
 
         with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
-            # Should not raise
-            self.client._atexit_cleanup()
+            with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
+                # Should not raise
+                self.client._atexit_cleanup()
+                # Should have printed a warning
+                mock_stderr.write.assert_called()
 
     async def test_validate_labels_rejects_invalid_value(self):
         with self.assertRaises(ValueError):

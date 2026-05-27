@@ -23,6 +23,7 @@ import atexit
 import asyncio
 import logging
 import re
+import sys
 import time
 import uuid
 from typing import Generic, TypeVar
@@ -353,15 +354,22 @@ class AsyncSandboxClient(Generic[T]):
                 for (ns, claim_name) in claims:
                     try:
                         await helper.delete_sandbox_claim(claim_name, ns)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(
+                            f"[agent-sandbox] Warning: failed to delete sandbox claim "
+                            f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
+                            file=sys.stderr,
+                        )
             finally:
                 await helper.close()
 
         try:
             asyncio.run(_do_cleanup())
-        except Exception:
-            pass
+        except Exception as e:
+            print(
+                f"[agent-sandbox] Warning: atexit cleanup failed: {e}",
+                file=sys.stderr,
+            )
 
     # --- Label validation (shared with sync client) ---
 

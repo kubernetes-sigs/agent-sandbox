@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal, Union
-from pydantic import BaseModel
+from typing import Any, Literal, Union
+from pydantic import BaseModel, ConfigDict
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
@@ -68,4 +68,24 @@ class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
     enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.
     trace_service_name: str = "sandbox-client"  # Service name used for traces.
-    
+
+
+class KubernetesConfig(BaseModel):
+    """Kubernetes client configuration for out-of-cluster authentication.
+
+    Pass a pre-configured ``kubernetes.client.ApiClient`` (sync) or
+    ``kubernetes_asyncio.client.ApiClient`` (async) to skip the default
+    ``load_incluster_config()`` / ``load_kube_config()`` discovery. Useful
+    for callers running outside the cluster (Cloud Run, AWS Lambda,
+    peer-cluster workloads) that build credentials from their environment
+    (e.g. ``google.auth.default()``) without writing a kubeconfig file.
+
+    ``namespace`` overrides the Kubernetes namespace used for all sandbox
+    operations performed by this client. When ``None``, individual API calls
+    fall back to their own defaults (usually ``"default"``).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    api_client: Any = None  # kubernetes[_asyncio].client.ApiClient
+    namespace: str | None = None  # Override namespace for all sandbox operations.

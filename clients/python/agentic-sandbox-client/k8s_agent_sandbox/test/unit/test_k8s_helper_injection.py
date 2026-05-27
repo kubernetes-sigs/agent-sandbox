@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for ``api_client`` injection into ``K8sHelper`` and ``k8s_helper``
-injection into ``SandboxClient``.
+"""Tests for ``KubernetesConfig`` injection into ``SandboxClient`` and the
+underlying ``api_client`` injection into ``K8sHelper``.
 
-These cover the explicit-injection path used by callers running outside
-the cluster (Cloud Run, Lambda, peer-cluster workloads) and assert the
-default discovery path (``load_incluster_config`` /
-``load_kube_config``) is preserved when no kwargs are passed.
+Covers:
+- ``K8sHelper(api_client=...)`` skips kubeconfig discovery (internal seam).
+- ``SandboxClient(kubernetes_config=KubernetesConfig(api_client=...))`` builds
+  a helper from the config rather than constructing a bare default one.
+- Default discovery path (``load_incluster_config`` / ``load_kube_config``)
+  is preserved when no kwargs are passed.
 """
 
 import unittest
@@ -26,7 +28,7 @@ from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.sandbox_client import SandboxClient
-from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+from k8s_agent_sandbox.models import KubernetesConfig, SandboxDirectConnectionConfig
 
 
 class TestK8sHelperApiClientInjection(unittest.TestCase):
@@ -78,29 +80,47 @@ class TestK8sHelperApiClientInjection(unittest.TestCase):
             mock_config.load_kube_config.assert_called_once()
 
 
-class TestSandboxClientK8sHelperInjection(unittest.TestCase):
-    """``SandboxClient(k8s_helper=...)`` uses the injected helper."""
+class TestSandboxClientKubernetesConfig(unittest.TestCase):
+    """``SandboxClient(kubernetes_config=...)`` builds K8sHelper from the config."""
 
     @patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
-    def test_injected_helper_is_used_directly(self, mock_helper_cls):
-        injected = MagicMock(name="injected_helper")
+    def test_kubernetes_config_api_client_is_forwarded_to_helper(self, mock_helper_cls):
+        injected_api_client = MagicMock(name="injected_api_client")
+        kube_cfg = KubernetesConfig(api_client=injected_api_client)
 
         c = SandboxClient(
             connection_config=SandboxDirectConnectionConfig(api_url="http://example"),
-            k8s_helper=injected,
+            kubernetes_config=kube_cfg,
         )
 
-        self.assertIs(c.k8s_helper, injected)
-        mock_helper_cls.assert_not_called()
+        mock_helper_cls.assert_called_once_with(api_client=injected_api_client)
+        self.assertIs(c.k8s_helper, mock_helper_cls.return_value)
 
     @patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
-    def test_default_helper_constructed_when_none_injected(self, mock_helper_cls):
+    def test_default_helper_constructed_when_no_kubernetes_config(self, mock_helper_cls):
         c = SandboxClient(
             connection_config=SandboxDirectConnectionConfig(api_url="http://example"),
         )
 
         mock_helper_cls.assert_called_once_with()
         self.assertIs(c.k8s_helper, mock_helper_cls.return_value)
+
+    @patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
+    def test_kubernetes_config_with_no_api_client_still_uses_injection_path(
+        self, mock_helper_cls
+    ):
+        # KubernetesConfig with only namespace set — api_client is None,
+        # but the config object itself was passed, so we still go through
+        # the K8sHelper(api_client=None) path (which behaves like default
+        # discovery since K8sHelper treats None as "no injection").
+        kube_cfg = KubernetesConfig(namespace="my-ns")
+
+        SandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://example"),
+            kubernetes_config=kube_cfg,
+        )
+
+        mock_helper_cls.assert_called_once_with(api_client=None)
 
 
 if __name__ == "__main__":

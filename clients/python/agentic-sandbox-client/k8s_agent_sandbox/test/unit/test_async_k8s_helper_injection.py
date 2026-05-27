@@ -14,9 +14,9 @@
 
 """Async sibling of ``test_k8s_helper_injection.py``.
 
-Exercises ``AsyncK8sHelper(api_client=...)`` and the ``k8s_helper``
-kwarg on ``AsyncSandboxClient``. Mirrors the sync tests so the two
-paths cannot drift.
+Exercises ``AsyncK8sHelper(api_client=...)`` and the ``kubernetes_config``
+kwarg on ``AsyncSandboxClient``. Mirrors the sync tests so the two paths
+cannot drift.
 """
 
 import unittest
@@ -28,7 +28,7 @@ pytest.importorskip("kubernetes_asyncio")
 
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
-from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+from k8s_agent_sandbox.models import KubernetesConfig, SandboxDirectConnectionConfig
 
 
 class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
@@ -68,29 +68,43 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
         mock_api_cls.assert_called_once()
 
 
-class TestAsyncSandboxClientK8sHelperInjection(unittest.TestCase):
-    """``AsyncSandboxClient(k8s_helper=...)`` uses the injected helper."""
+class TestAsyncSandboxClientKubernetesConfig(unittest.TestCase):
+    """``AsyncSandboxClient(kubernetes_config=...)`` builds AsyncK8sHelper from the config."""
 
     @patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
-    def test_injected_helper_is_used_directly(self, mock_helper_cls):
-        injected = MagicMock(name="injected_helper")
+    def test_kubernetes_config_api_client_is_forwarded_to_helper(self, mock_helper_cls):
+        injected_api_client = MagicMock(name="injected_api_client")
+        kube_cfg = KubernetesConfig(api_client=injected_api_client)
 
         c = AsyncSandboxClient(
             connection_config=SandboxDirectConnectionConfig(api_url="http://example"),
-            k8s_helper=injected,
+            kubernetes_config=kube_cfg,
         )
 
-        self.assertIs(c.k8s_helper, injected)
-        mock_helper_cls.assert_not_called()
+        mock_helper_cls.assert_called_once_with(api_client=injected_api_client)
+        self.assertIs(c.k8s_helper, mock_helper_cls.return_value)
 
     @patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
-    def test_default_helper_constructed_when_none_injected(self, mock_helper_cls):
+    def test_default_helper_constructed_when_no_kubernetes_config(self, mock_helper_cls):
         c = AsyncSandboxClient(
             connection_config=SandboxDirectConnectionConfig(api_url="http://example"),
         )
 
         mock_helper_cls.assert_called_once_with()
         self.assertIs(c.k8s_helper, mock_helper_cls.return_value)
+
+    @patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
+    def test_kubernetes_config_with_no_api_client_still_uses_injection_path(
+        self, mock_helper_cls
+    ):
+        kube_cfg = KubernetesConfig(namespace="my-ns")
+
+        AsyncSandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://example"),
+            kubernetes_config=kube_cfg,
+        )
+
+        mock_helper_cls.assert_called_once_with(api_client=None)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig, KubernetesConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ class AsyncSandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
-        k8s_helper: AsyncK8sHelper | None = None,
+        kubernetes_config: KubernetesConfig | None = None,
     ):
         """Initializes the AsyncSandboxClient.
 
@@ -72,13 +72,16 @@ class AsyncSandboxClient(Generic[T]):
                 SandboxGatewayConnectionConfig, or SandboxInClusterConnectionConfig.
             tracer_config: Configuration for OpenTelemetry tracing.
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
-            k8s_helper: Optional pre-configured ``AsyncK8sHelper``. When
-                provided, the client uses it directly instead of constructing
-                a default one. Lets callers running outside the cluster
-                inject a helper backed by their own ``Configuration``,
-                avoiding the default ``load_incluster_config()`` /
-                ``load_kube_config()`` discovery. Mirrors the existing
-                ``k8s_helper`` kwarg on ``AsyncSandbox`` handle class.
+            kubernetes_config: Optional Kubernetes client configuration.
+                When provided, its ``api_client`` is injected into the
+                underlying ``AsyncK8sHelper``, skipping
+                ``load_incluster_config()`` / ``load_kube_config()``
+                discovery. Useful for callers running outside the cluster
+                (Cloud Run, AWS Lambda, peer-cluster workloads) that build
+                credentials from their environment (e.g.
+                ``google.auth.default()``) without a kubeconfig file.
+                ``kubernetes_config.namespace`` overrides the default
+                namespace for all sandbox operations when set.
         """
         if connection_config is None:
             raise ValueError(
@@ -95,7 +98,11 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = k8s_helper if k8s_helper is not None else AsyncK8sHelper()
+        self.k8s_helper = (
+            AsyncK8sHelper(api_client=kubernetes_config.api_client)
+            if kubernetes_config is not None
+            else AsyncK8sHelper()
+        )
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()

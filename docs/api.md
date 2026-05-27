@@ -332,7 +332,7 @@ _Appears in:_
 | `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox |  | Optional: \{\} <br /> |
-| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requests/limits for the workspace container at claim time. |  | Optional: \{\} <br /> |
+| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requests/limits for the container named "workspace" at claim time.<br />Unset fields keep the values from the SandboxTemplate; set fields force request=limit for that resource. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -563,7 +563,9 @@ _Appears in:_
 
 
 
-WorkspaceResources defines per-claim resource overrides for the workspace container.
+WorkspaceResources defines per-claim resource overrides for the container named "workspace".
+Fields left unset keep the values from the SandboxTemplate; fields that are set
+force the workspace container request and limit to the same value.
 
 
 

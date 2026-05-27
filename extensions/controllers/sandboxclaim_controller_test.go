@@ -2119,7 +2119,7 @@ func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
 			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
-						{Name: "workspace", Image: "workspace:latest"},
+						{Name: workspaceContainerName, Image: "workspace:latest"},
 						{Name: "codewire-sidecar", Image: "sidecar:latest"},
 					},
 				},
@@ -2167,7 +2167,7 @@ func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
 	for i := range sandbox.Spec.PodTemplate.Spec.Containers {
 		container := &sandbox.Spec.PodTemplate.Spec.Containers[i]
 		switch container.Name {
-		case "workspace":
+		case workspaceContainerName:
 			workspace = container
 		case "codewire-sidecar":
 			sidecar = container
@@ -2281,7 +2281,7 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
-						{Name: "workspace", Image: "workspace:latest"},
+						{Name: workspaceContainerName, Image: "workspace:latest"},
 						{Name: "codewire-sidecar", Image: "sidecar:latest"},
 					},
 				},
@@ -2324,7 +2324,7 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
-						{Name: "workspace", Image: "workspace:latest"},
+						{Name: workspaceContainerName, Image: "workspace:latest"},
 						{Name: "codewire-sidecar", Image: "sidecar:latest"},
 					},
 				},
@@ -2381,7 +2381,7 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 	}
 	var workspace *corev1.Container
 	for i := range coldSandbox.Spec.PodTemplate.Spec.Containers {
-		if coldSandbox.Spec.PodTemplate.Spec.Containers[i].Name == "workspace" {
+		if coldSandbox.Spec.PodTemplate.Spec.Containers[i].Name == workspaceContainerName {
 			workspace = &coldSandbox.Spec.PodTemplate.Spec.Containers[i]
 			break
 		}
@@ -2436,7 +2436,7 @@ func TestApplyWorkspaceResourceOverridesEmptyOverridesIsNoOp(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			container := &corev1.Container{Name: "workspace", Resources: *tc.current.DeepCopy()}
+			container := &corev1.Container{Name: workspaceContainerName, Resources: *tc.current.DeepCopy()}
 			applyWorkspaceResourceOverrides(container, &tc.override)
 			if !reflect.DeepEqual(container.Resources, tc.current) {
 				t.Fatalf("expected resources unchanged when override has no positive fields\n  got:    %#v\n  wanted: %#v", container.Resources, tc.current)

@@ -58,6 +58,9 @@ import (
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
+const workspaceContainerName = "workspace"
+const bytesPerMiB = 1024 * 1024
+const bytesPerGiB = 1024 * 1024 * 1024
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -624,12 +627,12 @@ func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *ext
 		container.Resources.Limits[corev1.ResourceCPU] = qty
 	}
 	if overrides.MemoryMiB > 0 {
-		qty := *resource.NewQuantity(int64(overrides.MemoryMiB)<<20, resource.BinarySI)
+		qty := *resource.NewQuantity(int64(overrides.MemoryMiB)*bytesPerMiB, resource.BinarySI)
 		container.Resources.Requests[corev1.ResourceMemory] = qty
 		container.Resources.Limits[corev1.ResourceMemory] = qty
 	}
 	if overrides.DiskGiB > 0 {
-		qty := *resource.NewQuantity(int64(overrides.DiskGiB)<<30, resource.BinarySI)
+		qty := *resource.NewQuantity(int64(overrides.DiskGiB)*bytesPerGiB, resource.BinarySI)
 		container.Resources.Requests[corev1.ResourceEphemeralStorage] = qty
 		container.Resources.Limits[corev1.ResourceEphemeralStorage] = qty
 	}
@@ -641,10 +644,11 @@ func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensio
 	}
 	for i := range spec.Containers {
 		container := &spec.Containers[i]
-		if container.Name != "workspace" {
+		if container.Name != workspaceContainerName {
 			continue
 		}
 		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
+		break
 	}
 }
 

@@ -121,7 +121,9 @@ type EnvVar struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
-// WorkspaceResources defines per-claim resource overrides for the workspace container.
+// WorkspaceResources defines per-claim resource overrides for the container named "workspace".
+// Fields left unset keep the values from the SandboxTemplate; fields that are set
+// force the workspace container request and limit to the same value.
 type WorkspaceResources struct {
 	// cpuMillicores is the desired CPU request/limit for the workspace container.
 	// +optional
@@ -167,7 +169,8 @@ type SandboxClaimSpec struct {
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
 
-	// workspaceResources overrides resource requests/limits for the workspace container at claim time.
+	// workspaceResources overrides resource requests/limits for the container named "workspace" at claim time.
+	// Unset fields keep the values from the SandboxTemplate; set fields force request=limit for that resource.
 	// +optional
 	WorkspaceResources *WorkspaceResources `json:"workspaceResources,omitempty"`
 }

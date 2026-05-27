@@ -446,14 +446,13 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 }
 
 func isSystemLabel(key string) bool {
-	return key == sandboxLabel
+	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
+		strings.HasPrefix(key, "extensions.agents.x-k8s.io/")
 }
 
 func isSystemAnnotation(key string) bool {
-	return key == sandboxv1beta1.SandboxPodNameAnnotation ||
-		key == sandboxv1beta1.SandboxTemplateRefAnnotation ||
-		key == sandboxv1beta1.SandboxPropagatedLabelsAnnotation ||
-		key == sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation ||
+	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
+		strings.HasPrefix(key, "extensions.agents.x-k8s.io/") ||
 		key == asmetrics.TraceContextAnnotation
 }
 
@@ -767,9 +766,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		case resourceOwnedBySandbox:
 			// No additional action needed — label applied below.
 		}
-
-		metadataUpdated := r.updatePodMetadata(pod, sandbox, nameHash)
-		if metadataUpdated || needsUpdate {
+		updated := r.updatePodMetadata(ctx, pod, sandbox, nameHash)
+		if updated || needsUpdate {
 			if err := r.Update(ctx, pod); err != nil {
 				return nil, fmt.Errorf("failed to update pod: %w", err)
 			}
@@ -796,6 +794,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		if isSystemLabel(k) {
+			logger.Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
 			continue
 		}
 		podLabels[k] = v
@@ -807,6 +806,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 		if isSystemAnnotation(k) {
+			logger.Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
 			continue
 		}
 		annotations[k] = v
@@ -878,7 +878,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	return pod, nil
 }
 
-func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
+func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
+	logger := log.FromContext(ctx)
 	updated := false
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
@@ -891,6 +892,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		if isSystemLabel(k) {
+			logger.Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
 			continue
 		}
 		if pod.Labels[k] != v {
@@ -921,6 +923,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 		}
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 			if isSystemAnnotation(k) {
+				logger.Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
 				continue
 			}
 			if pod.Annotations[k] != v {

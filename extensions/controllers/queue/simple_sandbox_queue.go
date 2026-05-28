@@ -254,11 +254,9 @@ func GetNamespacedWarmPoolName(namespace, warmPoolName string) string {
 
 // GetWarmPoolNameIfNamespaced extracts the warmPoolName value if the parameter is namespace-aware.
 func GetWarmPoolNameIfNamespaced(warmPoolName string) (string, bool) {
-	if strings.Contains(warmPoolName, "/") {
-		parts := strings.SplitN(warmPoolName, "/", 2)
-		if len(parts) == 2 {
-			return parts[1], true
-		}
+	parts := strings.SplitN(warmPoolName, "/", 2)
+	if len(parts) == 2 && parts[1] != "" {
+		return parts[1], true
 	}
 	return "", false
 }

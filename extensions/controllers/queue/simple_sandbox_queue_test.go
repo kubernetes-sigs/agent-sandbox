@@ -244,34 +244,40 @@ func TestGetNamespacedWarmPoolName(t *testing.T) {
 
 func TestGetWarmPoolNameIfNamespaced(t *testing.T) {
 	testCases := []struct {
-		name         string
-		input        string
+		name          string
+		input         string
 		expectedValue string
-		expectedOk   bool
+		expectedOk    bool
 	}{
 		{
-			name:         "namespace-aware index",
-			input:        "my-ns/my-index",
+			name:          "namespace-aware index",
+			input:         "my-ns/my-index",
 			expectedValue: "my-index",
-			expectedOk:   true,
+			expectedOk:    true,
 		},
 		{
-			name:         "namespace-agnostic (legacy) index",
-			input:        "my-index",
+			name:          "namespace-agnostic (legacy) index",
+			input:         "my-index",
 			expectedValue: "",
-			expectedOk:   false,
+			expectedOk:    false,
 		},
 		{
-			name:         "empty string",
-			input:        "",
+			name:          "empty string",
+			input:         "",
 			expectedValue: "",
-			expectedOk:   false,
+			expectedOk:    false,
 		},
 		{
-			name:         "unexpected format (multiple slashes)",
-			input:        "ns/dir/index",
+			name:          "unexpected format (multiple slashes)",
+			input:         "ns/dir/index",
 			expectedValue: "dir/index",
-			expectedOk:   true,
+			expectedOk:    true,
+		},
+		{
+			name:          "malformed (nothing after namespace)",
+			input:         "ns/",
+			expectedValue: "",
+			expectedOk:    false,
 		},
 	}
 

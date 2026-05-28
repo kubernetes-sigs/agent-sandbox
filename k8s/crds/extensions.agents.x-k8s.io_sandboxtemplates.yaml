@@ -16,7 +16,7 @@ spec:
     singular: sandboxtemplate
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - name: v1beta1
     schema:
       openAPIV3Schema:
         properties:
@@ -4028,6 +4028,8 @@ spec:
                 required:
                 - spec
                 type: object
+              service:
+                type: boolean
               volumeClaimTemplates:
                 items:
                   properties:
@@ -4140,12 +4142,8 @@ spec:
             required:
             - podTemplate
             type: object
-          status:
-            type: object
         required:
         - spec
         type: object
     served: true
     storage: true
-    subresources:
-      status: {}

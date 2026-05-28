@@ -5,6 +5,8 @@ all: fix-go-generate build lint-go lint-api test-unit toc-verify
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+GOPATH ?= $(shell go env GOPATH)
+
 .PHONY: generate-api-docs
 generate-api-docs: ## Generate API reference documentation
 	@echo "Generating API Docs..."

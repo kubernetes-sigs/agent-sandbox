@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,26 +31,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
-	templateDefault := &extensionsv1alpha1.SandboxTemplate{
+	templateDefault := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
 			},
 		},
 	}
 
-	templateWithNP := &extensionsv1alpha1.SandboxTemplate{
+	templateWithNP := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
 					{
 						From: []networkingv1.NetworkPolicyPeer{
@@ -68,11 +69,11 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 		},
 	}
 
-	templateOptOut := &extensionsv1alpha1.SandboxTemplate{
+	templateOptOut := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Egress: []networkingv1.NetworkPolicyEgressRule{{}}, // Should be ignored
 			},
 		},
@@ -92,7 +93,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 
 	testCases := []struct {
 		name                  string
-		templateToReconcile   *extensionsv1alpha1.SandboxTemplate
+		templateToReconcile   *extensionsv1beta1.SandboxTemplate
 		existingObjects       []client.Object
 		expectNetworkPolicy   bool
 		validateNetworkPolicy func(t *testing.T, np *networkingv1.NetworkPolicy)
@@ -109,8 +110,22 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if len(np.Spec.Ingress) != 1 || np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "sandbox-router" {
 					t.Errorf("Expected Default Ingress rule to target sandbox-router")
 				}
-				if len(np.Spec.Egress) != 1 || np.Spec.Egress[0].To[0].IPBlock.CIDR != "0.0.0.0/0" {
+				if len(np.Spec.Egress) != 1 {
+					t.Fatalf("Expected 1 Default Egress rule, got %d", len(np.Spec.Egress))
+				}
+				if len(np.Spec.Egress[0].To) != 2 {
+					t.Fatalf("Expected 2 Egress peers (IPv4 and IPv6), got %d", len(np.Spec.Egress[0].To))
+				}
+				if np.Spec.Egress[0].To[0].IPBlock == nil || np.Spec.Egress[0].To[0].IPBlock.CIDR != "0.0.0.0/0" {
 					t.Fatalf("Expected Default Egress IPBlock 0.0.0.0/0")
+				}
+				ipv6Peer := np.Spec.Egress[0].To[1]
+				if ipv6Peer.IPBlock == nil || ipv6Peer.IPBlock.CIDR != "::/0" {
+					t.Fatalf("Expected Default Egress IPv6 IPBlock ::/0")
+				}
+				hasIPv6LinkLocalExcept := slices.Contains(ipv6Peer.IPBlock.Except, "fe80::/10")
+				if !hasIPv6LinkLocalExcept {
+					t.Errorf("Expected IPv6 Egress Except list to contain fe80::/10, got %v", ipv6Peer.IPBlock.Except)
 				}
 				expectedLabelKey := "agents.x-k8s.io/sandbox-template-ref-hash"
 				if _, ok := np.Spec.PodSelector.MatchLabels[expectedLabelKey]; !ok {

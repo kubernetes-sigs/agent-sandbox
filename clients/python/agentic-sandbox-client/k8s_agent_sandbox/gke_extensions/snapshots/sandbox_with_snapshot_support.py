@@ -63,7 +63,7 @@ class SandboxWithSnapshotSupport(Sandbox):
     def is_active(self) -> bool:
         return super().is_active and self._snapshots is not None
     
-    def is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult:
+    def _is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult:
         """
         Checks if this sandbox was restored from the provided snapshot.
 
@@ -159,6 +159,20 @@ class SandboxWithSnapshotSupport(Sandbox):
                 snapshot_response=None,
                 error_reason="",
                 error_code=SUCCESS_CODE
+            )
+
+        # Ensure the sandbox name hash is fetched and cached before we scale down to 0 replicas.
+        try:
+            sandbox_name_hash = self.get_sandbox_name_hash()
+            if not sandbox_name_hash:
+                raise ValueError(f"Sandbox name hash resolved to empty or None: {sandbox_name_hash}")
+        except Exception as e:
+            logger.error(f"Cannot suspend Sandbox: failed to retrieve required name hash label: {e}")
+            return SuspendResponse(
+                success=False,
+                snapshot_response=None,
+                error_reason=f"Failed to resolve sandbox name hash: {e}",
+                error_code=ERROR_CODE
             )
 
         snapshot_response = None
@@ -272,7 +286,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                     error_code=SUCCESS_CODE
                 )
 
-            restore_check = self.is_restored_from_snapshot(latest_snapshot_uid)
+            restore_check = self._is_restored_from_snapshot(latest_snapshot_uid)
             if restore_check.success:
                 logger.info(f"Sandbox '{self.sandbox_id}' successfully restored from snapshot '{latest_snapshot_uid}'.")
                 return ResumeResponse(

@@ -16,7 +16,7 @@ spec:
     singular: sandbox
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - name: v1beta1
     schema:
       openAPIV3Schema:
         properties:
@@ -3836,6 +3836,8 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
+              service:
+                type: boolean
               shutdownPolicy:
                 default: Retain
                 enum:

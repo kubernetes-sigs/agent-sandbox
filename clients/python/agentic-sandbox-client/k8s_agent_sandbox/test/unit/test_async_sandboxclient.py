@@ -425,6 +425,78 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
+    async def test_follow_redirects_is_false(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
+
+            call_args, call_kwargs = connector.client.request.call_args
+            self.assertFalse(call_kwargs.get("follow_redirects", True))
+        finally:
+            await connector.close()
+
+    async def test_follow_redirects_in_kwargs_popped(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health", follow_redirects=True)
+
+            call_args, call_kwargs = connector.client.request.call_args
+            self.assertFalse(call_kwargs.get("follow_redirects", True))
+        finally:
+            await connector.close()
+
+    async def test_redirect_raises_error(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 302
+        mock_response.is_redirect = True
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request("GET", "health")
+        finally:
+            await connector.close()
+
+    async def test_304_does_not_raise_redirect_error(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 304
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
+        finally:
+            await connector.close()
+
+    async def test_300_does_not_raise_redirect_error(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 300
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
+        finally:
+            await connector.close()
+
     async def test_post_execute(self):
         connector = self._make_connector()
         try:
@@ -572,6 +644,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         # Mock httpx client to return 404 on first request
         mock_response = MagicMock()
         mock_response.status_code = 404
+        mock_response.is_redirect = False
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
             "404 Not Found",
             request=MagicMock(),
@@ -658,6 +731,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         # First request to establish base_url
         mock_response_ok = MagicMock()
         mock_response_ok.status_code = 200
+        mock_response_ok.is_redirect = False
         mock_response_ok.raise_for_status = MagicMock()
         connector.client.request = AsyncMock(return_value=mock_response_ok)
 
@@ -667,6 +741,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         # Now return 503 error
         mock_response_error = MagicMock()
         mock_response_error.status_code = 503
+        mock_response_error.is_redirect = False
         mock_response_error.raise_for_status.side_effect = httpx.HTTPStatusError(
             "503 Service Unavailable",
             request=MagicMock(),

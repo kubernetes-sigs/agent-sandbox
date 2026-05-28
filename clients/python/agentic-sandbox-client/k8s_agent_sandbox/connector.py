@@ -272,6 +272,9 @@ class SandboxConnector:
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
+        self._pod_ip: str | None = None
+        self._pod_ip_resolved = False
+        self._pod_ip_auth_failed = False
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
@@ -307,11 +310,45 @@ class SandboxConnector:
         return self.strategy.connect()
 
     def close(self):
+        self._pod_ip_resolved = False
+        self._pod_ip = None
         self.strategy.close()
         if self.session:
             self.session.close()
 
     def send_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+        """Sends an HTTP request to the sandbox with standard parameters.
+
+        This method automatically resolves the gateway or tunnel connection,
+        appends the router/sandbox identity headers, overrides redirect options to
+        disable client-side automatic redirection (for security/SSRF mitigation),
+        and raises appropriate exceptions on errors.
+
+        Args:
+            method: The HTTP method (e.g., "GET", "POST").
+            endpoint: The API endpoint path.
+            **kwargs: Extra keyword arguments passed directly to the underlying
+                `requests.Session.request` invocation. Note that 'allow_redirects'
+                is explicitly popped and overridden.
+
+        Returns:
+            The `requests.Response` object representing the response from the sandbox.
+
+        Raises:
+            SandboxRequestError: If a connection error occurs, or if a redirect is
+                returned (status codes 301, 302, 303, 307, 308).
+            SandboxPortForwardError: If the local port-forward tunnel crashes.
+
+        Note on Redirect Handling:
+            Automatic redirection (SSRF risk mitigation) is explicitly disabled in the
+            HTTP client. If a redirect status code recognized by requests (301, 302,
+            303, 307, 308) is returned, a SandboxRequestError wrapping HTTPError is
+            raised. Non-redirect 3xx status codes, such as 300 (Multiple Choices), 304
+            (Not Modified), 305 (Use Proxy), and 306 (Switch Proxy), do not trigger
+            automatic client redirection or raise redirect errors; they are returned
+            directly to the caller because requests does not consider them redirects
+            and raise_for_status only raises for status codes 400 and above.
+        """
         try:
             # Establish connection (re-establishes if closed/dead)
             base_url = self.connect()
@@ -327,10 +364,37 @@ class SandboxConnector:
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
                 headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+                if self._get_pod_ip and not self._pod_ip_auth_failed:
+                    if not self._pod_ip_resolved:
+                        try:
+                            pod_ip = self._get_pod_ip()
+                            if pod_ip:
+                                self._pod_ip = pod_ip
+                                self._pod_ip_resolved = True
+                        except Exception as e:
+                            status_code = getattr(getattr(e, "response", None), "status_code", None)
+                            if status_code in (401, 403):
+                                self._pod_ip_auth_failed = True
+                                logging.debug(f"K8s API auth failed ({status_code}). Permanently disabling direct pod IP routing for this client instance.")
+                            else:
+                                logging.debug(f"Transient failure resolving pod IP for direct routing: {e}")
+                    if self._pod_ip:
+                        headers["X-Sandbox-Pod-IP"] = self._pod_ip
             kwargs["headers"] = headers
 
-            # Send the request
-            response = self.session.request(method, url, **kwargs)
+            # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
+            # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
+            # ignored. We pop 'allow_redirects' here to prevent a TypeError due to duplicate keyword
+            # arguments when calling requests.Session.request.
+            kwargs.pop("allow_redirects", None)
+
+            # Send the request with redirections blocked
+            response = self.session.request(method, url, allow_redirects=False, **kwargs)
+            if response.is_redirect:
+                raise requests.exceptions.HTTPError(
+                    f"Redirection is not allowed (status code {response.status_code}).",
+                    response=response,
+                )
             response.raise_for_status()
             return response
         except SandboxPortForwardError:
@@ -341,6 +405,8 @@ class SandboxConnector:
             status_code = resp.status_code if resp is not None else None
 
             logging.error(f"Request to sandbox failed: {e}")
+            self._pod_ip_resolved = False
+            self._pod_ip = None
             self.close()
             raise SandboxRequestError(
                 f"Failed to communicate with the sandbox at {url}.",

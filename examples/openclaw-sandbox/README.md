@@ -5,6 +5,7 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
 ## Prerequisites
 
 -   A Kubernetes cluster (e.g., Kind).
+-   (Optional) Ensure your cluster has a RuntimeClass (e.g., `gvisor`) configured and nodes support it. This example is verified using gVisor. The `openclaw-sandbox.yaml` manifest includes a commented-out `runtimeClassName: gvisor` line. Uncomment it or update it if you are using a non-default runtime class (e.g., Kata Containers). See the [gVisor documentation](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/).
 -   `agent-sandbox` controller installed.
 
 ## Usage
@@ -26,12 +27,21 @@ This example demonstrates how to run [OpenClaw (formerly Moltbot)](https://githu
     sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" openclaw-sandbox.yaml | kubectl apply -f -
     ```
 
-4.  Verify the pod is running and port-forward to access the Gateway:
+4.  **Access the Web UI**:
+
+    **Option 1: Direct Port-Forward (Only if NOT using gVisor)**
+    Verify the pod is running and port-forward to access it directly:
     ```bash
     kubectl port-forward pod/openclaw-sandbox 18789:18789
     ```
+    Then open [http://localhost:18789](http://localhost:18789) in your browser.
 
-5.  **Access the Web UI**: Open [http://localhost:18789](http://localhost:18789) in your browser.
+    **Option 2: Access with gVisor Enabled**
+    If you enable gVisor by uncommenting `runtimeClassName: gvisor` in `openclaw-sandbox.yaml`, direct `kubectl port-forward` to the pod will fail (see [Issue #158](https://github.com/kubernetes-sigs/agent-sandbox/issues/158)).
+
+    To access the Web UI with gVisor, you must use an alternative method:
+    - **Kubernetes Service**: Expose the sandbox pod via a `NodePort` or `LoadBalancer` service and access it via the service's endpoint.
+    - **Router Architecture**: Use the `sandbox-router` to proxy traffic. See [agentic-sandbox-client](../../clients/python/agentic-sandbox-client) and [sandbox-router](../../clients/python/agentic-sandbox-client/sandbox-router) for instructions.
 
 ## CLI Operations
 

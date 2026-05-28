@@ -1,0 +1,11 @@
+apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: {{.Name}}
+spec:
+  percentage: {{.Percentage}}
+  scalableRef:
+    apiGroup: extensions.agents.x-k8s.io
+    kind: SandboxWarmPool
+    name: {{.WarmPoolName}}
+  provisioningStrategy: "{{.ProvisioningStrategy}}"

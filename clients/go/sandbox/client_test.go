@@ -27,10 +27,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ktesting "k8s.io/client-go/testing"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	fakeextensions "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
@@ -46,8 +46,8 @@ func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 	}
 	opts.setDefaults()
 	opts.K8sHelper = &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1alpha1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		Log:              logr.Discard(),
 	}
 	c, err := NewClient(context.Background(), opts)
@@ -81,6 +81,25 @@ func TestClient_Registry(t *testing.T) {
 	}
 	if active[0].ClaimName != "test-claim" {
 		t.Errorf("expected test-claim, got %s", active[0].ClaimName)
+	}
+
+	// Inactive sandboxes (baseURL=="") are pruned from the registry.
+	inactive := &Sandbox{log: logr.Discard()}
+	inactive.connector = &connector{} // baseURL="" -> IsReady() = false
+	key = Key{Namespace: "default", ClaimName: "inactive-claim"}
+	c.mu.Lock()
+	c.registry[key] = inactive
+	c.mu.Unlock()
+
+	got := c.ListActiveSandboxes()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 active after adding inactive, got %d", len(got))
+	}
+	c.mu.Lock()
+	_, stillPresent := c.registry[key]
+	c.mu.Unlock()
+	if stillPresent {
+		t.Error("inactive sandbox should have been pruned from registry")
 	}
 }
 
@@ -131,8 +150,8 @@ func TestClient_ListAllSandboxes(t *testing.T) {
 
 	// Seed two claims.
 	extensionsCS.PrependReactor("list", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, &extv1alpha1.SandboxClaimList{
-			Items: []extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaimList{
+			Items: []extv1beta1.SandboxClaim{
 				{ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default"}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "claim-2", Namespace: "default"}},
 			},
@@ -196,6 +215,46 @@ func TestClient_GetSandbox_ReturnsCached(t *testing.T) {
 	}
 }
 
+func TestClient_DeleteSandbox_Tracked(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	sb := &Sandbox{
+		k8s:  c.k8s,
+		log:  logr.Discard(),
+		opts: c.opts,
+		connector: &connector{
+			strategy:   &DirectStrategy{URL: "http://fake"},
+			httpClient: &http.Client{},
+		},
+		inflightOps:  &sync.WaitGroup{},
+		lifecycleSem: make(chan struct{}, 1),
+	}
+	sb.mu.Lock()
+	sb.claimName = "tracked-claim"
+	sb.sandboxName = "sb-tracked"
+	sb.mu.Unlock()
+
+	key := Key{Namespace: "default", ClaimName: "tracked-claim"}
+	c.mu.Lock()
+	c.registry[key] = sb
+	c.mu.Unlock()
+
+	if err := c.DeleteSandbox(context.Background(), "tracked-claim", "default"); err != nil {
+		t.Fatalf("DeleteSandbox for tracked sandbox: %v", err)
+	}
+
+	c.mu.Lock()
+	remaining := len(c.registry)
+	c.mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("expected empty registry after DeleteSandbox of tracked sandbox, got %d", remaining)
+	}
+}
+
 func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	c, _ := newTestClient(t)
 
@@ -211,17 +270,17 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	k8s := &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1alpha1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		Log:              logr.Discard(),
 	}
 
 	// Seed claim with sandbox name already resolved.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: "my-claim", Namespace: "default"},
-			Status: extv1alpha1.SandboxClaimStatus{
-				SandboxStatus: extv1alpha1.SandboxStatus{
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{
 					Name: "warm-pool-sandbox-xyz",
 				},
 			},
@@ -243,23 +302,23 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	k8s := &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1alpha1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		Log:              logr.Discard(),
 	}
 
 	// Seed a ready sandbox with a name different from the claim.
 	agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, &sandboxv1alpha1.SandboxList{
-			Items: []sandboxv1alpha1.Sandbox{
+		return true, &sandboxv1beta1.SandboxList{
+			Items: []sandboxv1beta1.Sandbox{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "warm-pool-sandbox-xyz",
 						Namespace: "default",
 					},
-					Status: sandboxv1alpha1.SandboxStatus{
+					Status: sandboxv1beta1.SandboxStatus{
 						Conditions: []metav1.Condition{
-							{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+							{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
 						},
 					},
 				},

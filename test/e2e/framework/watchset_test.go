@@ -26,7 +26,7 @@ import (
 )
 
 func TestWatchSetRecreatesWatchAfterLastSubscriptionCloses(t *testing.T) {
-	gvr := schema.GroupVersionResource{Group: "agents.x-k8s.io", Version: "v1alpha1", Resource: "sandboxes"}
+	gvr := schema.GroupVersionResource{Group: "agents.x-k8s.io", Version: "v1beta1", Resource: "sandboxes"}
 	scheme := runtime.NewScheme()
 	dynClient := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		gvr: "SandboxList",

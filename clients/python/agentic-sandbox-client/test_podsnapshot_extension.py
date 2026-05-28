@@ -56,7 +56,7 @@ def test_snapshot_response(snapshot_response: SnapshotResponse, snapshot_name: s
 def wait_for_snapshot_ready(sandbox, snapshot_uid: str, max_retries: int = 30, sleep_time: int = 2) -> bool:
     """Helper to poll until a specific snapshot UID is reported as ready."""
     for _ in range(max_retries):
-        check_list = sandbox.snapshots.list(filter_by={"grouping_labels": {"tenant-id": "test-tenant", "user-id": "test-user"}})
+        check_list = sandbox.snapshots.list()
         if check_list.success and any(s.snapshot_uid == snapshot_uid for s in check_list.snapshots):
             print(f"Snapshot '{snapshot_uid}' is ready.")
             return True
@@ -124,11 +124,81 @@ def test_suspend_resume(sandbox) -> str:
     return suspend_third_snapshot_uid
 
 
+def test_suspend_resume_new_sandbox(client, template_name: str, namespace: str) -> None:
+    """
+    Tests creating a sandbox, suspending it (generating a snapshot), terminating it, 
+    provisioning a sandbox handle for the same sandbox, and resuming the sandbox from that snapshot.
+    """
+    print("\n======= Testing Suspend and Resume in a NEW Sandbox =======")
+
+    # Create the initial sandbox to take the snapshot from
+    print(f"Creating initial sandbox from template '{template_name}'...")
+    sandbox = client.create_sandbox(template_name, namespace=namespace)
+    print(f"Initial sandbox '{sandbox.sandbox_id}' ready.")
+
+    print(f"\nSuspending current sandbox '{sandbox.sandbox_id}'...")
+    suspend_result = sandbox.suspend(snapshot_before_suspend=True)
+    assert suspend_result.success, f"Suspend failed: {suspend_result.error_reason}"
+    assert sandbox.is_suspended(), "Sandbox should be suspended."
+    suspend_snapshot_uid = suspend_result.snapshot_response.snapshot_uid if suspend_result.snapshot_response else 'None'
+    print(f"Sandbox suspended. Snapshot UID: {suspend_snapshot_uid}")   
+
+    print(f"Waiting for suspend snapshot '{suspend_snapshot_uid}' to become ready...")
+    wait_for_snapshot_ready(sandbox, suspend_snapshot_uid)
+
+    claim_name = sandbox.claim_name
+    print("Closing connection for the old sandbox handle...")
+    sandbox.close_connection()
+
+    print(f"\nRe-attaching to sandbox claim '{claim_name}' to get a fresh handle...")
+    new_sandbox_handle = client.get_sandbox(claim_name, namespace=namespace)
+
+    print(f"\nResuming sandbox '{new_sandbox_handle.sandbox_id}'...")
+    resume_result = new_sandbox_handle.resume()
+    assert resume_result.success, f"Resume failed: {resume_result.error_reason}"
+    assert resume_result.restored_from_snapshot, "Sandbox should have been restored from snapshot."
+    assert not new_sandbox_handle.is_suspended(), "Sandbox should not be suspended after resume."
+    print(f"Sandbox successfully resumed and restored from Snapshot UID: {resume_result.snapshot_uid}")
+
+    # Cleanup snapshots
+    print(f"\nRunning cleanup of remaining snapshots on the restored sandbox '{new_sandbox_handle.sandbox_id}'...")
+    list_result = new_sandbox_handle.snapshots.list()
+    assert list_result.success, list_result.error_reason
+    print(f"Found {len(list_result.snapshots)} snapshots remaining for the sandbox.")
+    
+    delete_result = new_sandbox_handle.snapshots.delete_all(delete_by="all")
+    assert delete_result.success, delete_result.error_reason
+    print("Cleaned up remaining snapshots.")
+
+
+def test_timestamp_based_listing_and_deletion(sandbox, creation_time, suspend_third_snapshot_uid):
+    """Helper to verify listing and deleting snapshots by timestamp."""
+    print(f"\nListing snapshots created after '{creation_time}'...")
+    # Test listing with timestamp filter
+    list_after = sandbox.snapshots.list(filter_by={"created_after": creation_time})
+    assert list_after.success
+    assert len(list_after.snapshots) >= 1
+    assert list_after.snapshots[0].snapshot_uid == suspend_third_snapshot_uid
+    for snap in list_after.snapshots:
+        print(
+            f"Snapshot UID: {snap.snapshot_uid}, Source Pod: {snap.source_pod}, Creation Time: {snap.creation_timestamp}"
+        )
+
+    print(
+        f"\nDeleting snapshots created after '{creation_time}' of the sandbox '{sandbox.sandbox_id}'..."
+    )
+    delete_result = sandbox.snapshots.delete_all(delete_by="created_after", timestamp=creation_time)
+    assert delete_result.success, delete_result.error_reason
+    assert len(delete_result.deleted_snapshots) >= 1
+    assert suspend_third_snapshot_uid in delete_result.deleted_snapshots
+    print(f"Snapshots deleted successfully: {delete_result.deleted_snapshots}")
+
+
 def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: str, suspend_third_snapshot_uid: str):
     """Tests listing all snapshots and verifying snapshot deletion."""
     print("\n======= Testing List and Delete =======")
     print(f"\nListing all snapshots for sandbox '{sandbox.sandbox_id}'...")
-    list_result = sandbox.snapshots.list(filter_by={"grouping_labels": {"tenant-id": "test-tenant", "user-id": "test-user"}})
+    list_result = sandbox.snapshots.list()
     assert list_result.success, list_result.error_reason
 
     for snap in list_result.snapshots:
@@ -146,28 +216,23 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     ), f"Expected older snapshot UID '{first_snapshot_uid}', but got '{list_result.snapshots[2].snapshot_uid}'"
 
     print(
-        f"\nDeleting snapshot '{suspend_third_snapshot_uid}' of the sandbox '{sandbox.sandbox_id}'..."
+        f"\nDeleting second snapshot '{second_snapshot_uid}' by UID..."
     )
-    delete_result = sandbox.snapshots.delete(snapshot_uid=suspend_third_snapshot_uid)
+    delete_result = sandbox.snapshots.delete(snapshot_uid=second_snapshot_uid)
     assert delete_result.success, delete_result.error_reason
-    assert (
-        len(delete_result.deleted_snapshots) == 1
-    ), f"Expected 1 deleted snapshot, but got {len(delete_result.deleted_snapshots)}"
-    assert (
-        delete_result.deleted_snapshots[0] == suspend_third_snapshot_uid
-    ), f"Expected deleted snapshot UID '{suspend_third_snapshot_uid}', but got '{delete_result.deleted_snapshots[0]}''"
-    print(f"Snapshot '{suspend_third_snapshot_uid}' deleted successfully.")
+    assert len(delete_result.deleted_snapshots) == 1
+    assert delete_result.deleted_snapshots[0] == second_snapshot_uid
+    print(f"Snapshot '{second_snapshot_uid}' deleted successfully.")
 
-    print(f"\nDeleting all snapshots for sandbox '{sandbox.sandbox_id}'...")
-    delete_result = sandbox.snapshots.delete_all(delete_by="all")
+    creation_time_2 = list_result.snapshots[1].creation_timestamp
+    test_timestamp_based_listing_and_deletion(sandbox, creation_time_2, suspend_third_snapshot_uid)
+
+    print(f"\nDeleting all remaining snapshots for sandbox '{sandbox.sandbox_id}'...")
+    delete_result = sandbox.snapshots.delete_all()
     assert delete_result.success, delete_result.error_reason
-    assert (
-        len(delete_result.deleted_snapshots) == 2
-    ), f"Expected 2 deleted snapshots, but got {len(delete_result.deleted_snapshots)}"
-    assert (
-        first_snapshot_uid in delete_result.deleted_snapshots and second_snapshot_uid in delete_result.deleted_snapshots
-    ), f"Expected deleted snapshot UIDs to include '{first_snapshot_uid}' and '{second_snapshot_uid}'"
-    print(f"Snapshots deleted successfully.")
+    assert len(delete_result.deleted_snapshots) >= 1
+    assert first_snapshot_uid in delete_result.deleted_snapshots
+    print(f"Remaining snapshots deleted successfully: {delete_result.deleted_snapshots}")
 
 
 def main(
@@ -220,6 +285,10 @@ def main(
         test_list_and_delete(
             sandbox, first_snapshot_uid, second_snapshot_uid, suspend_third_snapshot_uid
         )
+
+        # Create a fresh sandbox to test suspend-resume flow on a brand new instance
+        print("\n***** Phase 2: Testing Suspend/Resume on a new Sandbox *****")
+        test_suspend_resume_new_sandbox(client, template_name, namespace)
 
         print("--- Pod Snapshot Test Passed! ---")
 

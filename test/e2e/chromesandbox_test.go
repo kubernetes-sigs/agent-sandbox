@@ -28,7 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -67,12 +67,12 @@ func chromeSandboxImageName() string {
 	return fmt.Sprintf("%schrome-sandbox:%s", imagePrefix, imageTag)
 }
 
-func chromeSandbox(namespace string) *sandboxv1alpha1.Sandbox {
+func chromeSandbox(namespace string) *sandboxv1beta1.Sandbox {
 	imageName := chromeSandboxImageName()
-	sandbox := &sandboxv1alpha1.Sandbox{}
+	sandbox := &sandboxv1beta1.Sandbox{}
 	sandbox.Name = "chrome-sandbox"
 	sandbox.Namespace = namespace
-	sandbox.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+	sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -160,14 +160,14 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	}()
 
 	go func() {
-		var lastValue *sandboxv1alpha1.Sandbox
+		var lastValue *sandboxv1beta1.Sandbox
 
-		gvr := sandboxv1alpha1.GroupVersion.WithResource("sandboxes")
+		gvr := sandboxv1beta1.GroupVersion.WithResource("sandboxes")
 		watchFilter := framework.WatchFilter{
 			Namespace: ns.Name,
 		}
 
-		framework.MustWatch(t.Context(), t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *sandboxv1alpha1.Sandbox) (bool, error) {
+		framework.MustWatch(t.Context(), t.ClusterClient, gvr, watchFilter, func(event watch.Event, obj *sandboxv1beta1.Sandbox) (bool, error) {
 			t.Logf("Sandbox event %s %s/%s", event.Type, obj.Namespace, obj.Name)
 
 			if lastValue != nil {

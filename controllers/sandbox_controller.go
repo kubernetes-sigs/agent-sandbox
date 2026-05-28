@@ -567,6 +567,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 		logger.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 
+		patch := client.MergeFrom(service.DeepCopy())
 		if service.Labels == nil {
 			service.Labels = make(map[string]string)
 		}
@@ -578,8 +579,8 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 			return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 		}
-		if err := r.Update(ctx, service); err != nil {
-			return nil, fmt.Errorf("failed to update service with owner reference: %w", err)
+		if err := r.Patch(ctx, service, patch); err != nil {
+			return nil, fmt.Errorf("failed to patch service with owner reference and selector: %w", err)
 		}
 
 	case resourceOwnedBySandbox:

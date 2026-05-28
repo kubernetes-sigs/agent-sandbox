@@ -177,11 +177,9 @@ func GetNamespacedTemplateHash(namespace, templateRefHash string) string {
 
 // GetTemplateRefHashIfNamespaced extracts the templateRefHash value if the parameter is namespace-aware.
 func GetTemplateRefHashIfNamespaced(templateHash string) (string, bool) {
-	if strings.Contains(templateHash, "/") {
-		parts := strings.SplitN(templateHash, "/", 2)
-		if len(parts) == 2 {
-			return parts[1], true
-		}
+	parts := strings.SplitN(templateHash, "/", 2)
+	if len(parts) == 2 && parts[1] != "" {
+		return parts[1], true
 	}
 	return "", false
 }

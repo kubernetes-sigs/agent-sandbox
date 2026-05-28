@@ -1478,7 +1478,7 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 		}
 		templateRefHash := newSandbox.Labels[sandboxTemplateRefHash]
 		namespacedTemplateHash := queue.GetNamespacedTemplateHash(newSandbox.Namespace, templateRefHash)
-		logger.V(1).Info("Adding sandbox to warm pool queue", "templateRefHash", templateRefHash, "sandbox", key)
+		logger.V(1).Info("Adding sandbox to warm pool queue", "templateRefHash", templateRefHash, "namespace", newSandbox.Namespace, "sandbox", key)
 		h.sandboxQueue.Add(namespacedTemplateHash, key)
 	}
 }

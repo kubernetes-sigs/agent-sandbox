@@ -226,6 +226,12 @@ func TestGetTemplateRefHashIfNamespaced(t *testing.T) {
 			expectedHash: "dir/hash",
 			expectedOk:   true,
 		},
+		{
+			name:         "malformed (nothing after namespace)",
+			input:        "ns/",
+			expectedHash: "",
+			expectedOk:   false,
+		},
 	}
 
 	for _, tc := range testCases {

@@ -39,7 +39,8 @@ class LocalCodeExecutor:
             proc = await asyncio.create_subprocess_exec(
                 'python', '/tmp/agent_code.py',
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env={}
             )
             
             try:
@@ -64,9 +65,6 @@ class CodeGenerationLLM:
         import os
         if not hf_token:
             hf_token = os.getenv("HF_TOKEN")
-        
-        if not hf_token:
-            raise ValueError("HF_TOKEN required for model download")
         
         print(f"Loading model {model_id}... This will take 2-5 minutes on first run.")
 

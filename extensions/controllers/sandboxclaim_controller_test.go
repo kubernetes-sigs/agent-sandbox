@@ -1868,6 +1868,41 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectNewSandboxCreated: false,
 		},
+		{
+			name: "adopts oldest ready sandbox from warm pool using legacy FNV hash fallback",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-legacy", metav1.Time{Time: metav1.Now().Add(-3600 * time.Second)}, true)
+					sb.Labels[sandboxTemplateRefHash] = sandboxcontrollers.FNVNameHash("test-template")
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "pool-sb-legacy",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "prefers SHA-256 hash sandbox over legacy FNV hash sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-legacy", metav1.Time{Time: metav1.Now().Add(-3600 * time.Second)}, true)
+					sb.Labels[sandboxTemplateRefHash] = sandboxcontrollers.FNVNameHash("test-template")
+					return sb
+				}(),
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-sha256", metav1.Now(), true)
+					sb.Labels[sandboxTemplateRefHash] = sandboxcontrollers.NameHash("test-template")
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "pool-sb-sha256",
+			expectNewSandboxCreated: false,
+		},
 	}
 
 	for _, tc := range testCases {

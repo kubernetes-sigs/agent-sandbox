@@ -16,6 +16,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -50,6 +52,10 @@ const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
+
+	// Allowed tracking labels under system prefix.
+	warmPoolSandboxLabel        = "agents.x-k8s.io/warm-pool-sandbox"
+	sandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
@@ -444,17 +450,31 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	return nil
 }
 
-// GetNumericHash generates a raw FNV-1a hash value.
-func GetNumericHash(input string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(input))
-	return h.Sum32()
+func isSystemLabel(key string) bool {
+	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
+		strings.HasPrefix(key, "extensions.agents.x-k8s.io/")
 }
 
-// NameHash generates an FNV-1a hash from a string and returns
-// it as a fixed-length hexadecimal string.
+func isSystemAnnotation(key string) bool {
+	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
+		strings.HasPrefix(key, "extensions.agents.x-k8s.io/") ||
+		key == asmetrics.TraceContextAnnotation
+}
+
+// NameHash generates a truncated SHA-256 hash (first 16 bytes) from a string and returns
+// it as a 32-character hexadecimal string.
 func NameHash(objectName string) string {
-	return fmt.Sprintf("%08x", GetNumericHash(objectName))
+	hash := sha256.Sum256([]byte(objectName))
+	return hex.EncodeToString(hash[:16])
+}
+
+// FNVNameHash generates an FNV-1a hash from a string and returns
+// it as an 8-character hexadecimal string.
+func FNVNameHash(objectName string) string {
+	h := fnv.New32a()
+	h.Write([]byte(objectName))
+	hashValue := h.Sum32()
+	return fmt.Sprintf("%08x", hashValue)
 }
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
@@ -547,6 +567,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 		logger.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 
+		patch := client.MergeFrom(service.DeepCopy())
 		if service.Labels == nil {
 			service.Labels = make(map[string]string)
 		}
@@ -558,8 +579,8 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 			return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 		}
-		if err := r.Update(ctx, service); err != nil {
-			return nil, fmt.Errorf("failed to update service with owner reference: %w", err)
+		if err := r.Patch(ctx, service, patch); err != nil {
+			return nil, fmt.Errorf("failed to patch service with owner reference and selector: %w", err)
 		}
 
 	case resourceOwnedBySandbox:
@@ -760,9 +781,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		case resourceOwnedBySandbox:
 			// No additional action needed — label applied below.
 		}
-
-		metadataUpdated := r.updatePodMetadata(pod, sandbox, nameHash)
-		if metadataUpdated || needsUpdate {
+		updated := r.updatePodMetadata(ctx, pod, sandbox, nameHash)
+		if updated || needsUpdate {
 			if err := r.Update(ctx, pod); err != nil {
 				return nil, fmt.Errorf("failed to update pod: %w", err)
 			}
@@ -784,18 +804,37 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Create new Pod
 	logger.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
-	podLabels := map[string]string{
-		sandboxLabel: nameHash,
-	}
+	podLabels := make(map[string]string)
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if isSystemLabel(k) {
+			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k)
+			continue
+		}
 		podLabels[k] = v
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
+	podLabels[sandboxLabel] = nameHash
+
+	// Explicitly copy trusted warm pool tracking labels from Sandbox CR if present
+	if v, ok := sandbox.Labels[warmPoolSandboxLabel]; ok {
+		podLabels[warmPoolSandboxLabel] = v
+	}
+	if v, ok := sandbox.Labels[sandboxTemplateRefHashLabel]; ok {
+		podLabels[sandboxTemplateRefHashLabel] = v
+	}
+	if v, ok := sandbox.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel]; ok {
+		podLabels[sandboxv1beta1.SandboxPodTemplateHashLabel] = v
+	}
+
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+		if isSystemAnnotation(k) {
+			logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k)
+			continue
+		}
 		annotations[k] = v
 		managedAnnotationKeys = append(managedAnnotationKeys, k)
 	}
@@ -865,7 +904,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	return pod, nil
 }
 
-func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
+func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
+	logger := log.FromContext(ctx)
 	updated := false
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
@@ -874,27 +914,94 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 		pod.Labels[sandboxLabel] = nameHash
 		updated = true
 	}
+	// Only remove reserved labels that were attempted via the Sandbox PodTemplate.
+	// This prevents PodTemplate-based hijacking without deleting unrelated system
+	// labels that may be legitimately managed by other internal components.
+	reservedTemplateLabelKeys := make(map[string]struct{})
+	if sandbox.Spec.PodTemplate.ObjectMeta.Labels != nil {
+		for k := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+			if isSystemLabel(k) &&
+				k != sandboxLabel &&
+				k != sandboxv1beta1.SandboxPodTemplateHashLabel &&
+				k != warmPoolSandboxLabel &&
+				k != sandboxTemplateRefHashLabel {
+				reservedTemplateLabelKeys[k] = struct{}{}
+			}
+		}
+	}
+	for k := range reservedTemplateLabelKeys {
+		if _, exists := pod.Labels[k]; exists {
+			delete(pod.Labels, k)
+			updated = true
+			logger.Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
+		}
+	}
 	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if isSystemLabel(k) {
+			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "pod", pod.Name, "key", k)
+			continue
+		}
 		if pod.Labels[k] != v {
 			pod.Labels[k] = v
 			updated = true
 		}
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
+
+	// Explicitly copy trusted warm pool tracking labels from Sandbox CR if present
+	if v, ok := sandbox.Labels[warmPoolSandboxLabel]; ok {
+		if pod.Labels[warmPoolSandboxLabel] != v {
+			pod.Labels[warmPoolSandboxLabel] = v
+			updated = true
+		}
+	}
+	if v, ok := sandbox.Labels[sandboxTemplateRefHashLabel]; ok {
+		if pod.Labels[sandboxTemplateRefHashLabel] != v {
+			pod.Labels[sandboxTemplateRefHashLabel] = v
+			updated = true
+		}
+	}
+	if v, ok := sandbox.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel]; ok {
+		if pod.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel] != v {
+			pod.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel] = v
+			updated = true
+		}
+	}
 	// Handle deletion of labels
 	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
 		for k := range propagatedLabels {
-			if k == "" {
+			if k == "" || isSystemLabel(k) {
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
 				delete(pod.Labels, k)
 				updated = true
 			}
+		}
+	}
+	// Only remove reserved annotations that were attempted via the Sandbox PodTemplate.
+	reservedTemplateAnnotationKeys := make(map[string]struct{})
+	if sandbox.Spec.PodTemplate.ObjectMeta.Annotations != nil {
+		for k := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+			if isSystemAnnotation(k) &&
+				k != sandboxv1beta1.SandboxPodNameAnnotation &&
+				k != sandboxv1beta1.SandboxTemplateRefAnnotation &&
+				k != sandboxv1beta1.SandboxPropagatedLabelsAnnotation &&
+				k != sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation &&
+				k != asmetrics.TraceContextAnnotation {
+				reservedTemplateAnnotationKeys[k] = struct{}{}
+			}
+		}
+	}
+	for k := range reservedTemplateAnnotationKeys {
+		if _, exists := pod.Annotations[k]; exists {
+			delete(pod.Annotations, k)
+			updated = true
+			logger.Info("Removed unauthorized system annotation from Pod", "pod", pod.Name, "key", k)
 		}
 	}
 	// Propagate pod template annotations to the existing pod
@@ -904,6 +1011,10 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 			pod.Annotations = make(map[string]string)
 		}
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+			if isSystemAnnotation(k) {
+				logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "pod", pod.Name, "key", k)
+				continue
+			}
 			if pod.Annotations[k] != v {
 				pod.Annotations[k] = v
 				updated = true
@@ -916,7 +1027,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	if propagatedAnnotationsStr != "" {
 		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
 		for k := range propagatedAnnotations {
-			if k == "" {
+			if k == "" || isSystemAnnotation(k) {
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {
@@ -967,15 +1078,30 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 			case resourceUnowned:
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				patch := client.MergeFrom(pvc.DeepCopy())
+				if pvc.Labels == nil {
+					pvc.Labels = make(map[string]string)
+				}
+				pvc.Labels[sandboxLabel] = nameHash
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}
-				if err := r.Update(ctx, pvc); err != nil {
-					return fmt.Errorf("failed to update PVC with owner reference: %w", err)
+				if err := r.Patch(ctx, pvc, patch); err != nil {
+					return fmt.Errorf("failed to patch PVC with owner reference and labels: %w", err)
 				}
 
 			case resourceOwnedBySandbox:
-				// Already owned by this sandbox — no action needed.
+				if pvc.Labels == nil {
+					pvc.Labels = make(map[string]string)
+				}
+				if pvc.Labels[sandboxLabel] != nameHash {
+					patch := client.MergeFrom(pvc.DeepCopy())
+					pvc.Labels[sandboxLabel] = nameHash
+					if err := r.Patch(ctx, pvc, patch); err != nil {
+						return fmt.Errorf("failed to patch PVC labels: %w", err)
+					}
+					logger.Info("Updated owned PVC labels", "PVC.Name", pvcName)
+				}
 			}
 			continue
 		}

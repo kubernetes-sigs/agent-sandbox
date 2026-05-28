@@ -75,10 +75,8 @@ func runHelperProcess() {
 
 		fmt.Printf("CLAIM:%s\n", sb.ClaimName())
 
-		// Wait for signal instead of sleeping to prevent claim leaks
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-		<-sigCh
+		// Block until client's signal handler terminates the process
+		select {}
 
 	case "cleanup-disabled":
 		// Create client with CleanupOnSignal=false and exit normally

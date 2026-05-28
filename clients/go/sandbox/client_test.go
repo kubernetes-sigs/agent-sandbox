@@ -364,7 +364,7 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 	}
 }
 
-func TestClientCleanupOnSignalDefault(t *testing.T) {
+func TestClient_CleanupOnSignal_Default(t *testing.T) {
 	// Verify CleanupOnSignal defaults to false
 	var opts Options
 	if opts.CleanupOnSignal {
@@ -384,7 +384,7 @@ func TestClientCleanupOnSignalDefault(t *testing.T) {
 	}
 }
 
-func TestClientCleanupOnSignalEnabled(t *testing.T) {
+func TestClient_CleanupOnSignal_Enabled(t *testing.T) {
 	client, _ := newTestClientWithOptions(t, func(opts *Options) {
 		opts.CleanupOnSignal = true
 	})
@@ -407,7 +407,7 @@ func TestClientCleanupOnSignalEnabled(t *testing.T) {
 	client.DisableAutoCleanup()
 }
 
-func TestClientMultipleClientsIndependent(t *testing.T) {
+func TestClient_MultipleClients_Independent(t *testing.T) {
 	// Client 1 with cleanup enabled
 	client1, _ := newTestClientWithOptions(t, func(opts *Options) {
 		opts.CleanupOnSignal = true

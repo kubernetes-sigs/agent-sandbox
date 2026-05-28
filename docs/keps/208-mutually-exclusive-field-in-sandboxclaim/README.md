@@ -185,7 +185,7 @@ In this model, we allow the users to choose between a template and a warmpool bu
 1. If a user provides a template source, they are given the option to either adopt a sandbox from the available warmpool matching the template name or skip the warmpool.
 2. If a user provides a warmpool source, the sandbox is adopted from the warmpool name specified by the user. 
 
-This introduces complications to watch both `SandboxClaim` and `SandboxWarmPool`. 
+This introduces complications to watch both `SandboxTemplate` and `SandboxWarmPool`. 
 
 ```go
 type SandboxClaimSpec struct {

@@ -29,8 +29,8 @@ import (
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-// NameHash generates a SHA-256 hash from a string and returns
-// it as a 32-character hexadecimal string using memory-efficient slice encoding.
+// NameHash generates a SHA-256 hash from a string, truncates it to the first
+// 16 bytes, and returns that truncated value as a 32-character hexadecimal string.
 func NameHash(objectName string) string {
 	hash := sha256.Sum256([]byte(objectName))
 	return hex.EncodeToString(hash[:16])

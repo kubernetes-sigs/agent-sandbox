@@ -913,13 +913,23 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		pod.Labels[sandboxLabel] = nameHash
 		updated = true
 	}
-	// Explicitly remove any unauthorized system-reserved labels from pod metadata
-	for k := range pod.Labels {
-		if isSystemLabel(k) {
-			// Do not delete the ones we intentionally set!
-			if k == sandboxLabel || k == sandboxv1beta1.SandboxPodTemplateHashLabel || k == warmPoolSandboxLabel || k == sandboxTemplateRefHashLabel {
-				continue
+	// Only remove reserved labels that were attempted via the Sandbox PodTemplate.
+	// This prevents PodTemplate-based hijacking without deleting unrelated system
+	// labels that may be legitimately managed by other internal components.
+	reservedTemplateLabelKeys := make(map[string]struct{})
+	if sandbox.Spec.PodTemplate.ObjectMeta.Labels != nil {
+		for k := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+			if isSystemLabel(k) &&
+				k != sandboxLabel &&
+				k != sandboxv1beta1.SandboxPodTemplateHashLabel &&
+				k != warmPoolSandboxLabel &&
+				k != sandboxTemplateRefHashLabel {
+				reservedTemplateLabelKeys[k] = struct{}{}
 			}
+		}
+	}
+	for k := range reservedTemplateLabelKeys {
+		if _, exists := pod.Labels[k]; exists {
 			delete(pod.Labels, k)
 			updated = true
 			logger.Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
@@ -972,17 +982,22 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			}
 		}
 	}
-	// Explicitly remove any unauthorized system-reserved annotations from pod metadata
-	for k := range pod.Annotations {
-		if isSystemAnnotation(k) {
-			// Do not delete the ones we intentionally set!
-			if k == sandboxv1beta1.SandboxPodNameAnnotation ||
-				k == sandboxv1beta1.SandboxTemplateRefAnnotation ||
-				k == sandboxv1beta1.SandboxPropagatedLabelsAnnotation ||
-				k == sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation ||
-				k == asmetrics.TraceContextAnnotation {
-				continue
+	// Only remove reserved annotations that were attempted via the Sandbox PodTemplate.
+	reservedTemplateAnnotationKeys := make(map[string]struct{})
+	if sandbox.Spec.PodTemplate.ObjectMeta.Annotations != nil {
+		for k := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+			if isSystemAnnotation(k) &&
+				k != sandboxv1beta1.SandboxPodNameAnnotation &&
+				k != sandboxv1beta1.SandboxTemplateRefAnnotation &&
+				k != sandboxv1beta1.SandboxPropagatedLabelsAnnotation &&
+				k != sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation &&
+				k != asmetrics.TraceContextAnnotation {
+				reservedTemplateAnnotationKeys[k] = struct{}{}
 			}
+		}
+	}
+	for k := range reservedTemplateAnnotationKeys {
+		if _, exists := pod.Annotations[k]; exists {
 			delete(pod.Annotations, k)
 			updated = true
 			logger.Info("Removed unauthorized system annotation from Pod", "pod", pod.Name, "key", k)

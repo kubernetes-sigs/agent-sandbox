@@ -1604,8 +1604,9 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
-						"keep-label": "value",
+						sandboxLabel:                   nameHash,
+						"keep-label":                   "value",
+						"agents.x-k8s.io/system-label": "value",
 					},
 					Annotations: map[string]string{
 						"keep-annotation":                        "value",

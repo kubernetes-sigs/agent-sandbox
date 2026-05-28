@@ -24,11 +24,11 @@ import (
 	"github.com/go-logr/logr"
 )
 
-func TestSSRF(t *testing.T) {
+func TestConnector_DoesNotFollowRedirects(t *testing.T) {
 	// 1. Create a target (local internal listener) server
-	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("TARGET_REACHED"))
+		_, _ = w.Write([]byte("TARGET_REACHED"))
 	}))
 	defer targetServer.Close()
 
@@ -61,9 +61,11 @@ func TestSSRF(t *testing.T) {
 	defer resp.Body.Close()
 
 	// 5. Check if it followed redirect to the target server
-	if resp.StatusCode == http.StatusOK {
-		t.Errorf("SSRF Vulnerability: client followed redirect! Status: %d", resp.StatusCode)
-	} else if resp.StatusCode == http.StatusFound {
-		t.Logf("Safe: client did not follow redirect! Status: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("expected redirect response without following it; got status %d", resp.StatusCode)
+	}
+
+	if location := resp.Header.Get("Location"); location != targetServer.URL {
+		t.Errorf("expected redirect Location %q, got %q", targetServer.URL, location)
 	}
 }

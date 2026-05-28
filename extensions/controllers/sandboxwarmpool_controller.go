@@ -49,13 +49,15 @@ const (
 	sandboxTemplateRefHash          = "agents.x-k8s.io/sandbox-template-ref-hash"
 	warmPoolSandboxLabel            = "agents.x-k8s.io/warm-pool-sandbox"
 	sandboxCreateDeleteMaxBatchSize = 300
+	warmPoolEvictionAnnotation      = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
 type SandboxWarmPoolReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	MaxBatchSize int
+	Scheme                 *runtime.Scheme
+	MaxBatchSize           int
+	EnableWarmPoolEviction bool
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
@@ -347,6 +349,14 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
+
+	// Respect the template's custom eviction annotation if explicitly specified.
+	// Only apply the default eviction behavior if the annotation is not defined.
+	if _, exists := template.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
+		if r.EnableWarmPoolEviction {
+			podAnnotations[warmPoolEvictionAnnotation] = "true"
+		}
+	}
 
 	replicas := int32(1)
 

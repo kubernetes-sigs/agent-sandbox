@@ -733,6 +733,12 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	delete(adopted.Labels, warmPoolSandboxLabel)
 	delete(adopted.Labels, sandboxTemplateRefHash)
 	delete(adopted.Labels, v1beta1.SandboxPodTemplateHashLabel)
+	// Remove the warm pool's default eviction annotation so the adopted sandbox
+	// is protected from autoscaler scale-downs now that it hosts active state.
+	// Custom template-specified overrides (e.g. "false") are explicitly kept.
+	if adopted.Spec.PodTemplate.ObjectMeta.Annotations != nil && adopted.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] == "true" {
+		delete(adopted.Spec.PodTemplate.ObjectMeta.Annotations, warmPoolEvictionAnnotation)
+	}
 
 	// Transfer ownership from SandboxWarmPool to SandboxClaim
 	adopted.OwnerReferences = nil

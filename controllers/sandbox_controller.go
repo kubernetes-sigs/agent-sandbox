@@ -451,13 +451,6 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 }
 
 func isSystemLabel(key string) bool {
-	// We explicitly allow-list the warm pool and template tracking labels
-	if key == sandboxv1beta1.SandboxPodTemplateHashLabel ||
-		key == warmPoolSandboxLabel ||
-		key == sandboxTemplateRefHashLabel {
-		return false
-	}
-
 	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
 		strings.HasPrefix(key, "extensions.agents.x-k8s.io/")
 }
@@ -815,7 +808,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		if isSystemLabel(k) {
-			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
+			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k)
 			continue
 		}
 		podLabels[k] = v
@@ -823,11 +816,22 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	podLabels[sandboxLabel] = nameHash
 
+	// Explicitly copy trusted warm pool tracking labels from Sandbox CR if present
+	if v, ok := sandbox.Labels[warmPoolSandboxLabel]; ok {
+		podLabels[warmPoolSandboxLabel] = v
+	}
+	if v, ok := sandbox.Labels[sandboxTemplateRefHashLabel]; ok {
+		podLabels[sandboxTemplateRefHashLabel] = v
+	}
+	if v, ok := sandbox.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel]; ok {
+		podLabels[sandboxv1beta1.SandboxPodTemplateHashLabel] = v
+	}
+
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 		if isSystemAnnotation(k) {
-			logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
+			logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k)
 			continue
 		}
 		annotations[k] = v
@@ -925,7 +929,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		if isSystemLabel(k) {
-			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
+			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k)
 			continue
 		}
 		if pod.Labels[k] != v {
@@ -933,6 +937,26 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			updated = true
 		}
 		managedLabelKeys = append(managedLabelKeys, k)
+	}
+
+	// Explicitly copy trusted warm pool tracking labels from Sandbox CR if present
+	if v, ok := sandbox.Labels[warmPoolSandboxLabel]; ok {
+		if pod.Labels[warmPoolSandboxLabel] != v {
+			pod.Labels[warmPoolSandboxLabel] = v
+			updated = true
+		}
+	}
+	if v, ok := sandbox.Labels[sandboxTemplateRefHashLabel]; ok {
+		if pod.Labels[sandboxTemplateRefHashLabel] != v {
+			pod.Labels[sandboxTemplateRefHashLabel] = v
+			updated = true
+		}
+	}
+	if v, ok := sandbox.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel]; ok {
+		if pod.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel] != v {
+			pod.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel] = v
+			updated = true
+		}
 	}
 	// Handle deletion of labels
 	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
@@ -972,7 +996,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		}
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 			if isSystemAnnotation(k) {
-				logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k, "value", v)
+				logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k)
 				continue
 			}
 			if pod.Annotations[k] != v {

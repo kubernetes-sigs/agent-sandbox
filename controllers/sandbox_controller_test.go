@@ -315,7 +315,7 @@ func TestReconcile(t *testing.T) {
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Replicas:      1,
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=48ef8902639c4db8ff663259d106869a",
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				Conditions: []metav1.Condition{
 					{
 						Type:               "Ready",
@@ -334,7 +334,7 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": "48ef8902639c4db8ff663259d106869a",
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -368,7 +368,7 @@ func TestReconcile(t *testing.T) {
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
 				Replicas:      1,
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash, // Pre-computed hash of "sandbox-name"
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				Conditions: []metav1.Condition{
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -464,7 +464,7 @@ func TestReconcile(t *testing.T) {
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
 				Replicas:      1,
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash, // Pre-computed hash of "sandbox-name"
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				Conditions: []metav1.Condition{
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -630,7 +630,7 @@ func TestReconcile(t *testing.T) {
 						Name:      sandboxName,
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": "48ef8902639c4db8ff663259d106869a",
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -654,7 +654,7 @@ func TestReconcile(t *testing.T) {
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Replicas:      1,
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=48ef8902639c4db8ff663259d106869a",
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				PodIPs:        []string{"10.244.0.5"},
 				Conditions: []metav1.Condition{
 					{

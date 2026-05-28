@@ -350,10 +350,12 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
 
-	if r.EnableWarmPoolEviction {
-		podAnnotations[warmPoolEvictionAnnotation] = "true"
-	} else {
-		delete(podAnnotations, warmPoolEvictionAnnotation)
+	// Respect the template's custom eviction annotation if explicitly specified.
+	// Only apply the default eviction behavior if the annotation is not defined.
+	if _, exists := template.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
+		if r.EnableWarmPoolEviction {
+			podAnnotations[warmPoolEvictionAnnotation] = "true"
+		}
 	}
 
 	replicas := int32(1)

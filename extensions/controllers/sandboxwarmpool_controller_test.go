@@ -1551,17 +1551,49 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 		name                string
 		controllerEnable    bool
 		templateAnnotations map[string]string
-		expectEviction      bool
+		expectedEvictionVal string
 	}{
 		{
-			name:             "controller true sets eviction annotation",
-			controllerEnable: true,
-			expectEviction:   true,
+			name:                "controller true sets eviction annotation to true by default",
+			controllerEnable:    true,
+			expectedEvictionVal: "true",
 		},
 		{
-			name:             "controller false does not set eviction annotation",
+			name:                "controller false does not set eviction annotation by default",
+			controllerEnable:    false,
+			expectedEvictionVal: "",
+		},
+		{
+			name:             "controller true respects explicit template value false",
+			controllerEnable: true,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "false",
+			},
+			expectedEvictionVal: "false",
+		},
+		{
+			name:             "controller false respects explicit template value false",
 			controllerEnable: false,
-			expectEviction:   false,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "false",
+			},
+			expectedEvictionVal: "false",
+		},
+		{
+			name:             "controller true respects explicit template value true",
+			controllerEnable: true,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "true",
+			},
+			expectedEvictionVal: "true",
+		},
+		{
+			name:             "controller false respects explicit template value true",
+			controllerEnable: false,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "true",
+			},
+			expectedEvictionVal: "true",
 		},
 	}
 
@@ -1606,9 +1638,9 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 
 			sb := list.Items[0]
 			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]
-			if tc.expectEviction {
+			if tc.expectedEvictionVal != "" {
 				require.True(t, exists, "expected eviction annotation to exist")
-				require.Equal(t, "true", val)
+				require.Equal(t, tc.expectedEvictionVal, val)
 			} else {
 				require.False(t, exists, "expected eviction annotation to NOT exist")
 			}

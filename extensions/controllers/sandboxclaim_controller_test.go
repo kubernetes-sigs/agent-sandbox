@@ -3263,9 +3263,10 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				warmPoolSandboxLabel:   "pool-hash-123",
 			},
 			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
 				Kind:       "SandboxWarmPool",
 				Name:       "test-warmpool",
-				Controller: new(true),
+				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
 	}
@@ -3280,9 +3281,10 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				warmPoolSandboxLabel:   "pool-hash-123",
 			},
 			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
 				Kind:       "SandboxWarmPool",
 				Name:       "test-warmpool",
-				Controller: new(true),
+				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
 	}
@@ -3842,9 +3844,6 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 				sandboxTemplateRefHash: templateHash,
 			},
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
-		},
 	}
 
 	// 3. Verify it is rejected
@@ -3860,7 +3859,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 			Kind:       "SandboxWarmPool",
 			Name:       "test-pool",
 			UID:        "pool-uid-123",
-			Controller: new(true),
+			Controller: ptr.To(true), // nolint:modernize
 		},
 	}
 
@@ -3876,7 +3875,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 			Kind:       "SandboxClaim",
 			Name:       "test-claim",
 			UID:        "claim-uid-123",
-			Controller: new(true),
+			Controller: ptr.To(true), // nolint:modernize
 		},
 	}
 

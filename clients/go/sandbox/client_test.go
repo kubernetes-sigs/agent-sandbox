@@ -273,13 +273,13 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	stop2()
 }
 
-func TestClientCleanupIdempotent(t *testing.T) {
+func TestClient_EnableAutoCleanup_FromOptions_Idempotent(t *testing.T) {
 	client, _ := newTestClientWithOptions(t, func(opts *Options) {
 		opts.CleanupOnSignal = true
 	})
 
 	// Manually call EnableAutoCleanup again (should be safe/idempotent)
-	stop := client.EnableAutoCleanup()
+	_ = client.EnableAutoCleanup()
 
 	// Verify cleanup is still enabled (not broken by double-enable)
 	client.mu.Lock()
@@ -291,12 +291,7 @@ func TestClientCleanupIdempotent(t *testing.T) {
 	}
 
 	// Clean up signal handlers
-	stop()
-	client.mu.Lock()
-	if client.stopSignal != nil {
-		client.stopSignal()
-	}
-	client.mu.Unlock()
+	client.DisableAutoCleanup()
 }
 
 // TestResolveSandboxName_FromClaimStatus verifies the new resolution path.
@@ -409,11 +404,7 @@ func TestClientCleanupOnSignalEnabled(t *testing.T) {
 	}
 
 	// Clean up signal handler
-	client.mu.Lock()
-	if client.stopSignal != nil {
-		client.stopSignal()
-	}
-	client.mu.Unlock()
+	client.DisableAutoCleanup()
 }
 
 func TestClientMultipleClientsIndependent(t *testing.T) {
@@ -444,15 +435,6 @@ func TestClientMultipleClientsIndependent(t *testing.T) {
 	}
 
 	// Clean up signal handlers
-	client1.mu.Lock()
-	if client1.stopSignal != nil {
-		client1.stopSignal()
-	}
-	client1.mu.Unlock()
-
-	client2.mu.Lock()
-	if client2.stopSignal != nil {
-		client2.stopSignal()
-	}
-	client2.mu.Unlock()
+	client1.DisableAutoCleanup()
+	client2.DisableAutoCleanup()
 }

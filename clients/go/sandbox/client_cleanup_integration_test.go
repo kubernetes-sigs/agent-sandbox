@@ -23,11 +23,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -71,7 +74,11 @@ func runHelperProcess() {
 		}
 
 		fmt.Printf("CLAIM:%s\n", sb.ClaimName())
-		time.Sleep(60 * time.Second)
+
+		// Wait for signal instead of sleeping to prevent claim leaks
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		<-sigCh
 
 	case "cleanup-disabled":
 		// Create client with CleanupOnSignal=false and exit normally
@@ -136,22 +143,51 @@ func TestCleanupOnSignalWithSIGTERM(t *testing.T) {
 	}
 
 	// Start subprocess using TestHelperProcess pattern
-	var stdout bytes.Buffer
 	cmd := exec.Command(os.Args[0], "-test.run=TestCleanupOnSignalWithSIGTERM")
 	cmd.Env = append(os.Environ(),
 		"GO_TEST_HELPER_PROCESS=1",
 		"GO_TEST_HELPER_MODE=cleanup-on-signal",
 		"SANDBOX_TEMPLATE="+template,
 	)
-	cmd.Stdout = &stdout
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start subprocess: %v", err)
 	}
 
-	// Wait for sandbox to be created and claim name to be printed
-	time.Sleep(10 * time.Second)
+	// Wait for CLAIM: line to be printed (with timeout)
+	claimName := ""
+	done := make(chan bool, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "CLAIM:") {
+				claimName = strings.TrimPrefix(line, "CLAIM:")
+				done <- true
+				return
+			}
+		}
+		done <- false
+	}()
+
+	select {
+	case success := <-done:
+		if !success || claimName == "" {
+			t.Fatal("failed to parse claim name from subprocess output")
+		}
+	case <-time.After(60 * time.Second):
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+			_ = cmd.Wait() // Reap the process to avoid zombie
+		}
+		t.Fatalf("timeout waiting for claim name from subprocess (claimName so far: %q)", claimName)
+	}
 
 	// Send SIGTERM
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -161,21 +197,10 @@ func TestCleanupOnSignalWithSIGTERM(t *testing.T) {
 	// Wait for subprocess to exit
 	_ = cmd.Wait() // Expected to exit non-zero from signal
 
-	// Parse claim name from output
-	claimName := parseClaimName(t, stdout.String())
-	if claimName == "" {
-		t.Fatal("failed to parse claim name from subprocess output")
-	}
-
 	// Verify sandbox was deleted
 	ctx := context.Background()
-	opts := Options{
-		TemplateName: template,
-		Quiet:        true,
-	}
-	opts.setDefaults()
 
-	k8s, err := NewK8sHelper(nil)
+	k8s, err := NewK8sHelper(nil, logr.Discard())
 	if err != nil {
 		t.Fatalf("failed to create k8s helper: %v", err)
 	}
@@ -222,7 +247,7 @@ func TestCleanupOnSignalDisabled(t *testing.T) {
 
 	// Verify sandbox still exists
 	ctx := context.Background()
-	k8s, err := NewK8sHelper(nil)
+	k8s, err := NewK8sHelper(nil, logr.Discard())
 	if err != nil {
 		t.Fatalf("failed to create k8s helper: %v", err)
 	}
@@ -282,7 +307,7 @@ func TestCleanupWithDeferPattern(t *testing.T) {
 
 	// Verify sandbox was deleted via defer
 	ctx := context.Background()
-	k8s, err := NewK8sHelper(nil)
+	k8s, err := NewK8sHelper(nil, logr.Discard())
 	if err != nil {
 		t.Fatalf("failed to create k8s helper: %v", err)
 	}
@@ -306,7 +331,7 @@ func parseClaimName(t *testing.T, output string) string {
 	return ""
 }
 
-// waitForClaimDeletion polls for claim deletion with exponential backoff.
+// waitForClaimDeletion polls for claim deletion with a 2-second interval.
 func waitForClaimDeletion(t *testing.T, ctx context.Context, k8s *K8sHelper, name, namespace string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -314,9 +339,15 @@ func waitForClaimDeletion(t *testing.T, ctx context.Context, k8s *K8sHelper, nam
 	for time.Now().Before(deadline) {
 		_, err := k8s.SandboxClaimClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			// Claim is deleted (or never existed)
-			t.Logf("claim %s deleted successfully", name)
-			return true
+			if apierrors.IsNotFound(err) {
+				// Claim is deleted
+				t.Logf("claim %s deleted successfully", name)
+				return true
+			}
+			// Other errors (API/network/auth) - log and retry
+			t.Logf("error checking claim %s: %v (retrying)", name, err)
+			time.Sleep(2 * time.Second)
+			continue
 		}
 
 		// Still exists, wait and retry

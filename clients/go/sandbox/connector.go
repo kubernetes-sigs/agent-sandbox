@@ -112,6 +112,9 @@ func newConnector(cfg connectorConfig) *connector {
 		ownsTransport:     cfg.HTTPTransport == nil,
 		httpClient: &http.Client{
 			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		log:     cfg.Log,
 		tracer:  cfg.Tracer,

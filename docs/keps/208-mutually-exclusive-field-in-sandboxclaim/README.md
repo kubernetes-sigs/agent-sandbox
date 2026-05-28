@@ -29,7 +29,7 @@ Before we even implement #2, I think we should decide if it is even worth having
 
 The user only provides a warm pool reference in `SandboxClaim` spec. The concept of "template" is hidden from the end-user API when claiming a sandbox. The controller looks at the specified warm pool to adopt a sandbox. 
 
-1. If the warmpool is empty, it falls back to a cold start using the template configured in the warmpool. 
+1. If the warmpool's `spec.replicas` is 0, it falls back to a cold start using the `spec.sandboxTemplateRef` configured in the warmpool. 
 2. If the user explicitly wants a cold start, they can set `forceColdStart: true` in the claim and the Sandbox will be created based on the template configured in the warmpool.
 3. If a user provides custom environment variables, they must set `forceColdStart: true` to provision a Sandbox from scratch, otherwise the controller will reject the claim.
 4. If the warmpool has been deleted by the cluster admin, the claim controller will throw a permanent failure error.
@@ -45,11 +45,6 @@ type SandboxClaimSpec struct {
 	// This is required if injecting custom Env variables into a fresh instance.
 	// +optional
 	ForceColdStart bool `json:"forceColdStart,omitempty"`
-
-	// env is a list of environment variables to inject into the sandbox
-	// +listType=atomic
-	// +optional
-	Env []EnvVar `json:"env,omitempty"`
 }
 
 // SandboxWarmPoolRef references a SandboxWarmPool.
@@ -66,15 +61,14 @@ type SandboxWarmPoolRef struct {
 * **Avoids Ambiguity**: Resolves the mutually exclusive fields problem elegantly.
 
 **Cons:**
-* **Cascade Latency**: Reconciliations are delayed by an extra step. A template update must finish updating the warm pool before the claim controller even gets notified that its sandbox needs to be rolled over.
-* **Platform Team Bottleneck**: Developers cannot test a brand-new template directly; they must first create a `SandboxWarmPool` to wrap the template. *This is by design though*
+* **Platform Team Bottleneck**: If the platform team wants to share a sandbox template to dev which should only be used for cold starts, they still need to create a warm pool with size 0 (a level of indirection). *This is a design choice we make to avoid duplicating template ref*
 
 #### Impact and Migration
 
 Adopting the preferred solution (removing the `TemplateRef` field) simplifies the API but introduces shifts in how users and the system interact. The impact and migration paths for the primary scenarios are:
 
-*   **Scenario A: Targeting a specific warm pool (`warmpool: "my-fast-pool"`)**
-    * **Impact:** Users will specify `warmPoolRef.name: "my-fast-pool"`. The `TemplateRef` and `WarmPoolPolicy` fields are completely removed.
+*   **Scenario A: Targeting a specific warm pool (`warmpool: "my-large-pool"`)**
+    * **Impact:** Users will specify `warmPoolRef.name: "my-large-pool"`. The `TemplateRef` and `WarmPoolPolicy` fields are completely removed.
     * **Migration:** Replace `templateRef` and `warmpool` policy fields with the single `warmPoolRef` field.
 
 *   **Scenario B: Explicitly requesting a cold start (`warmpool: "none"`) from a template**
@@ -137,7 +131,7 @@ type SandboxClaimSpec struct {
 	// warmpool specifies the warm pool policy for sandbox adoption.
 	// - "none": Do not use any warm pool, always create fresh sandboxes
 	// - "default": Use default behavior, select from all matching warm pools (default)
-	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+	// - A warm pool name: Select only from the specified warm pool (e.g., "large-pool", "standard-pool")
 	// +optional
 	// +kubebuilder:default=default
 	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
@@ -175,7 +169,7 @@ type SandboxTemplateRef struct {
 * **Zero Configuration Conflicts**: Impossible for a user to create a mismatch (e.g., asking for Template A but pointing to a pool running Template B).
 
 **Cons:**
-* **Loss of Priority Control:** Power users cannot explicitly guarantee their workload hits a premium, ultra-fast warm pool. Everything relies on the controller's internal scheduling logic. 
+* **Loss of Priority Control:** Power users cannot explicitly guarantee their workload hits a premium, ultra-large warm pool. Everything relies on the controller's internal scheduling logic. 
 * **Opaque Debugging**: If a user gets a slow "cold start," it is harder for them to diagnose why from looking at their own manifest, since the pool state is completely abstracted away.
 
 ### Option 3: Union Model (oneOf)

@@ -91,7 +91,14 @@ async def upload_file(file: UploadFile = File(...)):
     """
     try:
         logging.info(f"--- UPLOAD_FILE CALLED: Attempting to save '{file.filename}' ---")
-        file_path = os.path.join("/app", file.filename)
+        
+        try:
+            file_path = get_safe_path(file.filename)
+        except ValueError:
+            return JSONResponse(
+                status_code=403,
+                content={"message": "Access denied"}
+            )
         
         with open(file_path, "wb") as f:
             f.write(await file.read())

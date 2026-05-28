@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"reflect"
 	"slices"
@@ -52,7 +53,7 @@ const (
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 
-	// Allowed tracking labels under system prefix
+	// Allowed tracking labels under system prefix.
 	warmPoolSandboxLabel        = "agents.x-k8s.io/warm-pool-sandbox"
 	sandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
@@ -472,6 +473,15 @@ func isSystemAnnotation(key string) bool {
 func NameHash(objectName string) string {
 	hash := sha256.Sum256([]byte(objectName))
 	return hex.EncodeToString(hash[:16])
+}
+
+// FNVNameHash generates an FNV-1a hash from a string and returns
+// it as an 8-character hexadecimal string.
+func FNVNameHash(objectName string) string {
+	h := fnv.New32a()
+	h.Write([]byte(objectName))
+	hashValue := h.Sum32()
+	return fmt.Sprintf("%08x", hashValue)
 }
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {

@@ -481,9 +481,12 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 ) bool {
 	sandboxHash := sandbox.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel]
 
-	// If the templateRefHash doesn't match, it's stale.
-	if sandbox.Labels[sandboxTemplateRefHash] != SandboxTemplateRefHash(template.Name) {
-		return true
+	// If the templateRefHash doesn't match, check if it matches the legacy FNV hash.
+	tmplRefHash := sandbox.Labels[sandboxTemplateRefHash]
+	if tmplRefHash != SandboxTemplateRefHash(template.Name) {
+		if tmplRefHash != sandboxcontrollers.FNVNameHash(template.Name) {
+			return true
+		}
 	}
 
 	// Check if the sandbox is unowned (orphaned).

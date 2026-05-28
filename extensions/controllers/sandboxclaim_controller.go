@@ -603,7 +603,12 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	for {
 		adoptedKey, ok := r.WarmSandboxQueue.Get(templateHash)
 		if !ok {
-			return nil, queue.SandboxKey{}, nil
+			// Fallback to old FNV hash
+			oldHash := sandboxcontrollers.FNVNameHash(claim.Spec.TemplateRef.Name)
+			adoptedKey, ok = r.WarmSandboxQueue.Get(oldHash)
+			if !ok {
+				return nil, queue.SandboxKey{}, nil
+			}
 		}
 
 		// 1. Hand the Kubernetes client the empty bucket
@@ -1505,8 +1510,12 @@ func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1
 	}
 
 	templateHash := SandboxTemplateRefHash(claim.Spec.TemplateRef.Name)
-	if candidate.Labels[sandboxTemplateRefHash] != templateHash {
-		return fmt.Errorf("incorrect template hash, expected %v, got %v", templateHash, candidate.Labels[sandboxTemplateRefHash])
+	candidateHash := candidate.Labels[sandboxTemplateRefHash]
+	if candidateHash != templateHash {
+		oldHash := sandboxcontrollers.FNVNameHash(claim.Spec.TemplateRef.Name)
+		if candidateHash != oldHash {
+			return fmt.Errorf("incorrect template hash, expected %v or %v, got %v", templateHash, oldHash, candidateHash)
+		}
 	}
 	return nil
 }

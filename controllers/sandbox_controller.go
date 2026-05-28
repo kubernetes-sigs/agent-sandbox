@@ -462,7 +462,7 @@ func isSystemAnnotation(key string) bool {
 }
 
 // NameHash generates a truncated SHA-256 hash (first 16 bytes) from a string and returns
-// it as a 32-character hexadecimal string using memory-efficient slice encoding.
+// it as a 32-character hexadecimal string.
 func NameHash(objectName string) string {
 	hash := sha256.Sum256([]byte(objectName))
 	return hex.EncodeToString(hash[:16])

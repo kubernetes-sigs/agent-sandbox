@@ -14,6 +14,7 @@
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 from kubernetes.client import ApiException
 from kubernetes import watch
@@ -318,3 +319,19 @@ def wait_for_pod_ready(
                     logger.error(f"Error checking pod status: {e}")
         time.sleep(2)
     return False
+
+
+def normalize_datetime(v):
+    """Normalizes a datetime object or ISO string to a timezone-aware UTC datetime."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError as e:
+            raise ValueError(f"Invalid ISO datetime string: {v}") from e
+    if isinstance(v, datetime):
+        if v.tzinfo is None or v.utcoffset() is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
+    raise TypeError(f"Expected datetime or ISO format string, got {type(v)}")

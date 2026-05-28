@@ -829,6 +829,11 @@ func validateAdditionalPodMetadata(claimMeta *v1beta1.PodMetadata) error {
 			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
 		}
 
+		// Block spoofing of system components
+		if isLabel && strings.EqualFold(key, "app") && strings.EqualFold(value, "sandbox-router") {
+			return fmt.Errorf("restricted system label value: %q=%q is not allowed in AdditionalPodMetadata", key, value)
+		}
+
 		// Validate label values (annotations have less restrictions)
 		if isLabel {
 			if errs := validation.IsValidLabelValue(value); len(errs) > 0 {

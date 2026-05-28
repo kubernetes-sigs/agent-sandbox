@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -67,6 +68,12 @@ def run_python_tests(repo_root):
         venv_pip = os.path.join(venv_dir, "bin", "pip")
 
         print(f"\n=== Setting up Python venv for {suite['name']} tests ===")
+        if os.path.isdir(venv_dir):
+            # Safely verify the directory is indeed a virtual environment before removing
+            if os.path.exists(os.path.join(venv_dir, "pyvenv.cfg")):
+                shutil.rmtree(venv_dir)
+            else:
+                print(f"WARNING: Directory {venv_dir} exists but does not appear to be a venv (missing pyvenv.cfg). Skipping clean.")
         subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
 
         env = os.environ.copy()

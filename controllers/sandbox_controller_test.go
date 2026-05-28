@@ -1027,7 +1027,7 @@ func TestReconcilePod(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			Replicas: new(int32(1)),
+			Replicas: ptr.To[int32](1),
 			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -1190,7 +1190,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
@@ -1301,7 +1301,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1506,7 +1506,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
@@ -1582,7 +1582,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 					PodTemplate: sandboxv1beta1.PodTemplate{
 						ObjectMeta: sandboxv1beta1.PodMetadata{
 							Labels: map[string]string{
@@ -1604,9 +1604,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel:                   nameHash,
-						"keep-label":                   "value",
-						"agents.x-k8s.io/system-label": "value",
+						sandboxLabel: nameHash,
+						"keep-label": "value",
 					},
 					Annotations: map[string]string{
 						"keep-annotation":                        "value",
@@ -1694,7 +1693,7 @@ func TestReconcileService(t *testing.T) {
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			Replicas: new(int32(1)),
+			Replicas: ptr.To[int32](1),
 			Service:  new(true),
 		},
 	}
@@ -1915,7 +1914,7 @@ func TestReconcileService(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 				},
 			},
 			wantNilService:        true,
@@ -1944,7 +1943,7 @@ func TestReconcileService(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 				},
 			},
 			wantService: &corev1.Service{
@@ -1988,7 +1987,7 @@ func TestReconcileService(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 				},
 			},
 			wantNilService:        true,
@@ -2014,7 +2013,7 @@ func TestReconcileService(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 					Service:  new(false),
 				},
 			},
@@ -2041,7 +2040,7 @@ func TestReconcileService(t *testing.T) {
 					UID:       sandboxUID,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					Replicas: new(int32(1)),
+					Replicas: ptr.To[int32](1),
 					Service:  new(false),
 				},
 			},

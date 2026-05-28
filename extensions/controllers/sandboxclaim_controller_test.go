@@ -494,6 +494,34 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
 		},
 		{
+			name:             "sandbox exists with safe-to-evict, claim is silent on evict, and template lookup fails",
+			claimToReconcile: claimWithoutEvict,
+			existingObjects: []client.Object{
+				func() client.Object {
+					sb := readySandbox.DeepCopy()
+					if sb.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+						sb.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+					}
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] = "on-completion"
+					sb.Name = claimWithoutEvict.Name
+					sb.OwnerReferences = []metav1.OwnerReference{{
+						APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claimWithoutEvict.Name, UID: claimWithoutEvict.UID, Controller: new(true),
+					}}
+					return sb
+				}(),
+			},
+			expectSandbox: true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
+			},
+			expectedPodIPs: []string{"10.244.0.6"},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, _ *extensionsv1beta1.SandboxTemplate) {
+				if val := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; val != "on-completion" {
+					t.Errorf("expected safe-to-evict annotation to remain intact ('on-completion'), but got %q", val)
+				}
+			},
+		},
+		{
 			name:             "sandbox is ready",
 			claimToReconcile: claim,
 			existingObjects:  []client.Object{template, warmPool, readySandbox},
@@ -2152,7 +2180,14 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						SafeToEvict: nil,
 					},
 				},
-				createWarmPoolSandbox("pool-sb-1", metav1.Now(), true),
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Now(), true)
+					if sb.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+						sb.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+					}
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] = "on-completion"
+					return sb
+				}(),
 			},
 			expectSandboxAdoption:    true,
 			expectedAdoptedSandbox:   "pool-sb-1",

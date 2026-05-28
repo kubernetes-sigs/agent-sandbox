@@ -58,6 +58,9 @@ const (
 )
 
 // SafeToEvictPolicy describes the policy for cluster-autoscaler.kubernetes.io/safe-to-evict annotation.
+// If not specified on the claim, the policy is inherited from the underlying SandboxTemplate's pod metadata.
+// If the template also does not specify this annotation, the Sandbox Pod is created without a safe-to-evict
+// annotation, falling back to standard Kubernetes Cluster Autoscaler defaults.
 // +kubebuilder:validation:Enum=on-completion;true;false
 type SafeToEvictPolicy string
 
@@ -135,6 +138,10 @@ type SandboxClaimSpec struct {
 	AdditionalPodMetadata sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
 	// safeToEvict specifies the policy for cluster-autoscaler.kubernetes.io/safe-to-evict annotation.
+	// If this field is omitted or nil, the safe-to-evict annotation value is inherited from the
+	// underlying SandboxTemplate. If the template also does not specify this annotation, the final
+	// Sandbox Pod will not possess any safe-to-evict annotation, falling back to Cluster Autoscaler defaults.
+	// If specified on the claim, the claim value overrides the template default.
 	// Note that if "true" or "false" values are desired, they must be quoted in the YAML manifest (e.g., safeToEvict: "false")
 	// because unquoted true/false values are parsed as booleans by YAML and will fail CRD string enum validation.
 	// +optional

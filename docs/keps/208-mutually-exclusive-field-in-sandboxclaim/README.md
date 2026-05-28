@@ -35,10 +35,10 @@ Before we even implement #2, I think we should decide if it is even worth having
 
 The user only provides a warm pool reference in `SandboxClaim` spec. The concept of "template" is hidden from the end-user API when claiming a sandbox. The controller looks at the specified warm pool to adopt a sandbox. 
 
-1. If the warmpool's `spec.replicas` is 0, it falls back to a cold start using the `spec.sandboxTemplateRef` configured in the warmpool. 
+1. If the warmpool's `spec.replicas` is 0, the controller falls back to a cold start using the `spec.templateRef` configured in the warmpool. 
 2. If a user provides custom environment variables, the controller will implicitly bypass the warm pool and provision a Sandbox from scratch based on the template configured in the warmpool.
 3. If the warmpool has been deleted by the cluster admin, the claim controller will throw a permanent failure error.
-4. If the warmpool's `spec.replicas` > 0 and no `spec.env` is set, the Sandbox is adopted from the warmpool specified by the user. 
+4. If the warmpool's `spec.replicas` > 0 and no `spec.env` is provided by the user, the Sandbox is adopted from the warmpool specified in `spec.warmpoolRef`. 
 
 ```go
 type SandboxClaimSpec struct {
@@ -97,7 +97,7 @@ The controller logic will change as follows:
    Because the claim no longer natively provides a template reference, the internal in-memory queue (`SimpleSandboxQueue`) will be refactored to use the `SandboxWarmPool`'s Name (or UID) as its primary routing key instead of the `TemplateRef` hash. When a claim is eligible:
    * The controller performs a direct O(1) lookup against the specific warm pool's queue.
    * If the queue has available Sandboxes, it pops one off the queue, assigns ownership to the claim, and updates the adoption labels (bypassing slow API list operations).
-   * If the queue is empty (all warm Sandboxes are claimed, initializing, or the pool size is 0), this empty return acts as the exact trigger for the fallback policy. The controller dynamically provisions a new `Sandbox` from scratch directly using the `SandboxTemplate` associated with the pool.
+   * If the queue is empty (all warm Sandboxes are claimed, initializing, or the pool size is 0), the controller dynamically provisions a new `Sandbox` from scratch directly using the `SandboxTemplate` associated with the pool.
 
 ## Alternatives Considered 
 

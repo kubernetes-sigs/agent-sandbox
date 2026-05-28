@@ -54,10 +54,13 @@ kubectl -n agent-sandbox-system wait --for=condition=Ready pod -l app=agent-sand
 
 The `kubectl wait` command will exit when the pod is ready.
 
-### 2. Set Up HuggingFace Token
+### 2. Set Up HuggingFace Token (Optional)
+
+> [!NOTE]
+> A HuggingFace token is not required for the default model (`Salesforce/codegen-350M-mono`) because it is fully open-source and publicly accessible. You only need a HuggingFace token if you switch to a gated or private model (like LLaMA). If you do not require a token, you can safely skip steps 2 and 4!
 
 ```bash
-# Export your HuggingFace token
+# Export your HuggingFace token (only required for gated/private models)
 export HF_TOKEN='your_huggingface_token_here'
 ```
 
@@ -73,9 +76,12 @@ git clone https://github.com/kubernetes-sigs/agent-sandbox.git
 cd examples/coding-agent
 ```
 
-### 4. Set your huggingface token
+### 4. Set your huggingface token (Optional)
 
-Update `<HF_TOKEN>` placeholder in `deployment.yaml`:
+> [!NOTE]
+> If you skipped Step 2 because you are using the default open-source model, you can skip this step as well! The deployment manifest configures the secret token to be `optional`, meaning the init container will run and cache the public model even if you leave the placeholder `"<HF_TOKEN>"` intact or delete the Secret resource.
+
+Update the `<HF_TOKEN>` placeholder in `deployment.yaml` if you are deploying with a gated/private model:
 
 ```yaml
 apiVersion: v1

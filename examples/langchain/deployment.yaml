@@ -43,6 +43,7 @@ spec:
                 secretKeyRef:
                   name: coding-agent-hf-token
                   key: token
+                  optional: true
           volumeMounts:
             - name: models-cache
               mountPath: /models

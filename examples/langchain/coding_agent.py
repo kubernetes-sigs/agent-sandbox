@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 import sys
 from typing import TypedDict, Literal, Optional
 import torch
@@ -36,11 +37,19 @@ class LocalCodeExecutor:
             with open('/tmp/agent_code.py', 'w') as f:
                 f.write(code)
             
+            # Use sys.executable as the interpreter path, and provide a minimal sanitized environment
+            # containing only safe and necessary variables (like PATH). This prevents exposure of
+            # sensitive orchestrator credentials (like HF_TOKEN) to untrusted code execution.
+            env = {}
+            for key in ["PATH", "LANG", "LC_ALL"]:
+                if key in os.environ:
+                    env[key] = os.environ[key]
+
             proc = await asyncio.create_subprocess_exec(
-                'python', '/tmp/agent_code.py',
+                sys.executable, '/tmp/agent_code.py',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={}
+                env=env
             )
             
             try:
@@ -62,32 +71,42 @@ class LocalCodeExecutor:
 class CodeGenerationLLM:
     
     def __init__(self, model_id: str = "Salesforce/codegen-350M-mono", hf_token: str = None):
-        import os
         if not hf_token:
             hf_token = os.getenv("HF_TOKEN")
+        if hf_token == "<HF_TOKEN>":
+            hf_token = None
         
-        print(f"Loading model {model_id}... This will take 2-5 minutes on first run.")
-
         cache_dir = os.getenv("HF_HOME", "/models")
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
-            token=hf_token,
-            trust_remote_code=True,
-            local_files_only=True,
-            cache_dir=cache_dir
-        )
-        
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            token=hf_token,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-            local_files_only=True,
-            cache_dir=cache_dir
-        )
+        print(f"Loading model {model_id} from local cache ({cache_dir})...")
+
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_id,
+                token=hf_token,
+                trust_remote_code=True,
+                local_files_only=True,
+                cache_dir=cache_dir
+            )
+            
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                token=hf_token,
+                trust_remote_code=True,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+                cache_dir=cache_dir
+            )
+        except OSError as e:
+            print(f"\nERROR: Failed to load model '{model_id}' from local cache at '{cache_dir}'.", file=sys.stderr)
+            print(f"Details: {e}", file=sys.stderr)
+            print("\nThis usually indicates that the model files have not been downloaded or cached yet.", file=sys.stderr)
+            print("Please ensure that the 'model-downloader' initContainer ran successfully,", file=sys.stderr)
+            print("or download the model manually by running:", file=sys.stderr)
+            print("   python download_model.py", file=sys.stderr)
+            print("=" * 80, file=sys.stderr)
+            sys.exit(1)
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token

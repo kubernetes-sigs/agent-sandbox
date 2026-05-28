@@ -1,6 +1,7 @@
 <!-- toc -->
 - [KEP-0208: Resolving Mutually Exclusive Fields in SandboxClaim for Beta](#kep-0208-resolving-mutually-exclusive-fields-in-sandboxclaim-for-beta)
   - [Motivation](#motivation)
+  - [User Personas](#user-personas)
   - [Preferred Solution](#preferred-solution)
       - [Pure WarmPoolRef and remove <code>TemplateRef</code> field.](#pure-warmpoolref-and-remove-templateref-field)
       - [Impact and Migration](#impact-and-migration)
@@ -22,6 +23,11 @@ These issues introduce the following problems for end-users:
 2. **Naming Collisions (Capitalize Warm Pool Constants):** The current API for `WarmPoolPolicy` uses lowercase string constants (`none`, `default`) to dictate warm pool behavior. If a user creates a custom `SandboxWarmPool` resource and happens to name it "none" or "default", the controller cannot distinguish between the user's intent to use their custom pool versus the system's reserved policy. By capitalizing the constants (`None`, `Default`), we align with Kubernetes API conventions and prevent these routing collisions.
 
 Before we even implement #2, I think we should decide if it is even worth having the field in the first place in the Beta API. Please note `WarmPoolPolicy` has been added very recently (April 2026). 
+
+## User Personas
+
+1. **Platform Administrator:** Responsible for setting up the underlying infrastructure, including defining `SandboxTemplate`s and creating `SandboxWarmPool`s. They want to control the size of warm pools, manage resource costs, and offer specific "tiers" or "environments" (e.g., `ml-workload`, `standard-dev`) for developers to consume.
+2. **End User / Agentic Workflow:** The consumer of the sandbox (either a human developer or an automated AI agent). They create `SandboxClaim` resources to dynamically request execution environments. They prioritize low latency (getting a sandbox immediately) and a simple, unambiguous API contract (e.g., "give me an instance from the `ml-workload` pool") without needing to know the underlying template configuration.
 
 ## Preferred Solution
 
@@ -73,15 +79,15 @@ Adopting the preferred solution (removing the `TemplateRef` field) simplifies th
 
 *   **Scenario B: Explicitly requesting a cold start (`warmpool: "none"`) from a template**
     * **Impact:** The `warmpool: "none"` option is no longer supported directly on the claim.
-    * **Migration:** Users can point to an existing `SandboxWarmPool` and set `forceColdStart: true` in their claim to explicitly bypass the warm pool queue and get a fresh sandbox. If they are testing a completely new template, they must first create a `SandboxWarmPool` (e.g., with `replicas: 0`) referencing that template.
+    * **Migration:** Users can point to an existing `SandboxWarmPool` and set `forceColdStart: true` in their claim to explicitly bypass the warm pool queue and get a fresh sandbox. If they are testing a completely new template, the Platform admins must first create a `SandboxWarmPool` (e.g., with `replicas: 0`) referencing that template for devs to use.
 
 *   **Scenario C: Default behavior / Implicit warm pool discovery (`warmpool: "default"` or omitted)**
     *   **Impact:** Users can no longer rely on the controller to automatically discover and select an arbitrary warm pool based solely on a template reference. The implicit "default" discovery mechanism is removed.
     *   **Migration:** Users must explicitly specify the exact warm pool they want to draw from using `warmPoolRef.name`.
 
 *   **Scenario D: Environment Variable Injection (Customizing the Sandbox)**
-    *   **Impact:** The system no longer relies on implicit magic or implicit cold-starts. Providing `Env` vars directly into a warm pool adoption is blocked.
-    *   **Migration:** If users inject custom `Env` variables, they must explicitly set `forceColdStart: true`. If `Env` variables are provided but `forceColdStart` is false, the admission webhook will immediately reject the claim with the error: "Custom environment variables require forceColdStart to be true."
+    *   **Impact:** Users cannot set `spec.envVar` with `warmpool: "none"` since the option is not longer supported directly in the claim.
+    *   **Migration:** If users inject custom `Env` variables, they must explicitly set `forceColdStart: true`. If `Env` variables are provided but `forceColdStart` is false, the controller will immediately reject the claim with the error: "Custom environment variables require forceColdStart to be true."
 
 #### Controller Implementation Details
 

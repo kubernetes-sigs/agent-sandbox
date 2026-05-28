@@ -27,7 +27,7 @@ Before we even implement #2, I think we should decide if it is even worth having
 ## User Personas
 
 1. **Platform Administrator:** Responsible for setting up the underlying infrastructure, including defining `SandboxTemplate`s and creating `SandboxWarmPool`s. They want to control the size of warm pools, manage resource costs, and offer specific "tiers" or "environments" (e.g., `ml-workload`, `standard-dev`) for developers to consume.
-2. **End User / Agentic Workflow:** The consumer of the sandbox (either a human developer or an automated AI agent). They create `SandboxClaim` resources to dynamically request execution environments. They prioritize low latency (getting a sandbox immediately) and a simple, unambiguous API contract (e.g., "give me an instance from the `ml-workload` pool") without needing to know the underlying template configuration.
+2. **End User / Agentic Workflow:** The consumer of the sandbox (either a human developer or an automated AI agent). They create `SandboxClaim` resources to dynamically request execution environments. They prioritize low latency (getting a sandbox immediately) and a simple, unambiguous API contract.
 
 ## Preferred Solution
 
@@ -36,21 +36,15 @@ Before we even implement #2, I think we should decide if it is even worth having
 The user only provides a warm pool reference in `SandboxClaim` spec. The concept of "template" is hidden from the end-user API when claiming a sandbox. The controller looks at the specified warm pool to adopt a sandbox. 
 
 1. If the warmpool's `spec.replicas` is 0, it falls back to a cold start using the `spec.sandboxTemplateRef` configured in the warmpool. 
-2. If the user explicitly wants a cold start, they can set `forceColdStart: true` in the claim and the Sandbox will be created based on the template configured in the warmpool.
-3. If a user provides custom environment variables, they must set `forceColdStart: true` to provision a Sandbox from scratch, otherwise the controller will reject the claim.
-4. If the warmpool has been deleted by the cluster admin, the claim controller will throw a permanent failure error.
+2. If a user provides custom environment variables, the controller will implicitly bypass the warm pool and provision a Sandbox from scratch based on the template configured in the warmpool.
+3. If the warmpool has been deleted by the cluster admin, the claim controller will throw a permanent failure error.
+4. If the warmpool's `spec.replicas` > 0 and no `spec.env` is set, the Sandbox is adopted from the warmpool specified by the user. 
 
 ```go
 type SandboxClaimSpec struct {
 	// WarmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
 	// +required
 	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
-
-	// ForceColdStart, when true, bypasses the warm pool queue and explicitly 
-	// provisions a fresh sandbox using the pool's underlying template.
-	// This is required if injecting custom Env variables into a fresh instance.
-	// +optional
-	ForceColdStart bool `json:"forceColdStart,omitempty"`
 }
 
 // SandboxWarmPoolRef references a SandboxWarmPool.
@@ -79,15 +73,15 @@ Adopting the preferred solution (removing the `TemplateRef` field) simplifies th
 
 *   **Scenario B: Explicitly requesting a cold start (`warmpool: "none"`) from a template**
     * **Impact:** The `warmpool: "none"` option is no longer supported directly on the claim.
-    * **Migration:** Users can point to an existing `SandboxWarmPool` and set `forceColdStart: true` in their claim to explicitly bypass the warm pool queue and get a fresh sandbox. If they are testing a completely new template, the Platform admins must first create a `SandboxWarmPool` (e.g., with `replicas: 0`) referencing that template for devs to use.
+    * **Migration:** If the users want a cold start of the sandbox from the template, the Platform admins must first create a `SandboxWarmPool` (with `replicas: 0`) referencing that template for devs to use. 
 
 *   **Scenario C: Default behavior / Implicit warm pool discovery (`warmpool: "default"` or omitted)**
     *   **Impact:** Users can no longer rely on the controller to automatically discover and select an arbitrary warm pool based solely on a template reference. The implicit "default" discovery mechanism is removed.
     *   **Migration:** Users must explicitly specify the exact warm pool they want to draw from using `warmPoolRef.name`.
 
 *   **Scenario D: Environment Variable Injection (Customizing the Sandbox)**
-    *   **Impact:** Users cannot set `spec.envVar` with `warmpool: "none"` since the option is not longer supported directly in the claim.
-    *   **Migration:** If users inject custom `Env` variables, they must explicitly set `forceColdStart: true`. If `Env` variables are provided but `forceColdStart` is false, the controller will immediately reject the claim with the error: "Custom environment variables require forceColdStart to be true."
+    *   **Impact:** Users cannot set `spec.env` with `warmpool: "none"` since the option is no longer supported directly in the claim.
+    *   **Migration:** If users inject custom `Env` variables, the controller will implicitly recognize this and provision a cold start sandbox. The user does not need to specify any additional flags.
 
 #### Controller Implementation Details
 
@@ -96,8 +90,8 @@ The controller logic will change as follows:
 1. **Warm Pool Existence Check:**
    The controller first looks up the `SandboxWarmPool` referenced in the claim's `warmPoolRef`. If the pool doesn't exist, it errors out immediately.
 
-2. **Explicit Cold Start Detection (Bypassing the Queue):**
-   If `claim.Spec.ForceColdStart` is `true`, the controller immediately bypasses the warm pool queue. It fetches the `SandboxTemplate` associated with the pool and routes the request directly to a cold start. Additionally, controller will enforce that if `len(claim.Spec.Env) > 0`, `ForceColdStart` must be `true`.
+2. **Implicit Cold Start Detection (Bypassing the Queue):**
+   If `len(claim.Spec.Env) > 0`, the controller immediately bypasses the warm pool queue. It fetches the `SandboxTemplate` associated with the pool and routes the request directly to a cold start.
 
 3. **Queue Evaluation and Adoption:**
    Because the claim no longer natively provides a template reference, the internal in-memory queue (`SimpleSandboxQueue`) will be refactored to use the `SandboxWarmPool`'s Name (or UID) as its primary routing key instead of the `TemplateRef` hash. When a claim is eligible:

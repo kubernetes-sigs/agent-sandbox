@@ -922,14 +922,14 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			}
 			delete(pod.Labels, k)
 			updated = true
-			logger.Info("Removed unauthorized system label from Pod", "key", k)
+			logger.Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
 		}
 	}
 	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		if isSystemLabel(k) {
-			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "key", k)
+			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate to prevent hijacking", "pod", pod.Name, "key", k)
 			continue
 		}
 		if pod.Labels[k] != v {
@@ -985,7 +985,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			}
 			delete(pod.Annotations, k)
 			updated = true
-			logger.Info("Removed unauthorized system annotation from Pod", "key", k)
+			logger.Info("Removed unauthorized system annotation from Pod", "pod", pod.Name, "key", k)
 		}
 	}
 	// Propagate pod template annotations to the existing pod
@@ -996,7 +996,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		}
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
 			if isSystemAnnotation(k) {
-				logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "key", k)
+				logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate to prevent hijacking", "pod", pod.Name, "key", k)
 				continue
 			}
 			if pod.Annotations[k] != v {

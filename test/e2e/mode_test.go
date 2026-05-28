@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -76,6 +77,7 @@ func TestSandboxRunSuspendResumeLifecycle(t *testing.T) {
 	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
 		obj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
 	})
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: sandboxObj.Name, Namespace: sandboxObj.Namespace}, sandboxObj))
 
 	// 5. Assert Sandbox becomes Suspended
 	pSuspended := []predicates.ObjectPredicate{
@@ -113,6 +115,7 @@ func TestSandboxRunSuspendResumeLifecycle(t *testing.T) {
 	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
 		obj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 	})
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: sandboxObj.Name, Namespace: sandboxObj.Namespace}, sandboxObj))
 
 	// 8. Assert Sandbox becomes Ready again
 	pResumed := []predicates.ObjectPredicate{

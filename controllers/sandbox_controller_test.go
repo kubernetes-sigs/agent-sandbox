@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -559,7 +560,7 @@ func TestReconcile(t *testing.T) {
 						Namespace: sandboxNs,
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
-							sandboxv1alpha1.SandboxPoolLabel:    "true",
+							sandboxv1beta1.SandboxPoolLabel:     "true",
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -627,6 +628,7 @@ func TestReconcile(t *testing.T) {
 						Namespace: sandboxNs,
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": "ab179450",
+							sandboxv1beta1.SandboxPoolLabel:     "true",
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -1060,7 +1062,7 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxv1alpha1.SandboxPoolLabel: "true",
+							sandboxv1beta1.SandboxPoolLabel: "true",
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -1081,7 +1083,7 @@ func TestReconcilePod(t *testing.T) {
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"custom-label":                      "label-val",
-						sandboxv1alpha1.SandboxPoolLabel:    "true",
+						sandboxv1beta1.SandboxPoolLabel:     "true",
 					},
 					Annotations: map[string]string{
 						"custom-annotation":                      "anno-val",
@@ -1113,6 +1115,7 @@ func TestReconcilePod(t *testing.T) {
 						Labels: map[string]string{
 							"agents.x-k8s.io/sandbox-name-hash": nameHash,
 							"custom-label":                      "label-val",
+							sandboxv1beta1.SandboxPoolLabel:     "true",
 						},
 						Annotations: map[string]string{
 							"custom-annotation":                      "anno-val",
@@ -1136,6 +1139,7 @@ func TestReconcilePod(t *testing.T) {
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"custom-label":                      "label-val",
+						sandboxv1beta1.SandboxPoolLabel:     "true",
 					},
 					Annotations: map[string]string{
 						"custom-annotation":                      "anno-val",
@@ -1229,7 +1233,7 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxv1alpha1.SandboxPoolLabel: "true",
+							sandboxv1beta1.SandboxPoolLabel: "true",
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -1269,8 +1273,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel:                     nameHash,
-						sandboxv1alpha1.SandboxPoolLabel: "true",
+						sandboxLabel:                    nameHash,
+						sandboxv1beta1.SandboxPoolLabel: "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1589,18 +1593,18 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			sandbox: &sandboxv1alpha1.Sandbox{
+			sandbox: &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 					Annotations: map[string]string{
-						sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name",
+						sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
-				Spec: sandboxv1alpha1.SandboxSpec{
+				Spec: sandboxv1beta1.SandboxSpec{
 					Replicas: new(int32(1)),
-					PodTemplate: sandboxv1alpha1.PodTemplate{
+					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
 						},
@@ -1609,7 +1613,7 @@ func TestReconcilePod(t *testing.T) {
 			},
 			wantPod:                nil,
 			expectErr:              true,
-			wantSandboxAnnotations: map[string]string{sandboxv1alpha1.SandboxPodNameAnnotation: "adopted-pod-name"},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name"},
 		},
 	}
 
@@ -1634,7 +1638,7 @@ func TestReconcilePod(t *testing.T) {
 							livePod := &corev1.Pod{}
 							err = r.Get(t.Context(), types.NamespacedName{Name: initialPod.Name, Namespace: initialPod.Namespace}, livePod)
 							require.NoError(t, err)
-							require.Empty(t, livePod.OwnerReferences, "expected Pod %q to remain unowned after failed reconcile", livePod.Name)
+							assert.Empty(t, livePod.OwnerReferences, "expected Pod %q to remain unowned after failed reconcile", livePod.Name)
 						}
 					}
 				}
@@ -1825,7 +1829,7 @@ func TestReconcileService(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxv1alpha1.SandboxPoolLabel: "true",
+							sandboxv1beta1.SandboxPoolLabel: "true",
 						},
 					},
 				},
@@ -1838,7 +1842,7 @@ func TestReconcileService(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
-						sandboxv1alpha1.SandboxPoolLabel:    "true",
+						sandboxv1beta1.SandboxPoolLabel:     "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1860,7 +1864,7 @@ func TestReconcileService(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxv1alpha1.SandboxPoolLabel: "true",
+							sandboxv1beta1.SandboxPoolLabel: "true",
 						},
 					},
 					Spec: corev1.ServiceSpec{
@@ -1882,7 +1886,7 @@ func TestReconcileService(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxv1alpha1.SandboxPoolLabel: "true",
+							sandboxv1beta1.SandboxPoolLabel: "true",
 						},
 					},
 					Spec: corev1.ServiceSpec{
@@ -1901,7 +1905,7 @@ func TestReconcileService(t *testing.T) {
 					ResourceVersion: "2",
 					Labels: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
-						sandboxv1alpha1.SandboxPoolLabel:    "true",
+						sandboxv1beta1.SandboxPoolLabel:     "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -1915,7 +1919,6 @@ func TestReconcileService(t *testing.T) {
 			wantStatusService:     sandboxName,
 			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
 		},
-		{
 		{
 			name: "does not create service when service is nil",
 			sandbox: &sandboxv1beta1.Sandbox{
@@ -2066,7 +2069,6 @@ func TestReconcileService(t *testing.T) {
 			wantService: nil,
 			expectErr:   true,
 		},
-		},
 	}
 
 	for _, tc := range testCases {
@@ -2092,7 +2094,7 @@ func TestReconcileService(t *testing.T) {
 							liveSvc := &corev1.Service{}
 							err = r.Get(t.Context(), types.NamespacedName{Name: initialSvc.Name, Namespace: initialSvc.Namespace}, liveSvc)
 							require.NoError(t, err)
-							require.Empty(t, liveSvc.OwnerReferences, "expected Service %q to remain unowned after failed reconcile", liveSvc.Name)
+							assert.Empty(t, liveSvc.OwnerReferences, "expected Service %q to remain unowned after failed reconcile", liveSvc.Name)
 						}
 					}
 				}
@@ -2336,7 +2338,7 @@ func TestReconcilePVCs(t *testing.T) {
 						Name:      pvcName,
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							sandboxv1alpha1.SandboxPoolLabel: "true",
+							sandboxv1beta1.SandboxPoolLabel: "true",
 						},
 					},
 				},
@@ -2378,7 +2380,7 @@ func TestReconcilePVCs(t *testing.T) {
 							livePVC := &corev1.PersistentVolumeClaim{}
 							err = r.Get(t.Context(), types.NamespacedName{Name: initialPVC.Name, Namespace: initialPVC.Namespace}, livePVC)
 							require.NoError(t, err)
-							require.Empty(t, livePVC.OwnerReferences, "expected PVC %q to remain unowned after failed reconcile", livePVC.Name)
+							assert.Empty(t, livePVC.OwnerReferences, "expected PVC %q to remain unowned after failed reconcile", livePVC.Name)
 						}
 					}
 				}

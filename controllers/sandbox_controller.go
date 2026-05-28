@@ -477,7 +477,6 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 						sandboxLabel: nameHash,
 					},
 				},
-
 			}
 			service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 			if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
@@ -737,6 +736,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			})
 		}
 
+		patch := client.MergeFrom(pod.DeepCopy())
 		needsUpdate := false
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
@@ -753,12 +753,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 		case resourceUnowned:
-			if pod.Labels == nil || pod.Labels[sandboxv1alpha1.SandboxPoolLabel] != "true" {
-				log.Info("Refusing to adopt unowned pod: missing pool authorization label",
+			if pod.Labels == nil || pod.Labels[sandboxv1beta1.SandboxPoolLabel] != "true" {
+				logger.Info("Refusing to adopt unowned pod: missing pool authorization label",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
-					"RequiredLabel", sandboxv1alpha1.SandboxPoolLabel)
+					"RequiredLabel", sandboxv1beta1.SandboxPoolLabel)
 				return nil, fmt.Errorf("cannot adopt unowned pod %q: missing required %q label with value \"true\"",
-					pod.Name, sandboxv1alpha1.SandboxPoolLabel)
+					pod.Name, sandboxv1beta1.SandboxPoolLabel)
 			}
 
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
@@ -772,8 +772,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		metadataUpdated := r.updatePodMetadata(pod, sandbox, nameHash)
 		if metadataUpdated || needsUpdate {
-			if err := r.Update(ctx, pod); err != nil {
-				return nil, fmt.Errorf("failed to update pod: %w", err)
+			if err := r.Patch(ctx, pod, patch); err != nil {
+				return nil, fmt.Errorf("failed to patch pod: %w", err)
 			}
 		}
 
@@ -975,21 +975,22 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 			case resourceUnowned:
-				if pvc.Labels == nil || pvc.Labels[sandboxv1alpha1.SandboxPoolLabel] != "true" {
-					log.Info("Refusing to adopt unowned PVC: missing pool authorization label",
+				if pvc.Labels == nil || pvc.Labels[sandboxv1beta1.SandboxPoolLabel] != "true" {
+					logger.Info("Refusing to adopt unowned PVC: missing pool authorization label",
 						"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
-						"RequiredLabel", sandboxv1alpha1.SandboxPoolLabel)
+						"RequiredLabel", sandboxv1beta1.SandboxPoolLabel)
 					return fmt.Errorf("cannot adopt unowned PVC %q: missing required %q label with value \"true\"",
-						pvcName, sandboxv1alpha1.SandboxPoolLabel)
+						pvcName, sandboxv1beta1.SandboxPoolLabel)
 				}
 
-				log.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 
+				patch := client.MergeFrom(pvc.DeepCopy())
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}
-				if err := r.Update(ctx, pvc); err != nil {
-					return fmt.Errorf("failed to update PVC with owner reference: %w", err)
+				if err := r.Patch(ctx, pvc, patch); err != nil {
+					return fmt.Errorf("failed to patch PVC with owner reference: %w", err)
 				}
 
 			case resourceOwnedBySandbox:

@@ -1668,7 +1668,10 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	}
 
 	controllerRef := metav1.GetControllerOf(candidate)
-	if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
+	if controllerRef == nil {
+		return fmt.Errorf("sandbox is unowned and cannot be safely adopted")
+	}
+	if controllerRef.Kind != "SandboxWarmPool" {
 		return fmt.Errorf("sandbox is not managed by warm pool. Controller: %v", controllerRef)
 	}
 	return nil

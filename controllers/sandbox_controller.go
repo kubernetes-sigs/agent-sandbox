@@ -998,15 +998,22 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		}
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
-	// Propagate trusted warm-pool tracking labels from the Sandbox CR, but only for
-	// controller-managed Sandboxes so tenants cannot spoof them on a self-created Sandbox.
+	// Keep the warm-pool tracking labels in sync: propagate them from the Sandbox CR for
+	// controller-managed Sandboxes, and remove them otherwise (or when the Sandbox no
+	// longer carries a given label) so stale or spoofed tracking labels cannot persist
+	// across ownership/label transitions.
 	extensionManaged := sandboxManagedByExtensionController(sandbox)
-	if extensionManaged {
-		for _, key := range warmPoolTrackingLabels {
-			if v, ok := sandbox.Labels[key]; ok && pod.Labels[key] != v {
+	for _, key := range warmPoolTrackingLabels {
+		if v, ok := sandbox.Labels[key]; extensionManaged && ok {
+			if pod.Labels[key] != v {
 				pod.Labels[key] = v
 				updated = true
 			}
+			continue
+		}
+		if _, exists := pod.Labels[key]; exists {
+			delete(pod.Labels, key)
+			updated = true
 		}
 	}
 	// Handle deletion of labels removed from the template. System keys recorded in the

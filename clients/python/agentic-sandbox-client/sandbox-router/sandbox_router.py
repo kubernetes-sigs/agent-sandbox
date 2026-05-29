@@ -16,6 +16,7 @@
 import os
 import re
 import secrets
+import ipaddress
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -25,6 +26,9 @@ from fastapi.responses import StreamingResponse
 app = FastAPI()
 
 # Configuration
+MIN_TCP_PORT = 1
+MAX_TCP_PORT = 65535
+
 DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
 DEFAULT_PROXY_TIMEOUT = 180.0
@@ -78,7 +82,7 @@ def _env_var_is_truthy(name: str) -> bool:
 proxy_timeout = _get_proxy_timeout()
 client = httpx.AsyncClient(timeout=proxy_timeout)
 
-ROUTER_AUTH_TOKEN = os.environ.get("ROUTER_AUTH_TOKEN")
+ROUTER_AUTH_TOKEN = os.environ.get("ROUTER_AUTH_TOKEN", "").strip() or None
 ALLOW_UNAUTHENTICATED_ROUTER = _env_var_is_truthy("ALLOW_UNAUTHENTICATED_ROUTER")
 
 print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")
@@ -143,13 +147,21 @@ async def proxy_request(request: Request, full_path: str):
 
     try:
         port = int(request.headers.get("X-Sandbox-Port", DEFAULT_SANDBOX_PORT))
+        if not (MIN_TCP_PORT <= port <= MAX_TCP_PORT):
+            raise ValueError()
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid port format.")
 
     # Dynamic routing: route by Pod IP if provided by client, otherwise fallback to DNS name
     pod_ip = request.headers.get("X-Sandbox-Pod-IP")
     if pod_ip:
-        target_host = pod_ip
+        try:
+            ip = ipaddress.ip_address(pod_ip)
+            if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                raise HTTPException(status_code=400, detail="Invalid target IP address.")
+            target_host = str(ip)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid target IP address format.")
     else:
         # Construct the K8s internal DNS name
         target_host = f"{sandbox_id}.{namespace}.svc.{cluster_domain}"
@@ -176,10 +188,17 @@ async def proxy_request(request: Request, full_path: str):
 
         resp = await client.send(req, stream=True)
 
+        async def stream_generator():
+            try:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+            finally:
+                await resp.aclose()
+
         return StreamingResponse(
-            content=resp.aiter_bytes(),
+            content=stream_generator(),
             status_code=resp.status_code,
-            headers=resp.headers
+            headers=dict(resp.headers)
         )
     except httpx.ConnectError as e:
         print(

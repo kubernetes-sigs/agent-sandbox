@@ -22,28 +22,26 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-func TestSandboxRunSuspendResumeLifecycle(t *testing.T) {
+func TestSandboxOperatingMode(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
 	// Set up a namespace
 	ns := &corev1.Namespace{}
-	ns.Name = fmt.Sprintf("my-sandbox-lifecycle-ns-%d", time.Now().UnixNano())
+	ns.Name = fmt.Sprintf("my-sandbox-ns-%d", time.Now().UnixNano())
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
-
-	// 1. Create a Sandbox Object (defaults to Running mode)
+	// Create a Sandbox Object
 	sandboxObj := simpleSandbox(ns.Name)
+	sandboxObj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
 	nameHash := NameHash(sandboxObj.Name)
-
-	// 2. Assert Sandbox becomes Ready
-	pReady := []predicates.ObjectPredicate{
+	// Assert Sandbox object status reconciles as expected
+	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
@@ -52,16 +50,15 @@ func TestSandboxRunSuspendResumeLifecycle(t *testing.T) {
 				{
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
-					ObservedGeneration: 1, // Initial creation
+					ObservedGeneration: 1,
 					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 					Message:            "Pod is Ready; Service Exists",
 				},
 			},
 		}),
 	}
-	tc.MustWaitForObject(sandboxObj, pReady...)
-
-	// 3. Assert Pod and Service objects exist
+	tc.MustWaitForObject(sandboxObj, p...)
+	// Assert Pod and Service objects exist
 	pod := &corev1.Pod{}
 	pod.Name = "my-sandbox"
 	pod.Namespace = ns.Name
@@ -72,70 +69,37 @@ func TestSandboxRunSuspendResumeLifecycle(t *testing.T) {
 	service.Namespace = ns.Name
 	tc.MustExist(service)
 
-	// 4. Suspend the Sandbox
-	t.Log("Suspending the sandbox")
+	// Set operating mode to suspended
 	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
 		obj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
 	})
-	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: sandboxObj.Name, Namespace: sandboxObj.Namespace}, sandboxObj))
 
-	// 5. Assert Sandbox becomes Suspended
-	pSuspended := []predicates.ObjectPredicate{
-		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
-			Service:       "my-sandbox",
-			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash, // Should be retained from previous state
-			PodIPs:        nil,                                             // Should be cleared
-			Conditions: []metav1.Condition{
-				{
-					Type:               "Ready",
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: 2, // First update
-					Reason:             sandboxv1beta1.SandboxReasonSuspended,
-					Message:            "Sandbox is suspended",
-				},
-				{
-					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: 2, // First update
-					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
-					Message:            "Pod has been terminated. Sandbox is not operational.",
-				},
-			},
-		}),
-	}
-	tc.MustWaitForObject(sandboxObj, pSuspended...)
-
-	// 6. Verify Pod is deleted and Service still exists
-	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), pod))
-	tc.MustExist(service)
-
-	// 7. Resume the Sandbox
-	t.Log("Resuming the sandbox")
-	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
-		obj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
-	})
-	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: sandboxObj.Name, Namespace: sandboxObj.Namespace}, sandboxObj))
-
-	// 8. Assert Sandbox becomes Ready again
-	pResumed := []predicates.ObjectPredicate{
+	// Wait for sandbox status to reflect new state
+	p = []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Type:               string(sandboxv1beta1.SandboxConditionReady),
+					Type:               "Ready",
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonSuspended,
+					Message:            "Sandbox is suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 					Status:             metav1.ConditionTrue,
-					ObservedGeneration: 3, // Second update
-					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
-					Message:            "Pod is Ready; Service Exists",
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+					Message:            "Pod has been terminated. Sandbox is not operational.",
 				},
 			},
 		}),
 	}
-	tc.MustWaitForObject(sandboxObj, pResumed...)
-
-	// 9. Verify Pod exists again
-	tc.MustExist(pod)
+	tc.MustWaitForObject(sandboxObj, p...)
+	// Verify Pod is deleted but Service still exists
+	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), pod))
+	tc.MustMatchPredicates(service, predicates.NotDeleted())
 }

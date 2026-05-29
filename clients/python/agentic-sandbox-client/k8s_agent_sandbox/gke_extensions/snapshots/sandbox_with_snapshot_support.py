@@ -30,6 +30,9 @@ ERROR_CODE = 1
 
 logger = logging.getLogger(__name__)
 
+OPERATING_MODE_RUNNING = "Running"
+OPERATING_MODE_SUSPENDED = "Suspended"
+
 class SuspendResponse(BaseModel):
     """Result of a suspend operation."""
     success: bool
@@ -106,14 +109,14 @@ class SandboxWithSnapshotSupport(Sandbox):
                 plural=SANDBOX_PLURAL_NAME,
                 name=self.sandbox_id
             )
-            spec_operating_mode = sandbox_cr.get("spec", {}).get("operatingMode", "Running")
+            spec_operating_mode = sandbox_cr.get("spec", {}).get("operatingMode", OPERATING_MODE_RUNNING)
             pod_ips = sandbox_cr.get("status", {}).get("podIPs")
             
-            is_spec_suspended = spec_operating_mode == "Suspended"
+            is_spec_suspended = spec_operating_mode == OPERATING_MODE_SUSPENDED
             
             # TODO: Replace this with Suspended status when it's available
             if is_spec_suspended and pod_ips:
-                logger.info(f"Sandbox '{self.sandbox_id}' is in the process of suspending (spec.operatingMode='Suspended' but podIPs still present).")
+                logger.info(f"Sandbox '{self.sandbox_id}' is in the process of suspending (spec.operatingMode='{OPERATING_MODE_SUSPENDED}' but podIPs still present).")
             elif not is_spec_suspended and not pod_ips:
                 logger.info(f"Sandbox '{self.sandbox_id}' is in the process of resuming/starting (spec.operatingMode='{spec_operating_mode}' but no podIPs assigned).")
                 
@@ -200,8 +203,8 @@ class SandboxWithSnapshotSupport(Sandbox):
                     logger.error(f"Error getting pod UID before suspend: {e}")
 
         try:
-            self._set_operating_mode("Suspended")
-            logger.info(f"Sandbox '{self.sandbox_id}' suspended (operatingMode set to Suspended).")
+            self._set_operating_mode(OPERATING_MODE_SUSPENDED)
+            logger.info(f"Sandbox '{self.sandbox_id}' suspended (operatingMode set to {OPERATING_MODE_SUSPENDED}).")
         except Exception as e:
             logger.error(f"Failed to suspend Sandbox '{self.sandbox_id}': {e}")
             return SuspendResponse(
@@ -263,8 +266,8 @@ class SandboxWithSnapshotSupport(Sandbox):
             )
 
         try:
-            self._set_operating_mode("Running")
-            logger.info(f"Sandbox '{self.sandbox_id}' resumed (operatingMode set to Running).")
+            self._set_operating_mode(OPERATING_MODE_RUNNING)
+            logger.info(f"Sandbox '{self.sandbox_id}' resumed (operatingMode set to {OPERATING_MODE_RUNNING}).")
         except Exception as e:
             logger.error(f"Failed to resume Sandbox '{self.sandbox_id}': {e}")
             return ResumeResponse(

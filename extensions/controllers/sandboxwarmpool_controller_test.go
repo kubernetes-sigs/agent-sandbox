@@ -54,6 +54,7 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 	if template != nil {
 		templateRefHash = sandboxcontrollers.NameHash(template.Name)
 		podSpec = *template.Spec.PodTemplate.Spec.DeepCopy()
+		ApplySandboxSecureDefaults(template, &podSpec)
 		// If template has a version label, we could use it as part of the hash placeholder
 		if v, ok := template.Spec.PodTemplate.ObjectMeta.Labels["version"]; ok {
 			podTemplateHash = "pod-hash-" + v
@@ -61,7 +62,6 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 			specJSON, _ := json.Marshal(template.Spec.PodTemplate)
 			podTemplateHash = sandboxcontrollers.NameHash(string(specJSON))
 		}
-		ApplySandboxSecureDefaults(template, &podSpec)
 	} else {
 		// Fallback for tests that don't provide a template
 		podSpec = corev1.PodSpec{

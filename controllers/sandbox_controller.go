@@ -249,22 +249,15 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, allErrors, svc, pod)
 	hasFinished := false
-	hasSuspended := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
 		if condition.Type == string(sandboxv1beta1.SandboxConditionFinished) {
 			hasFinished = true
 		}
-		if condition.Type == string(sandboxv1beta1.SandboxConditionSuspended) {
-			hasSuspended = true
-		}
 	}
 
 	if !hasFinished {
 		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
-	}
-	if !hasSuspended {
-		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 	}
 
 	return allErrors

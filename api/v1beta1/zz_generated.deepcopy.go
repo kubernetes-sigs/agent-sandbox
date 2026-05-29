@@ -196,11 +196,6 @@ func (in *SandboxSpec) DeepCopyInto(out *SandboxSpec) {
 		}
 	}
 	in.Lifecycle.DeepCopyInto(&out.Lifecycle)
-	if in.Replicas != nil {
-		in, out := &in.Replicas, &out.Replicas
-		*out = new(int32)
-		**out = **in
-	}
 	if in.Service != nil {
 		in, out := &in.Service, &out.Service
 		*out = new(bool)

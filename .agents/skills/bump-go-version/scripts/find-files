@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import subprocess
+import sys
+
+def get_git_files():
+    try:
+        repo_root = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()
+        os.chdir(repo_root)
+        files = subprocess.check_output(['git', 'ls-files'], text=True).splitlines()
+        return files
+    except subprocess.CalledProcessError as e:
+        print(f"Error running git command: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def main():
+    files = get_git_files()
+    
+    print("=== Dockerfile FROM lines ===")
+    dockerfiles = sorted([f for f in files if 'Dockerfile' in f])
+    for f in dockerfiles:
+        print(f"{f}:")
+        has_from = False
+        try:
+            with open(f, 'r', encoding='utf-8') as fp:
+                for line in fp:
+                    if line.startswith('FROM '):
+                        print(f"  {line.strip()}")
+                        has_from = True
+        except Exception as e:
+            print(f"  (error reading file: {e})")
+        if not has_from:
+            print("  (no FROM lines found)")
+
+    print("\n=== go.mod / tools.mod go and toolchain lines ===")
+    # Exclude site/go.mod because Hugo manages it as a theme module, which breaks standard Go tooling
+    mod_files = sorted([f for f in files if f.endswith('.mod') and f != 'site/go.mod'])
+    for f in mod_files:
+        print(f"{f}:")
+        has_lines = False
+        try:
+            with open(f, 'r', encoding='utf-8') as fp:
+                for line in fp:
+                    if line.startswith('go ') or line.startswith('toolchain '):
+                        print(f"  {line.strip()}")
+                        has_lines = True
+        except Exception as e:
+            print(f"  (error reading file: {e})")
+        if not has_lines:
+            print("  (no go or toolchain directives found)")
+
+if __name__ == '__main__':
+    main()

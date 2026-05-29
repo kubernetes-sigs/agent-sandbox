@@ -161,6 +161,8 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
 
     def _mock_ok_response(self):
         mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 200
+        mock_resp.is_redirect = False
         mock_resp.raise_for_status.return_value = None
         return mock_resp
 
@@ -204,6 +206,68 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         url = call_args[1]
         self.assertEqual(url, "http://my-sb.my-ns.svc.cluster.local:8888/execute")
 
+    def test_allow_redirects_is_false(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute")
+
+        call_args, call_kwargs = mock_session.request.call_args
+        self.assertFalse(call_kwargs.get("allow_redirects", True))
+
+    def test_allow_redirects_in_kwargs_popped(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", allow_redirects=True)
+
+        call_args, call_kwargs = mock_session.request.call_args
+        self.assertFalse(call_kwargs.get("allow_redirects", True))
+
+    def test_redirect_raises_error(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 302
+        mock_resp.is_redirect = True
+        mock_resp.raise_for_status.return_value = None
+        mock_session.request.return_value = mock_resp
+
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        with self.assertRaises(SandboxRequestError):
+            connector.send_request("GET", "/execute")
+
+    def test_304_does_not_raise_redirect_error(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 304
+        mock_resp.is_redirect = False
+        mock_resp.raise_for_status.return_value = None
+        mock_session.request.return_value = mock_resp
+
+        connector.send_request("GET", "/execute")
+
+    def test_300_does_not_raise_redirect_error(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 300
+        mock_resp.is_redirect = False
+        mock_resp.raise_for_status.return_value = None
+        mock_session.request.return_value = mock_resp
+
+        connector.send_request("GET", "/execute")
 
 if __name__ == "__main__":
     unittest.main()

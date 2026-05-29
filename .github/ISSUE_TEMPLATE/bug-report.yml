@@ -1,0 +1,37 @@
+name: Bug Report
+description: Report a bug encountered while using agent-sandbox
+labels: ["kind/bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report! 
+        If this is a security vulnerability, please do NOT open a public issue. Instead, follow our [Security Policy](https://github.com/kubernetes-sigs/agent-sandbox/security/policy).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Please provide as much information as possible. What did you do, what happened, and what did you expect to happen?
+      placeholder: Tell us what you saw and what you expected to see.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it (as minimally and precisely as possible)?
+      description: Provide steps to reproduce the issue, including sample manifests or code snippets if applicable.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Please provide the agent-sandbox version you are using.
+      placeholder: e.g., vX.Y.Z or commit hash
+    validations:
+      required: true
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else we need to know?
+      description: Additional context, logs, or related issues.

@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a Vulnerability
+    url: https://github.com/kubernetes-sigs/agent-sandbox/security/policy
+    about: Please report security vulnerabilities privately following our security policy.
+  - name: Support Request / Questions (Slack)
+    url: https://kubernetes.slack.com/messages/agent-sandbox
+    about: Join the #agent-sandbox channel on Kubernetes Slack for real-time discussions and support.
+  - name: GitHub Discussions
+    url: https://github.com/kubernetes-sigs/agent-sandbox/discussions
+    about: Ask questions and discuss ideas with the community on GitHub Discussions.

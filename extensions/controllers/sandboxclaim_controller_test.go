@@ -632,6 +632,27 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "claim with spoofed router app label is rejected",
+			claimToReconcile: &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-spoofed-app-label", Namespace: "default", UID: "uid-spoofed-app-label"},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{"app": "sandbox-router"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template},
+			expectSandbox:   false,
+			expectError:     false,
+			expectedCondition: metav1.Condition{
+				Type:    string(sandboxv1beta1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  "InvalidMetadata",
+				Message: "invalid additionalPodMetadata: failed to validate label \"app\": restricted system label value: \"app\"=\"sandbox-router\" is not allowed in AdditionalPodMetadata",
+			},
+		},
+		{
 			name:             "sandbox is created with injected environment variables from claim",
 			claimToReconcile: claimWithEnv,
 			existingObjects:  []client.Object{templateWithEnvOverride},
@@ -853,6 +874,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			if tc.expectedCondition.Reason == "ReconcilerError" || tc.expectedCondition.Reason == "InvalidMetadata" {
 				if condition.Reason != tc.expectedCondition.Reason {
 					t.Errorf("expected condition reason %q, got %q", tc.expectedCondition.Reason, condition.Reason)
+				}
+				if tc.expectedCondition.Message != "" && condition.Message != tc.expectedCondition.Message {
+					t.Errorf("expected condition message %q, got %q", tc.expectedCondition.Message, condition.Message)
 				}
 			} else {
 				if len(tc.expectedPodIPs) > 0 {
@@ -1561,7 +1585,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		if ready {
 			conditionStatus = metav1.ConditionTrue
 		}
-		replicas := int32(1)
 		return &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
@@ -1582,8 +1605,13 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas: &replicas,
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				PodTemplate: sandboxv1beta1.PodTemplate{
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Annotations: map[string]string{
+							warmPoolEvictionAnnotation: "true",
+						},
+					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
@@ -1607,7 +1635,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	}
 
 	createSandboxWithDifferentController := func(name string) *sandboxv1beta1.Sandbox {
-		replicas := int32(1)
 		return &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -1627,7 +1654,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas: &replicas,
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -1656,6 +1683,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		expectSandboxAdoption   bool
 		expectedAdoptedSandbox  string
 		expectedAnnotations     map[string]string
+		expectedPodAnnotations  map[string]string
 		expectNewSandboxCreated bool
 		simulateConflicts       int
 	}{
@@ -1794,6 +1822,50 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 			simulateConflicts:       1, // Fail update on the first sandbox, succeed on the second
 		},
+		{
+			name: "preserves template eviction annotation false when adopting sandbox",
+			existingObjects: []client.Object{
+				func() client.Object {
+					tCopy := template.DeepCopy()
+					if tCopy.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+						tCopy.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+					}
+					tCopy.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "false"
+					return tCopy
+				}(),
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "false"
+					return sb
+				}(),
+				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedPodAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "false",
+			},
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "preserves template eviction annotation false when template lookup fails (fallback path)",
+			existingObjects: []client.Object{
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "false"
+					return sb
+				}(),
+				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedPodAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "false",
+			},
+			expectNewSandboxCreated: false,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1867,6 +1939,22 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 				if _, exists := adoptedSandbox.Labels[sandboxTemplateRefHash]; exists {
 					t.Errorf("expected template ref label to be removed from adopted sandbox")
+				}
+
+				// Verify eviction annotation is either matched against expected value or removed by default
+				if len(tc.expectedPodAnnotations) > 0 {
+					for key, expected := range tc.expectedPodAnnotations {
+						val, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[key]
+						if !exists {
+							t.Errorf("expected pod template annotation %q to exist on adopted sandbox", key)
+						} else if val != expected {
+							t.Errorf("expected pod template annotation %q=%q, got %q", key, expected, val)
+						}
+					}
+				} else {
+					if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
+						t.Errorf("expected eviction annotation to be removed from adopted sandbox")
+					}
 				}
 
 				// 2. Verify SandboxID label was added to pod template
@@ -2000,8 +2088,8 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			}},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			Replicas:    new(int32(1)),
-			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodTemplate:   sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 	}
 
@@ -2015,8 +2103,8 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			Replicas:    new(int32(1)),
-			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodTemplate:   sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 		Status: sandboxv1beta1.SandboxStatus{
 			Conditions: []metav1.Condition{{
@@ -2285,8 +2373,8 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas:    new(int32(1)),
-				PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}},
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				PodTemplate:   sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}},
 			},
 			Status: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{{
@@ -2405,7 +2493,6 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		if ready {
 			conditionStatus = metav1.ConditionTrue
 		}
-		replicas := int32(1)
 		return &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -2425,7 +2512,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas: &replicas,
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},

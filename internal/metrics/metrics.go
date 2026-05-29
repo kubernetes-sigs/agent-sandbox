@@ -124,7 +124,7 @@ var (
 			Help:    "Latency of individual Kubernetes write calls from sandbox controllers",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"controller", "action", "result"},
+		[]string{"controller", "action", "subresource", "verb", "result"},
 	)
 
 	buildVersionInfo = version.Get()
@@ -197,6 +197,6 @@ func InstrumentWrite(controller, action, subresource, verb string, fn func() err
 		}
 	}
 	writesTotal.WithLabelValues(controller, action, subresource, verb, result).Inc()
-	writeDuration.WithLabelValues(controller, action, result).Observe(time.Since(start).Seconds())
+	writeDuration.WithLabelValues(controller, action, subresource, verb, result).Observe(time.Since(start).Seconds())
 	return err
 }

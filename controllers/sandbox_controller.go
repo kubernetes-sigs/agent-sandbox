@@ -181,7 +181,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 
-		if err := asmetrics.InstrumentWrite("sandbox", "annotation_set", "spec", "patch", func() error {
+		if err := asmetrics.InstrumentWrite("sandbox", "annotation_set", "metadata", "patch", func() error {
 			return r.Patch(ctx, sandbox, patch)
 		}); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -649,7 +649,7 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 	logger := log.FromContext(ctx)
 	patch := client.MergeFrom(sandbox.DeepCopy())
 	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
-	if err := asmetrics.InstrumentWrite("sandbox", "annotation_remove", "spec", "patch", func() error {
+	if err := asmetrics.InstrumentWrite("sandbox", "annotation_remove", "metadata", "patch", func() error {
 		return r.Patch(ctx, sandbox, patch)
 	}); err != nil {
 		if k8serrors.IsNotFound(err) {
@@ -773,7 +773,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			sandbox.Annotations = make(map[string]string)
 		}
 		sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] = podName
-		if err := asmetrics.InstrumentWrite("sandbox", "pod_name_annotation", "spec", "patch", func() error {
+		if err := asmetrics.InstrumentWrite("sandbox", "pod_name_annotation", "metadata", "patch", func() error {
 			return r.Patch(ctx, sandbox, patch)
 		}); err != nil {
 			if k8serrors.IsNotFound(err) {

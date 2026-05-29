@@ -237,7 +237,7 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 		return err
 	}
 	setWarmLaunchTypeLabelIfNeeded(sb)
-	return asmetrics.InstrumentWrite("warmpool", "owner_adopt", "spec", "update", func() error {
+	return asmetrics.InstrumentWrite("warmpool", "owner_adopt", "metadata", "update", func() error {
 		return r.Update(ctx, sb)
 	})
 }

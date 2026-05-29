@@ -450,6 +450,10 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 	if err := asmetrics.InstrumentWrite("claim", "claim_status", "status", "patch", func() error {
 		return r.Status().Patch(ctx, claim, patch)
 	}); err != nil {
+		if k8errors.IsNotFound(err) {
+			// Claim was deleted out from under us; nothing left to reconcile.
+			return nil
+		}
 		logger.Error(err, "Failed to patch sandboxclaim status")
 		return err
 	}

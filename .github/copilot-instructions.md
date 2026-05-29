@@ -9,22 +9,20 @@ The Go toolchain version targeted by this repository is the value of the `go` di
 
 **Lint Policy:**
 
-This repository's binding style and correctness gate is whatever lint config exists at the head of the PR's base branch (e.g. `.golangci.yml`, `.golangci.yaml`, or absence of one). If the repo has not opted into a particular linter or stylistic rule, do **not** introduce that rule via review comments. Bias toward stylistic suggestions only when:
+This repository's binding style and correctness gate is whatever lint config exists at the head of the PR's base branch (e.g. `.golangci.yml`, `.golangci.yaml`, `.golangci-kal.yml`, or absence of one). If the repo has not opted into a particular linter or stylistic rule, do **not** introduce that rule via review comments. Bias toward stylistic suggestions only when:
 
 - the rule is enforced by the repo's existing lint config, **or**
 - the change introduces a clear bug (not a clear style preference), **or**
 - the file already follows a local convention and the new code visibly diverges from it.
 
-If `go vet`, `go build`, and `go test` all pass and no lint config flags the line, treat residual style as author preference rather than a review-blocking concern.
+If the repo's lint gate (`make lint-go` and `make lint-api`, which wrap `./dev/tools/lint-*`) and `go test` all pass and no lint config flags the line, treat residual style as author preference rather than a review-blocking concern.
 
 **Scope of Review:**
 
 Focus on substantive findings tied to the lines the PR actually changes — logic bugs, security issues, controller-runtime misuse, API/contract breaks, missing tests for the new behavior. In particular:
 
-- Do **not** repeat the same finding across multiple files when one comment with a file list suffices.
 - Do **not** comment on lines that are unchanged by the diff unless they materially interact with a changed line (e.g. the change breaks an invariant the surrounding code assumed).
 - Do **not** flag style issues in pre-existing code that the PR happens to move or re-format mechanically.
-- Prefer one consolidated comment per concern over multiple sub-comments restating the same point.
 
 When in doubt between flagging a marginal nit and staying silent: stay silent. Each comment costs the contributor attention, and a noisy review erodes the signal of the substantive findings.
 

@@ -5,7 +5,6 @@
 - [Condition Hierarchy](#condition-hierarchy)
     - [1. <code>Suspended</code>](#1-suspended)
     - [2. <code>Ready</code> (Root Condition)](#2-ready-root-condition)
-- [Controller Implementation](#controller-implementation)
 - [Usage Examples](#usage-examples)
 - [Alternatives Considered](#alternatives-considered)
     - [1. Retaining the Legacy <code>status.phase</code> Field](#1-retaining-the-legacy-statusphase-field)

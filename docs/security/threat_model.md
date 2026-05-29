@@ -54,10 +54,19 @@ The controller treats any label/annotation key under `agents.x-k8s.io/` or
   filter out system-reserved keys from the user template before applying them.
 - The Service selector label `agents.x-k8s.io/sandbox-name-hash` is assigned by
   the controller **after** merging user labels, so it cannot be overridden.
-- On adoption, any unauthorized system label already present on a Pod is removed.
+- On adoption/update, system-reserved keys that an older (vulnerable) controller
+  recorded in the `propagated-labels` / `propagated-annotations` lists are scrubbed
+  from the Pod — except the controller-owned name-hash label, the allowed tracking
+  labels on extension-managed Sandboxes, and the controller-managed annotations
+  (`propagated-labels`, `propagated-annotations`, and the trace-context annotation).
+  Combined with always (re)setting the name-hash label to the controller's value,
+  this prevents a stale or spoofed Service-selector label from surviving adoption.
 - The warm-pool tracking labels are **only** propagated for Sandboxes that are
-  owned by a trusted extension controller (`SandboxWarmPool` / `SandboxClaim`),
-  so a tenant cannot spoof them via a directly-created Sandbox.
+  owned by a trusted extension controller (`SandboxWarmPool` / `SandboxClaim`) via a
+  *controller* owner reference. This assumes the
+  `OwnerReferencesPermissionEnforcement` admission plugin is active so a tenant
+  cannot attach such an owner reference to an object they cannot delete; verifying
+  the owner object's existence and UID would harden this further.
 
 ## Out of scope
 

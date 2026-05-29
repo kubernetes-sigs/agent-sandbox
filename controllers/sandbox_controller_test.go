@@ -1245,6 +1245,59 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
+			name: "scrubs stale system labels/annotations recorded by an older controller",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							"custom-label":                      "label-val",
+							// A system label an older controller propagated and recorded.
+							"agents.x-k8s.io/evil": "x",
+						},
+						Annotations: map[string]string{
+							"custom-annotation": "anno-val",
+							// Older controller recorded system keys in the propagated lists.
+							"agents.x-k8s.io/propagated-labels":      "custom-label,agents.x-k8s.io/evil",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation,agents.x-k8s.io/pod-name",
+							"agents.x-k8s.io/pod-name":               "leftover",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: sandboxObj,
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
 			name: "delete pod if mode is Suspended",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{

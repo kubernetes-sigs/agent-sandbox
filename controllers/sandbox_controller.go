@@ -475,12 +475,30 @@ func isSystemAnnotation(key string) bool {
 		key == asmetrics.TraceContextAnnotation
 }
 
+// warmPoolTrackingLabels are the system-prefixed labels that trusted extension
+// controllers (warm pool / claim) set on a Sandbox and that must be propagated to the
+// backing Pod. Centralized here so the create and adoption paths stay in sync.
+var warmPoolTrackingLabels = []string{
+	warmPoolSandboxLabel,
+	sandboxTemplateRefHashLabel,
+	sandboxv1beta1.SandboxPodTemplateHashLabel,
+}
+
 // isAllowedSystemLabel reports whether a system-prefixed label is a tracking label
 // that trusted controllers are permitted to set on a Sandbox and have propagated to
 // the backing Pod.
 func isAllowedSystemLabel(key string) bool {
+	return slices.Contains(warmPoolTrackingLabels, key)
+}
+
+// isControllerManagedPodAnnotation reports whether a system-reserved annotation is one
+// the controller itself sets on a Pod, and therefore must not be scrubbed during
+// cleanup of previously-propagated annotations.
+func isControllerManagedPodAnnotation(key string) bool {
 	switch key {
-	case warmPoolSandboxLabel, sandboxTemplateRefHashLabel, sandboxv1beta1.SandboxPodTemplateHashLabel:
+	case sandboxv1beta1.SandboxPropagatedLabelsAnnotation,
+		sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation,
+		asmetrics.TraceContextAnnotation:
 		return true
 	default:
 		return false
@@ -491,8 +509,17 @@ func isAllowedSystemLabel(key string) bool {
 // extension controller (warm pool or claim). Only controller-managed Sandboxes may
 // propagate the warm-pool tracking labels to their Pods; this prevents a tenant from
 // spoofing those labels via a directly-created Sandbox.
+//
+// We require a controller owner reference (controller=true) under the extensions API
+// group. This assumes the OwnerReferencesPermissionEnforcement admission plugin is
+// active, so a tenant cannot attach a controller ownerRef pointing at an object they
+// are not permitted to delete. Verifying that the referenced owner actually exists and
+// matches ref.UID would harden this further and is left as a follow-up.
 func sandboxManagedByExtensionController(sandbox *sandboxv1beta1.Sandbox) bool {
 	for _, ref := range sandbox.OwnerReferences {
+		if ref.Controller == nil || !*ref.Controller {
+			continue
+		}
 		if !strings.HasPrefix(ref.APIVersion, "extensions.agents.x-k8s.io/") {
 			continue
 		}
@@ -863,7 +890,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// Propagate trusted warm-pool tracking labels from the Sandbox CR, but only for
 	// controller-managed Sandboxes so tenants cannot spoof them on a self-created Sandbox.
 	if sandboxManagedByExtensionController(sandbox) {
-		for _, key := range []string{warmPoolSandboxLabel, sandboxTemplateRefHashLabel, sandboxv1beta1.SandboxPodTemplateHashLabel} {
+		for _, key := range warmPoolTrackingLabels {
 			if v, ok := sandbox.Labels[key]; ok {
 				podLabels[key] = v
 			}
@@ -963,14 +990,6 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
 		if isSystemLabel(k) {
 			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate", "pod", pod.Name, "key", k)
-			// Remove a value a tenant may have managed to inject on an adopted pod.
-			if !isAllowedSystemLabel(k) {
-				if _, exists := pod.Labels[k]; exists {
-					delete(pod.Labels, k)
-					updated = true
-					logger.Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
-				}
-			}
 			continue
 		}
 		if pod.Labels[k] != v {
@@ -981,20 +1000,35 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	}
 	// Propagate trusted warm-pool tracking labels from the Sandbox CR, but only for
 	// controller-managed Sandboxes so tenants cannot spoof them on a self-created Sandbox.
-	if sandboxManagedByExtensionController(sandbox) {
-		for _, key := range []string{warmPoolSandboxLabel, sandboxTemplateRefHashLabel, sandboxv1beta1.SandboxPodTemplateHashLabel} {
+	extensionManaged := sandboxManagedByExtensionController(sandbox)
+	if extensionManaged {
+		for _, key := range warmPoolTrackingLabels {
 			if v, ok := sandbox.Labels[key]; ok && pod.Labels[key] != v {
 				pod.Labels[key] = v
 				updated = true
 			}
 		}
 	}
-	// Handle deletion of labels
+	// Handle deletion of labels removed from the template. System keys recorded in the
+	// propagated list by an older (vulnerable) controller are also scrubbed, except the
+	// controller-owned name-hash label and, on extension-managed Sandboxes, the allowed
+	// tracking labels.
 	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
 		for k := range propagatedLabels {
-			if k == "" || isSystemLabel(k) {
+			if k == "" {
+				continue
+			}
+			if isSystemLabel(k) {
+				if k == sandboxLabel || (extensionManaged && isAllowedSystemLabel(k)) {
+					continue
+				}
+				if _, exists := pod.Labels[k]; exists {
+					delete(pod.Labels, k)
+					updated = true
+					logger.Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
+				}
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
@@ -1021,12 +1055,24 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			managedAnnotationKeys = append(managedAnnotationKeys, k)
 		}
 	}
-	// Handle deletion of annotations
+	// Handle deletion of annotations. System annotations that an older controller may
+	// have recorded in the propagated list are scrubbed, except those the controller
+	// itself manages on the Pod.
 	propagatedAnnotationsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation]
 	if propagatedAnnotationsStr != "" {
 		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
 		for k := range propagatedAnnotations {
-			if k == "" || isSystemAnnotation(k) {
+			if k == "" {
+				continue
+			}
+			if isSystemAnnotation(k) {
+				if isControllerManagedPodAnnotation(k) {
+					continue
+				}
+				if _, exists := pod.Annotations[k]; exists {
+					delete(pod.Annotations, k)
+					updated = true
+				}
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {

@@ -129,10 +129,20 @@ The implementation focuses on updating the Sandbox controller's reconciliation l
 
 ## Migration Plan (Alpha to Beta)
 
-Upgrading from Alpha to Beta is designed to be seamless for end-users, relying heavily on native Kubernetes API defaulting mechanisms to prevent disruption.
+Upgrading from Alpha to Beta is designed to be seamless, relying on native Kubernetes API defaulting mechanisms to prevent disruption.
 
-1. **CRD Update:** The cluster administrator applies the updated `Sandbox` CRD containing the new `spec.operatingMode` Enum field.
-2. **Defaulting Behavior:** Because the `spec.operatingMode` field is defined with `// +kubebuilder:default=Running`, all existing Sandbox resources in the cluster will automatically be treated as `Running` by the API server.
-3. **Controller Upgrade:** When the Sandbox controller is updated to the Beta version, it reads existing Sandbox resources as `Running`. As long as their Pods exist, the controller will take no destructive action.
-4. **Handling Previously Suspended Sandboxes (`replicas: 0`):** Because of the automatic defaulting to `Running`, any Sandbox that was explicitly suspended (`spec.replicas: 0`) in the Alpha version will be automatically **resumed** (its Pod will be recreated) when the Beta controller starts.
-   * **Mitigation:** If administrators or users wish to keep these Sandboxes suspended across the upgrade, they must patch the existing Sandbox resources to explicitly set `spec.operatingMode: Suspended` prior to upgrading the controller.
+1. **CRD Update:** Apply the updated `Sandbox` CRD containing the new `spec.operatingMode` Enum field.
+2. **Defaulting Behavior:** Because the `spec.operatingMode` field defaults to `Running`, all existing Sandbox resources will automatically be treated as `Running` by the API server.
+3. **Suspend Mitigation (CRITICAL):** Because of the `Running` default, any Sandbox suspended in Alpha (`spec.replicas: 0`) will automatically **resume** when the Beta controller starts. To keep them suspended, administrators must patch them to `Suspended` *before* upgrading the controller:
+
+   *Single Sandbox:*
+   ```bash
+   kubectl patch sandbox <name> -n <namespace> --type='merge' -p '{"spec":{"operatingMode":"Suspended"}}'
+   ```
+   *Bulk Patch (Cluster-wide):*
+   ```bash
+   for sandbox in $(kubectl get sandboxes -A -o jsonpath='{range .items[?(@.spec.replicas==0)]}{.metadata.namespace}{"/"}{.metadata.name}{"\n"}{end}'); do
+     kubectl patch sandbox "${sandbox#*/}" -n "${sandbox%/*}" --type='merge' -p '{"spec":{"operatingMode":"Suspended"}}'
+   done
+   ```
+4. **Controller Upgrade:** Upgrade the Sandbox controller to the Beta version. It will read existing running Sandboxes as `Running` and the patched sandboxes as `Suspended`, safely bridging the upgrade boundary.

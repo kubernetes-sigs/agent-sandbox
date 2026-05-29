@@ -92,6 +92,7 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 					Reason:             "DependenciesReady",
 					LastTransitionTime: metav1.NewTime(time.Now()),
 				}},
+				PodIPs: []string{"10.244.0.5"},
 			},
 		}
 	}

@@ -49,6 +49,11 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
+// testNetworkedPodIP is a placeholder Pod IP used by warm-pool sandbox
+// fixtures to mark "backing Pod exists and is networked" (the condition
+// isAdoptable checks via len(Status.PodIPs) > 0).
+const testNetworkedPodIP = "10.244.0.5"
+
 func TestSandboxClaimReconcile(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
@@ -1630,6 +1635,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Reason: "DependenciesReady",
 					},
 				},
+				// PodIPs populated regardless of Ready state: the backing Pod exists
+				// and has been networked. isAdoptable requires this to avoid adopting
+				// a sandbox whose pod has been deleted during warm-pool rotation.
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 	}
@@ -1674,6 +1683,15 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		now := metav1.Now()
 		sb.DeletionTimestamp = &now
 		sb.Finalizers = []string{"test-finalizer"}
+		return sb
+	}
+
+	// createRotatingSandbox simulates a warm-pool sandbox whose backing Pod has
+	// been deleted (e.g. during template-spec rotation) but whose Sandbox CR is
+	// still in the queue. PodIPs is cleared and Ready=False — the rotation gap.
+	createRotatingSandbox := func(name string, creationTime metav1.Time) *sandboxv1beta1.Sandbox {
+		sb := createWarmPoolSandbox(name, creationTime, false)
+		sb.Status.PodIPs = nil
 		return sb
 	}
 
@@ -1767,6 +1785,35 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "not-ready-1",
+			expectNewSandboxCreated: false,
+		},
+		{
+			// Regression test for the rotation hang that motivated issue #491
+			// discussion: a warm-pool sandbox is still in the queue but its
+			// backing Pod has been deleted (PodIPs empty). Adopting it would
+			// leave the claim stuck with ReconcilerError.
+			name: "skips warm pool sandbox with no backing pod and falls through to cold creation",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createRotatingSandbox("rotating-sb-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
+				createRotatingSandbox("rotating-sb-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
+		},
+		{
+			// Prefer a not-Ready sandbox with PodIPs over cold creation, while
+			// still skipping stale queue entries whose Pods disappeared.
+			name: "adopts not-ready sandbox with backing pod, skipping rotating sandboxes without pods",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createRotatingSandbox("rotating-sb", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
+				createWarmPoolSandbox("not-ready-with-pod", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "not-ready-with-pod",
 			expectNewSandboxCreated: false,
 		},
 		{
@@ -1887,15 +1934,17 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			// 1. Initialize the Queue
 			warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
-			// 2. Seed the Queue with the existing objects from the test case
+			// 2. Seed stale queue entries too; production can retain keys after
+			//    a sandbox stops being adoptable, and pop-side validation must
+			//    reject them.
 			for _, obj := range tc.existingObjects {
 				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok {
-					// Only add valid, adoptable sandboxes to the queue
-					if isAdoptable(sb) == nil {
-						hash := sb.Labels[sandboxTemplateRefHash]
-						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
-						warmSandboxQueue.Add(hash, key)
+					if sb.Labels[warmPoolSandboxLabel] == "" || sb.Labels[sandboxTemplateRefHash] == "" {
+						continue
 					}
+					hash := sb.Labels[sandboxTemplateRefHash]
+					key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
+					warmSandboxQueue.Add(hash, key)
 				}
 			}
 
@@ -2380,6 +2429,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				Conditions: []metav1.Condition{{
 					Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 				}},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 
@@ -2527,6 +2577,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 						Reason: "DependenciesReady",
 					},
 				},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 	}
@@ -3327,6 +3378,9 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 			OwnerReferences: []metav1.OwnerReference{{
 				Kind: "SandboxWarmPool",
 			}},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{"10.0.0.10"},
 		},
 	}
 

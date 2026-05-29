@@ -737,6 +737,12 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		adopted.Labels = make(map[string]string)
 	}
 	adopted.Labels[v1beta1.SandboxLaunchTypeLabel] = v1beta1.SandboxLaunchTypeWarm
+	// Remove the warm pool's default eviction annotation so the adopted sandbox
+	// is protected from autoscaler scale-downs now that it hosts active state.
+	// Custom template-specified overrides (e.g. "false") are explicitly kept.
+	if adopted.Spec.PodTemplate.ObjectMeta.Annotations != nil && adopted.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] == "true" {
+		delete(adopted.Spec.PodTemplate.ObjectMeta.Annotations, warmPoolEvictionAnnotation)
+	}
 
 	// Transfer ownership from SandboxWarmPool to SandboxClaim
 	adopted.OwnerReferences = nil
@@ -831,6 +837,11 @@ func validateAdditionalPodMetadata(claimMeta *v1beta1.PodMetadata) error {
 		}
 		if isRestrictedDomain(domain) {
 			return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
+		}
+
+		// Block spoofing of system components
+		if isLabel && strings.EqualFold(key, "app") && strings.EqualFold(value, "sandbox-router") {
+			return fmt.Errorf("restricted system label value: %q=%q is not allowed in AdditionalPodMetadata", key, value)
 		}
 
 		// Validate label values (annotations have less restrictions)

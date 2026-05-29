@@ -1,0 +1,10 @@
+title: Handling Mutually Exclusive Fields for warmpool vs template in Sandbox claim
+kep-number: 208
+authors:
+  - "@SHRUTI6991"
+status: implementable
+creation-date: 2026-05-21
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

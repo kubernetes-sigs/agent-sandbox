@@ -17,6 +17,8 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,7 +198,8 @@ func TestReconcilePool(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(tc.initialObjs...).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			ctx := context.Background()
@@ -334,7 +337,8 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(tc.initialObjs...).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			ctx := context.Background()
@@ -424,7 +428,9 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				WithScheme(scheme).
 				WithRuntimeObjects(template).
 				Build(),
-			Scheme: scheme,
+			Scheme:                 scheme,
+			MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
+			EnableWarmPoolEviction: true,
 		}
 
 		expectedPoolNameHash := sandboxcontrollers.NameHash(poolName)
@@ -451,6 +457,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 			// Verify pod template annotations
 			require.Equal(t, "from-podtemplate", sb.Spec.PodTemplate.ObjectMeta.Annotations["pod-annotation"])
+			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation])
 		}
 	})
 }
@@ -522,7 +529,8 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 			WithScheme(scheme).
 			WithRuntimeObjects(template).
 			Build(),
-		Scheme: scheme,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 
 	err := r.reconcilePool(ctx, warmPool)
@@ -620,7 +628,8 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(template).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			err := r.reconcilePool(ctx, warmPool)
@@ -795,7 +804,8 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 					createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
 				).
 				Build(),
-			Scheme: scheme,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 		}
 
 		ctx := context.Background()
@@ -827,7 +837,8 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 					createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
 				).
 				Build(),
-			Scheme: scheme,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 		}
 
 		ctx := context.Background()
@@ -927,7 +938,8 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					WithScheme(scheme).
 					WithRuntimeObjects(template, warmPool).
 					Build(),
-				Scheme: scheme,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
 			ctx := context.Background()
@@ -1072,7 +1084,8 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 			WithScheme(scheme).
 			WithRuntimeObjects(template1, warmPool).
 			Build(),
-		Scheme: scheme,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 
 	ctx := context.Background()
@@ -1338,7 +1351,8 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 			WithScheme(scheme).
 			WithRuntimeObjects(template, warmPool).
 			Build(),
-		Scheme: scheme,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 
 	// Initial reconcile to create sandboxes
@@ -1448,4 +1462,192 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 
 	isStaleGenuine := r.isSandboxStale(ctx, genuineOrphan, template, currentPodTemplateHash, vettedHashes)
 	require.False(t, isStaleGenuine, "Orphaned sandbox with genuine fully vetted PodSpec should be fresh")
+}
+
+func TestSlowStartBatch(t *testing.T) {
+	tests := []struct {
+		name               string
+		count              int
+		initialBatchSize   int
+		failAtIndices      *int
+		cancelContextAtIdx *int
+		expectedSuccess    int
+		expectError        bool
+		expectedCallCount  int
+		expectedErrMsgs    []string
+	}{
+		{
+			name:              "all succeed with batch trimming (count=14)",
+			count:             14,
+			initialBatchSize:  1,
+			expectedSuccess:   14,
+			expectedCallCount: 14,
+		},
+		{
+			name:              "zero count",
+			count:             0,
+			initialBatchSize:  1,
+			expectedSuccess:   0,
+			expectedCallCount: 0,
+		},
+		{
+			name:              "early exit on failure",
+			count:             14,
+			initialBatchSize:  1,
+			failAtIndices:     new(5),
+			expectedSuccess:   6, // index 0, 1, 2, 3, 4, and 6 succeeds, 5 fails - 6 successful calls
+			expectError:       true,
+			expectedCallCount: 7, // 1 + 2 + 4 = 7 calls in total.
+			expectedErrMsgs:   []string{"injected error at idx 5"},
+		},
+		{
+			name:               "context canceled in middle of batch",
+			count:              14,
+			initialBatchSize:   1,
+			cancelContextAtIdx: new(2), // cancels during batch 2 (indices 1, 2)
+			expectedSuccess:    3,      // indices 0, 1, 2 complete successfully before cancellation aborts batch 3
+			expectError:        true,
+			expectedCallCount:  3,
+			expectedErrMsgs:    []string{"context canceled"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var callCount atomic.Int32
+			ctx, cancel := context.WithCancel(context.Background())
+			successes, err := slowStartBatch(ctx, tt.count, tt.initialBatchSize, func(idx int) error {
+				callCount.Add(1)
+				if tt.cancelContextAtIdx != nil && *tt.cancelContextAtIdx == idx {
+					cancel()
+				}
+				if tt.failAtIndices != nil && *tt.failAtIndices == idx {
+					return fmt.Errorf("injected error at idx %d", idx)
+				}
+				return nil
+			})
+
+			if tt.expectError {
+				require.Error(t, err)
+				for _, expectedErrMsg := range tt.expectedErrMsgs {
+					require.Contains(t, err.Error(), expectedErrMsg)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, tt.expectedSuccess, successes)
+			require.Equal(t, int32(tt.expectedCallCount), callCount.Load())
+		})
+	}
+}
+
+func TestReconcilePool_EvictionOverride(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(1)
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	testCases := []struct {
+		name                string
+		controllerEnable    bool
+		templateAnnotations map[string]string
+		expectedEvictionVal string
+	}{
+		{
+			name:                "controller true sets eviction annotation to true by default",
+			controllerEnable:    true,
+			expectedEvictionVal: "true",
+		},
+		{
+			name:                "controller false does not set eviction annotation by default",
+			controllerEnable:    false,
+			expectedEvictionVal: "",
+		},
+		{
+			name:             "controller true respects explicit template value false",
+			controllerEnable: true,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "false",
+			},
+			expectedEvictionVal: "false",
+		},
+		{
+			name:             "controller false respects explicit template value false",
+			controllerEnable: false,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "false",
+			},
+			expectedEvictionVal: "false",
+		},
+		{
+			name:             "controller true respects explicit template value true",
+			controllerEnable: true,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "true",
+			},
+			expectedEvictionVal: "true",
+		},
+		{
+			name:             "controller false respects explicit template value true",
+			controllerEnable: false,
+			templateAnnotations: map[string]string{
+				warmPoolEvictionAnnotation: "true",
+			},
+			expectedEvictionVal: "true",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			warmPool := &extensionsv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: poolNamespace,
+					UID:       "warmpool-uid-123",
+				},
+				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+					Replicas: replicas,
+					TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+						Name: templateName,
+					},
+				},
+			}
+
+			testTemplate := createTemplate(poolNamespace)
+			if tc.templateAnnotations != nil {
+				testTemplate.Spec.PodTemplate.ObjectMeta.Annotations = tc.templateAnnotations
+			}
+
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithRuntimeObjects(testTemplate).
+					Build(),
+				Scheme:                 scheme,
+				MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
+				EnableWarmPoolEviction: tc.controllerEnable,
+			}
+
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			list := &sandboxv1beta1.SandboxList{}
+			err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+			require.NoError(t, err)
+			require.Len(t, list.Items, 1)
+
+			sb := list.Items[0]
+			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]
+			if tc.expectedEvictionVal != "" {
+				require.True(t, exists, "expected eviction annotation to exist")
+				require.Equal(t, tc.expectedEvictionVal, val)
+			} else {
+				require.False(t, exists, "expected eviction annotation to NOT exist")
+			}
+		})
+	}
 }

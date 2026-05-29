@@ -30,7 +30,8 @@ class CommandExecutor:
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
         span = trace.get_current_span()
         if span.is_recording():
-            span.set_attribute("sandbox.command", command)
+            executable = command.split()[0] if command and command.split() else ""
+            span.set_attribute("sandbox.command.executable", executable)
 
         payload = {"command": command}
         response = self.connector.send_request(

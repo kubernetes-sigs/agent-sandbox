@@ -33,7 +33,7 @@ import (
 // Span attribute keys in the sandbox.* namespace.
 var (
 	AttrClaimName        = attribute.Key("sandbox.claim.name")
-	AttrCommand          = attribute.Key("sandbox.command")
+	AttrCommandExecutable = attribute.Key("sandbox.command.executable")
 	AttrExitCode         = attribute.Key("sandbox.exit_code")
 	AttrFilePath         = attribute.Key("sandbox.file.path")
 	AttrFileSize         = attribute.Key("sandbox.file.size")

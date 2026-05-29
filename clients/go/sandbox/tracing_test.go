@@ -253,7 +253,7 @@ func TestTracingLifecycleAndOperations(t *testing.T) {
 	}
 
 	// Verify Run attributes
-	assertSpanAttr(t, spanByName["test-svc.run"], "sandbox.command", "echo hello")
+	assertSpanAttr(t, spanByName["test-svc.run"], "sandbox.command.executable", "echo")
 	assertSpanAttrInt(t, spanByName["test-svc.run"], "sandbox.exit_code", 0)
 
 	// Verify Write attributes

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
@@ -56,7 +57,7 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 		maxAttempts = 1 // safe default: no retries for non-idempotent commands
 	}
 	ctx = withLifecycleSpan(ctx, c.lifecycleCtx())
-	ctx, span := startSpan(ctx, c.tracer, c.svcName, "run", AttrCommand.String(command))
+	ctx, span := startSpan(ctx, c.tracer, c.svcName, "run", AttrCommandExecutable.String(commandExecutable(command)))
 	defer func() { span.End() }()
 
 	payload, err := json.Marshal(map[string]string{"command": command})
@@ -95,3 +96,12 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 	c.log.V(1).Info("run completed", "exitCode", result.ExitCode)
 	return &result, nil
 }
+
+func commandExecutable(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+

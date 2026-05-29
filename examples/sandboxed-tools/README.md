@@ -34,14 +34,22 @@ go run ./examples/sandboxed-tools/main.go
 go run ./examples/sandboxed-tools/main.go -session mysession
 ```
 
-## Session Persistence & Resuming Sessions
+## Session Persistence, Warm Sandbox Reuse & Inactivity Expiry
 
-By default, `sandboxed-tools` creates and resumes a session named `default`. You can specify a custom session name with the `-session` flag to run multiple independent sessions.
+`sandboxed-tools` uses an advanced architectural design to balance **visual responsiveness**, **resource efficiency**, and **cluster-wide cleanup guarantees**:
 
-### How it Works
-1. **Message History**: Chat history (including system prompts, user inputs, assistant replies, and tool calls/results) is saved in real-time to a JSONL file at `~/.local/sandboxed-tools/sessions/<session-name>.jsonl`.
-2. **Resuming Existing Sessions**: When starting `sandboxed-tools` with a specific session name, it automatically loads the message history from the JSONL file, prints a visual summary of your previous conversation, and continues seamlessly from where you left off.
-3. **Filesystem Backups**: Sandbox filesystem states (contents of `/home/clawtainer`) are backed up in the session-specific folder `~/.local/sandboxed-tools/<session-name>/fs`. When a sandbox launches, the latest backup tarball is restored automatically, preserving your files and environment state across tool executions and session restarts!
+### 1. Warm Sandbox Reuse (Fast Execution)
+Instead of launching and deleting a sandbox on every single tool call, the application launches the sandbox Pod only on the **first tool call**. For subsequent tool calls within the same session, the application **reuses** the warm, active sandbox directly. This cuts execution overhead down from several seconds to milliseconds, keeping the agent loop incredibly fast.
+
+### 2. Kubernetes-Native Inactivity Expiry
+To prevent orphaned containers and resource leaks in your cluster, the application leverages the Sandbox's built-in **Lifecycle Spec**:
+- During creation, the sandbox is configured with a 5-minute inactivity lifetime: `Spec.Lifecycle.ShutdownTime` is set to `now + 5 minutes` and `Spec.Lifecycle.ShutdownPolicy` is set to `Delete`.
+- Every time a new tool is executed, the application automatically **extends the lifecycle** by updating the sandbox's `ShutdownTime` in Kubernetes to `now + 5 minutes`.
+- If no new tool calls are made for 5 minutes (e.g., because the CLI was closed, crashed, or left idle), the **Kubernetes controller automatically terminates the Pod and deletes the Sandbox resource**.
+
+### 3. Resuming & Local Filesystem Backups
+- **Message History**: Chat history is saved in real-time to a JSONL file at `~/.local/sandboxed-tools/sessions/<session-name>.jsonl`, and restored automatically on startup.
+- **Durable Backups**: Before the sandbox is cleaned up (on CLI exit or upon inactivity), the filesystem state of `/home/clawtainer` is archived to a timestamped backup at `~/.local/sandboxed-tools/<session-name>/fs`. If a session is resumed and the sandbox was already cleaned up by Kubernetes, a new sandbox is created and restored seamlessly from the latest local backup!
 
 ## Example Session
 

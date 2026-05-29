@@ -32,6 +32,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -183,6 +184,27 @@ func (s *Sandbox) PodNamespacedName() types.NamespacedName {
 		Namespace: s.id.Namespace,
 		Name:      s.podName,
 	}
+}
+
+// ExtendLifecycle updates the ShutdownTime of the Sandbox in Kubernetes to now + inactivityTimeout.
+func (s *Sandbox) ExtendLifecycle(ctx context.Context, inactivityTimeout time.Duration) error {
+	agentsClient := s.session.client.agentsClient
+
+	// Fetch latest spec
+	latest, err := agentsClient.AgentsV1beta1().Sandboxes(s.id.Namespace).Get(ctx, s.id.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to fetch latest sandbox spec to extend lifecycle: %w", err)
+	}
+
+	// Update ShutdownTime
+	latest.Spec.ShutdownTime = &metav1.Time{Time: time.Now().Add(inactivityTimeout)}
+
+	_, err = agentsClient.AgentsV1beta1().Sandboxes(s.id.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update sandbox lifecycle: %w", err)
+	}
+
+	return nil
 }
 
 // WaitForReady polls the Sandbox resource until it becomes ready and resolves the underlying Pod name.
@@ -448,17 +470,20 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 }
 
 // CreateSandbox creates a Sandbox resource.
-func (s *Session) CreateSandbox(ctx context.Context, image, namespace string) (*Sandbox, error) {
+func (s *Session) CreateSandbox(ctx context.Context, image, namespace string, inactivityTimeout time.Duration) (*Sandbox, error) {
 	agentsClient := s.client.agentsClient
 
-	// TODO: Use shutdownPolicy (and maybe cache the sandbox between tool calls)
-
+	policy := sandboxv1beta1.ShutdownPolicyDelete
 	sb := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "sandbox-tool-",
 			Namespace:    namespace,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   &metav1.Time{Time: time.Now().Add(inactivityTimeout)},
+				ShutdownPolicy: &policy,
+			},
 			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: new(false),
@@ -657,7 +682,19 @@ func run(ctx context.Context, opts RunOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize sandbox client: %w", err)
 	}
+	var (
+		activeSandbox            *Sandbox
+		sandboxInactivityTimeout = 5 * time.Minute
+	)
+
 	defer func() {
+		if activeSandbox != nil {
+			log.Info("taking final snapshot before program exit...", "sandbox.name", activeSandbox.SandboxName())
+			if err := activeSandbox.SnapshotFS(context.WithoutCancel(ctx)); err != nil {
+				log.Error(err, "failed to take final snapshot on program exit")
+			}
+		}
+
 		if err := sandboxClient.DeleteAllSandboxes(context.WithoutCancel(ctx)); err != nil {
 			log.Error(err, "failed to delete all sandboxes")
 		}
@@ -708,8 +745,8 @@ func run(ctx context.Context, opts RunOptions) error {
 		fmt.Printf("Session Name: %s\n", opts.SessionName)
 		fmt.Printf("Sandbox Image: %s (Namespace: %s)\n", opts.Image, opts.Namespace)
 		fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
-		fmt.Println("Key Concept: An Agent Sandbox is launched ONLY when a tool needs to be executed,")
-		fmt.Println("             and is immediately deleted afterward.")
+		fmt.Println("Key Concept: An Agent Sandbox is launched ONCE on the first tool call for warm reuse,")
+		fmt.Println("             and automatically deleted by the cluster after 5 minutes of inactivity.")
 		fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
 		fmt.Println("================================================================================")
 	} else {
@@ -781,24 +818,80 @@ func run(ctx context.Context, opts RunOptions) error {
 				break
 			}
 
-			log.Info("launching sandbox for tool execution...")
+			sb := activeSandbox
 
-			sb, err := session.CreateSandbox(ctx, opts.Image, opts.Namespace)
-			if err != nil {
-				return fmt.Errorf("failed to create sandbox: %w", err)
+			if sb != nil {
+				// Check if the sandbox still exists in the cluster
+				_, err := sandboxClient.agentsClient.AgentsV1beta1().Sandboxes(sb.id.Namespace).Get(ctx, sb.id.Name, metav1.GetOptions{})
+				if err != nil {
+					if k8serrors.IsNotFound(err) {
+						log.Info("Active sandbox was deleted or expired, will recreate it", "sandbox.name", sb.SandboxName())
+						activeSandbox = nil
+						sb = nil
+					} else {
+						return fmt.Errorf("failed to verify active sandbox status: %w", err)
+					}
+				}
 			}
 
-			if err := sb.WaitForReady(ctx); err != nil {
-				log.Error(err, "sandbox not ready")
-				_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
-				return err
-			}
+			if sb == nil {
+				log.Info("launching sandbox for tool execution...")
 
-			log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+				var err error
+				sb, err = session.CreateSandbox(ctx, opts.Image, opts.Namespace, sandboxInactivityTimeout)
+				if err != nil {
+					return fmt.Errorf("failed to create sandbox: %w", err)
+				}
 
-			log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
-			if err := sb.RestoreFS(ctx); err != nil {
-				log.Error(err, "failed to restore filesystem; starting with a fresh sandbox instead", "sandbox.name", sb.SandboxName())
+				if err := sb.WaitForReady(ctx); err != nil {
+					log.Error(err, "sandbox not ready")
+					_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+					return err
+				}
+
+				log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+
+				log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
+				if err := sb.RestoreFS(ctx); err != nil {
+					log.Error(err, "failed to restore filesystem; starting with a fresh sandbox instead", "sandbox.name", sb.SandboxName())
+				}
+
+				activeSandbox = sb
+			} else {
+				log.Info("reusing active sandbox...", "sandbox.name", sb.SandboxName())
+				log.Info("extending sandbox lifecycle...", "sandbox.name", sb.SandboxName())
+				if err := sb.ExtendLifecycle(ctx, sandboxInactivityTimeout); err != nil {
+					if k8serrors.IsNotFound(err) {
+						log.Info("sandbox vanished while extending lifecycle, recreating...")
+						activeSandbox = nil
+						sb = nil
+
+						var recreateErr error
+						sb, recreateErr = session.CreateSandbox(ctx, opts.Image, opts.Namespace, sandboxInactivityTimeout)
+						if recreateErr != nil {
+							return fmt.Errorf("failed to recreate sandbox: %w", recreateErr)
+						}
+
+						if err := sb.WaitForReady(ctx); err != nil {
+							log.Error(err, "sandbox not ready")
+							_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+							return err
+						}
+
+						log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+
+						log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
+						if err := sb.RestoreFS(ctx); err != nil {
+							log.Error(err, "failed to restore filesystem", "sandbox.name", sb.SandboxName())
+							_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+							return err
+						}
+
+						activeSandbox = sb
+					} else {
+						log.Error(err, "failed to extend sandbox lifecycle")
+					}
+				}
 			}
 
 			shouldSnapshot := true
@@ -834,17 +927,8 @@ func run(ctx context.Context, opts RunOptions) error {
 			if shouldSnapshot {
 				log.Info("snapshotting filesystem from sandbox...", "sandbox.name", sb.SandboxName())
 				if err := sb.SnapshotFS(ctx); err != nil {
-					// Maybe this should be surfaced as an error ... but let's deal with this
-					// when we cache the sandbox.
 					log.Error(err, "failed to snapshot filesystem")
 				}
-			}
-
-			log.Info("deleting sandbox", "sandbox.name", sb.SandboxName())
-			if deleteErr := sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb); deleteErr != nil {
-				log.Error(deleteErr, "failed to delete sandbox", "sandbox.name", sb.SandboxName())
-			} else {
-				log.V(1).Info("sandbox deleted successfully.", "sandbox.name", sb.SandboxName())
 			}
 		}
 	}

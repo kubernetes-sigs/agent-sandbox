@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -185,10 +184,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	if sandbox.Spec.Replicas == nil {
-		sandbox.Spec.Replicas = ptr.To[int32](1)
-	}
-
 	oldStatus := sandbox.Status.DeepCopy()
 	var err error
 	sandboxDeleted := false
@@ -241,10 +236,8 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 	if pod == nil {
-		sandbox.Status.Replicas = 0
 		sandbox.Status.PodIPs = nil
 	} else {
-		sandbox.Status.Replicas = 1
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
 		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 	}
@@ -287,8 +280,8 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 }
 
 func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
-	replicaCountZero := sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0
-	if !replicaCountZero {
+	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
+	if !isSuspended {
 		return nil
 	}
 
@@ -325,8 +318,8 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		return readyCondition
 	}
 
-	replicaCountZero := sandbox.Spec.Replicas != nil && *sandbox.Spec.Replicas == 0
-	if replicaCountZero {
+	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
+	if isSuspended {
 		readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
 		if pod != nil {
 			readyCondition.Message = "Sandbox is suspending"
@@ -668,13 +661,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	if *sandbox.Spec.Replicas == 0 {
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
 		if pod != nil {
 			ownership, controllerRef := checkOwnership(pod, sandbox)
 			switch ownership {
 			case resourceOwnedBySandbox:
 				if pod.DeletionTimestamp.IsZero() {
-					logger.Info("Deleting Pod because .Spec.Replicas is 0", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
 						return nil, fmt.Errorf("failed to delete pod: %w", err)
 					}

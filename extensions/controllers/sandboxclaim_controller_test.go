@@ -1585,7 +1585,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		if ready {
 			conditionStatus = metav1.ConditionTrue
 		}
-		replicas := int32(1)
 		return &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
@@ -1606,7 +1605,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas: &replicas,
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					ObjectMeta: sandboxv1beta1.PodMetadata{
 						Annotations: map[string]string{
@@ -1636,7 +1635,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	}
 
 	createSandboxWithDifferentController := func(name string) *sandboxv1beta1.Sandbox {
-		replicas := int32(1)
 		return &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -1656,7 +1654,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas: &replicas,
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -2090,8 +2088,8 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			}},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			Replicas:    new(int32(1)),
-			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodTemplate:   sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 	}
 
@@ -2105,8 +2103,8 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			Replicas:    new(int32(1)),
-			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodTemplate:   sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
 		},
 		Status: sandboxv1beta1.SandboxStatus{
 			Conditions: []metav1.Condition{{
@@ -2375,8 +2373,8 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas:    new(int32(1)),
-				PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}},
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				PodTemplate:   sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "i"}}}},
 			},
 			Status: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{{
@@ -2495,7 +2493,6 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 		if ready {
 			conditionStatus = metav1.ConditionTrue
 		}
-		replicas := int32(1)
 		return &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -2515,7 +2512,7 @@ func TestSandboxClaimWarmPoolPolicy(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				Replicas: &replicas,
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},

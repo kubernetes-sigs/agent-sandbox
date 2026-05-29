@@ -50,6 +50,10 @@ spec:
         resources:
           {{- toYaml . | nindent 10 }}
         {{- end }}
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/sandbox-config
+          readOnly: true
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -62,3 +66,9 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      volumes:
+      - name: config-volume
+        configMap:
+          name: agent-sandbox-config
+          optional: true
+

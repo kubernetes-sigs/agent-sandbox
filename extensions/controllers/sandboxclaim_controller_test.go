@@ -342,6 +342,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		name              string
 		claimToReconcile  *extensionsv1beta1.SandboxClaim
 		existingObjects   []client.Object
+		allowedDomains    []string
 		expectSandbox     bool
 		expectError       bool
 		expectedCondition metav1.Condition
@@ -689,7 +690,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "claim with custom allowed domain via configmap is accepted",
+			name: "claim with custom allowed domain is accepted",
 			claimToReconcile: &extensionsv1beta1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{Name: "claim-custom-domain", Namespace: "default", UID: "uid-custom-domain"},
 				Spec: extensionsv1beta1.SandboxClaimSpec{
@@ -699,19 +700,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					},
 				},
 			},
-			existingObjects: []client.Object{
-				template,
-				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "agent-sandbox-config",
-						Namespace: "agent-sandbox-system",
-					},
-					Data: map[string]string{
-						"allowed-label-domains": "sandbox.users.io, custom.company.com",
-					},
-				},
-			},
-			expectSandbox: true,
+			existingObjects: []client.Object{template},
+			allowedDomains:  []string{"sandbox.users.io", "custom.company.com"},
+			expectSandbox:   true,
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
@@ -882,11 +873,12 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
 
 			reconciler := &SandboxClaimReconciler{
-				Client:           client,
-				Scheme:           scheme,
-				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
-				Recorder:         events.NewFakeRecorder(10),
-				Tracer:           asmetrics.NewNoOp(),
+				Client:              client,
+				Scheme:              scheme,
+				WarmSandboxQueue:    queue.NewSimpleSandboxQueue(),
+				Recorder:            events.NewFakeRecorder(10),
+				Tracer:              asmetrics.NewNoOp(),
+				AllowedLabelDomains: tc.allowedDomains,
 			}
 
 			// Pre-populate PodQueue with any existing pods
@@ -3471,18 +3463,21 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	// Run reconcile
 	_, err := reconciler.Reconcile(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Expected first Reconcile to succeed, but failed: %v", err)
+	expectedErr := "triggered adoption completion for \"adopted-sb\": retrying"
+	if err == nil {
+		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
+	} else if err.Error() != expectedErr {
+		t.Errorf("Expected error %q, got: %q", expectedErr, err.Error())
 	}
 
-	// Verify that the claim status WAS updated with the sandbox name
+	// Verify that the claim status was NOT updated with the sandbox name (due to error)
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 
-	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
-		t.Errorf("expected claim status to be updated with 'adopted-sb', got %q", updatedClaim.Status.SandboxStatus.Name)
+	if updatedClaim.Status.SandboxStatus.Name == "adopted-sb" {
+		t.Error("expected claim status to NOT be updated with 'adopted-sb' during cache lag")
 	}
 
 	// Verify that the extra warm sandbox was NOT adopted (it should still have its warm pool labels)

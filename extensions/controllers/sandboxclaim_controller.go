@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -126,6 +125,7 @@ type SandboxClaimReconciler struct {
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
+	AllowedLabelDomains     []string
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -134,7 +134,6 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
@@ -327,7 +326,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
 
 	// Upfront validation of additional metadata to skip unnecessary processing
-	if err := r.validateAdditionalPodMetadata(ctx, &claim.Spec.AdditionalPodMetadata); err != nil {
+	if err := r.validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
 		if errors.Is(err, ErrConfigReadFailure) {
 			return nil, err
 		}
@@ -367,7 +366,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			mergedMeta.Labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
 			mergedMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
 
-			if err := r.mergePodMetadata(ctx, &mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 				return nil, err
 			}
 
@@ -779,7 +778,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		mergedMeta.Labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
 		mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 
-		if err := r.mergePodMetadata(ctx, &mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
 
@@ -789,7 +788,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		// Fallback (just in case template is somehow missing)
 		adopted.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
 
-		if err := r.mergePodMetadata(ctx, &adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+		if err := r.mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
 	}
@@ -820,59 +819,15 @@ func isRestrictedDomain(domain string) bool {
 	return false
 }
 
-var (
-	controllerNamespace     string
-	controllerNamespaceOnce sync.Once
-)
-
-func getControllerNamespace() string {
-	controllerNamespaceOnce.Do(func() {
-		if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-			controllerNamespace = ns
-			return
-		}
-		if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
-			if ns := strings.TrimSpace(string(data)); ns != "" {
-				controllerNamespace = ns
-				return
-			}
-		}
-		controllerNamespace = "agent-sandbox-system"
-	})
-	return controllerNamespace
-}
-
 // validateAdditionalPodMetadata checks claimMeta for invalid domain or label values upfront.
-func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(ctx context.Context, claimMeta *v1beta1.PodMetadata) error {
+func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(claimMeta *v1beta1.PodMetadata) error {
 	if claimMeta == nil {
 		return nil
 	}
 
-	allowedDomains := []string{"sandbox.users.io"} // default
-	if len(claimMeta.Labels) > 0 && r.Client != nil {
-		// Read allowed domains from ConfigMap only when there are labels to validate
-		cm := &corev1.ConfigMap{}
-		ns := getControllerNamespace()
-		err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: "agent-sandbox-config"}, cm)
-		if err == nil {
-			val := strings.TrimSpace(cm.Data["allowed-label-domains"])
-			if val != "" {
-				var domains []string
-				for _, d := range strings.FieldsFunc(val, func(c rune) bool {
-					return c == ',' || c == '\n' || c == '\r'
-				}) {
-					d = strings.ToLower(strings.TrimSpace(d))
-					if d != "" {
-						domains = append(domains, d)
-					}
-				}
-				if len(domains) > 0 {
-					allowedDomains = domains
-				}
-			}
-		} else if !k8errors.IsNotFound(err) {
-			return fmt.Errorf("%w: failed to get ConfigMap %s/%s: %w", ErrConfigReadFailure, ns, "agent-sandbox-config", err)
-		}
+	allowedDomains := r.AllowedLabelDomains
+	if len(allowedDomains) == 0 {
+		allowedDomains = []string{"sandbox.users.io"} // Secure default fallback
 	}
 
 	validate := func(key, value string, isLabel bool) error {
@@ -942,8 +897,8 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(ctx context.Conte
 
 // mergePodMetadata merges labels and annotations from claimMeta into templateMeta,
 // rejecting overrides with different values.
-func (r *SandboxClaimReconciler) mergePodMetadata(ctx context.Context, templateMeta *v1beta1.PodMetadata, claimMeta *v1beta1.PodMetadata) error {
-	if err := r.validateAdditionalPodMetadata(ctx, claimMeta); err != nil {
+func (r *SandboxClaimReconciler) mergePodMetadata(templateMeta *v1beta1.PodMetadata, claimMeta *v1beta1.PodMetadata) error {
+	if err := r.validateAdditionalPodMetadata(claimMeta); err != nil {
 		return err
 	}
 
@@ -1052,7 +1007,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
 
-	if err := r.mergePodMetadata(ctx, &sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
+	if err := r.mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
 	}
 
@@ -1201,9 +1156,8 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
 					} else {
-						// Successfully completed adoption: return the adopted sandbox directly.
-						logger.Info("Successfully completed adoption", "sandbox", sbName, "claim", claim.Name)
-						return sandbox, nil
+						// If succeeded, return error to retry so next reconcile sees it controlled by us!
+						return nil, fmt.Errorf("triggered adoption completion for %q: retrying", sbName)
 					}
 				}
 			}

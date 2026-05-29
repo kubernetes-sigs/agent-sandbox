@@ -73,6 +73,7 @@ func main() {
 	flag.StringVar(&opts.SessionName, "session", opts.SessionName, "session name")
 	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
 	flag.StringVar(&opts.Image, "image", opts.Image, "image")
+	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
@@ -147,6 +148,10 @@ type Session struct {
 
 	// client is the sandbox client to use to interact with the cluster
 	client *SandboxClient
+
+	// HomeDir is the home directory; we mount a tmpfs volume here.
+	// We currently only snapshot and restore this directory.
+	HomeDir string
 }
 
 // Sandbox represents an active sandbox instance.
@@ -417,7 +422,7 @@ func (s *Sandbox) RestoreFS(ctx context.Context) error {
 	defer f.Close()
 
 	opts := ExecOptions{
-		Command: []string{"tar", "-zxf", "-", "-C", "/home/clawtainer"},
+		Command: []string{"tar", "-zxf", "-", "-C", s.session.HomeDir},
 		Stdin:   f,
 	}
 	res, err := s.Exec(ctx, opts)
@@ -451,7 +456,7 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 	defer backupFile.Close()
 
 	opts := ExecOptions{
-		Command: []string{"tar", "-zcf", "-", "-C", "/home/clawtainer", "."},
+		Command: []string{"tar", "-zcf", "-", "-C", s.session.HomeDir, "."},
 		Stdout:  backupFile,
 	}
 	res, err := s.Exec(ctx, opts)
@@ -502,21 +507,21 @@ func (s *Session) CreateSandbox(ctx context.Context, image, namespace string) (*
 							Command: []string{"sleep", "infinity"},
 							VolumeMounts: []corev1.VolumeMount{
 								{
-									Name:      "clawtainer-home",
-									MountPath: "/home/clawtainer",
+									Name:      "home",
+									MountPath: s.HomeDir,
 								},
 							},
 							Env: []corev1.EnvVar{
 								{
 									Name:  "HOME",
-									Value: "/home/clawtainer",
+									Value: s.HomeDir,
 								},
 							},
 						},
 					},
 					Volumes: []corev1.Volume{
 						{
-							Name: "clawtainer-home",
+							Name: "home",
 							VolumeSource: corev1.VolumeSource{
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
@@ -613,6 +618,10 @@ type RunOptions struct {
 	SessionName string
 	Namespace   string
 	Image       string
+
+	// HomeDir is the home directory inside the sandbox.
+	// This is currently the only path that we persist between execs in the sandbox.
+	HomeDir string
 }
 
 func (o *RunOptions) InitDefaults() {
@@ -624,6 +633,11 @@ func (o *RunOptions) InitDefaults() {
 	o.Namespace = os.Getenv("SANDBOX_NAMESPACE")
 	if o.Namespace == "" {
 		o.Namespace = "default"
+	}
+
+	o.HomeDir = os.Getenv("SANDBOX_HOME_DIR")
+	if o.HomeDir == "" {
+		o.HomeDir = "/home/clawtainer"
 	}
 }
 

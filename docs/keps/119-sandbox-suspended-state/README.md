@@ -47,54 +47,6 @@ The controller evaluates the hierarchy top-down. The `Suspended` condition remai
 | **Resuming** | `False` | `PodResuming` | nil (Recreating) | **`False`** | `DependenciesNotReady` | Transient State: Sandbox resumption requested. Recreation of underlying workload is in progress. |
 | **Operational** | `False` | `PodProvisioned` | non-nil (Active) | **`True` / `False`** | `DependenciesReady` / `DependenciesNotReady` | Stable State: Sandbox is active and the underlying Pod has been provisioned. Note: The Pod might be Pending or Failed; we rely on `Ready` and `Finished` to track specific Pod health. |
 
-## Controller Implementation
-
-The state transitions map cleanly to a level-based evaluation of desired state (`OperatingMode`) against physical state (Pod existence):
-
-```go
-func (r *SandboxReconciler) computeSuspendedCondition(
-    sandbox *sandboxv1beta1.Sandbox, 
-    pod *corev1.Pod,
-) *metav1.Condition {
-    
-    desiresSuspension := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
-    existingSuspendedCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
-
-    // Initialize the condition container (keep the condition present once initialized)
-    suspended := &metav1.Condition{
-        Type:               string(sandboxv1beta1.SandboxConditionSuspended),
-        ObservedGeneration: sandbox.Generation,
-    }
-
-    if desiresSuspension {
-        if pod == nil {
-            // Stable State: Fully Suspended
-            suspended.Status = metav1.ConditionTrue
-            suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
-            suspended.Message = "Pod has been successfully terminated. Sandbox is fully suspended."
-        } else {
-            // Transient State: In the process of scaling down
-            suspended.Status = metav1.ConditionFalse
-            suspended.Reason = "PodTerminating"
-            suspended.Message = "Sandbox suspension requested. Active workloads are being de-provisioned."
-        }
-    } else {
-        // The spec wants it RUNNING
-        if pod == nil {
-            // Differentiate between a brand-new Sandbox and one waking up from suspension
-            suspended.Status = metav1.ConditionFalse
-        } else {
-            // Stable State: The pod exists. We do not track granular pod health here.
-            suspended.Status = metav1.ConditionFalse
-            suspended.Reason = "PodProvisioned"
-            suspended.Message = "Sandbox is active and the underlying Pod has been provisioned."
-        }
-    }
-
-    return suspended
-}
-```
-
 ## Usage Examples
 
 Standard Kubernetes tooling can now interact with the sandbox state natively and reliably using both states of the condition:

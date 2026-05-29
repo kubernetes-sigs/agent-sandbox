@@ -49,6 +49,14 @@ const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
+
+	// warmPoolSandboxLabel and sandboxTemplateRefHashLabel are tracking labels under
+	// the system prefix that trusted extension controllers (e.g. the warm pool
+	// controller) set on a Sandbox and expect to be propagated to the backing Pod.
+	// They are mirrored here (rather than imported from the extensions package) to
+	// avoid an import cycle.
+	warmPoolSandboxLabel        = "agents.x-k8s.io/warm-pool-sandbox"
+	sandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
@@ -450,6 +458,51 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
+// isSystemLabel reports whether a label key is reserved for the sandbox system.
+// Such keys must never be settable through a user-supplied PodTemplate, otherwise a
+// tenant could override security-critical labels (e.g. the headless Service selector
+// label) and hijack another Sandbox's network traffic.
+func isSystemLabel(key string) bool {
+	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
+		strings.HasPrefix(key, "extensions.agents.x-k8s.io/")
+}
+
+// isSystemAnnotation reports whether an annotation key is reserved for the sandbox
+// system and therefore must not be settable through a user-supplied PodTemplate.
+func isSystemAnnotation(key string) bool {
+	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
+		strings.HasPrefix(key, "extensions.agents.x-k8s.io/") ||
+		key == asmetrics.TraceContextAnnotation
+}
+
+// isAllowedSystemLabel reports whether a system-prefixed label is a tracking label
+// that trusted controllers are permitted to set on a Sandbox and have propagated to
+// the backing Pod.
+func isAllowedSystemLabel(key string) bool {
+	switch key {
+	case warmPoolSandboxLabel, sandboxTemplateRefHashLabel, sandboxv1beta1.SandboxPodTemplateHashLabel:
+		return true
+	default:
+		return false
+	}
+}
+
+// sandboxManagedByExtensionController reports whether the Sandbox is owned by a trusted
+// extension controller (warm pool or claim). Only controller-managed Sandboxes may
+// propagate the warm-pool tracking labels to their Pods; this prevents a tenant from
+// spoofing those labels via a directly-created Sandbox.
+func sandboxManagedByExtensionController(sandbox *sandboxv1beta1.Sandbox) bool {
+	for _, ref := range sandbox.OwnerReferences {
+		if !strings.HasPrefix(ref.APIVersion, "extensions.agents.x-k8s.io/") {
+			continue
+		}
+		if ref.Kind == "SandboxWarmPool" || ref.Kind == "SandboxClaim" {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
 	logger := log.FromContext(ctx)
 	desired := sandbox.Spec.Service
@@ -770,7 +823,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			// No additional action needed — label applied below.
 		}
 
-		metadataUpdated := r.updatePodMetadata(pod, sandbox, nameHash)
+		metadataUpdated := r.updatePodMetadata(ctx, pod, sandbox, nameHash)
 		if metadataUpdated || needsUpdate {
 			if err := r.Patch(ctx, pod, patch); err != nil {
 				return nil, fmt.Errorf("failed to patch pod: %w", err)
@@ -793,18 +846,38 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Create new Pod
 	logger.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
-	podLabels := map[string]string{
-		sandboxLabel: nameHash,
-	}
+	podLabels := make(map[string]string, len(sandbox.Spec.PodTemplate.ObjectMeta.Labels)+1)
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		// Never let a user-supplied template set system-reserved labels.
+		if isSystemLabel(k) {
+			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate", "key", k)
+			continue
+		}
 		podLabels[k] = v
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
+	// Assign system-owned labels after merging user input so they cannot be overridden.
+	podLabels[sandboxLabel] = nameHash
+	// Propagate trusted warm-pool tracking labels from the Sandbox CR, but only for
+	// controller-managed Sandboxes so tenants cannot spoof them on a self-created Sandbox.
+	if sandboxManagedByExtensionController(sandbox) {
+		for _, key := range []string{warmPoolSandboxLabel, sandboxTemplateRefHashLabel, sandboxv1beta1.SandboxPodTemplateHashLabel} {
+			if v, ok := sandbox.Labels[key]; ok {
+				podLabels[key] = v
+			}
+		}
+	}
+
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+		// Never let a user-supplied template set system-reserved annotations.
+		if isSystemAnnotation(k) {
+			logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate", "key", k)
+			continue
+		}
 		annotations[k] = v
 		managedAnnotationKeys = append(managedAnnotationKeys, k)
 	}
@@ -874,7 +947,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	return pod, nil
 }
 
-func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
+func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
+	logger := log.FromContext(ctx)
 	updated := false
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
@@ -883,21 +957,44 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 		pod.Labels[sandboxLabel] = nameHash
 		updated = true
 	}
-	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
+	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption),
+	// skipping system-reserved keys so a user-supplied template cannot override them.
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if isSystemLabel(k) {
+			logger.V(1).Info("Ignoring system-reserved label in Sandbox PodTemplate", "pod", pod.Name, "key", k)
+			// Remove a value a tenant may have managed to inject on an adopted pod.
+			if !isAllowedSystemLabel(k) {
+				if _, exists := pod.Labels[k]; exists {
+					delete(pod.Labels, k)
+					updated = true
+					logger.Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
+				}
+			}
+			continue
+		}
 		if pod.Labels[k] != v {
 			pod.Labels[k] = v
 			updated = true
 		}
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
+	// Propagate trusted warm-pool tracking labels from the Sandbox CR, but only for
+	// controller-managed Sandboxes so tenants cannot spoof them on a self-created Sandbox.
+	if sandboxManagedByExtensionController(sandbox) {
+		for _, key := range []string{warmPoolSandboxLabel, sandboxTemplateRefHashLabel, sandboxv1beta1.SandboxPodTemplateHashLabel} {
+			if v, ok := sandbox.Labels[key]; ok && pod.Labels[key] != v {
+				pod.Labels[key] = v
+				updated = true
+			}
+		}
+	}
 	// Handle deletion of labels
 	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
 		for k := range propagatedLabels {
-			if k == "" {
+			if k == "" || isSystemLabel(k) {
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
@@ -913,6 +1010,10 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 			pod.Annotations = make(map[string]string)
 		}
 		for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
+			if isSystemAnnotation(k) {
+				logger.V(1).Info("Ignoring system-reserved annotation in Sandbox PodTemplate", "pod", pod.Name, "key", k)
+				continue
+			}
 			if pod.Annotations[k] != v {
 				pod.Annotations[k] = v
 				updated = true
@@ -925,7 +1026,7 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	if propagatedAnnotationsStr != "" {
 		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
 		for k := range propagatedAnnotations {
-			if k == "" {
+			if k == "" || isSystemAnnotation(k) {
 				continue
 			}
 			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {

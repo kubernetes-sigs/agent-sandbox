@@ -247,7 +247,6 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 		}},
 	})
 
-	shutdownTime := metav1.NewTime(time.Now().Add(30 * time.Second)).Rfc3339Copy()
 	ttlAfterFinished := int32(120)
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -258,7 +257,6 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
-				ShutdownTime:            &shutdownTime,
 				TTLSecondsAfterFinished: &ttlAfterFinished,
 			},
 		},
@@ -266,6 +264,13 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
 	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded))
+
+	// Start the shutdown clock only after the pod has successfully finished to avoid startup latency
+	shutdownTime := metav1.NewTime(time.Now().Add(15 * time.Second)).Rfc3339Copy()
+	framework.MustUpdateObject(tc.ClusterClient, claim, func(obj *extensionsv1beta1.SandboxClaim) {
+		obj.Spec.Lifecycle.ShutdownTime = &shutdownTime
+	})
+
 	require.Never(t, func() bool {
 		current := &extensionsv1beta1.SandboxClaim{}
 		if err := tc.Get(t.Context(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, current); err != nil {

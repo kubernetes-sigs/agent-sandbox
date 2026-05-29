@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -66,11 +67,18 @@ func main() {
 			}
 		})
 	}
+
+	var opts RunOptions
+	opts.InitDefaults()
+	flag.StringVar(&opts.SessionName, "session", opts.SessionName, "session name")
+	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
+	flag.StringVar(&opts.Image, "image", opts.Image, "image")
+	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
 
-	if err := run(signalCtx); err != nil {
+	if err := run(signalCtx, opts); err != nil {
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "\n")
 			log.V(1).Info("context cancelled")
@@ -133,10 +141,25 @@ func NewSandboxClient(restConfig *rest.Config) (*SandboxClient, error) {
 	}, nil
 }
 
+// Session represents an agentic "chat" session (a stream of messages / tools calls etc).
+type Session struct {
+	// Name is the identifier for the session
+	Name string
+
+	// client is the sandbox client to use to interact with the cluster
+	client *SandboxClient
+
+	// HomeDir is the home directory; we mount a tmpfs volume here.
+	// We currently only snapshot and restore this directory.
+	HomeDir string
+}
+
 // Sandbox represents an active sandbox instance.
 type Sandbox struct {
-	id      types.NamespacedName
-	client  *SandboxClient
+	session *Session
+
+	id types.NamespacedName
+
 	podName string
 
 	// created is true if we have created the sandbox (and not deleted it)
@@ -167,6 +190,8 @@ func (s *Sandbox) WaitForReady(ctx context.Context) error {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	agentsClient := s.session.client.agentsClient
+
 readyLoop:
 	for {
 		select {
@@ -175,7 +200,7 @@ readyLoop:
 		case <-timeout:
 			return fmt.Errorf("timed out waiting for Sandbox %s to become ready", s.SandboxName())
 		case <-ticker.C:
-			latest, err := s.client.agentsClient.AgentsV1beta1().Sandboxes(s.NamespacedName().Namespace).Get(ctx, s.NamespacedName().Name, metav1.GetOptions{})
+			latest, err := agentsClient.AgentsV1beta1().Sandboxes(s.NamespacedName().Namespace).Get(ctx, s.NamespacedName().Name, metav1.GetOptions{})
 			if err != nil {
 				return fmt.Errorf("error polling state of sandbox: %w", err)
 			}
@@ -199,45 +224,84 @@ readyLoop:
 	return nil
 }
 
-// ExecutionResult holds the stdout, stderr, and exit code of a command.
+// ExecutionResult holds the captured stdout, stderr, and exit code of a command.
 type ExecutionResult struct {
-	Stdout   string
-	Stderr   string
+	// Stdout contains the captured standard output.
+	// This is only populated if ExecOptions.Stdout was nil.
+	Stdout string
+
+	// Stderr contains the captured standard error.
+	// This is only populated if ExecOptions.Stderr was nil.
+	Stderr string
+
+	// ExitCode is the exit status returned by the command.
 	ExitCode int
 }
 
-// Run executes a command in the sandbox pod via Kubernetes REST API and SPDY executor.
-func (s *Sandbox) Run(ctx context.Context, command string) (*ExecutionResult, error) {
+// ExecOptions contains the options for executing a command inside the sandbox container.
+type ExecOptions struct {
+	// Command is the process name and arguments to run (e.g. []string{"sh", "-c", "uname -a"}).
+	Command []string
+
+	// Stdin is an optional reader to pipe into the command's standard input.
+	Stdin io.Reader
+
+	// Stdout is an optional writer where standard output will be written.
+	// If nil, Stdout will be captured internally and returned as a string in the ExecutionResult.
+	Stdout io.Writer
+
+	// Stderr is an optional writer where standard error will be written.
+	// If nil, Stderr will be captured internally and returned as a string in the ExecutionResult.
+	Stderr io.Writer
+}
+
+// Exec executes a command inside the sandbox container with specified options.
+// If Stdout or Stderr are nil in ExecOptions, they are captured internally and returned in the ExecutionResult.
+func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult, error) {
+	coreClient := s.session.client.coreClient
+	restConfig := s.session.client.restConfig
+
 	podID := s.PodNamespacedName()
 
 	if podID.Name == "" {
 		return nil, fmt.Errorf("pod name not resolved yet")
 	}
 
-	req := s.client.coreClient.RESTClient().Post().
+	stdout := opts.Stdout
+	var stdoutBuf bytes.Buffer
+	if stdout == nil {
+		stdout = &stdoutBuf
+	}
+
+	stderr := opts.Stderr
+	var stderrBuf bytes.Buffer
+	if stderr == nil {
+		stderr = &stderrBuf
+	}
+
+	req := coreClient.RESTClient().Post().
 		Resource("pods").
 		Name(podID.Name).
 		Namespace(podID.Namespace).
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   []string{"sh", "-c", command},
-			Stdin:     false,
+			Command:   opts.Command,
+			Stdin:     opts.Stdin != nil,
 			Stdout:    true,
 			Stderr:    true,
 			TTY:       false,
 		}, scheme.ParameterCodec)
 
-	executor, err := remotecommand.NewSPDYExecutor(s.client.restConfig, "POST", req.URL())
+	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SPDY executor: %w", err)
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
 	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  nil,
-		Stdout: &stdoutBuf,
-		Stderr: &stderrBuf,
+		Stdin:  opts.Stdin,
+		Stdout: stdout,
+		Stderr: stderr,
 		Tty:    false,
 	})
 
@@ -251,15 +315,180 @@ func (s *Sandbox) Run(ctx context.Context, command string) (*ExecutionResult, er
 		}
 	}
 
-	return &ExecutionResult{
-		Stdout:   stdoutBuf.String(),
-		Stderr:   stderrBuf.String(),
+	res := &ExecutionResult{
 		ExitCode: exitCode,
-	}, nil
+	}
+	if opts.Stdout == nil {
+		res.Stdout = stdoutBuf.String()
+	}
+	if opts.Stderr == nil {
+		res.Stderr = stderrBuf.String()
+	}
+
+	return res, nil
+}
+
+// Run executes a shell command in the sandbox pod.
+func (s *Sandbox) Run(ctx context.Context, command string) (*ExecutionResult, error) {
+	opts := ExecOptions{
+		Command: []string{"sh", "-c", command},
+	}
+	return s.Exec(ctx, opts)
+}
+
+// getBackupDir gets the backup directory for the session.
+// It creates the directory if it doesn't exist.
+func (s *Session) getBackupDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	dir := filepath.Join(home, ".local", "sandboxed-tools", s.Name, "fs")
+
+	// Ensure the session's backup directory exists;
+	// use mode 700 because it might contain sensitive data.
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create backup directory: %w", err)
+	}
+	return dir, nil
+}
+
+// FindLatestBackup searches for the latest backup tarball in the session's backup directory.
+func (s *Session) FindLatestBackup() (string, error) {
+	dir, err := s.getBackupDir()
+	if err != nil {
+		return "", err
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "backup-*.tar.gz"))
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", nil
+	}
+	// Since Glob returns matches sorted alphabetically, and YYYYMMDDTHHMMSS
+	// naturally sorts alphabetically in chronological order, the last match is the latest one!
+	return matches[len(matches)-1], nil
+}
+
+// PruneBackups deletes older backups, keeping only the most recent keepCount backups.
+func (s *Session) PruneBackups(ctx context.Context, keepCount int) error {
+	log := klog.FromContext(ctx)
+	dir, err := s.getBackupDir()
+	if err != nil {
+		return err
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "backup-*.tar.gz"))
+	if err != nil {
+		return err
+	}
+
+	if len(matches) <= keepCount {
+		return nil
+	}
+
+	pruneCount := len(matches) - keepCount
+	for i := range pruneCount {
+		if err := os.Remove(matches[i]); err != nil {
+			log.Error(err, "unable to prune old backup", "backup", matches[i])
+		} else {
+			log.Info("pruned old backup", "backup", matches[i])
+		}
+	}
+
+	return nil
+}
+
+// RestoreFS restores the filesystem in the sandbox from the latest local backup tarball, if one exists.
+func (s *Sandbox) RestoreFS(ctx context.Context) error {
+	log := klog.FromContext(ctx)
+
+	latestBackup, err := s.session.FindLatestBackup()
+	if err != nil {
+		return fmt.Errorf("failed to search for latest backup: %w", err)
+	}
+	if latestBackup == "" {
+		// No previous backup found, start fresh
+		return nil
+	}
+
+	log.Info("restoring filesystem from latest backup", "backup", latestBackup)
+	f, err := os.Open(latestBackup)
+	if err != nil {
+		return fmt.Errorf("failed to open backup file %s: %w", latestBackup, err)
+	}
+	defer f.Close()
+
+	opts := ExecOptions{
+		Command: []string{"tar", "-zxf", "-", "-C", s.session.HomeDir},
+		Stdin:   f,
+	}
+	res, err := s.Exec(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to execute restore: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("restore failed with exit code %d: %s", res.ExitCode, res.Stderr)
+	}
+
+	return nil
+}
+
+// SnapshotFS archives the filesystem in the sandbox and saves it to a new timestamped backup inside the session's backup directory.
+func (s *Sandbox) SnapshotFS(ctx context.Context) error {
+	log := klog.FromContext(ctx)
+
+	dir, err := s.session.getBackupDir()
+	if err != nil {
+		return err
+	}
+
+	timestamp := time.Now().Format("20060102T150405")
+	backupFilename := filepath.Join(dir, fmt.Sprintf("backup-%s.tar.gz", timestamp))
+	tmpFilename := backupFilename + ".tmp"
+
+	backupFile, err := os.OpenFile(tmpFilename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create backup file %s: %w", tmpFilename, err)
+	}
+	defer backupFile.Close()
+
+	opts := ExecOptions{
+		Command: []string{"tar", "-zcf", "-", "-C", s.session.HomeDir, "."},
+		Stdout:  backupFile,
+	}
+	res, err := s.Exec(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to execute snapshot: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("snapshot failed with exit code %d: %s", res.ExitCode, res.Stderr)
+	}
+
+	// Close the file explicitly before renaming
+	if err := backupFile.Close(); err != nil {
+		return fmt.Errorf("failed to close backup file %s: %w", tmpFilename, err)
+	}
+
+	if err := os.Rename(tmpFilename, backupFilename); err != nil {
+		return fmt.Errorf("failed to rename temp backup file to final path: %w", err)
+	}
+
+	// Prune backups, keeping only the last 5
+	if err := s.session.PruneBackups(ctx, 5); err != nil {
+		log.Error(err, "failed to prune old backups")
+	}
+
+	log.Info("saved filesystem state to new backup", "backup", backupFilename)
+	return nil
 }
 
 // CreateSandbox creates a Sandbox resource.
-func (c *SandboxClient) CreateSandbox(ctx context.Context, image, namespace string) (*Sandbox, error) {
+func (s *Session) CreateSandbox(ctx context.Context, image, namespace string) (*Sandbox, error) {
+	agentsClient := s.client.agentsClient
+
 	// TODO: Use shutdownPolicy (and maybe cache the sandbox between tool calls)
 
 	sb := &sandboxv1beta1.Sandbox{
@@ -276,6 +505,26 @@ func (c *SandboxClient) CreateSandbox(ctx context.Context, image, namespace stri
 							Name:    "sandbox",
 							Image:   image,
 							Command: []string{"sleep", "infinity"},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "home",
+									MountPath: s.HomeDir,
+								},
+							},
+							Env: []corev1.EnvVar{
+								{
+									Name:  "HOME",
+									Value: s.HomeDir,
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "home",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
 						},
 					},
 					RestartPolicy: corev1.RestartPolicyNever,
@@ -284,7 +533,7 @@ func (c *SandboxClient) CreateSandbox(ctx context.Context, image, namespace stri
 		},
 	}
 
-	created, err := c.agentsClient.AgentsV1beta1().Sandboxes(namespace).Create(ctx, sb, metav1.CreateOptions{})
+	created, err := agentsClient.AgentsV1beta1().Sandboxes(namespace).Create(ctx, sb, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Sandbox: %w", err)
 	}
@@ -294,14 +543,14 @@ func (c *SandboxClient) CreateSandbox(ctx context.Context, image, namespace stri
 		Name:      created.Name,
 	}
 	sandbox := &Sandbox{
-		client:  c,
+		session: s,
 		id:      id,
 		created: true,
 	}
 
-	c.mutex.Lock()
-	c.sandboxes[sandbox.NamespacedName()] = sandbox
-	c.mutex.Unlock()
+	s.client.mutex.Lock()
+	s.client.sandboxes[sandbox.NamespacedName()] = sandbox
+	s.client.mutex.Unlock()
 
 	return sandbox, nil
 }
@@ -364,7 +613,35 @@ func readLine() ([]byte, error) {
 	}
 }
 
-func run(ctx context.Context) error {
+// RunOptions are the options for the run command.
+type RunOptions struct {
+	SessionName string
+	Namespace   string
+	Image       string
+
+	// HomeDir is the home directory inside the sandbox.
+	// This is currently the only path that we persist between execs in the sandbox.
+	HomeDir string
+}
+
+func (o *RunOptions) InitDefaults() {
+	o.Image = os.Getenv("SANDBOX_IMAGE")
+	if o.Image == "" {
+		o.Image = "debian:bookworm-slim"
+	}
+
+	o.Namespace = os.Getenv("SANDBOX_NAMESPACE")
+	if o.Namespace == "" {
+		o.Namespace = "default"
+	}
+
+	o.HomeDir = os.Getenv("SANDBOX_HOME_DIR")
+	if o.HomeDir == "" {
+		o.HomeDir = "/home/clawtainer"
+	}
+}
+
+func run(ctx context.Context, opts RunOptions) error {
 	log := klog.FromContext(ctx)
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
@@ -388,14 +665,8 @@ func run(ctx context.Context) error {
 		modelName = "gemini-3.5-flash"
 	}
 
-	sandboxImage := os.Getenv("SANDBOX_IMAGE")
-	if sandboxImage == "" {
-		sandboxImage = "debian:bookworm-slim"
-	}
-
-	namespace := os.Getenv("SANDBOX_NAMESPACE")
-	if namespace == "" {
-		namespace = "default"
+	if !isAlphaNumeric(opts.SessionName) {
+		return fmt.Errorf("invalid session name %q: must be alphanumeric", opts.SessionName)
 	}
 
 	llmClient, err := llm.NewClient(baseURL, apiKey)
@@ -417,6 +688,11 @@ func run(ctx context.Context) error {
 			log.Error(err, "failed to delete all sandboxes")
 		}
 	}()
+
+	session := &Session{
+		Name:   opts.SessionName,
+		client: sandboxClient,
+	}
 
 	runCmdTool := llm.Tool{
 		Type: "function",
@@ -448,7 +724,6 @@ func run(ctx context.Context) error {
 	fmt.Println("================================================================================")
 	fmt.Println("Welcome to the Sandboxed Tools example!")
 	fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
-	fmt.Printf("Sandbox Image: %s (Namespace: %s)\n", sandboxImage, namespace)
 	fmt.Println("Key Concept: An Agent Sandbox is launched ONLY when a tool needs to be executed,")
 	fmt.Println("             and is immediately deleted afterward.")
 	fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
@@ -521,7 +796,7 @@ func run(ctx context.Context) error {
 					fmt.Printf("\n[Tool Execution] LLM requested tool %q with command: %q\n", tc.Function.Name, args.Command)
 					log.Info("launching sandbox for tool execution...")
 
-					sb, err := sandboxClient.CreateSandbox(ctx, sandboxImage, namespace)
+					sb, err := session.CreateSandbox(ctx, opts.Image, opts.Namespace)
 					if err != nil {
 						fmt.Printf("[Sandbox Error] Failed to create sandbox: %v\n", err)
 						messages = append(messages, llm.Message{
@@ -540,13 +815,36 @@ func run(ctx context.Context) error {
 
 					log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
 
+					log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
+					if err := sb.RestoreFS(ctx); err != nil {
+						log.Error(err, "failed to restore filesystem", "sandbox.name", sb.SandboxName())
+						_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+						messages = append(messages, llm.Message{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Content:    fmt.Sprintf("Filesystem restore failed: %v", err),
+						})
+						continue
+					}
+
 					log.Info("executing command in sandbox", "sandbox.name", sb.SandboxName(), "command", args.Command)
 					// TODO: Add a timeout to the tool execution?
 					res, err := sb.Run(ctx, args.Command)
 
+					// We don't snapshot if there was an error, but we do snapshot if the tool just
+					// returned a non-zero exit code.
+					if err == nil {
+						log.Info("snapshotting filesystem from sandbox...", "sandbox.name", sb.SandboxName())
+						if err := sb.SnapshotFS(ctx); err != nil {
+							// Maybe this should be surfaced as an error ... but let's deal with this
+							// when we cache the sandbox.
+							log.Error(err, "failed to snapshot filesystem")
+						}
+					}
+
 					log.Info("deleting sandbox", "sandbox.name", sb.SandboxName())
 					if deleteErr := sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb); deleteErr != nil {
-						fmt.Printf("[Sandbox Warning] Failed to delete sandbox %s: %v\n", sb.SandboxName(), deleteErr)
+						log.Error(deleteErr, "failed to delete sandbox", "sandbox.name", sb.SandboxName())
 					} else {
 						log.V(1).Info("sandbox deleted successfully.", "sandbox.name", sb.SandboxName())
 					}
@@ -577,4 +875,21 @@ func run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// isAlphaNumeric returns true if the string is purely alphanumeric.
+func isAlphaNumeric(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }

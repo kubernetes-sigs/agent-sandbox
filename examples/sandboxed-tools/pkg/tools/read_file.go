@@ -16,6 +16,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
@@ -41,6 +42,7 @@ func (t *ReadFileTool) Schema() llm.Tool {
 						"description": "Path to the file to read (relative or absolute)",
 					},
 				},
+				"required": []string{"path"},
 			},
 		},
 	}
@@ -48,6 +50,10 @@ func (t *ReadFileTool) Schema() llm.Tool {
 
 func (t *ReadFileTool) Run(ctx context.Context, sandbox Sandbox) (llm.Message, error) {
 	log := klog.FromContext(ctx)
+
+	if t.Path == "" {
+		return llm.Message{}, fmt.Errorf("path is required")
+	}
 
 	log.Info("reading file in sandbox", "path", t.Path)
 	res, err := sandbox.ExecCommand(ctx, ExecCommandOptions{

@@ -45,6 +45,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	agentsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sessions"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/tools"
 )
 
@@ -586,6 +587,11 @@ type RunOptions struct {
 }
 
 func (o *RunOptions) InitDefaults() {
+	o.SessionName = os.Getenv("SESSION_NAME")
+	if o.SessionName == "" {
+		o.SessionName = "default"
+	}
+
 	o.Image = os.Getenv("SANDBOX_IMAGE")
 	if o.Image == "" {
 		o.Image = "debian:bookworm-slim"
@@ -666,31 +672,58 @@ func run(ctx context.Context, opts RunOptions) error {
 
 	llmTools := toolsRegistry.All()
 
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	sessionsDir := filepath.Join(homeDir, ".local", "sandboxed-tools", "sessions")
+	sessionStore := sessions.NewFileStore(sessionsDir)
+
 	session := &Session{
 		Name:   opts.SessionName,
 		client: sandboxClient,
 	}
 
-	systemPrompt := "You are a helpful AI assistant with access to a sandboxed environment. " +
-		"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
-		"Always explain what you are doing."
-
-	messages := []llm.Message{
-		{
-			Role:    "system",
-			Content: &systemPrompt,
-		},
+	messages, err := sessionStore.LoadSession(ctx, opts.SessionName)
+	if err != nil {
+		return fmt.Errorf("failed to load session: %w", err)
 	}
 
-	fmt.Println("================================================================================")
-	fmt.Println("Welcome to the Sandboxed Tools example!")
-	fmt.Printf("Session Name: %s\n", opts.SessionName)
-	fmt.Printf("Sandbox Image: %s (Namespace: %s)\n", opts.Image, opts.Namespace)
-	fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
-	fmt.Println("Key Concept: An Agent Sandbox is launched ONLY when a tool needs to be executed,")
-	fmt.Println("             and is immediately deleted afterward.")
-	fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
-	fmt.Println("================================================================================")
+	if len(messages) == 0 {
+		systemPrompt := "You are a helpful AI assistant with access to a sandboxed environment. " +
+			"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
+			"Always explain what you are doing."
+
+		sysMsg := llm.Message{
+			Role:    "system",
+			Content: &systemPrompt,
+		}
+		messages = []llm.Message{sysMsg}
+		if err := sessionStore.AppendMessage(ctx, opts.SessionName, sysMsg); err != nil {
+			return fmt.Errorf("failed to persist system prompt: %w", err)
+		}
+
+		fmt.Println("================================================================================")
+		fmt.Println("Welcome to the Sandboxed Tools example!")
+		fmt.Printf("Session Name: %s\n", opts.SessionName)
+		fmt.Printf("Sandbox Image: %s (Namespace: %s)\n", opts.Image, opts.Namespace)
+		fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
+		fmt.Println("Key Concept: An Agent Sandbox is launched ONLY when a tool needs to be executed,")
+		fmt.Println("             and is immediately deleted afterward.")
+		fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
+		fmt.Println("================================================================================")
+	} else {
+		fmt.Println("================================================================================")
+		fmt.Printf("Resumed session %q with %d messages in history:\n", opts.SessionName, len(messages))
+		fmt.Println("================================================================================")
+		for _, msg := range messages {
+			if msg.Role == "user" {
+				fmt.Printf("User> %s\n", valueOf(msg.Content))
+			} else if msg.Role == "assistant" && msg.Content != nil && *msg.Content != "" {
+				fmt.Printf("Agent> %s\n", *msg.Content)
+			}
+		}
+	}
 
 	for {
 		fmt.Print("\nUser> ")
@@ -713,7 +746,11 @@ func run(ctx context.Context, opts RunOptions) error {
 			break
 		}
 
-		messages = append(messages, llm.Message{Role: "user", Content: &input})
+		userMsg := llm.Message{Role: "user", Content: &input}
+		messages = append(messages, userMsg)
+		if err := sessionStore.AppendMessage(ctx, opts.SessionName, userMsg); err != nil {
+			return fmt.Errorf("failed to persist user message: %w", err)
+		}
 
 		for {
 			req := llm.ChatCompletionRequest{
@@ -735,6 +772,9 @@ func run(ctx context.Context, opts RunOptions) error {
 
 			msg := resp.Choices[0].Message
 			messages = append(messages, msg)
+			if err := sessionStore.AppendMessage(ctx, opts.SessionName, msg); err != nil {
+				return fmt.Errorf("failed to persist assistant message: %w", err)
+			}
 
 			if len(msg.ToolCalls) == 0 {
 				fmt.Printf("\nAgent> %s\n", valueOf(msg.Content))
@@ -773,16 +813,21 @@ func run(ctx context.Context, opts RunOptions) error {
 					shouldSnapshot = false
 				}
 
+				var toolMsg llm.Message
 				if err != nil {
 					log.Error(err, "error calling tool", "tool", tc.Function.Name)
 					content := fmt.Sprintf("Error calling tool %q: %v", tc.Function.Name, err)
-					messages = append(messages, llm.Message{
+					toolMsg = llm.Message{
 						Role:       "tool",
 						ToolCallID: tc.ID,
 						Content:    &content,
-					})
+					}
 				} else {
-					messages = append(messages, result)
+					toolMsg = result
+				}
+				messages = append(messages, toolMsg)
+				if err := sessionStore.AppendMessage(ctx, opts.SessionName, toolMsg); err != nil {
+					return fmt.Errorf("failed to persist tool response: %w", err)
 				}
 			}
 

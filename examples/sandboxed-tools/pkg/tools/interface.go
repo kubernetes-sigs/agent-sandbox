@@ -35,11 +35,11 @@ type Sandbox interface {
 // ExecCommandResult holds the result of running a command in the sandbox.
 type ExecCommandResult struct {
 	// Stdout contains the captured standard output.
-	// This is only populated if ExecOptions.Stdout was nil.
+	// This is only populated if ExecCommandOptions.Stdout was nil.
 	Stdout string
 
 	// Stderr contains the captured standard error.
-	// This is only populated if ExecOptions.Stderr was nil.
+	// This is only populated if ExecCommandOptions.Stderr was nil.
 	Stderr string
 
 	// ExitCode is the exit status returned by the command.
@@ -56,10 +56,10 @@ type ExecCommandOptions struct {
 	Stdin io.Reader
 
 	// Stdout is an optional writer where standard output will be written.
-	// If nil, Stdout will be captured internally and returned as a string in the ExecutionResult.
+	// If nil, Stdout will be captured internally and returned as a string in the ExecCommandResult.
 	Stdout io.Writer
 
 	// Stderr is an optional writer where standard error will be written.
-	// If nil, Stderr will be captured internally and returned as a string in the ExecutionResult.
+	// If nil, Stderr will be captured internally and returned as a string in the ExecCommandResult.
 	Stderr io.Writer
 }

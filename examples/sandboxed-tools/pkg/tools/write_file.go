@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
@@ -50,6 +49,7 @@ func (t *WriteFileTool) Schema() llm.Tool {
 						"description": "Content to write to the file",
 					},
 				},
+				"required": []string{"path", "content"},
 			},
 		},
 	}
@@ -72,18 +72,15 @@ func (t *WriteFileTool) Run(ctx context.Context, sandbox Sandbox) (llm.Message, 
 	}
 
 	log.Info("writing file in sandbox", "path", p)
-	response, err := sandbox.ExecCommand(ctx, ExecCommandOptions{
-		Command: []string{"tee", p},
+	_, err := sandbox.ExecCommand(ctx, ExecCommandOptions{
+		Command: []string{"sh", "-c", `cat > "$1"`, "--", p},
 		Stdin:   bytes.NewBufferString(t.Content),
 	})
 	if err != nil {
 		return llm.Message{}, err
 	}
 
-	content := strings.TrimSpace(response.Stdout)
-	if content == "" {
-		content = fmt.Sprintf("Wrote file %q", p)
-	}
+	content := fmt.Sprintf("Successfully wrote %d bytes to %q", len(t.Content), p)
 	result := llm.Message{
 		Content: &content,
 	}

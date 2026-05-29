@@ -39,6 +39,9 @@ func NewRegistry() *Registry {
 
 // Add registers a new tool.
 func (r *Registry) Add(tool Tool) {
+	if tool == nil {
+		panic("cannot add nil tool to registry")
+	}
 	if reflect.TypeOf(tool).Kind() != reflect.Ptr {
 		panic(fmt.Sprintf("registered tool %T must be a pointer", tool))
 	}
@@ -69,7 +72,7 @@ func (r *Registry) All() []llm.Tool {
 func (r *Registry) Call(ctx context.Context, sandbox Sandbox, tc llm.ToolCall) (llm.Message, error) {
 	log := klog.FromContext(ctx)
 
-	log.Info("llm invoking tool", "tool.name", tc.Function.Name, "tool.arguments", tc.Function.Arguments)
+	log.Info("llm invoking tool", "tool.name", tc.Function.Name, "arguments.bytes", len(tc.Function.Arguments))
 
 	tool := r.tools[tc.Function.Name]
 	if tool == nil {

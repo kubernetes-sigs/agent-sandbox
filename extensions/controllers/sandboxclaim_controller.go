@@ -367,7 +367,9 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
-				if err := r.Update(ctx, sandbox); err != nil {
+				if err := asmetrics.InstrumentWrite("claim", "pod_meta_bind", "spec", "update", func() error {
+					return r.Update(ctx, sandbox)
+				}); err != nil {
 					return nil, err
 				}
 			}
@@ -445,7 +447,9 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 
 	patch := client.MergeFrom(oldClaim)
 
-	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+	if err := asmetrics.InstrumentWrite("claim", "claim_status", "status", "patch", func() error {
+		return r.Status().Patch(ctx, claim, patch)
+	}); err != nil {
 		logger.Error(err, "Failed to patch sandboxclaim status")
 		return err
 	}
@@ -809,7 +813,9 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		}
 	}
 
-	if err := r.Patch(ctx, adopted, client.MergeFrom(originalAdopted)); err != nil {
+	if err := asmetrics.InstrumentWrite("claim", "adopt_patch", "spec", "patch", func() error {
+		return r.Patch(ctx, adopted, client.MergeFrom(originalAdopted))
+	}); err != nil {
 		return err
 	}
 

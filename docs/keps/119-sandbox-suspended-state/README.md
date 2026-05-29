@@ -16,9 +16,7 @@
 
 We currently expose a single `Ready` condition for Sandboxes. Because Sandbox acts as an "aggregation" object, a common convention is that `Ready` should be `True` when all child objects (Pod, Service, PVC) are applied to the cluster and are themselves `Ready`. However, relying purely on the `Ready` condition makes it harder to observe certain lifecycle transitions—specifically, when a Sandbox is in the process of suspending or resuming. While a controller or user can observe that a Sandbox should be suspended from `spec.operatingMode` and verify `status.observedGeneration` to know the controller has acted on the spec, they lack a clear signal indicating whether the suspension process is actively happening or if it has fully completed without deeply inspecting the child objects.
 
-Adding the `Suspended` condition explicitly solves this visibility gap for both suspend and resume cycles. Following standard Kubernetes API conventions, this condition is persistent once initialized. Instead of being deleted when a sandbox is active, it transitions between `True` and `False`. This preserves the `lastTransitionTime` timestamp, providing an immutable audit trail of exactly when a sandbox successfully resumed, while enabling robust automation patterns.
-
-Additionally, it lays the API groundwork for future enhancements like "soft pause". In a future soft pause scenario, a Sandbox's execution might be paused (e.g., freezing processes via the container runtime) without terminating the underlying Pod. An explicit `Suspended` condition provides a stable, consistent API abstraction to represent this halted state to users and automation, regardless of the underlying technical implementation.
+Adding the `Suspended` condition explicitly solves this visibility gap for both suspend and resume cycles. This KEP proposes keeping the condition present and toggling it between `True` and `False`, so clients can reliably observe the most recent `lastTransitionTime` for suspend/resume. Additionally, it lays the API groundwork for future enhancements like "soft pause". In a future soft pause scenario, a Sandbox's execution might be paused (e.g., freezing processes via the container runtime) without terminating the underlying Pod. An explicit `Suspended` condition provides a stable, consistent API abstraction to represent this halted state to users and automation, regardless of the underlying technical implementation.
 
 Furthermore, there is a growing need to represent a more diverse and granular status in the Agent Sandbox UI. A richer set of conditions allows the UI to provide clear, user-friendly feedback about the exact stage of a Sandbox's lifecycle, rather than just a simple binary Ready or Not Ready state.
 
@@ -27,9 +25,9 @@ Furthermore, there is a growing need to represent a more diverse and granular st
 The Sandbox state is determined by multiple distinct layers. 
 
 #### 1. `Suspended`
-This condition explicitly tracks whether the sandbox environment is currently paused or hibernated. Per Kubernetes API conventions, this condition is always present from the moment the Sandbox is created; it strictly toggles its status.
+This condition explicitly tracks whether the sandbox environment is currently paused or hibernated. 
 * **Status: True** – The Sandbox is no longer actively executing workloads due to a suspension request. The `Reason` field specifies how it is suspended (`PodTerminated`).
-* **Status: False** – The Sandbox is active, running, or actively in a transient lifecycle phase (`PodTerminating`, `PodResuming`, `PodRunning`). When transitioning from `True` to `False`, the `lastTransitionTime` timestamp is preserved, marking the exact moment the sandbox resumed operational life.
+* **Status: False** – The Sandbox is active, running, or in a transient lifecycle phase (`PodTerminating`, `PodResuming`, `PodRunning`). `lastTransitionTime` is updated only when the status flips between `True` and `False`, and is retained while the status remains `False` even if the reason/message changes.
 * **Ready Impact:** The moment a suspension is requested (e.g., `spec.operatingMode: Suspended`), the `Ready` condition immediately transitions to `False` with the reason `SandboxSuspended`. It holds this reason through the entire suspending phase and remains that way once fully suspended.
 
 #### 2. `Ready` (Root Condition)
@@ -62,7 +60,7 @@ func (r *SandboxReconciler) computeSuspendedCondition(
     desiresSuspension := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
     existingSuspendedCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 
-    // Initialize the condition container (Always present per K8s API Conventions)
+    // Initialize the condition container (keep the condition present once initialized)
     suspended := &metav1.Condition{
         Type:               string(sandboxv1beta1.SandboxConditionSuspended),
         ObservedGeneration: sandbox.Generation,
@@ -77,7 +75,7 @@ func (r *SandboxReconciler) computeSuspendedCondition(
         } else {
             // Transient State: In the process of scaling down
             suspended.Status = metav1.ConditionFalse
-            suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
+            suspended.Reason = "PodTerminating"
             suspended.Message = "Sandbox suspension requested. Active workloads are being de-provisioned."
         }
     } else {
@@ -86,16 +84,16 @@ func (r *SandboxReconciler) computeSuspendedCondition(
             // Differentiate between a brand-new Sandbox and one waking up from suspension
             suspended.Status = metav1.ConditionFalse
             if existingSuspendedCond != nil && existingSuspendedCond.Status == metav1.ConditionTrue {
-                suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodResuming
+                suspended.Reason = "PodResuming"
                 suspended.Message = "Sandbox resumption requested. Recreation of underlying workload is in progress."
             } else {
-                suspended.Reason = sandboxv1beta1.SandboxReasonProvisioning
+                suspended.Reason = "Provisioning"
                 suspended.Message = "Sandbox is provisioning."
             }
         } else {
             // Stable State: The pod exists and is active.
             suspended.Status = metav1.ConditionFalse
-            suspended.Reason = sandboxv1beta1.SandboxReasonPodRunning
+            suspended.Reason = "PodRunning"
             suspended.Message = "Sandbox is active and the underlying Pod is running."
         }
     }

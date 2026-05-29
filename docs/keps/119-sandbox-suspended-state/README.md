@@ -143,3 +143,4 @@ We considered using only the `Ready` condition and overloading the `Reason` fiel
 
 * **Cons:**
     * **Lack of Granularity for Future Suspend States:** A single `Ready: False` status cannot granularly distinguish between different types of suspension. Future features like "freeze" (pausing container processes), "hibernate" (snapshotting memory to disk), or traditional "scale-to-zero" would all appear identically as "not ready". Extracting `Suspended` into its own explicitly tracked condition gives us the design space to represent these nuanced operational states in the future.
+    * **Ambiguity in Suspension:** If only a `Ready` condition exists, setting it to `False` during suspension provides no programmatic signal that the network identity (Service) are still safely intact.

@@ -247,6 +247,7 @@ func main() {
 
 	if extensions {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+		asmetrics.RegisterSandboxClaimCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandboxclaim-collector"))
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
 			Client:           mgr.GetClient(),
 			Scheme:           mgr.GetScheme(),

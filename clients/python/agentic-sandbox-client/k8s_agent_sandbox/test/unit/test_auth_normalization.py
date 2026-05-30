@@ -15,18 +15,21 @@
 import unittest
 from unittest.mock import MagicMock
 
-from kubernetes import client as k8s_client
-
 from k8s_agent_sandbox.utils import normalize_kubernetes_auth_config
+
+
+class _ConfigStub:
+    """Minimal stub matching the _Configuration Protocol surface."""
+    def __init__(self, api_key=None, api_key_prefix=None):
+        self.api_key = api_key
+        self.api_key_prefix = api_key_prefix
 
 
 def _make_client(api_key, api_key_prefix=None):
     mock_client = MagicMock()
-    mock_config = MagicMock(spec=k8s_client.Configuration())
-    mock_config.api_key = api_key
-    mock_config.api_key_prefix = api_key_prefix
-    mock_client.Configuration.get_default_copy.return_value = mock_config
-    return mock_client, mock_config
+    stub_config = _ConfigStub(api_key=api_key, api_key_prefix=api_key_prefix)
+    mock_client.Configuration.get_default_copy.return_value = stub_config
+    return mock_client, stub_config
 
 
 class TestNormalizeKubernetesAuthConfig(unittest.TestCase):

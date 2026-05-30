@@ -13,10 +13,21 @@
 # limitations under the License.
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Protocol
 
 
-def normalize_kubernetes_auth_config(client_module: Any = None) -> Any:
+class _Configuration(Protocol):
+    api_key: dict | None
+    api_key_prefix: dict | None
+
+
+class _ClientModule(Protocol):
+    class Configuration:
+        @classmethod
+        def get_default_copy(cls) -> '_Configuration': ...
+
+
+def normalize_kubernetes_auth_config(client_module: _ClientModule | None = None) -> _Configuration:
     """Ensure both 'authorization' and 'BearerToken' api_key entries are populated.
 
     Some versions of the kubernetes and kubernetes_asyncio clients expect
@@ -66,6 +77,11 @@ def normalize_kubernetes_auth_config(client_module: Any = None) -> Any:
             config.api_key['authorization'] = config.api_key['BearerToken']
         elif has_auth:
             config.api_key['BearerToken'] = config.api_key['authorization']
+
+    # Ensure api_key_prefix is a dict so prefix mirroring can populate it when
+    # api_key is present but api_key_prefix was never initialized.
+    if config.api_key is not None and config.api_key_prefix is None:
+        config.api_key_prefix = {}
 
     # Mirror prefix independently — even when both tokens were already present,
     # a missing prefix entry would cause the Authorization header to be malformed

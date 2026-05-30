@@ -245,6 +245,17 @@ class TestK8sHelperClose(_K8sHelperPatchedBase):
         self.assertIsNone(helper.custom_objects_api)
         self.assertIsNone(helper.core_v1_api)
 
+    def test_context_manager_closes_on_exit(self):
+        """Test that K8sHelper can be used as a context manager and closes on exit."""
+        mock_api_client_instance = MagicMock()
+        self.mock_api_client_cls.return_value = mock_api_client_instance
+
+        with K8sHelper() as helper:
+            self.assertIsNotNone(helper._api_client)
+
+        mock_api_client_instance.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -61,16 +61,19 @@ def normalize_kubernetes_auth_config(client_module=None):
             )
         elif bearer_token and not authorization:
             config.api_key['authorization'] = bearer_token
-            if config.api_key_prefix and 'authorization' not in config.api_key_prefix:
-                bearer_prefix = config.api_key_prefix.get('BearerToken')
-                if bearer_prefix:
-                    config.api_key_prefix['authorization'] = bearer_prefix
         elif authorization and not bearer_token:
             config.api_key['BearerToken'] = authorization
-            if config.api_key_prefix and 'BearerToken' not in config.api_key_prefix:
-                auth_prefix = config.api_key_prefix.get('authorization')
-                if auth_prefix:
-                    config.api_key_prefix['BearerToken'] = auth_prefix
+
+    # Mirror prefix independently — even when both tokens were already present,
+    # a missing prefix entry would cause the Authorization header to be malformed
+    # for whichever client version reads the key that lacks a prefix.
+    if config.api_key_prefix:
+        bearer_prefix = config.api_key_prefix.get('BearerToken')
+        auth_prefix = config.api_key_prefix.get('authorization')
+        if bearer_prefix and not auth_prefix:
+            config.api_key_prefix['authorization'] = bearer_prefix
+        elif auth_prefix and not bearer_prefix:
+            config.api_key_prefix['BearerToken'] = auth_prefix
 
     return config
 

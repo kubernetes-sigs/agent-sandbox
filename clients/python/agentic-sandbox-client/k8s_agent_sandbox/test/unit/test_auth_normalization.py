@@ -131,6 +131,17 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
         self.assertEqual(mock_config.api_key_prefix['authorization'], 'Bearer')
 
+    def test_normalize_mirrors_prefix_when_both_tokens_set_but_one_prefix_missing(self):
+        """Test prefix is mirrored even when both tokens are already set with the same value."""
+        mock_client, mock_config = _make_client(
+            api_key={'BearerToken': 'token', 'authorization': 'token'},
+            api_key_prefix={'BearerToken': 'Bearer'},
+        )
+
+        normalize_kubernetes_auth_config(client_module=mock_client)
+
+        self.assertEqual(mock_config.api_key_prefix['authorization'], 'Bearer')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 from datetime import datetime, timedelta, timezone
-
-logger = logging.getLogger(__name__)
 
 
 def normalize_kubernetes_auth_config(client_module=None):
@@ -26,9 +23,9 @@ def normalize_kubernetes_auth_config(client_module=None):
     token from whichever key is present to the one that is missing, so both
     clients work regardless of which key was set by the config loader.
 
-    If both keys are already set with different values, no changes are made
-    to avoid silently switching credentials — a warning is logged instead so
-    the mismatch is visible. api_key_prefix is mirrored using the same logic.
+    Raises ValueError if both keys are set to different values, as proceeding
+    with mismatched credentials will cause auth failures. api_key_prefix is
+    mirrored using the same logic.
 
     Returns the (possibly modified) Configuration instance. Callers should
     pass it into ApiClient(configuration=...) rather than relying on the
@@ -47,9 +44,10 @@ def normalize_kubernetes_auth_config(client_module=None):
         authorization = config.api_key.get('authorization')
 
         if bearer_token and authorization and bearer_token != authorization:
-            logger.warning(
+            raise ValueError(
                 "Both 'BearerToken' and 'authorization' api_key entries are set with "
-                "different values. No normalization applied; verify your kubeconfig."
+                "different values. Verify your kubeconfig — authentication will fail "
+                "for whichever key the installed client version does not read."
             )
         elif bearer_token and not authorization:
             config.api_key['authorization'] = bearer_token

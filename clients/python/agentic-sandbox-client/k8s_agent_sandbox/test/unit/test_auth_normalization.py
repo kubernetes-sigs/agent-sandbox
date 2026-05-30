@@ -12,16 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import unittest
 from unittest.mock import MagicMock
+
+from kubernetes import client as k8s_client
 
 from k8s_agent_sandbox.utils import normalize_kubernetes_auth_config
 
 
 def _make_client(api_key, api_key_prefix=None):
     mock_client = MagicMock()
-    mock_config = MagicMock()
+    mock_config = MagicMock(spec=k8s_client.Configuration)
     mock_config.api_key = api_key
     mock_config.api_key_prefix = api_key_prefix
     mock_client.Configuration.get_default_copy.return_value = mock_config
@@ -31,7 +32,7 @@ def _make_client(api_key, api_key_prefix=None):
 class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
     def test_normalize_with_only_authorization_key(self):
-        """Test normalization when only 'authorization' key exists (k8s <36)."""
+        """Test normalization when only 'authorization' key exists (kubernetes package <36)."""
         mock_client, mock_config = _make_client({'authorization': 'token-123'})
 
         result = normalize_kubernetes_auth_config(client_module=mock_client)
@@ -41,7 +42,7 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         self.assertEqual(mock_config.api_key['BearerToken'], 'token-123')
 
     def test_normalize_with_only_bearer_token_key(self):
-        """Test normalization when only 'BearerToken' key exists (k8s 36+)."""
+        """Test normalization when only 'BearerToken' key exists (kubernetes package >=36)."""
         mock_client, mock_config = _make_client({'BearerToken': 'token-456'})
 
         result = normalize_kubernetes_auth_config(client_module=mock_client)
@@ -51,16 +52,11 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         self.assertEqual(mock_config.api_key['authorization'], 'token-456')
 
     def test_normalize_with_both_keys_different_values(self):
-        """Test normalization logs a warning and leaves both keys intact when they differ."""
+        """Test normalization raises ValueError when both keys exist with different values."""
         mock_client, mock_config = _make_client({'BearerToken': 'new-token', 'authorization': 'old-token'})
 
-        with self.assertLogs('k8s_agent_sandbox.utils', level=logging.WARNING) as log:
-            result = normalize_kubernetes_auth_config(client_module=mock_client)
-
-        self.assertTrue(any('different values' in msg for msg in log.output))
-        self.assertIs(result, mock_config)
-        self.assertEqual(mock_config.api_key['BearerToken'], 'new-token')
-        self.assertEqual(mock_config.api_key['authorization'], 'old-token')
+        with self.assertRaises(ValueError, msg='different values'):
+            normalize_kubernetes_auth_config(client_module=mock_client)
 
     def test_normalize_with_both_keys_same_value(self):
         """Test normalization returns config unchanged when both keys already exist with same value."""

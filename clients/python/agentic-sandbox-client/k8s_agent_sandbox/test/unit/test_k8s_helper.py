@@ -196,6 +196,7 @@ class TestK8sHelperNormalization(unittest.TestCase):
         helper = K8sHelper()
 
         mock_normalize.assert_called_once()
+        self.assertIn('client_module', mock_normalize.call_args.kwargs)
         mock_api_client_cls.assert_called_once_with(configuration=mock_normalize.return_value)
 
 

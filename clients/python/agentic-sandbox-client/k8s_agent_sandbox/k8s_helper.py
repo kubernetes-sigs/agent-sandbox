@@ -39,7 +39,7 @@ class K8sHelper:
         except config.ConfigException:
             config.load_kube_config()
 
-        cfg = normalize_kubernetes_auth_config()
+        cfg = normalize_kubernetes_auth_config(client_module=client)
         api_client = client.ApiClient(configuration=cfg)
         self.custom_objects_api = client.CustomObjectsApi(api_client)
         self.core_v1_api = client.CoreV1Api(api_client)

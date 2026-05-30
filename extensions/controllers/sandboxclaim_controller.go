@@ -64,9 +64,6 @@ var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
 // ErrInvalidMetadata is a sentinel error indicating additionalPodMetadata was invalid.
 var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
 
-// ErrConfigReadFailure indicates a controller config read failure.
-var ErrConfigReadFailure = errors.New("controller config read failure")
-
 // ErrSandboxNotOwned indicates the Sandbox exists but is not controlled by this claim.
 var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 
@@ -327,9 +324,6 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 	// Upfront validation of additional metadata to skip unnecessary processing
 	if err := r.validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
-		if errors.Is(err, ErrConfigReadFailure) {
-			return nil, err
-		}
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
@@ -849,7 +843,7 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(claimMeta *v1beta
 		if len(parts) > 1 {
 			domain = strings.ToLower(parts[0])
 		} else if isLabel {
-			return fmt.Errorf("label %q must have a domain prefix to prevent opting into unintended policy domains", key)
+			return fmt.Errorf("label %q must have a domain prefix (e.g. 'sandbox.users.io/my-label') to prevent opting into unintended policy domains", key)
 		}
 
 		if isLabel {
@@ -1147,7 +1141,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 				logger.Info("Sandbox found by label still in warm pool, checking if it matches template", "sandbox", sbName, "claim", claim.Name)
 
 				if err := verifySandboxCandidate(sandbox, claim); err != nil {
-					logger.Info("Sandbox recorded in label cannot be adopted, falling through", "sandbox", sbName, "claim", claim.Name, "reason", err.Error())
+					logger.Info("Sandbox recorded in label cannot be adopted, removing stale label", "sandbox", sbName, "claim", claim.Name, "reason", err.Error())
+					patch := client.MergeFrom(claim.DeepCopy())
+					delete(claim.Labels, extensionsv1beta1.AssignedSandboxNameLabel)
+					if err := r.Patch(ctx, claim, patch); err != nil {
+						return nil, fmt.Errorf("failed to remove invalid sandbox label: %w", err)
+					}
 				} else {
 					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
 						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {

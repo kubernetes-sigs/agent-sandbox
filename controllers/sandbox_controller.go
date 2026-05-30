@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -50,16 +49,6 @@ const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
-
-	// warmPoolSandboxLabel and sandboxTemplateRefHashLabel are tracking labels under
-	// the system prefix that trusted extension controllers (e.g. the warm pool
-	// controller) set on a Sandbox and expect to be propagated to the backing Pod.
-	// They are mirrored here (rather than imported from the extensions package) to
-	// avoid an import cycle.
-	warmPoolSandboxLabel        = "agents.x-k8s.io/warm-pool-sandbox"
-	sandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
-
-	extensionsAgentsGroup = "extensions.agents.x-k8s.io"
 )
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
@@ -478,31 +467,6 @@ func isSystemAnnotation(key string) bool {
 		key == asmetrics.TraceContextAnnotation
 }
 
-// warmPoolTrackingLabelSet is the allowlist of system-prefixed labels that trusted
-// extension controllers (warm pool / claim) set on a Sandbox and that must be
-// propagated to the backing Pod. A map avoids accidental mutation via append on a
-// shared slice and keeps membership checks O(1).
-var warmPoolTrackingLabelSet = map[string]struct{}{
-	warmPoolSandboxLabel:                       {},
-	sandboxTemplateRefHashLabel:                {},
-	sandboxv1beta1.SandboxPodTemplateHashLabel: {},
-}
-
-// extensionControllerOwnerKinds are the extension owner kinds that may authorize
-// warm-pool tracking label propagation.
-var extensionControllerOwnerKinds = map[string]struct{}{
-	"SandboxWarmPool": {},
-	"SandboxClaim":    {},
-}
-
-// isAllowedSystemLabel reports whether a system-prefixed label is a tracking label
-// that trusted controllers are permitted to set on a Sandbox and have propagated to
-// the backing Pod.
-func isAllowedSystemLabel(key string) bool {
-	_, ok := warmPoolTrackingLabelSet[key]
-	return ok
-}
-
 // isControllerManagedPodAnnotation reports whether a system-reserved annotation is one
 // the controller itself sets on a Pod, and therefore must not be scrubbed during
 // cleanup of previously-propagated annotations.
@@ -515,32 +479,6 @@ func isControllerManagedPodAnnotation(key string) bool {
 	default:
 		return false
 	}
-}
-
-// sandboxManagedByExtensionController reports whether the Sandbox is owned by a trusted
-// extension controller (warm pool or claim). Only controller-managed Sandboxes may
-// propagate the warm-pool tracking labels to their Pods; this prevents a tenant from
-// spoofing those labels via a directly-created Sandbox.
-//
-// We require a controller owner reference (controller=true) under the extensions API
-// group. This assumes the OwnerReferencesPermissionEnforcement admission plugin is
-// active, so a tenant cannot attach a controller ownerRef pointing at an object they
-// are not permitted to delete. Verifying that the referenced owner actually exists and
-// matches ref.UID would harden this further and is left as a follow-up.
-func sandboxManagedByExtensionController(sandbox *sandboxv1beta1.Sandbox) bool {
-	for _, ref := range sandbox.OwnerReferences {
-		if ref.Controller == nil || !*ref.Controller {
-			continue
-		}
-		gv, err := schema.ParseGroupVersion(ref.APIVersion)
-		if err != nil || gv.Group != extensionsAgentsGroup {
-			continue
-		}
-		if _, ok := extensionControllerOwnerKinds[ref.Kind]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
@@ -900,15 +838,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	// Assign system-owned labels after merging user input so they cannot be overridden.
 	podLabels[sandboxLabel] = nameHash
-	// Propagate trusted warm-pool tracking labels from the Sandbox CR, but only for
-	// controller-managed Sandboxes so tenants cannot spoof them on a self-created Sandbox.
-	if sandboxManagedByExtensionController(sandbox) {
-		for key := range warmPoolTrackingLabelSet {
-			if v, ok := sandbox.Labels[key]; ok {
-				podLabels[key] = v
-			}
-		}
-	}
 
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
@@ -1011,28 +940,9 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		}
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
-	// Keep the warm-pool tracking labels in sync: propagate them from the Sandbox CR for
-	// controller-managed Sandboxes, and remove them otherwise (or when the Sandbox no
-	// longer carries a given label) so stale or spoofed tracking labels cannot persist
-	// across ownership/label transitions.
-	extensionManaged := sandboxManagedByExtensionController(sandbox)
-	for key := range warmPoolTrackingLabelSet {
-		if v, ok := sandbox.Labels[key]; extensionManaged && ok {
-			if pod.Labels[key] != v {
-				pod.Labels[key] = v
-				updated = true
-			}
-			continue
-		}
-		if _, exists := pod.Labels[key]; exists {
-			delete(pod.Labels, key)
-			updated = true
-		}
-	}
 	// Handle deletion of labels removed from the template. System keys recorded in the
 	// propagated list by an older (vulnerable) controller are also scrubbed, except the
-	// controller-owned name-hash label and, on extension-managed Sandboxes, the allowed
-	// tracking labels.
+	// controller-owned name-hash label.
 	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
@@ -1041,7 +951,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 				continue
 			}
 			if isSystemLabel(k) {
-				if k == sandboxLabel || (extensionManaged && isAllowedSystemLabel(k)) {
+				if k == sandboxLabel {
 					continue
 				}
 				if _, exists := pod.Labels[k]; exists {

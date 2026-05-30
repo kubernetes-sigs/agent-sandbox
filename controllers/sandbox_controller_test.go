@@ -1298,57 +1298,15 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
-			name: "propagates warm-pool tracking labels for an extension-managed Sandbox",
+			name: "does not propagate system labels from Sandbox metadata to Pod",
 			sandbox: &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
-					Labels:    map[string]string{"agents.x-k8s.io/warm-pool-sandbox": "pool-hash"},
-					OwnerReferences: []metav1.OwnerReference{{
-						APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-						Kind:       "SandboxWarmPool",
-						Name:       "wp",
-						UID:        "wp-uid",
-						Controller: new(true),
-					}},
-				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
-				},
-			},
-			wantPod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            sandboxName,
-					Namespace:       sandboxNs,
-					ResourceVersion: "1",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 						"agents.x-k8s.io/warm-pool-sandbox": "pool-hash",
-						"custom-label":                      "label-val",
 					},
-					Annotations: map[string]string{
-						"agents.x-k8s.io/propagated-labels": "custom-label",
-					},
-					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
-				},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
-		},
-		{
-			name: "does not propagate warm-pool tracking labels for a tenant-owned Sandbox",
-			sandbox: &sandboxv1beta1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxName,
-					Namespace: sandboxNs,
-					UID:       sandboxUID,
-					// Tenant sets the tracking label directly but is not extension-managed.
-					Labels: map[string]string{"agents.x-k8s.io/warm-pool-sandbox": "pool-hash"},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
 					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
@@ -1369,48 +1327,6 @@ func TestReconcilePod(t *testing.T) {
 					},
 					Annotations: map[string]string{
 						"agents.x-k8s.io/propagated-labels": "custom-label",
-					},
-					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
-				},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
-		},
-		{
-			name: "removes stale warm-pool tracking label when Sandbox is not extension-managed",
-			initialObjs: []runtime.Object{
-				&corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:            sandboxName,
-						Namespace:       sandboxNs,
-						ResourceVersion: "1",
-						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
-							"agents.x-k8s.io/warm-pool-sandbox": "pool-hash",
-							"custom-label":                      "label-val",
-						},
-						Annotations: map[string]string{
-							"agents.x-k8s.io/propagated-labels": "custom-label",
-						},
-						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
-					},
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-				},
-			},
-			sandbox: sandboxObj,
-			wantPod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            sandboxName,
-					Namespace:       sandboxNs,
-					ResourceVersion: "2",
-					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
-						"custom-label":                      "label-val",
-					},
-					Annotations: map[string]string{
-						"custom-annotation":                      "anno-val",
-						"agents.x-k8s.io/propagated-labels":      "custom-label",
-						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},

@@ -626,13 +626,13 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: &extensionsv1beta1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{Name: "claim-no-domain-label", Namespace: "default", UID: "uid-no-domain-label"},
 				Spec: extensionsv1beta1.SandboxClaimSpec{
-					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
 					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
 						Labels: map[string]string{"label-without-domain": "value"},
 					},
 				},
 			},
-			existingObjects: []client.Object{template},
+			existingObjects: []client.Object{template, warmPool},
 			expectSandbox:   false,
 			expectError:     false,
 			expectedCondition: metav1.Condition{
@@ -680,7 +680,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: &extensionsv1beta1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{Name: "claim-invalid-key", Namespace: "default", UID: "uid-invalid-key"},
 				Spec: extensionsv1beta1.SandboxClaimSpec{
-					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
 					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
 						Labels: map[string]string{"sandbox.users.io/invalid@key": "value"},
 					},
@@ -737,13 +737,13 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: &extensionsv1beta1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{Name: "claim-custom-domain", Namespace: "default", UID: "uid-custom-domain"},
 				Spec: extensionsv1beta1.SandboxClaimSpec{
-					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
 					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
 						Labels: map[string]string{"custom.company.com/my-label": "my-value"},
 					},
 				},
 			},
-			existingObjects: []client.Object{template},
+			existingObjects: []client.Object{template, warmPool},
 			allowedDomains:  []string{"sandbox.users.io", "custom.company.com"},
 			expectSandbox:   true,
 			expectedCondition: metav1.Condition{
@@ -3297,7 +3297,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	}
 }
 
-func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
+func TestSandboxClaimPreventsAdoptionFromWrongWarmPool(t *testing.T) {
 	scheme := newScheme(t)
 
 	claim := &extensionsv1beta1.SandboxClaim{
@@ -3306,11 +3306,11 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 			Namespace: "default",
 			UID:       "claim-uid-123",
 			Labels: map[string]string{
-				"agents.x-k8s.io/sandbox-name": "wrong-template-sb",
+				"agents.x-k8s.io/sandbox-name": "wrong-pool-sb",
 			},
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "correct-template"},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "correct-pool"},
 		},
 	}
 
@@ -3325,20 +3325,25 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 		},
 	}
 
-	wrongTemplateSandbox := &sandboxv1beta1.Sandbox{
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "correct-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "correct-template"}},
+	}
+
+	wrongPoolSandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "wrong-template-sb",
+			Name:      "wrong-pool-sb",
 			Namespace: "default",
 			UID:       "wrong-sb-uid",
 			Labels: map[string]string{
-				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
-				sandboxTemplateRefHash: sandboxcontrollers.NameHash("wrong-template"),
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("wrong-pool"),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("correct-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
 				Kind:       "SandboxWarmPool",
-				Name:       "test-pool",
-				UID:        "warmpool-uid-123",
+				Name:       "wrong-pool",
+				UID:        "wrong-pool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
@@ -3354,7 +3359,7 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(template, claim, wrongTemplateSandbox).
+		WithObjects(template, warmPool, claim, wrongPoolSandbox).
 		WithStatusSubresource(claim).
 		Build()
 
@@ -3376,11 +3381,11 @@ func TestSandboxClaimPreventsAdoptionFromWrongTemplate(t *testing.T) {
 	}
 
 	var sb sandboxv1beta1.Sandbox
-	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "wrong-template-sb", Namespace: "default"}, &sb); err != nil {
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "wrong-pool-sb", Namespace: "default"}, &sb); err != nil {
 		t.Fatalf("failed to get sandbox: %v", err)
 	}
 	if _, ok := sb.Labels[warmPoolSandboxLabel]; !ok {
-		t.Error("expected wrong template sandbox to still have warm pool label, meaning it was not incorrectly adopted")
+		t.Error("expected wrong pool sandbox to still have warm pool label, meaning it was not incorrectly adopted")
 	}
 
 	var newSb sandboxv1beta1.Sandbox
@@ -3555,7 +3560,7 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 			},
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
 		},
 	}
 
@@ -3568,6 +3573,11 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 				},
 			},
 		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
 	}
 
 	adoptedSandbox := &sandboxv1beta1.Sandbox{
@@ -3599,7 +3609,7 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(template, claim, adoptedSandbox).
+		WithObjects(template, warmPool, claim, adoptedSandbox).
 		WithStatusSubresource(claim).
 		Build()
 

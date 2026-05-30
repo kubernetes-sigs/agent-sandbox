@@ -17,31 +17,30 @@ from datetime import datetime, timedelta, timezone
 from kubernetes import client
 
 
-def normalize_kubernetes_auth_config():
+def normalize_kubernetes_auth_config(client_module=None):
     """Normalize api_key to support both kubernetes <36.0.0 and >=36.0.0.
 
     Pre-36: Uses 'authorization' key
     36+: Uses 'BearerToken' key
 
     This ensures both keys exist with the same value, prioritizing 'BearerToken' if both present.
+    Pass client_module to use a different client (e.g. kubernetes_asyncio.client for async usage).
     """
+    _client = client_module if client_module is not None else client
 
-    config = client.Configuration.get_default_copy()
+    config = _client.Configuration.get_default_copy()
     if config.api_key:
         bearer_token = config.api_key.get('BearerToken')
         authorization = config.api_key.get('authorization')
 
         if bearer_token and authorization:
-            # Both exist - prioritize BearerToken
             config.api_key['authorization'] = bearer_token
         elif bearer_token:
-            # Only BearerToken exists (k8s 36+) - copy to authorization
             config.api_key['authorization'] = bearer_token
         elif authorization:
-            # Only authorization exists (k8s <36) - copy to BearerToken
             config.api_key['BearerToken'] = authorization
 
-    client.Configuration.set_default(config)
+    _client.Configuration.set_default(config)
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:

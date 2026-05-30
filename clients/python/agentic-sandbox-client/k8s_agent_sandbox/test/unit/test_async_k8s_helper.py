@@ -229,8 +229,8 @@ class TestAsyncK8sHelperNormalization(unittest.IsolatedAsyncioTestCase):
         helper = AsyncK8sHelper()
         await helper._ensure_initialized()
 
-        # Verify normalization was called
-        mock_normalize.assert_called_once()
+        # Verify normalization was called with the async client module
+        mock_normalize.assert_called_once_with(client_module=mock_client)
 
 if __name__ == "__main__":
     unittest.main()

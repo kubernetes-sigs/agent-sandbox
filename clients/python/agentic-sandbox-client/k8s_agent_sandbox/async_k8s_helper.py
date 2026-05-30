@@ -55,7 +55,7 @@ class AsyncK8sHelper:
                 await config.load_kube_config()
 
             # Normalize auth keys for kubernetes client version compatibility
-            normalize_kubernetes_auth_config()
+            normalize_kubernetes_auth_config(client_module=client)
 
             self._api_client = client.ApiClient()
             self.custom_objects_api = client.CustomObjectsApi(self._api_client)

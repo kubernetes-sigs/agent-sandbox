@@ -18,10 +18,11 @@ from unittest.mock import MagicMock
 from k8s_agent_sandbox.utils import normalize_kubernetes_auth_config
 
 
-def _make_client(api_key):
+def _make_client(api_key, api_key_prefix=None):
     mock_client = MagicMock()
     mock_config = MagicMock()
     mock_config.api_key = api_key
+    mock_config.api_key_prefix = api_key_prefix
     mock_client.Configuration.get_default_copy.return_value = mock_config
     return mock_client, mock_config
 
@@ -86,6 +87,42 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
         self.assertEqual(mock_config.api_key, {})
         mock_client.Configuration.set_default.assert_called_once_with(mock_config)
+
+    def test_normalize_copies_prefix_with_authorization_key(self):
+        """Test that api_key_prefix is mirrored when copying authorization to BearerToken."""
+        mock_client, mock_config = _make_client(
+            api_key={'authorization': 'token-123'},
+            api_key_prefix={'authorization': 'Bearer'},
+        )
+
+        normalize_kubernetes_auth_config(client_module=mock_client)
+
+        self.assertEqual(mock_config.api_key['BearerToken'], 'token-123')
+        self.assertEqual(mock_config.api_key_prefix['BearerToken'], 'Bearer')
+
+    def test_normalize_copies_prefix_with_bearer_token_key(self):
+        """Test that api_key_prefix is mirrored when copying BearerToken to authorization."""
+        mock_client, mock_config = _make_client(
+            api_key={'BearerToken': 'token-456'},
+            api_key_prefix={'BearerToken': 'Bearer'},
+        )
+
+        normalize_kubernetes_auth_config(client_module=mock_client)
+
+        self.assertEqual(mock_config.api_key['authorization'], 'token-456')
+        self.assertEqual(mock_config.api_key_prefix['authorization'], 'Bearer')
+
+    def test_normalize_does_not_overwrite_existing_prefix(self):
+        """Test that an existing api_key_prefix entry is not overwritten."""
+        mock_client, mock_config = _make_client(
+            api_key={'BearerToken': 'token-456'},
+            api_key_prefix={'BearerToken': 'Bearer', 'authorization': 'Token'},
+        )
+
+        normalize_kubernetes_auth_config(client_module=mock_client)
+
+        # authorization prefix already set - must not be overwritten
+        self.assertEqual(mock_config.api_key_prefix['authorization'], 'Token')
 
 
 if __name__ == '__main__':

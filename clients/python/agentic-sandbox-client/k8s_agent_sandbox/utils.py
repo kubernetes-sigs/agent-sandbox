@@ -35,8 +35,16 @@ def normalize_kubernetes_auth_config(client_module=None):
 
         if bearer_token and not authorization:
             config.api_key['authorization'] = bearer_token
+            if config.api_key_prefix and 'authorization' not in config.api_key_prefix:
+                bearer_prefix = config.api_key_prefix.get('BearerToken')
+                if bearer_prefix:
+                    config.api_key_prefix['authorization'] = bearer_prefix
         elif authorization and not bearer_token:
             config.api_key['BearerToken'] = authorization
+            if config.api_key_prefix and 'BearerToken' not in config.api_key_prefix:
+                auth_prefix = config.api_key_prefix.get('authorization')
+                if auth_prefix:
+                    config.api_key_prefix['BearerToken'] = auth_prefix
 
     client_module.Configuration.set_default(config)
 

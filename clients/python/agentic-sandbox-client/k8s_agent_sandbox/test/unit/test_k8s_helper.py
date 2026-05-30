@@ -190,9 +190,10 @@ class TestK8sHelperNormalization(unittest.TestCase):
 
     def test_k8s_helper_init_calls_normalization(self, mock_config, mock_api_cls, mock_core_cls, mock_normalize):
         """Test that K8sHelper.__init__ calls normalize_kubernetes_auth_config."""
+        mock_config.ConfigException = Exception
+
         helper = K8sHelper()
 
-        # Verify normalization was called
         mock_normalize.assert_called_once()
 
 

@@ -67,7 +67,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         real_helper.wait_for_sandbox_ready = MagicMock()
 
         before = datetime.now(timezone.utc)
-        sandbox_client.create_sandbox("my-template", "default", shutdown_after_seconds=300)
+        sandbox_client.create_sandbox("my-warmpool", "default", shutdown_after_seconds=300)
         after = datetime.now(timezone.utc)
 
         mock_api.create_namespaced_custom_object.assert_called_once()
@@ -85,7 +85,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertLessEqual(shutdown_time, expected_latest + timedelta(seconds=301))
 
         self.assertEqual(body["kind"], "SandboxClaim")
-        self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "my-template")
+        self.assertEqual(body["spec"]["warmPoolRef"]["name"], "my-warmpool")
 
     def test_create_sandbox_without_shutdown_omits_lifecycle_in_manifest(
         self, MockClientK8sHelper, mock_config, mock_api_cls, mock_core_cls
@@ -112,11 +112,11 @@ class TestLifecycleIntegration(unittest.TestCase):
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
         real_helper.wait_for_sandbox_ready = MagicMock()
 
-        sandbox_client.create_sandbox("my-template", "default")
+        sandbox_client.create_sandbox("my-warmpool", "default")
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertNotIn("lifecycle", body["spec"])
-        self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "my-template")
+        self.assertEqual(body["spec"]["warmPoolRef"]["name"], "my-warmpool")
 
     def test_invalid_shutdown_never_reaches_k8s_api(
         self, MockClientK8sHelper, mock_config, mock_api_cls, mock_core_cls
@@ -140,7 +140,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.sandbox_class = MagicMock()
 
         with self.assertRaises(ValueError):
-            sandbox_client.create_sandbox("my-template", shutdown_after_seconds=-1)
+            sandbox_client.create_sandbox("my-warmpool", shutdown_after_seconds=-1)
 
         mock_api.create_namespaced_custom_object.assert_not_called()
 

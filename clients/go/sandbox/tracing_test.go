@@ -91,7 +91,7 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		TracerProvider:      tp,
 		TraceServiceName:    "test-svc",
@@ -320,7 +320,7 @@ func TestTracingNoopWithoutProvider(t *testing.T) {
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
@@ -378,7 +378,7 @@ func TestTracingErrorRecording(t *testing.T) {
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		TracerProvider:      tp,
 		TraceServiceName:    "test-svc",

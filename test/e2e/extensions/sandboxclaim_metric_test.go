@@ -59,6 +59,17 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "obs-anno-warmpool",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "obs-anno-template"},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	startTime := time.Now()
 
 	// Create a SandboxClaim
@@ -68,7 +79,7 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "obs-anno-template"},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "obs-anno-warmpool"},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))

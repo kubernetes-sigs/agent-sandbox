@@ -26,7 +26,7 @@ import (
 
 func main() {
 	client, err := sandbox.New(context.Background(), sandbox.Options{
-		TemplateName:     "my-sandbox-template",
+		WarmPoolName:     "my-sandbox-template",
 		Namespace:        "default",
 		GatewayName:      "external-http-gateway",
 		GatewayNamespace: "default",

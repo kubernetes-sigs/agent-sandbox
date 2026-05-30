@@ -70,6 +70,13 @@ type NetworkPolicySpec struct {
 	Egress []networkingv1.NetworkPolicyEgressRule `json:"egress,omitempty"`
 }
 
+// SandboxTemplateRef references a SandboxTemplate.
+type SandboxTemplateRef struct {
+	// name of the SandboxTemplate
+	// +required
+	Name string `json:"name,omitempty"`
+}
+
 // SandboxTemplateSpec defines the desired state of Sandbox.
 type SandboxTemplateSpec struct {
 	// podTemplate defines the object template that describes the pod spec that will be used to create

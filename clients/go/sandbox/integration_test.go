@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	templateName     = flag.String("template-name", "python-sandbox-template", "SandboxTemplate name")
+	warmPoolName     = flag.String("warmpool-name", "python-sandbox-warmpool", "SandboxWarmPool name")
 	gatewayName      = flag.String("gateway-name", "", "Gateway name for production mode")
 	gatewayNamespace = flag.String("gateway-namespace", "", "Gateway namespace (defaults to --namespace)")
 	apiURL           = flag.String("api-url", "", "Direct API URL")
@@ -44,7 +44,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	}
 
 	opts := Options{
-		TemplateName:        *templateName,
+		WarmPoolName:        *warmPoolName,
 		Namespace:           *namespace,
 		GatewayName:         *gatewayName,
 		GatewayNamespace:    gwNS,
@@ -151,7 +151,7 @@ func newIntegrationClient(t *testing.T) *Sandbox {
 		gwNS = *namespace
 	}
 	client, err := New(context.Background(), Options{
-		TemplateName:        *templateName,
+		WarmPoolName:        *warmPoolName,
 		Namespace:           *namespace,
 		GatewayName:         *gatewayName,
 		GatewayNamespace:    gwNS,

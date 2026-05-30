@@ -38,17 +38,17 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             "shutdownPolicy": "Delete",
         }
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", lifecycle=lifecycle
+            "test-claim", "test-warmpool", "test-namespace", lifecycle=lifecycle
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
         body = call_kwargs["body"]
         self.assertEqual(body["spec"]["lifecycle"], lifecycle)
-        self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "test-template")
+        self.assertEqual(body["spec"]["warmPoolRef"]["name"], "test-warmpool")
 
     async def test_no_lifecycle_omits_key(self):
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace"
+            "test-claim", "test-warmpool", "test-namespace"
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
@@ -61,7 +61,7 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             "shutdownPolicy": "Delete",
         }
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace",
+            "test-claim", "test-warmpool", "test-namespace",
             annotations={"key": "val"},
             labels={"agent": "test"},
             lifecycle=lifecycle,
@@ -75,28 +75,21 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_claim_with_warmpool_none(self):
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", warmpool="none"
+            "test-claim", "none", "test-namespace"
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
         body = call_kwargs["body"]
-        self.assertEqual(body["spec"]["warmpool"], "none")
+        self.assertEqual(body["spec"]["warmPoolRef"]["name"], "none")
 
     async def test_create_claim_with_specific_warmpool(self):
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", warmpool="custom-pool"
+            "test-claim", "custom-pool", "test-namespace"
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
         body = call_kwargs["body"]
-        self.assertEqual(body["spec"]["warmpool"], "custom-pool")
-
-    async def test_create_claim_warmpool_omitted(self):
-        await self.helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
-
-        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
-        body = call_kwargs["body"]
-        self.assertNotIn("warmpool", body["spec"])
+        self.assertEqual(body["spec"]["warmPoolRef"]["name"], "custom-pool")
 
 
 class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):

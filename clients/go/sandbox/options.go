@@ -42,9 +42,9 @@ const (
 
 // Options configures a Sandbox instance.
 type Options struct {
-	// TemplateName is the name of the SandboxTemplate to use. Required.
+	// WarmPoolName is the name of the SandboxWarmPool to use. Required.
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
-	TemplateName string
+	WarmPoolName string
 
 	// Namespace where the SandboxClaim will be created. Default: "default".
 	// Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
@@ -251,11 +251,11 @@ func (o *Options) validate() error {
 			return fmt.Errorf("sandbox: APIURL %q must include a host", o.APIURL)
 		}
 	}
-	if o.TemplateName == "" {
-		return fmt.Errorf("sandbox: TemplateName is required")
+	if o.WarmPoolName == "" {
+		return fmt.Errorf("sandbox: WarmPoolName is required")
 	}
-	if !isValidDNSSubdomain(o.TemplateName) {
-		return fmt.Errorf("sandbox: TemplateName %q is not a valid Kubernetes DNS subdomain name", o.TemplateName)
+	if !isValidDNSSubdomain(o.WarmPoolName) {
+		return fmt.Errorf("sandbox: WarmPoolName %q is not a valid Kubernetes DNS subdomain name", o.WarmPoolName)
 	}
 	if !isValidDNSLabel(o.Namespace) {
 		return fmt.Errorf("sandbox: Namespace %q is not a valid Kubernetes namespace (DNS label)", o.Namespace)

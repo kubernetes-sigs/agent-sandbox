@@ -38,42 +38,41 @@ echo "Using image tag: $IMAGE_TAG"
 export SANDBOX_ROUTER_IMG="kind.local/sandbox-router:${IMAGE_TAG}"
 export SANDBOX_PYTHON_RUNTIME_IMG="kind.local/python-runtime-sandbox:${IMAGE_TAG}"
 
+# Start virtual environment and install dependencies first so we have yaml library available
+echo "Starting virtual environment for Python client and install agentic sandbox client..."
+cd "$REPO_ROOT/clients/python/agentic-sandbox-client"
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
 # following develop guide to make and deploy agent-sandbox to kind cluster
-cd $REPO_ROOT
+cd "$REPO_ROOT"
 make build
 make deploy-kind EXTENSIONS=true
 make deploy-cloud-provider-kind
 
-cd clients/python/agentic-sandbox-client/gateway-kind
+cd "$REPO_ROOT/clients/python/agentic-sandbox-client/gateway-kind"
 echo "Applying CRD for template - Sandbox claim will be applied by the sandbox client in python code"
-sed -i "s|IMAGE_PLACEHOLDER|${SANDBOX_PYTHON_RUNTIME_IMG}|g" python-sandbox-template.yaml
-kubectl apply -f python-sandbox-template.yaml
+python3 "$REPO_ROOT/dev/tools/mutate_yaml.py" template python-sandbox-template.yaml --image "${SANDBOX_PYTHON_RUNTIME_IMG}" | kubectl apply -f -
 
-
-cd ../sandbox-router
+cd "$REPO_ROOT/clients/python/agentic-sandbox-client/sandbox-router"
 echo "Applying CRD for router template"
-sed -i "s|\${ROUTER_IMAGE}|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml
-sed -i 's|value: "false"|value: "true"|g' sandbox_router.yaml
-kubectl apply -f sandbox_router.yaml
+python3 "$REPO_ROOT/dev/tools/mutate_yaml.py" router sandbox_router.yaml --image "${SANDBOX_ROUTER_IMG}" --allow-unauthenticated | kubectl apply -f -
 kubectl rollout status deployment/sandbox-router-deployment --timeout=60s
 
-
-cd ../gateway-kind
+cd "$REPO_ROOT/clients/python/agentic-sandbox-client/gateway-kind"
 echo "Setting up Cloud Provider Kind Gateway in the kind cluster..."
 echo "Applying Gateway configuration..."
 kubectl apply -f gateway-kind.yaml
 kubectl wait --for=condition=Programmed=True gateway/kind-gateway --timeout=60s
 
-cd ../
-
-
 # Cleanup function
 cleanup() {
     echo "Cleaning up virtual environment..."
-    deactivate 
-    rm -rf .venv
+    deactivate || true
+    rm -rf "$REPO_ROOT/clients/python/agentic-sandbox-client/.venv"
 
-    cd $REPO_ROOT
+    cd "$REPO_ROOT"
     echo "Cleaning up cloud provider kind..."
     make kill-cloud-provider-kind
     
@@ -83,17 +82,12 @@ cleanup() {
     echo "Cleanup completed."
 }
 
+trap cleanup EXIT
 
-echo "Starting virtual environment for Python client and install agentic sandbox client..."
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-
+cd "$REPO_ROOT/clients/python/agentic-sandbox-client/gateway-kind"
 echo "========= $0 - Running the Python client tester... ========="
 python3 ./test_client.py --gateway-name kind-gateway
 echo "========= $0 - Finished running the Python client with gateway and router tester. ========="
 
-trap cleanup EXIT
-
 echo "Test finished."
+

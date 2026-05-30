@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -57,6 +58,8 @@ const (
 	// avoid an import cycle.
 	warmPoolSandboxLabel        = "agents.x-k8s.io/warm-pool-sandbox"
 	sandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
+
+	extensionsAgentsGroup = "extensions.agents.x-k8s.io"
 )
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
@@ -475,20 +478,29 @@ func isSystemAnnotation(key string) bool {
 		key == asmetrics.TraceContextAnnotation
 }
 
-// warmPoolTrackingLabels are the system-prefixed labels that trusted extension
-// controllers (warm pool / claim) set on a Sandbox and that must be propagated to the
-// backing Pod. Centralized here so the create and adoption paths stay in sync.
-var warmPoolTrackingLabels = []string{
-	warmPoolSandboxLabel,
-	sandboxTemplateRefHashLabel,
-	sandboxv1beta1.SandboxPodTemplateHashLabel,
+// warmPoolTrackingLabelSet is the allowlist of system-prefixed labels that trusted
+// extension controllers (warm pool / claim) set on a Sandbox and that must be
+// propagated to the backing Pod. A map avoids accidental mutation via append on a
+// shared slice and keeps membership checks O(1).
+var warmPoolTrackingLabelSet = map[string]struct{}{
+	warmPoolSandboxLabel:                       {},
+	sandboxTemplateRefHashLabel:                {},
+	sandboxv1beta1.SandboxPodTemplateHashLabel: {},
+}
+
+// extensionControllerOwnerKinds are the extension owner kinds that may authorize
+// warm-pool tracking label propagation.
+var extensionControllerOwnerKinds = map[string]struct{}{
+	"SandboxWarmPool": {},
+	"SandboxClaim":    {},
 }
 
 // isAllowedSystemLabel reports whether a system-prefixed label is a tracking label
 // that trusted controllers are permitted to set on a Sandbox and have propagated to
 // the backing Pod.
 func isAllowedSystemLabel(key string) bool {
-	return slices.Contains(warmPoolTrackingLabels, key)
+	_, ok := warmPoolTrackingLabelSet[key]
+	return ok
 }
 
 // isControllerManagedPodAnnotation reports whether a system-reserved annotation is one
@@ -520,10 +532,11 @@ func sandboxManagedByExtensionController(sandbox *sandboxv1beta1.Sandbox) bool {
 		if ref.Controller == nil || !*ref.Controller {
 			continue
 		}
-		if !strings.HasPrefix(ref.APIVersion, "extensions.agents.x-k8s.io/") {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err != nil || gv.Group != extensionsAgentsGroup {
 			continue
 		}
-		if ref.Kind == "SandboxWarmPool" || ref.Kind == "SandboxClaim" {
+		if _, ok := extensionControllerOwnerKinds[ref.Kind]; ok {
 			return true
 		}
 	}
@@ -890,7 +903,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// Propagate trusted warm-pool tracking labels from the Sandbox CR, but only for
 	// controller-managed Sandboxes so tenants cannot spoof them on a self-created Sandbox.
 	if sandboxManagedByExtensionController(sandbox) {
-		for _, key := range warmPoolTrackingLabels {
+		for key := range warmPoolTrackingLabelSet {
 			if v, ok := sandbox.Labels[key]; ok {
 				podLabels[key] = v
 			}
@@ -1003,7 +1016,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	// longer carries a given label) so stale or spoofed tracking labels cannot persist
 	// across ownership/label transitions.
 	extensionManaged := sandboxManagedByExtensionController(sandbox)
-	for _, key := range warmPoolTrackingLabels {
+	for key := range warmPoolTrackingLabelSet {
 		if v, ok := sandbox.Labels[key]; extensionManaged && ok {
 			if pod.Labels[key] != v {
 				pod.Labels[key] = v
@@ -1034,7 +1047,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 				if _, exists := pod.Labels[k]; exists {
 					delete(pod.Labels, k)
 					updated = true
-					logger.Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
+					logger.V(1).Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
 				}
 				continue
 			}

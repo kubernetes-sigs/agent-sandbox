@@ -232,6 +232,8 @@ class TestAsyncK8sHelperNormalization(unittest.IsolatedAsyncioTestCase):
 
         # Verify normalization was called with the async client module
         mock_normalize.assert_called_once_with(client_module=mock_client)
+        # Verify the returned config was passed to ApiClient
+        mock_client.ApiClient.assert_called_once_with(configuration=mock_normalize.return_value)
 
 if __name__ == "__main__":
     unittest.main()

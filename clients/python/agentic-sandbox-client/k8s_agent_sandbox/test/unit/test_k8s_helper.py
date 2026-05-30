@@ -183,18 +183,20 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
 
 
 @patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config")
+@patch("k8s_agent_sandbox.k8s_helper.client.ApiClient")
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestK8sHelperNormalization(unittest.TestCase):
 
-    def test_k8s_helper_init_calls_normalization(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_normalize):
-        """Test that K8sHelper.__init__ calls normalize_kubernetes_auth_config."""
+    def test_k8s_helper_init_calls_normalization(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_api_client_cls, mock_normalize):
+        """Test that K8sHelper.__init__ calls normalize_kubernetes_auth_config and passes the result to ApiClient."""
         mock_config.ConfigException = Exception
 
         helper = K8sHelper()
 
         mock_normalize.assert_called_once()
+        mock_api_client_cls.assert_called_once_with(configuration=mock_normalize.return_value)
 
 
 if __name__ == '__main__':

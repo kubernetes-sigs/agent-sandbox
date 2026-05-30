@@ -39,11 +39,10 @@ class K8sHelper:
         except config.ConfigException:
             config.load_kube_config()
 
-        # Normalize auth keys for kubernetes client version compatibility
-        normalize_kubernetes_auth_config()
-
-        self.custom_objects_api = client.CustomObjectsApi()
-        self.core_v1_api = client.CoreV1Api()
+        cfg = normalize_kubernetes_auth_config()
+        api_client = client.ApiClient(configuration=cfg)
+        self.custom_objects_api = client.CustomObjectsApi(api_client)
+        self.core_v1_api = client.CoreV1Api(api_client)
 
     def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
         """Creates a SandboxClaim custom resource."""

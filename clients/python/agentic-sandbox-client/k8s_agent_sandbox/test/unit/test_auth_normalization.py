@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import unittest
 from unittest.mock import MagicMock
 
@@ -33,60 +34,61 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         """Test normalization when only 'authorization' key exists (k8s <36)."""
         mock_client, mock_config = _make_client({'authorization': 'token-123'})
 
-        normalize_kubernetes_auth_config(client_module=mock_client)
+        result = normalize_kubernetes_auth_config(client_module=mock_client)
 
+        self.assertIs(result, mock_config)
         self.assertEqual(mock_config.api_key['authorization'], 'token-123')
         self.assertEqual(mock_config.api_key['BearerToken'], 'token-123')
-        mock_client.Configuration.set_default.assert_called_once_with(mock_config)
 
     def test_normalize_with_only_bearer_token_key(self):
         """Test normalization when only 'BearerToken' key exists (k8s 36+)."""
         mock_client, mock_config = _make_client({'BearerToken': 'token-456'})
 
-        normalize_kubernetes_auth_config(client_module=mock_client)
+        result = normalize_kubernetes_auth_config(client_module=mock_client)
 
+        self.assertIs(result, mock_config)
         self.assertEqual(mock_config.api_key['BearerToken'], 'token-456')
         self.assertEqual(mock_config.api_key['authorization'], 'token-456')
-        mock_client.Configuration.set_default.assert_called_once_with(mock_config)
 
     def test_normalize_with_both_keys_different_values(self):
-        """Test normalization leaves both keys intact when both exist with different values."""
+        """Test normalization logs a warning and leaves both keys intact when they differ."""
         mock_client, mock_config = _make_client({'BearerToken': 'new-token', 'authorization': 'old-token'})
 
-        normalize_kubernetes_auth_config(client_module=mock_client)
+        with self.assertLogs('k8s_agent_sandbox.utils', level=logging.WARNING) as log:
+            result = normalize_kubernetes_auth_config(client_module=mock_client)
 
-        # Both keys left as-is; set_default not called since nothing changed
+        self.assertTrue(any('different values' in msg for msg in log.output))
+        self.assertIs(result, mock_config)
         self.assertEqual(mock_config.api_key['BearerToken'], 'new-token')
         self.assertEqual(mock_config.api_key['authorization'], 'old-token')
-        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_with_both_keys_same_value(self):
-        """Test normalization is a no-op when both keys already exist with same value."""
+        """Test normalization returns config unchanged when both keys already exist with same value."""
         mock_client, mock_config = _make_client({'BearerToken': 'same-token', 'authorization': 'same-token'})
 
-        normalize_kubernetes_auth_config(client_module=mock_client)
+        result = normalize_kubernetes_auth_config(client_module=mock_client)
 
+        self.assertIs(result, mock_config)
         self.assertEqual(mock_config.api_key['BearerToken'], 'same-token')
         self.assertEqual(mock_config.api_key['authorization'], 'same-token')
-        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_with_no_api_key(self):
-        """Test normalization is a no-op when api_key is None."""
+        """Test normalization returns config unchanged when api_key is None."""
         mock_client, mock_config = _make_client(None)
 
-        normalize_kubernetes_auth_config(client_module=mock_client)
+        result = normalize_kubernetes_auth_config(client_module=mock_client)
 
+        self.assertIs(result, mock_config)
         self.assertIsNone(mock_config.api_key)
-        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_with_empty_api_key(self):
-        """Test normalization is a no-op when api_key is empty dict."""
+        """Test normalization returns config unchanged when api_key is empty dict."""
         mock_client, mock_config = _make_client({})
 
-        normalize_kubernetes_auth_config(client_module=mock_client)
+        result = normalize_kubernetes_auth_config(client_module=mock_client)
 
+        self.assertIs(result, mock_config)
         self.assertEqual(mock_config.api_key, {})
-        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_copies_prefix_with_authorization_key(self):
         """Test that api_key_prefix is mirrored when copying authorization to BearerToken."""
@@ -121,7 +123,6 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
         normalize_kubernetes_auth_config(client_module=mock_client)
 
-        # authorization prefix already set - must not be overwritten
         self.assertEqual(mock_config.api_key_prefix['authorization'], 'Token')
 
 

@@ -1728,6 +1728,75 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxPropagatesTemplateLabels(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "label-claim"
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "label-warmpool"},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "label-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "label-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "label-template",
+			Namespace: "default",
+			Labels: map[string]string{
+				"team":                           "platform",
+				"environment":                    "prod",
+				extensionsv1beta1.SandboxIDLabel: "should-be-overridden",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "test"}},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, warmPool, template).
+		WithStatusSubresource(claim).Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: claimName, Namespace: "default"}, sandbox); err != nil {
+		t.Fatalf("Failed to get sandbox: %v", err)
+	}
+
+	if val := sandbox.Labels["team"]; val != "platform" {
+		t.Errorf("expected template label team=platform on sandbox, got %q", val)
+	}
+	if val := sandbox.Labels["environment"]; val != "prod" {
+		t.Errorf("expected template label environment=prod on sandbox, got %q", val)
+	}
+	// System/claim-identity labels must take precedence over template labels.
+	if val := sandbox.Labels[extensionsv1beta1.SandboxIDLabel]; val != string(claim.UID) {
+		t.Errorf("expected claim-identity label to override template value, got %q", val)
+	}
+}
+
 func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

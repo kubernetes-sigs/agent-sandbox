@@ -1954,8 +1954,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					// Only add valid, adoptable sandboxes to the queue
 					if isAdoptable(sb) == nil {
 						hash := sb.Labels[sandboxTemplateRefHash]
+						namespacedHash := queue.GetNamespacedTemplateHash(sb.Namespace, hash)
 						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
-						warmSandboxQueue.Add(hash, key)
+						warmSandboxQueue.Add(namespacedHash, key)
 					}
 				}
 			}
@@ -2094,8 +2095,9 @@ func TestTemplateEventHandler_Delete_RemovesEntireQueue(t *testing.T) {
 	hash := sandboxcontrollers.NameHash(templateName)
 	key := queue.SandboxKey{Namespace: "default", Name: "abandoned-pod"}
 
-	// 1. Add a pod to this template's queue
-	q.Add(hash, key)
+	// 1. Add a pod to this template's queue using namespace-aware hash
+	namespacedHash := queue.GetNamespacedTemplateHash("default", hash)
+	q.Add(namespacedHash, key)
 
 	// 2. Create the mock SandboxTemplate object that is being deleted
 	template := &extensionsv1beta1.SandboxTemplate{
@@ -2109,7 +2111,7 @@ func TestTemplateEventHandler_Delete_RemovesEntireQueue(t *testing.T) {
 	handler.Delete(context.Background(), event.DeleteEvent{Object: template}, nil)
 
 	// 4. Verify the entire queue was wiped out
-	_, ok := q.Get(hash)
+	_, ok := q.Get(namespacedHash)
 	if ok {
 		t.Errorf("Expected the entire queue to be removed when the template was deleted")
 	}

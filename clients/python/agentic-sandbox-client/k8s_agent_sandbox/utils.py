@@ -39,41 +39,43 @@ def normalize_kubernetes_auth_config(client_module=None):
 
     config = client_module.Configuration.get_default_copy()
 
-    if config.api_key_prefix:
-        bearer_prefix = config.api_key_prefix.get('BearerToken')
-        auth_prefix = config.api_key_prefix.get('authorization')
-        if bearer_prefix and auth_prefix and bearer_prefix != auth_prefix:
-            raise ValueError(
-                "Both 'BearerToken' and 'authorization' api_key_prefix entries are set "
-                "with different values. Verify your kubeconfig — the Authorization header "
-                "prefix will differ depending on which key the installed client version reads."
-            )
+    if config.api_key_prefix is not None:
+        has_bearer_prefix = 'BearerToken' in config.api_key_prefix
+        has_auth_prefix = 'authorization' in config.api_key_prefix
+        if has_bearer_prefix and has_auth_prefix:
+            if config.api_key_prefix['BearerToken'] != config.api_key_prefix['authorization']:
+                raise ValueError(
+                    "Both 'BearerToken' and 'authorization' api_key_prefix entries are set "
+                    "with different values. Verify your kubeconfig — the Authorization header "
+                    "prefix will differ depending on which key the installed client version reads."
+                )
 
-    if config.api_key:
-        bearer_token = config.api_key.get('BearerToken')
-        authorization = config.api_key.get('authorization')
+    if config.api_key is not None:
+        has_bearer = 'BearerToken' in config.api_key
+        has_auth = 'authorization' in config.api_key
 
-        if bearer_token and authorization and bearer_token != authorization:
-            raise ValueError(
-                "Both 'BearerToken' and 'authorization' api_key entries are set with "
-                "different values. Verify your kubeconfig — authentication will fail "
-                "for whichever key the installed client version does not read."
-            )
-        elif bearer_token and not authorization:
-            config.api_key['authorization'] = bearer_token
-        elif authorization and not bearer_token:
-            config.api_key['BearerToken'] = authorization
+        if has_bearer and has_auth:
+            if config.api_key['BearerToken'] != config.api_key['authorization']:
+                raise ValueError(
+                    "Both 'BearerToken' and 'authorization' api_key entries are set with "
+                    "different values. Verify your kubeconfig — authentication will fail "
+                    "for whichever key the installed client version does not read."
+                )
+        elif has_bearer:
+            config.api_key['authorization'] = config.api_key['BearerToken']
+        elif has_auth:
+            config.api_key['BearerToken'] = config.api_key['authorization']
 
     # Mirror prefix independently — even when both tokens were already present,
     # a missing prefix entry would cause the Authorization header to be malformed
     # for whichever client version reads the key that lacks a prefix.
-    if config.api_key_prefix:
-        bearer_prefix = config.api_key_prefix.get('BearerToken')
-        auth_prefix = config.api_key_prefix.get('authorization')
-        if bearer_prefix and not auth_prefix:
-            config.api_key_prefix['authorization'] = bearer_prefix
-        elif auth_prefix and not bearer_prefix:
-            config.api_key_prefix['BearerToken'] = auth_prefix
+    if config.api_key_prefix is not None:
+        has_bearer_prefix = 'BearerToken' in config.api_key_prefix
+        has_auth_prefix = 'authorization' in config.api_key_prefix
+        if has_bearer_prefix and not has_auth_prefix:
+            config.api_key_prefix['authorization'] = config.api_key_prefix['BearerToken']
+        elif has_auth_prefix and not has_bearer_prefix:
+            config.api_key_prefix['BearerToken'] = config.api_key_prefix['authorization']
 
     return config
 

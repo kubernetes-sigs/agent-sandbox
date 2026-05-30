@@ -1,3 +1,17 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controllers
 
 import (
@@ -67,11 +81,11 @@ func TestStatusUpdateConflictsOnStaleResourceVersion(t *testing.T) {
 	// A concurrent writer advances the server's ResourceVersion.
 	fresh := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(ctx, key, fresh))
-	fresh.Status.Replicas = 1
+	fresh.Status.ServiceFQDN = "fresh.cluster.local"
 	require.NoError(t, r.Status().Update(ctx, fresh))
 
 	// The stale writer's Update is now rejected with a 409 Conflict.
-	stale.Status.Replicas = 2
+	stale.Status.ServiceFQDN = "stale.cluster.local"
 	err := r.Status().Update(ctx, stale)
 	require.Error(t, err)
 	require.Truef(t, k8serrors.IsConflict(err), "expected a Conflict error, got %v", err)
@@ -91,17 +105,17 @@ func TestUpdateStatusSucceedsWithStaleResourceVersion(t *testing.T) {
 	// Advance the server ResourceVersion out from under the stale copy.
 	fresh := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(ctx, key, fresh))
-	fresh.Status.Replicas = 1
+	fresh.Status.ServiceFQDN = "fresh.cluster.local"
 	require.NoError(t, r.Status().Update(ctx, fresh))
 
 	// updateStatus must succeed despite the stale ResourceVersion.
 	oldStatus := stale.Status.DeepCopy()
-	stale.Status.Replicas = 2
+	stale.Status.ServiceFQDN = "stale.cluster.local"
 	require.NoError(t, r.updateStatus(ctx, oldStatus, stale))
 
 	got := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(ctx, key, got))
-	require.Equal(t, int32(2), got.Status.Replicas)
+	require.Equal(t, "stale.cluster.local", got.Status.ServiceFQDN)
 }
 
 // TestUpdateStatusIgnoresDeletedSandbox proves the second half of the fix:
@@ -121,7 +135,7 @@ func TestUpdateStatusIgnoresDeletedSandbox(t *testing.T) {
 
 	// Writing status to the now-deleted object must return nil, not an error.
 	oldStatus := current.Status.DeepCopy()
-	current.Status.Replicas = 2
+	current.Status.ServiceFQDN = "deleted.cluster.local"
 	require.NoError(t, r.updateStatus(ctx, oldStatus, current))
 }
 

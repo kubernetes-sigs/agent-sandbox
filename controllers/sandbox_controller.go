@@ -450,31 +450,35 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
+// hasSystemReservedPrefix reports whether a key uses a label/annotation prefix
+// reserved for the sandbox system or its extensions.
+func hasSystemReservedPrefix(key string) bool {
+	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
+		strings.HasPrefix(key, "extensions.agents.x-k8s.io/")
+}
+
 // isSystemLabel reports whether a label key is reserved for the sandbox system.
 // Such keys must never be settable through a user-supplied PodTemplate, otherwise a
 // tenant could override security-critical labels (e.g. the headless Service selector
 // label) and hijack another Sandbox's network traffic.
 func isSystemLabel(key string) bool {
-	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
-		strings.HasPrefix(key, "extensions.agents.x-k8s.io/")
+	return hasSystemReservedPrefix(key)
 }
 
 // isSystemAnnotation reports whether an annotation key is reserved for the sandbox
 // system and therefore must not be settable through a user-supplied PodTemplate.
 func isSystemAnnotation(key string) bool {
-	return strings.HasPrefix(key, "agents.x-k8s.io/") ||
-		strings.HasPrefix(key, "extensions.agents.x-k8s.io/") ||
+	return hasSystemReservedPrefix(key) ||
 		key == asmetrics.TraceContextAnnotation
 }
 
 // isControllerManagedPodAnnotation reports whether a system-reserved annotation is one
-// the controller itself sets on a Pod, and therefore must not be scrubbed during
-// cleanup of previously-propagated annotations.
+// the core controller itself sets on a Pod during metadata reconciliation, and
+// therefore must not be scrubbed during cleanup of previously-propagated annotations.
 func isControllerManagedPodAnnotation(key string) bool {
 	switch key {
 	case sandboxv1beta1.SandboxPropagatedLabelsAnnotation,
-		sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation,
-		asmetrics.TraceContextAnnotation:
+		sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation:
 		return true
 	default:
 		return false

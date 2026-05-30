@@ -56,10 +56,9 @@ The core controller treats any label/annotation key under `agents.x-k8s.io/` or
 - On adoption/update, system-reserved keys that an older (vulnerable) controller
   recorded in the `propagated-labels` / `propagated-annotations` lists are scrubbed
   from the Pod — except the controller-owned name-hash label and the
-  controller-managed annotations (`propagated-labels`, `propagated-annotations`,
-  and the trace-context annotation). Combined with always (re)setting the
-  name-hash label to the controller's value, this prevents a stale or spoofed
-  Service-selector label from surviving adoption.
+  controller-managed annotations (`propagated-labels`, `propagated-annotations`).
+  Combined with always (re)setting the name-hash label to the controller's value,
+  this prevents a stale or spoofed Service-selector label from surviving adoption.
 - System labels on `Sandbox.metadata.labels` are **not** copied to Pods by the
   core controller. Only non-system keys from `spec.podTemplate` are propagated.
 

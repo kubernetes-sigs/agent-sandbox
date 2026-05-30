@@ -1262,8 +1262,9 @@ func TestReconcilePod(t *testing.T) {
 							"custom-annotation": "anno-val",
 							// Older controller recorded system keys in the propagated lists.
 							"agents.x-k8s.io/propagated-labels":      "custom-label,agents.x-k8s.io/evil",
-							"agents.x-k8s.io/propagated-annotations": "custom-annotation,agents.x-k8s.io/pod-name",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation,agents.x-k8s.io/pod-name,opentelemetry.io/trace-context",
 							"agents.x-k8s.io/pod-name":               "leftover",
+							asmetrics.TraceContextAnnotation:         "spoofed-trace",
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},

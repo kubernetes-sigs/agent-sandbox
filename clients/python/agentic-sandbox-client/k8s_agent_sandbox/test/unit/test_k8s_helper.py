@@ -200,5 +200,35 @@ class TestK8sHelperNormalization(unittest.TestCase):
         mock_api_client_cls.assert_called_once_with(configuration=mock_normalize.return_value)
 
 
+@patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config")
+@patch("k8s_agent_sandbox.k8s_helper.client.ApiClient")
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperClose(unittest.TestCase):
+
+    def test_close_calls_api_client_close_and_nulls_state(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_api_client_cls, mock_normalize):
+        """Test that close() releases the ApiClient and nulls out API attributes."""
+        mock_config.ConfigException = Exception
+        mock_api_client_instance = MagicMock()
+        mock_api_client_cls.return_value = mock_api_client_instance
+
+        helper = K8sHelper()
+        helper.close()
+
+        mock_api_client_instance.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+        self.assertIsNone(helper.custom_objects_api)
+        self.assertIsNone(helper.core_v1_api)
+
+    def test_close_is_idempotent(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_api_client_cls, mock_normalize):
+        """Test that calling close() twice does not raise."""
+        mock_config.ConfigException = Exception
+
+        helper = K8sHelper()
+        helper.close()
+        helper.close()
+
+
 if __name__ == '__main__':
     unittest.main()

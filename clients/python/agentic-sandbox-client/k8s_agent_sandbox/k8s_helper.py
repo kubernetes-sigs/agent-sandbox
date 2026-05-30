@@ -49,6 +49,8 @@ class K8sHelper:
         if self._api_client:
             self._api_client.close()
             self._api_client = None
+            self.custom_objects_api = None
+            self.core_v1_api = None
 
     def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
         """Creates a SandboxClaim custom resource."""

@@ -250,7 +250,7 @@ class TestAsyncK8sHelperClose(unittest.IsolatedAsyncioTestCase):
 
         await helper.close()
 
-        mock_api_client.close.assert_called_once()
+        mock_api_client.close.assert_awaited_once()
         self.assertIsNone(helper._api_client)
         self.assertIsNone(helper.custom_objects_api)
         self.assertIsNone(helper.core_v1_api)
@@ -266,7 +266,7 @@ class TestAsyncK8sHelperClose(unittest.IsolatedAsyncioTestCase):
         await helper.close()
         await helper.close()
 
-        mock_api_client.close.assert_called_once()
+        mock_api_client.close.assert_awaited_once()
         self.assertIsNone(helper._api_client)
 
 

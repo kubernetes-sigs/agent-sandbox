@@ -85,9 +85,12 @@ def normalize_kubernetes_auth_config(
         elif has_auth:
             config.api_key['BearerToken'] = config.api_key['authorization']
 
-    # Ensure api_key_prefix is a dict when tokens are present, then mirror or
-    # initialize prefix entries so the Authorization header scheme is always set.
-    if config.api_key is not None:
+    # Ensure api_key_prefix is a dict when token keys are actually present, then
+    # mirror or initialize prefix entries so the Authorization header scheme is set.
+    has_any_token = config.api_key is not None and bool(
+        {'BearerToken', 'authorization'} & config.api_key.keys()
+    )
+    if has_any_token:
         if config.api_key_prefix is None:
             config.api_key_prefix = {}
 

@@ -192,6 +192,7 @@ class _K8sHelperPatchedBase(unittest.TestCase):
             return p.start()
 
         self.mock_config = start("k8s_agent_sandbox.k8s_helper.config")
+        self.mock_configuration_cls = start("k8s_agent_sandbox.k8s_helper.client.Configuration")
         self.mock_custom_objects_api_cls = start("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
         self.mock_core_cls = start("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
         self.mock_api_client_cls = start("k8s_agent_sandbox.k8s_helper.client.ApiClient")
@@ -205,10 +206,9 @@ class TestK8sHelperNormalization(_K8sHelperPatchedBase):
         """Test that K8sHelper.__init__ loads into an explicit Configuration and passes it to normalize and ApiClient."""
         helper = K8sHelper()
 
-        self.mock_normalize.assert_called_once()
-        self.assertIn('configuration', self.mock_normalize.call_args.kwargs)
-        cfg = self.mock_normalize.call_args.kwargs['configuration']
-        self.mock_api_client_cls.assert_called_once_with(configuration=cfg)
+        expected_cfg = self.mock_configuration_cls.return_value
+        self.mock_normalize.assert_called_once_with(configuration=expected_cfg)
+        self.mock_api_client_cls.assert_called_once_with(configuration=expected_cfg)
 
 
 class TestK8sHelperClose(_K8sHelperPatchedBase):

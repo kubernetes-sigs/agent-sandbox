@@ -22,7 +22,7 @@ from k8s_agent_sandbox.utils import normalize_kubernetes_auth_config
 
 def _make_client(api_key, api_key_prefix=None):
     mock_client = MagicMock()
-    mock_config = MagicMock(spec=k8s_client.Configuration)
+    mock_config = MagicMock(spec=k8s_client.Configuration())
     mock_config.api_key = api_key
     mock_config.api_key_prefix = api_key_prefix
     mock_client.Configuration.get_default_copy.return_value = mock_config
@@ -69,7 +69,7 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
             normalize_kubernetes_auth_config(client_module=mock_client)
 
     def test_normalize_with_both_keys_same_value(self):
-        """Test normalization returns config unchanged when both keys already exist with same value."""
+        """Test normalization returns config with prefix initialized when both keys already exist with same value."""
         mock_client, mock_config = _make_client({'BearerToken': 'same-token', 'authorization': 'same-token'})
 
         result = normalize_kubernetes_auth_config(client_module=mock_client)
@@ -77,6 +77,9 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         self.assertIs(result, mock_config)
         self.assertEqual(mock_config.api_key['BearerToken'], 'same-token')
         self.assertEqual(mock_config.api_key['authorization'], 'same-token')
+        self.assertIsNotNone(result.api_key_prefix)
+        self.assertEqual(result.api_key_prefix.get('BearerToken'), 'Bearer')
+        self.assertEqual(result.api_key_prefix.get('authorization'), 'Bearer')
 
     def test_normalize_with_no_api_key(self):
         """Test normalization returns config unchanged when api_key is None."""
@@ -86,6 +89,7 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
         self.assertIs(result, mock_config)
         self.assertIsNone(mock_config.api_key)
+        self.assertIsNone(result.api_key_prefix)
 
     def test_normalize_with_empty_api_key(self):
         """Test normalization returns config unchanged when api_key is empty dict."""

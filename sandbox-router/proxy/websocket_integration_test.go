@@ -214,3 +214,124 @@ func TestIntegration_NonUpgradeStillRespectsProxyTimeout(t *testing.T) {
 		t.Fatalf("ProxyTimeout did not bound the request: %s elapsed", elapsed)
 	}
 }
+
+// TestIntegration_WebSocketStripsOriginOnUpgrade locks in the
+// vscode-server compatibility fix. The router rewrites Host to the
+// upstream sandbox's address, so a client-supplied Origin that
+// matches the router's external hostname would no longer match what
+// the backend sees as its own Host. CSRF-aware backends (vscode-
+// server, Jupyter) reject the WebSocket upgrade with 1006 Close on
+// that mismatch. We drop Origin on upgrade requests so the backend
+// sees "no Origin assertion" rather than a bad one.
+func TestIntegration_WebSocketStripsOriginOnUpgrade(t *testing.T) {
+	gotOrigin := "<unset>"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOrigin = r.Header.Get("Origin")
+		conn, err := echoUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("backend upgrade: %v", err)
+			return
+		}
+		conn.Close()
+	}))
+	defer backend.Close()
+
+	router := httptest.NewServer(newRouter(t))
+	defer router.Close()
+
+	// Build the dial ourselves so we can set Origin explicitly — the
+	// dialThroughRouter helper doesn't expose it.
+	bu, _ := url.Parse(backend.URL)
+	wsURL := strings.Replace(router.URL, "http://", "ws://", 1) + "/"
+	hdrs := http.Header{}
+	hdrs.Set(HeaderSandboxID, "ws-sandbox")
+	hdrs.Set(HeaderSandboxNamespace, "test")
+	hdrs.Set(HeaderSandboxPodIP, bu.Hostname())
+	hdrs.Set(HeaderSandboxPort, bu.Port())
+	hdrs.Set("Origin", "https://router.example.com")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, hdrs)
+	if err != nil {
+		t.Fatalf("ws dial: %v (status=%v)", err, resp)
+	}
+	conn.Close()
+
+	if gotOrigin != "" {
+		t.Fatalf("backend saw Origin=%q, want empty (router must strip on upgrade)", gotOrigin)
+	}
+}
+
+// TestIntegration_NonUpgradePreservesOrigin guards the converse:
+// regular (non-Upgrade) HTTP requests must NOT lose Origin, because
+// stripping it would break CORS preflights and any backend that uses
+// Origin for legitimate same-origin checks on non-WebSocket traffic.
+func TestIntegration_NonUpgradePreservesOrigin(t *testing.T) {
+	gotOrigin := "<unset>"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOrigin = r.Header.Get("Origin")
+		w.WriteHeader(204)
+	}))
+	defer backend.Close()
+	router := httptest.NewServer(newRouter(t))
+	defer router.Close()
+
+	req, _ := http.NewRequest("GET", router.URL+"/", nil)
+	for k, vs := range podIPHeaders(t, backend.URL) {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	req.Header.Set("Origin", "https://client.example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if gotOrigin != "https://client.example.com" {
+		t.Fatalf("backend Origin: got %q want https://client.example.com (only strip on upgrade)", gotOrigin)
+	}
+}
+
+// TestIntegration_XForwardedHeadersSet exercises pr.SetXForwarded():
+// the upstream sandbox needs to know the client-visible Host and
+// scheme to construct correct self-links / redirects (especially
+// for browser-facing backends like Jupyter or vscode-server). For
+// plain HTTP we should see Proto=http; X-Forwarded-For should
+// carry the inbound client address.
+func TestIntegration_XForwardedHeadersSet(t *testing.T) {
+	var gotHost, gotProto, gotFor string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Header.Get("X-Forwarded-Host")
+		gotProto = r.Header.Get("X-Forwarded-Proto")
+		gotFor = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(204)
+	}))
+	defer backend.Close()
+	router := httptest.NewServer(newRouter(t))
+	defer router.Close()
+
+	req, _ := http.NewRequest("GET", router.URL+"/", nil)
+	for k, vs := range podIPHeaders(t, backend.URL) {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+
+	wantHost := strings.TrimPrefix(router.URL, "http://")
+	if gotHost != wantHost {
+		t.Errorf("X-Forwarded-Host: got %q want %q", gotHost, wantHost)
+	}
+	if gotProto != "http" {
+		t.Errorf("X-Forwarded-Proto: got %q want %q", gotProto, "http")
+	}
+	if gotFor == "" {
+		t.Errorf("X-Forwarded-For: empty; expected the client address")
+	}
+}

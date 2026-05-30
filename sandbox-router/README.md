@@ -74,7 +74,12 @@ The retry budget never exceeds `--proxy-timeout`; the per-request context cuts i
 
 `Connection: Upgrade` / `Upgrade: websocket` requests are forwarded transparently via `httputil.ReverseProxy`'s built-in upgrade handling. This is what makes things like `code-server` (VS Code in the browser, holds a single long-lived WebSocket per editing session) work through the router unchanged.
 
-One important carve-out: **`--proxy-timeout` does NOT apply to upgraded connections.** A WebSocket is long-lived by design, so we cancel only the per-request context for non-upgraded HTTP; once the `101 Switching Protocols` response has gone back to the client, the connection's TCP keepalive is the liveness signal. Without this carve-out, the 180s default would tear down a healthy WebSocket at the 3-minute mark and the client would see WebSocket close `1006`.
+Two carve-outs that matter in practice:
+
+- **`--proxy-timeout` does NOT apply to upgraded connections.** A WebSocket is long-lived by design, so we cancel only the per-request context for non-upgraded HTTP; once the `101 Switching Protocols` response has gone back to the client, the connection's TCP keepalive is the liveness signal. Without this carve-out, the 180s default would tear down a healthy WebSocket at the 3-minute mark and the client would see WebSocket close `1006`.
+- **`Origin` is stripped from upgrade requests.** Many WebSocket backends (vscode-server is the classic case; Jupyter behaves the same) validate `Origin` against `Host` for CSRF protection. The router rewrites `Host` to the upstream sandbox's address, so a client-supplied `Origin` pointing at the router's external hostname would mismatch and the backend would reject the upgrade — same `1006` symptom. Dropping `Origin` tells the backend "no Origin assertion available," which CSRF-aware backends typically allow for non-browser callers. Normal (non-upgrade) HTTP traffic preserves `Origin` so CORS preflights are unaffected.
+
+The router also sets `X-Forwarded-Host` / `X-Forwarded-Proto` / `X-Forwarded-For` on every outbound request (via `httputil.ReverseProxy`'s `SetXForwarded` helper), so upstream sandboxes can reconstruct the client-visible URL for self-links and redirects — important for browser-facing backends like Jupyter and vscode-server.
 
 Metrics for upgraded requests record `code="101"` once the handshake completes; the duration histogram records the full lifetime of the upgraded connection.
 

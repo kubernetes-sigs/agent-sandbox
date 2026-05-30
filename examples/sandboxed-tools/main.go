@@ -46,6 +46,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	agentsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sandboxes"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sessions"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/tools"
 )
@@ -76,6 +77,7 @@ func main() {
 	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
 	flag.StringVar(&opts.Image, "image", opts.Image, "image")
 	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
+	flag.BoolVar(&opts.EnableServicePortal, "service-portal", opts.EnableServicePortal, "Enable service-portal proxy sidecar and iptables configuration")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
@@ -154,6 +156,9 @@ type Session struct {
 	// HomeDir is the home directory; we mount a tmpfs volume here.
 	// We currently only snapshot and restore this directory.
 	HomeDir string
+
+	// EnableServicePortal adds the initContainer and sidecar container to the Sandbox pod template spec.
+	EnableServicePortal bool
 }
 
 // Sandbox represents an active sandbox instance.
@@ -476,8 +481,8 @@ func (s *Session) CreateSandbox(ctx context.Context, image, namespace string, in
 	policy := sandboxv1beta1.ShutdownPolicyDelete
 	sb := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "sandbox-tool-",
-			Namespace:    namespace,
+			Name:      s.Name,
+			Namespace: namespace,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			Lifecycle: sandboxv1beta1.Lifecycle{
@@ -518,6 +523,10 @@ func (s *Session) CreateSandbox(ctx context.Context, image, namespace string, in
 				},
 			},
 		},
+	}
+
+	if s.EnableServicePortal {
+		sandboxes.AddServicePortal(sb, sandboxes.ServicePortalConfig{})
 	}
 
 	created, err := agentsClient.AgentsV1beta1().Sandboxes(namespace).Create(ctx, sb, metav1.CreateOptions{})
@@ -609,6 +618,9 @@ type RunOptions struct {
 	// HomeDir is the home directory inside the sandbox.
 	// This is currently the only path that we persist between execs in the sandbox.
 	HomeDir string
+
+	// EnableServicePortal enables the GKE service portal sidecar and iptables init container.
+	EnableServicePortal bool
 }
 
 func (o *RunOptions) InitDefaults() {
@@ -695,9 +707,9 @@ func run(ctx context.Context, opts RunOptions) error {
 			}
 		}
 
-		if err := sandboxClient.DeleteAllSandboxes(context.WithoutCancel(ctx)); err != nil {
-			log.Error(err, "failed to delete all sandboxes")
-		}
+		// if err := sandboxClient.DeleteAllSandboxes(context.WithoutCancel(ctx)); err != nil {
+		// 	log.Error(err, "failed to delete all sandboxes")
+		// }
 	}()
 
 	toolsRegistry := tools.NewRegistry()
@@ -717,8 +729,10 @@ func run(ctx context.Context, opts RunOptions) error {
 	sessionStore := sessions.NewFileStore(sessionsDir)
 
 	session := &Session{
-		Name:   opts.SessionName,
-		client: sandboxClient,
+		Name:                opts.SessionName,
+		client:              sandboxClient,
+		HomeDir:             opts.HomeDir,
+		EnableServicePortal: opts.EnableServicePortal,
 	}
 
 	messages, err := sessionStore.LoadSession(ctx, opts.SessionName)

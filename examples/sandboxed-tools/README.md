@@ -32,6 +32,9 @@ go run ./examples/sandboxed-tools/main.go
 
 # Or specify a custom session name to resume/create a specific session
 go run ./examples/sandboxed-tools/main.go -session mysession
+
+# Run with the GKE service portal integration enabled to proxy external APIs securely with tokens
+go run ./examples/sandboxed-tools/main.go -service-portal
 ```
 
 ## Session Persistence, Warm Sandbox Reuse & Inactivity Expiry

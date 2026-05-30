@@ -35,7 +35,7 @@ def _make_client(api_key, api_key_prefix=None):
 class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
     def test_normalize_with_only_authorization_key(self):
-        """Test normalization when only 'authorization' key exists (kubernetes package <36)."""
+        """Test normalization when only 'authorization' key exists (clients that use the authorization key)."""
         mock_client, mock_config = _make_client({'authorization': 'token-123'})
 
         result = normalize_kubernetes_auth_config(client_module=mock_client)
@@ -45,7 +45,7 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         self.assertEqual(mock_config.api_key['BearerToken'], 'token-123')
 
     def test_normalize_with_only_bearer_token_key(self):
-        """Test normalization when only 'BearerToken' key exists (kubernetes package >=36)."""
+        """Test normalization when only 'BearerToken' key exists (clients that use the BearerToken key)."""
         mock_client, mock_config = _make_client({'BearerToken': 'token-456'})
 
         result = normalize_kubernetes_auth_config(client_module=mock_client)

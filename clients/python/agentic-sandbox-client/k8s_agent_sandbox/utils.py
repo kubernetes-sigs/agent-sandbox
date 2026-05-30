@@ -53,7 +53,13 @@ def normalize_kubernetes_auth_config(
     """
     if configuration is None:
         if client_module is None:
-            from kubernetes import client as client_module
+            try:
+                from kubernetes import client as client_module
+            except ImportError:
+                raise ImportError(
+                    "The 'kubernetes' package is not installed. Pass client_module= "
+                    "(e.g. kubernetes_asyncio.client) or configuration= explicitly."
+                ) from None
         configuration = client_module.Configuration.get_default_copy()
 
     config = configuration

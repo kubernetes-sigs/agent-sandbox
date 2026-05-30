@@ -84,7 +84,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-cd "$REPO_ROOT/clients/python/agentic-sandbox-client/gateway-kind"
+cd "$REPO_ROOT/clients/python/agentic-sandbox-client"
 echo "========= $0 - Running the Python client tester... ========="
 python3 ./test_client.py --gateway-name kind-gateway
 echo "========= $0 - Finished running the Python client with gateway and router tester. ========="

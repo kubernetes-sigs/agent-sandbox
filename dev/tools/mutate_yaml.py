@@ -45,16 +45,22 @@ def mutate_router(file_path, image, allow_unauthenticated):
                     if c.get("name") == "router":
                         if image:
                             c["image"] = image
+                        env_mutated = False
                         for env_var in c.get("env", []):
                             if env_var.get("name") == "ALLOW_UNAUTHENTICATED_ROUTER":
                                 env_var["value"] = "true" if allow_unauthenticated else "false"
+                                env_mutated = True
+                        if allow_unauthenticated and not env_mutated:
+                            print("Error: ALLOW_UNAUTHENTICATED_ROUTER env var not found in router container", file=sys.stderr)
+                            sys.exit(1)
                         mutated = True
             except (KeyError, TypeError) as e:
                 print(f"Error parsing/mutating router YAML structure: {e}", file=sys.stderr)
                 sys.exit(1)
                 
     if not mutated:
-        print("Warning: sandbox-router-deployment Deployment not found in YAML documents", file=sys.stderr)
+        print("Error: sandbox-router-deployment Deployment not found in YAML documents", file=sys.stderr)
+        sys.exit(1)
         
     yaml.safe_dump_all(docs, sys.stdout)
 

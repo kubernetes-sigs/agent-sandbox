@@ -15,6 +15,7 @@
 import asyncio
 import os
 import sys
+import tempfile
 from typing import TypedDict, Literal, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -33,8 +34,11 @@ class LocalCodeExecutor:
     
     @staticmethod
     async def execute(code: str) -> tuple[str, bool]:
+        temp_filename = None
         try:
-            with open('/tmp/agent_code.py', 'w') as f:
+            # Use a unique temporary file to prevent race conditions during concurrent executions
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                temp_filename = f.name
                 f.write(code)
             
             # Use sys.executable as the interpreter path, and provide a minimal sanitized environment
@@ -46,7 +50,7 @@ class LocalCodeExecutor:
                     env[key] = os.environ[key]
 
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, '/tmp/agent_code.py',
+                sys.executable, temp_filename,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env
@@ -61,11 +65,21 @@ class LocalCodeExecutor:
                     return stderr.decode(), False
                     
             except asyncio.TimeoutError:
-                proc.kill()
+                try:
+                    proc.kill()
+                    await proc.wait()  # Reap the process to prevent zombie process accumulation
+                except ProcessLookupError:
+                    pass
                 return "Execution timeout (60s)", False
                 
         except Exception as e:
             return f"Execution error: {str(e)}", False
+        finally:
+            if temp_filename and os.path.exists(temp_filename):
+                try:
+                    os.remove(temp_filename)
+                except OSError:
+                    pass
 
 
 class CodeGenerationLLM:

@@ -233,9 +233,8 @@ class TestAsyncK8sHelperNormalization(unittest.IsolatedAsyncioTestCase):
         # Verify normalization was called with an explicit configuration instance
         mock_normalize.assert_called_once()
         self.assertIn('configuration', mock_normalize.call_args.kwargs)
-        cfg = mock_normalize.call_args.kwargs['configuration']
-        # Verify the same config was passed to ApiClient
-        mock_client.ApiClient.assert_called_once_with(configuration=cfg)
+        # Verify the return value of normalize was passed to ApiClient
+        mock_client.ApiClient.assert_called_once_with(configuration=mock_normalize.return_value)
 
 class TestAsyncK8sHelperClose(unittest.IsolatedAsyncioTestCase):
 

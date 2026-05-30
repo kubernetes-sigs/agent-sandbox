@@ -23,8 +23,8 @@ class _Configuration(Protocol):
 
 class _ClientModule(Protocol):
     class Configuration:
-        @classmethod
-        def get_default_copy(cls) -> '_Configuration': ...
+        @staticmethod
+        def get_default_copy() -> '_Configuration': ...
 
 
 def normalize_kubernetes_auth_config(

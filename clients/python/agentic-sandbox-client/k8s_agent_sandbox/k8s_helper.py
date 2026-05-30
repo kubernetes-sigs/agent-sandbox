@@ -31,7 +31,15 @@ from .constants import (
 )
 
 class K8sHelper:
-    """Helper class for Kubernetes API interactions."""
+    """Helper class for Kubernetes API interactions.
+
+    Instances are single-use: after calling close() (or exiting a with block),
+    the API attributes are set to None and further method calls will raise
+    AttributeError. Use the context manager form to ensure cleanup:
+
+        with K8sHelper() as helper:
+            helper.create_sandbox_claim(...)
+    """
 
     def __init__(self):
         cfg = client.Configuration()
@@ -40,7 +48,7 @@ class K8sHelper:
         except config.ConfigException:
             config.load_kube_config(client_configuration=cfg)
 
-        normalize_kubernetes_auth_config(configuration=cfg)
+        cfg = normalize_kubernetes_auth_config(configuration=cfg)
         self._api_client = client.ApiClient(configuration=cfg)
         self.custom_objects_api = client.CustomObjectsApi(self._api_client)
         self.core_v1_api = client.CoreV1Api(self._api_client)

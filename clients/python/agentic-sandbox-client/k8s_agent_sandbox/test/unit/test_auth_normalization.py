@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.utils import normalize_kubernetes_auth_config
 
@@ -161,6 +162,15 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         self.assertIsNotNone(result.api_key_prefix)
         self.assertEqual(result.api_key_prefix.get('authorization'), 'Bearer')
         self.assertEqual(result.api_key_prefix.get('BearerToken'), 'Bearer')
+
+
+class TestNormalizeKubernetesAuthConfigImport(unittest.TestCase):
+
+    def test_raises_descriptive_import_error_when_kubernetes_not_installed(self):
+        """Test that calling with no args raises ImportError with guidance when kubernetes is absent."""
+        with patch.dict(sys.modules, {'kubernetes': None, 'kubernetes.client': None}):
+            with self.assertRaisesRegex(ImportError, 'client_module'):
+                normalize_kubernetes_auth_config()
 
 
 if __name__ == '__main__':

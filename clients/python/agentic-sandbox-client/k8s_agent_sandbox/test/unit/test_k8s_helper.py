@@ -209,7 +209,7 @@ class TestK8sHelperNormalization(_K8sHelperPatchedBase):
 
         expected_cfg = self.mock_configuration_cls.return_value
         self.mock_normalize.assert_called_once_with(configuration=expected_cfg)
-        self.mock_api_client_cls.assert_called_once_with(configuration=expected_cfg)
+        self.mock_api_client_cls.assert_called_once_with(configuration=self.mock_normalize.return_value)
 
 
 class TestK8sHelperClose(_K8sHelperPatchedBase):

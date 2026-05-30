@@ -34,14 +34,15 @@ class K8sHelper:
     """Helper class for Kubernetes API interactions.
 
     Instances are single-use: after calling close() (or exiting a with block),
-    the API attributes are set to None and further method calls will raise
-    AttributeError. Use the context manager form to ensure cleanup:
+    all public methods raise RuntimeError. Use the context manager form to
+    ensure cleanup:
 
         with K8sHelper() as helper:
             helper.create_sandbox_claim(...)
     """
 
     def __init__(self):
+        self._closed = False
         cfg = client.Configuration()
         try:
             config.load_incluster_config(client_configuration=cfg)
@@ -53,6 +54,10 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi(self._api_client)
         self.core_v1_api = client.CoreV1Api(self._api_client)
 
+    def _check_not_closed(self):
+        if getattr(self, '_closed', False):
+            raise RuntimeError("K8sHelper is closed and cannot be reused.")
+
     def close(self):
         """Closes the Kubernetes API client and releases connection pool resources."""
         if self._api_client is not None:
@@ -60,6 +65,7 @@ class K8sHelper:
             self._api_client = None
             self.custom_objects_api = None
             self.core_v1_api = None
+        self._closed = True
 
     def __enter__(self):
         return self
@@ -70,6 +76,7 @@ class K8sHelper:
 
     def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
         """Creates a SandboxClaim custom resource."""
+        self._check_not_closed()
         metadata = {
             "name": name,
             "annotations": annotations or {},
@@ -108,6 +115,7 @@ class K8sHelper:
         name. This method watches the SandboxClaim until the sandbox name
         appears in the claim's status, then returns it.
         """
+        self._check_not_closed()
         deadline = time.monotonic() + timeout
         logging.info(f"Resolving sandbox name from claim '{claim_name}'...")
         while True:
@@ -162,6 +170,7 @@ class K8sHelper:
         Returns the first pod IP from the sandbox status when ready, or None if
         no IPs are present (e.g. on older controllers that don't populate podIPs).
         """
+        self._check_not_closed()
         deadline = time.monotonic() + timeout
         logging.info(f"Watching for Sandbox {name} to become ready...")
         while True:
@@ -197,6 +206,7 @@ class K8sHelper:
 
     def delete_sandbox_claim(self, name: str, namespace: str):
         """Deletes a SandboxClaim custom resource."""
+        self._check_not_closed()
         try:
             self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -213,6 +223,7 @@ class K8sHelper:
 
     def get_sandbox(self, name: str, namespace: str):
         """Gets a Sandbox custom resource."""
+        self._check_not_closed()
         try:
             return self.custom_objects_api.get_namespaced_custom_object(
                 group=SANDBOX_API_GROUP,
@@ -228,6 +239,7 @@ class K8sHelper:
 
     def get_sandbox_claim(self, name: str, namespace: str):
         """Gets a SandboxClaim custom resource (or ``None`` if it doesn't exist)."""
+        self._check_not_closed()
         try:
             return self.custom_objects_api.get_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -250,6 +262,7 @@ class K8sHelper:
                 (e.g. ``"app=myapp,env=prod"``). When set, only claims
                 matching the selector are returned.
         """
+        self._check_not_closed()
         try:
             kwargs: dict = dict(
                 group=CLAIM_API_GROUP,
@@ -271,6 +284,7 @@ class K8sHelper:
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
+        self._check_not_closed()
         deadline = time.monotonic() + timeout
         logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
         while True:

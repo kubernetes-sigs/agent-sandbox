@@ -252,6 +252,14 @@ class TestK8sHelperClose(_K8sHelperPatchedBase):
         mock_api_client_instance.close.assert_called_once()
         self.assertIsNone(helper._api_client)
 
+    def test_use_after_close_raises_runtime_error(self):
+        """Test that calling a public method after close() raises RuntimeError."""
+        helper = K8sHelper()
+        helper.close()
+
+        with self.assertRaisesRegex(RuntimeError, 'closed'):
+            helper.create_sandbox_claim('name', 'template', 'namespace')
+
 
 if __name__ == '__main__':
     unittest.main()

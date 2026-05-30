@@ -230,9 +230,9 @@ class TestAsyncK8sHelperNormalization(unittest.IsolatedAsyncioTestCase):
         helper = AsyncK8sHelper()
         await helper._ensure_initialized()
 
-        # Verify normalization was called with an explicit configuration instance
-        mock_normalize.assert_called_once()
-        self.assertIn('configuration', mock_normalize.call_args.kwargs)
+        # Verify normalization was called with the exact Configuration instance
+        expected_cfg = mock_client.Configuration.return_value
+        mock_normalize.assert_called_once_with(configuration=expected_cfg)
         # Verify the return value of normalize was passed to ApiClient
         mock_client.ApiClient.assert_called_once_with(configuration=mock_normalize.return_value)
 

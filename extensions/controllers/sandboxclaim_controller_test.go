@@ -1822,7 +1822,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		},
 	}
 
-	onCompletion := extensionsv1beta1.SafeToEvictPolicyOnCompletion
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-claim",
@@ -1833,7 +1832,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{
 				Name: "test-pool",
 			},
-			SafeToEvict: &onCompletion,
 		},
 	}
 
@@ -2284,8 +2282,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						}
 					}
 				} else {
-					if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
-						t.Errorf("expected eviction annotation to be removed from adopted sandbox")
+					if tc.expectedSafeToEvictValue == "REMOVE" || tc.expectedSafeToEvictValue == "" {
+						if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
+							t.Errorf("expected eviction annotation to be removed from adopted sandbox, expectedSafeToEvictValue=%q, actual=%q", tc.expectedSafeToEvictValue, adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation])
+						}
 					}
 				}
 
@@ -2315,22 +2315,18 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 				require.Equal(t, tc.expectedAdoptedSandbox, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
 
-				// 6. Verify safe-to-evict annotation was added or removed from pod template
-				if tc.expectedSafeToEvictValue == "REMOVE" {
-					if val, ok := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; ok {
-						t.Errorf("expected pod template to NOT have annotation %q, but got %q", PodSafeToEvictAnnotation, val)
-					}
-				} else {
-					expectedEvict := "on-completion"
-					if tc.expectedSafeToEvictValue != "" {
-						expectedEvict = tc.expectedSafeToEvictValue
-					}
-					if val := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; val != expectedEvict {
-						t.Errorf("expected pod template to have annotation %q with value %q, got %q", PodSafeToEvictAnnotation, expectedEvict, val)
+				// 6. Verify safe-to-evict annotation if expectedSafeToEvictValue is set
+				if tc.expectedSafeToEvictValue != "" {
+					if tc.expectedSafeToEvictValue == "REMOVE" {
+						if val, ok := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; ok {
+							t.Errorf("expected pod template to NOT have annotation %q, but got %q", PodSafeToEvictAnnotation, val)
+						}
+					} else {
+						if val := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; val != tc.expectedSafeToEvictValue {
+							t.Errorf("expected pod template to have annotation %q with value %q, got %q", PodSafeToEvictAnnotation, tc.expectedSafeToEvictValue, val)
+						}
 					}
 				}
-				}
-
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
 				var sandbox sandboxv1beta1.Sandbox

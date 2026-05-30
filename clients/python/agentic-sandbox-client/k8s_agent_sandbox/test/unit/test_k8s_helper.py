@@ -182,8 +182,6 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
 
 
-
-
 @patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config")
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")

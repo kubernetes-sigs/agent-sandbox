@@ -17,7 +17,7 @@ import time
 import logging
 import sys
 import subprocess
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from pydantic import ValidationError
 from k8s_agent_sandbox import SandboxClient, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.models import (
@@ -463,3 +463,104 @@ if __name__ == "__main__":
         server_port=args.server_port,
         enable_tracing=args.enable_tracing
     )
+
+
+class TestKubernetes36Compatibility:
+    """Integration tests for kubernetes 36.0.0 authentication compatibility."""
+
+    @patch("k8s_agent_sandbox.utils.client")
+    @patch("k8s_agent_sandbox.k8s_helper.config")
+    @patch("k8s_agent_sandbox.k8s_helper.client")
+    def test_client_with_only_authorization_key(self, mock_k8s_client, mock_config, mock_utils_client):
+        """Test client works when kubernetes client uses only 'authorization' key (pre-36)."""
+        from k8s_agent_sandbox import SandboxClient
+        from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+        # Mock kubernetes config to only set 'authorization' key (pre-36 behavior)
+        mock_config_obj = MagicMock()
+        mock_config_obj.api_key = {'authorization': 'test-token-pre36'}
+
+        # Both mocks need to return the same config object for consistency
+        mock_k8s_client.Configuration.get_default_copy.return_value = mock_config_obj
+        mock_utils_client.Configuration.get_default_copy.return_value = mock_config_obj
+
+        # Mock API clients
+        mock_custom_api = MagicMock()
+        mock_core_api = MagicMock()
+        mock_k8s_client.CustomObjectsApi.return_value = mock_custom_api
+        mock_k8s_client.CoreV1Api.return_value = mock_core_api
+
+        # Create client - should normalize auth keys
+        connection_config = SandboxDirectConnectionConfig(api_url="http://test:8888")
+        client_instance = SandboxClient(connection_config=connection_config)
+
+        # Verify normalization happened - both keys should exist
+        assert 'authorization' in mock_config_obj.api_key
+        assert 'BearerToken' in mock_config_obj.api_key
+        assert mock_config_obj.api_key['authorization'] == 'test-token-pre36'
+        assert mock_config_obj.api_key['BearerToken'] == 'test-token-pre36'
+
+    @patch("k8s_agent_sandbox.utils.client")
+    @patch("k8s_agent_sandbox.k8s_helper.config")
+    @patch("k8s_agent_sandbox.k8s_helper.client")
+    def test_client_with_only_bearer_token_key(self, mock_k8s_client, mock_config, mock_utils_client):
+        """Test client works when kubernetes client uses only 'BearerToken' key (36+)."""
+        from k8s_agent_sandbox import SandboxClient
+        from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+        # Mock kubernetes config to only set 'BearerToken' key (36+ behavior)
+        mock_config_obj = MagicMock()
+        mock_config_obj.api_key = {'BearerToken': 'test-token-36plus'}
+
+        # Both mocks need to return the same config object for consistency
+        mock_k8s_client.Configuration.get_default_copy.return_value = mock_config_obj
+        mock_utils_client.Configuration.get_default_copy.return_value = mock_config_obj
+
+        # Mock API clients
+        mock_custom_api = MagicMock()
+        mock_core_api = MagicMock()
+        mock_k8s_client.CustomObjectsApi.return_value = mock_custom_api
+        mock_k8s_client.CoreV1Api.return_value = mock_core_api
+
+        # Create client - should normalize auth keys
+        connection_config = SandboxDirectConnectionConfig(api_url="http://test:8888")
+        client_instance = SandboxClient(connection_config=connection_config)
+
+        # Verify normalization happened - both keys should exist
+        assert 'authorization' in mock_config_obj.api_key
+        assert 'BearerToken' in mock_config_obj.api_key
+        assert mock_config_obj.api_key['authorization'] == 'test-token-36plus'
+        assert mock_config_obj.api_key['BearerToken'] == 'test-token-36plus'
+
+    @patch("k8s_agent_sandbox.utils.client")
+    @patch("k8s_agent_sandbox.k8s_helper.config")
+    @patch("k8s_agent_sandbox.k8s_helper.client")
+    def test_client_prioritizes_bearer_token(self, mock_k8s_client, mock_config, mock_utils_client):
+        """Test client prioritizes BearerToken when both keys exist with different values."""
+        from k8s_agent_sandbox import SandboxClient
+        from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+        # Mock kubernetes config with both keys having different values
+        mock_config_obj = MagicMock()
+        mock_config_obj.api_key = {
+            'BearerToken': 'new-token',
+            'authorization': 'old-token'
+        }
+
+        # Both mocks need to return the same config object for consistency
+        mock_k8s_client.Configuration.get_default_copy.return_value = mock_config_obj
+        mock_utils_client.Configuration.get_default_copy.return_value = mock_config_obj
+
+        # Mock API clients
+        mock_custom_api = MagicMock()
+        mock_core_api = MagicMock()
+        mock_k8s_client.CustomObjectsApi.return_value = mock_custom_api
+        mock_k8s_client.CoreV1Api.return_value = mock_core_api
+
+        # Create client - should normalize auth keys
+        connection_config = SandboxDirectConnectionConfig(api_url="http://test:8888")
+        client_instance = SandboxClient(connection_config=connection_config)
+
+        # Verify BearerToken won - both should have 'new-token'
+        assert mock_config_obj.api_key['authorization'] == 'new-token'
+        assert mock_config_obj.api_key['BearerToken'] == 'new-token'

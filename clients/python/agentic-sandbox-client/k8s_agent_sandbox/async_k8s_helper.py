@@ -32,6 +32,7 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
 )
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .utils import normalize_kubernetes_auth_config
 
 
 class AsyncK8sHelper:
@@ -52,6 +53,10 @@ class AsyncK8sHelper:
                 config.load_incluster_config()
             except config.ConfigException:
                 await config.load_kube_config()
+
+            # Normalize auth keys for kubernetes client version compatibility
+            normalize_kubernetes_auth_config()
+
             self._api_client = client.ApiClient()
             self.custom_objects_api = client.CustomObjectsApi(self._api_client)
             self.core_v1_api = client.CoreV1Api(self._api_client)

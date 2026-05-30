@@ -182,5 +182,21 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
 
 
+
+
+@patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config")
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperNormalization(unittest.TestCase):
+
+    def test_k8s_helper_init_calls_normalization(self, mock_config, mock_api_cls, mock_core_cls, mock_normalize):
+        """Test that K8sHelper.__init__ calls normalize_kubernetes_auth_config."""
+        helper = K8sHelper()
+
+        # Verify normalization was called
+        mock_normalize.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()

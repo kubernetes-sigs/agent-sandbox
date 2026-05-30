@@ -17,6 +17,7 @@ import time
 from typing import List
 from kubernetes import client, config, watch
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .utils import normalize_kubernetes_auth_config
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -37,6 +38,10 @@ class K8sHelper:
             config.load_incluster_config()
         except config.ConfigException:
             config.load_kube_config()
+
+        # Normalize auth keys for kubernetes client version compatibility
+        normalize_kubernetes_auth_config()
+
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 

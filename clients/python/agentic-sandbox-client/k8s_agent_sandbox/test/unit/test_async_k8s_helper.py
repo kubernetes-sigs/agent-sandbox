@@ -212,5 +212,25 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
+
+@patch("k8s_agent_sandbox.async_k8s_helper.normalize_kubernetes_auth_config")
+@patch("k8s_agent_sandbox.async_k8s_helper.client")
+@patch("k8s_agent_sandbox.async_k8s_helper.config")
+class TestAsyncK8sHelperNormalization(unittest.IsolatedAsyncioTestCase):
+
+    async def test_async_k8s_helper_init_calls_normalization(self, mock_config, mock_client, mock_normalize):
+        """Test that AsyncK8sHelper._ensure_initialized calls normalize_kubernetes_auth_config."""
+        # Setup mocks
+        mock_config.load_incluster_config.side_effect = mock_config.ConfigException()
+        mock_config.load_kube_config = AsyncMock()
+        mock_api_client = MagicMock()
+        mock_client.ApiClient.return_value = mock_api_client
+
+        helper = AsyncK8sHelper()
+        await helper._ensure_initialized()
+
+        # Verify normalization was called
+        mock_normalize.assert_called_once()
+
 if __name__ == "__main__":
     unittest.main()

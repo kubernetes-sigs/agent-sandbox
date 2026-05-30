@@ -152,12 +152,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// produced the IP (cache vs DNS vs override) and invalidate the cache
 	// entry on dial-class failures. The Rewrite callback re-uses the URL.
 	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, r.URL.Path, r.URL.RawQuery, h.cache)
+	// Detect Upgrade once and reuse: the Rewrite callback uses it to
+	// decide whether to strip Origin, the timeout block below uses it
+	// to skip the per-request deadline. Same predicate, same source of
+	// truth — easier to keep them in sync.
+	upgrade := isUpgradeRequest(r)
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = upstreamURL
 			// Clear inbound Host so net/http picks the URL host. Matches the
 			// Python router's behavior of stripping Host before forwarding.
 			pr.Out.Host = ""
+			// X-Forwarded-{For,Host,Proto} so the upstream sandbox can
+			// reconstruct the client-visible URL for self-links and
+			// redirects. SetXForwarded is the canonical helper —
+			// always present, no allocation when the headers already
+			// exist, and respects the inbound request's TLS state.
+			pr.SetXForwarded()
+			// Origin is a hard problem on upgrade. Many WebSocket
+			// backends (vscode-server is the classic case) validate
+			// Origin == Host for CSRF protection. We rewrite Host to
+			// the upstream's address, so a client-supplied Origin
+			// pointing at the router's external hostname will mismatch
+			// and the backend rejects the upgrade with a 1006 close.
+			// Dropping Origin tells the backend "no Origin assertion
+			// available", which CSRF-aware backends typically allow
+			// for non-browser callers; backends that require a present
+			// Origin still need a separate fix on their end, but the
+			// vscode/Jupyter family work as-is. We only strip on
+			// upgrade so normal HTTP CORS preflights are unaffected.
+			if upgrade {
+				pr.Out.Header.Del("Origin")
+			}
 			// Inject trace context into the outbound request so the sandbox
 			// sees a continuation of the inbound trace.
 			h.propagator.Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
@@ -201,7 +227,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 101 handshake is done the connection's TCP keepalive is the
 	// liveness signal, not our handler context.
 	ctx := r.Context()
-	if !isUpgradeRequest(r) {
+	if !upgrade {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, h.cfg.ProxyTimeout)
 		defer cancel()

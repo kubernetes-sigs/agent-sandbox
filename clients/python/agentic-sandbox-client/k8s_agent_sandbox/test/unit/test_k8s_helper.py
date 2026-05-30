@@ -202,12 +202,13 @@ class _K8sHelperPatchedBase(unittest.TestCase):
 class TestK8sHelperNormalization(_K8sHelperPatchedBase):
 
     def test_k8s_helper_init_calls_normalization(self):
-        """Test that K8sHelper.__init__ calls normalize_kubernetes_auth_config and passes the result to ApiClient."""
+        """Test that K8sHelper.__init__ loads into an explicit Configuration and passes it to normalize and ApiClient."""
         helper = K8sHelper()
 
         self.mock_normalize.assert_called_once()
-        self.assertIn('client_module', self.mock_normalize.call_args.kwargs)
-        self.mock_api_client_cls.assert_called_once_with(configuration=self.mock_normalize.return_value)
+        self.assertIn('configuration', self.mock_normalize.call_args.kwargs)
+        cfg = self.mock_normalize.call_args.kwargs['configuration']
+        self.mock_api_client_cls.assert_called_once_with(configuration=cfg)
 
 
 class TestK8sHelperClose(_K8sHelperPatchedBase):

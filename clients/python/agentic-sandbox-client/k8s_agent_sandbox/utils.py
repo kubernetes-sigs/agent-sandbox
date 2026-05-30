@@ -17,8 +17,8 @@ from typing import Protocol
 
 
 class _Configuration(Protocol):
-    api_key: dict | None
-    api_key_prefix: dict | None
+    api_key: dict[str, str] | None
+    api_key_prefix: dict[str, str] | None
 
 
 class _ClientModule(Protocol):
@@ -27,7 +27,10 @@ class _ClientModule(Protocol):
         def get_default_copy(cls) -> '_Configuration': ...
 
 
-def normalize_kubernetes_auth_config(client_module: _ClientModule | None = None) -> _Configuration:
+def normalize_kubernetes_auth_config(
+    client_module: _ClientModule | None = None,
+    configuration: _Configuration | None = None,
+) -> _Configuration:
     """Ensure both 'authorization' and 'BearerToken' api_key entries are populated.
 
     Some versions of the kubernetes and kubernetes_asyncio clients expect
@@ -43,13 +46,17 @@ def normalize_kubernetes_auth_config(client_module: _ClientModule | None = None)
     pass it into ApiClient(configuration=...) rather than relying on the
     global default, to avoid cross-component side effects.
 
-    Pass client_module to target a specific client's configuration
-    (e.g. kubernetes_asyncio.client). Defaults to kubernetes.client.
+    Pass an explicit configuration instance (loaded via client_configuration=
+    on load_incluster_config / load_kube_config) to avoid touching the global
+    default entirely. If not provided, falls back to client_module.Configuration
+    .get_default_copy() (defaults to kubernetes.client).
     """
-    if client_module is None:
-        from kubernetes import client as client_module
+    if configuration is None:
+        if client_module is None:
+            from kubernetes import client as client_module
+        configuration = client_module.Configuration.get_default_copy()
 
-    config = client_module.Configuration.get_default_copy()
+    config = configuration
 
     if config.api_key_prefix is not None:
         has_bearer_prefix = 'BearerToken' in config.api_key_prefix

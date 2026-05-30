@@ -34,12 +34,13 @@ class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
     def __init__(self):
+        cfg = client.Configuration()
         try:
-            config.load_incluster_config()
+            config.load_incluster_config(client_configuration=cfg)
         except config.ConfigException:
-            config.load_kube_config()
+            config.load_kube_config(client_configuration=cfg)
 
-        cfg = normalize_kubernetes_auth_config(client_module=client)
+        normalize_kubernetes_auth_config(configuration=cfg)
         self._api_client = client.ApiClient(configuration=cfg)
         self.custom_objects_api = client.CustomObjectsApi(self._api_client)
         self.core_v1_api = client.CoreV1Api(self._api_client)

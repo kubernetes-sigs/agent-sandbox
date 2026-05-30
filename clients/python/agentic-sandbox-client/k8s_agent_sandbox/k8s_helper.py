@@ -40,9 +40,15 @@ class K8sHelper:
             config.load_kube_config()
 
         cfg = normalize_kubernetes_auth_config(client_module=client)
-        api_client = client.ApiClient(configuration=cfg)
-        self.custom_objects_api = client.CustomObjectsApi(api_client)
-        self.core_v1_api = client.CoreV1Api(api_client)
+        self._api_client = client.ApiClient(configuration=cfg)
+        self.custom_objects_api = client.CustomObjectsApi(self._api_client)
+        self.core_v1_api = client.CoreV1Api(self._api_client)
+
+    def close(self):
+        """Closes the Kubernetes API client and releases connection pool resources."""
+        if self._api_client:
+            self._api_client.close()
+            self._api_client = None
 
     def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
         """Creates a SandboxClaim custom resource."""

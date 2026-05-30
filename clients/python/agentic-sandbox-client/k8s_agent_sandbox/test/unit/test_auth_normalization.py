@@ -52,10 +52,20 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         self.assertEqual(mock_config.api_key['authorization'], 'token-456')
 
     def test_normalize_with_both_keys_different_values(self):
-        """Test normalization raises ValueError when both keys exist with different values."""
+        """Test normalization raises ValueError when both api_key entries exist with different values."""
         mock_client, mock_config = _make_client({'BearerToken': 'new-token', 'authorization': 'old-token'})
 
-        with self.assertRaises(ValueError, msg='different values'):
+        with self.assertRaisesRegex(ValueError, 'different values'):
+            normalize_kubernetes_auth_config(client_module=mock_client)
+
+    def test_normalize_raises_on_prefix_mismatch(self):
+        """Test normalization raises ValueError when both api_key_prefix entries differ."""
+        mock_client, mock_config = _make_client(
+            api_key={'BearerToken': 'token', 'authorization': 'token'},
+            api_key_prefix={'BearerToken': 'Bearer', 'authorization': 'Token'},
+        )
+
+        with self.assertRaisesRegex(ValueError, 'api_key_prefix'):
             normalize_kubernetes_auth_config(client_module=mock_client)
 
     def test_normalize_with_both_keys_same_value(self):
@@ -110,16 +120,16 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         self.assertEqual(mock_config.api_key['authorization'], 'token-456')
         self.assertEqual(mock_config.api_key_prefix['authorization'], 'Bearer')
 
-    def test_normalize_does_not_overwrite_existing_prefix(self):
-        """Test that an existing api_key_prefix entry is not overwritten."""
+    def test_normalize_does_not_overwrite_existing_prefix_when_same(self):
+        """Test that an existing api_key_prefix entry is not overwritten when values match."""
         mock_client, mock_config = _make_client(
             api_key={'BearerToken': 'token-456'},
-            api_key_prefix={'BearerToken': 'Bearer', 'authorization': 'Token'},
+            api_key_prefix={'BearerToken': 'Bearer', 'authorization': 'Bearer'},
         )
 
-        normalize_kubernetes_auth_config(client_module=mock_client)
+        result = normalize_kubernetes_auth_config(client_module=mock_client)
 
-        self.assertEqual(mock_config.api_key_prefix['authorization'], 'Token')
+        self.assertEqual(mock_config.api_key_prefix['authorization'], 'Bearer')
 
 
 if __name__ == '__main__':

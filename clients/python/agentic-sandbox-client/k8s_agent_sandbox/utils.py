@@ -23,9 +23,9 @@ def normalize_kubernetes_auth_config(client_module=None):
     token from whichever key is present to the one that is missing, so both
     clients work regardless of which key was set by the config loader.
 
-    Raises ValueError if both keys are set to different values, as proceeding
-    with mismatched credentials will cause auth failures. api_key_prefix is
-    mirrored using the same logic.
+    Raises ValueError if both token keys or both prefix keys are set to
+    different values, as proceeding with a mismatch will cause auth failures.
+    api_key_prefix is mirrored using the same logic.
 
     Returns the (possibly modified) Configuration instance. Callers should
     pass it into ApiClient(configuration=...) rather than relying on the
@@ -38,6 +38,16 @@ def normalize_kubernetes_auth_config(client_module=None):
         from kubernetes import client as client_module
 
     config = client_module.Configuration.get_default_copy()
+
+    if config.api_key_prefix:
+        bearer_prefix = config.api_key_prefix.get('BearerToken')
+        auth_prefix = config.api_key_prefix.get('authorization')
+        if bearer_prefix and auth_prefix and bearer_prefix != auth_prefix:
+            raise ValueError(
+                "Both 'BearerToken' and 'authorization' api_key_prefix entries are set "
+                "with different values. Verify your kubeconfig — the Authorization header "
+                "prefix will differ depending on which key the installed client version reads."
+            )
 
     if config.api_key:
         bearer_token = config.api_key.get('BearerToken')

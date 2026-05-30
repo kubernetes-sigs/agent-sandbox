@@ -186,23 +186,17 @@ class _K8sHelperPatchedBase(unittest.TestCase):
     """Base class that patches K8sHelper's external dependencies via setUp/tearDown."""
 
     def setUp(self):
-        self.patchers = [
-            patch("k8s_agent_sandbox.k8s_helper.config"),
-            patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi"),
-            patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api"),
-            patch("k8s_agent_sandbox.k8s_helper.client.ApiClient"),
-            patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config"),
-        ]
-        (self.mock_config,
-         self.mock_custom_objects_api_cls,
-         self.mock_core_cls,
-         self.mock_api_client_cls,
-         self.mock_normalize) = [p.start() for p in self.patchers]
-        self.mock_config.ConfigException = Exception
+        def start(target):
+            p = patch(target)
+            self.addCleanup(p.stop)
+            return p.start()
 
-    def tearDown(self):
-        for p in self.patchers:
-            p.stop()
+        self.mock_config = start("k8s_agent_sandbox.k8s_helper.config")
+        self.mock_custom_objects_api_cls = start("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+        self.mock_core_cls = start("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+        self.mock_api_client_cls = start("k8s_agent_sandbox.k8s_helper.client.ApiClient")
+        self.mock_normalize = start("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config")
+        self.mock_config.ConfigException = Exception
 
 
 class TestK8sHelperNormalization(_K8sHelperPatchedBase):

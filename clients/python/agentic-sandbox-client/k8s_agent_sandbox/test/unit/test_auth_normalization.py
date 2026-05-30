@@ -142,8 +142,8 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
         self.assertEqual(mock_config.api_key_prefix['authorization'], 'Bearer')
 
-    def test_normalize_initializes_prefix_dict_when_none(self):
-        """Test that api_key_prefix is initialized to {} when api_key is present but api_key_prefix is None."""
+    def test_normalize_initializes_prefix_and_sets_bearer_default_when_none(self):
+        """Test that api_key_prefix is initialized and 'Bearer' is set for all token keys when prefix was None."""
         mock_client, mock_config = _make_client(
             api_key={'authorization': 'token-123'},
             api_key_prefix=None,
@@ -152,6 +152,8 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         result = normalize_kubernetes_auth_config(client_module=mock_client)
 
         self.assertIsNotNone(result.api_key_prefix)
+        self.assertEqual(result.api_key_prefix.get('authorization'), 'Bearer')
+        self.assertEqual(result.api_key_prefix.get('BearerToken'), 'Bearer')
 
 
 if __name__ == '__main__':

@@ -78,21 +78,25 @@ def normalize_kubernetes_auth_config(client_module: _ClientModule | None = None)
         elif has_auth:
             config.api_key['BearerToken'] = config.api_key['authorization']
 
-    # Ensure api_key_prefix is a dict so prefix mirroring can populate it when
-    # api_key is present but api_key_prefix was never initialized.
-    if config.api_key is not None and config.api_key_prefix is None:
-        config.api_key_prefix = {}
+    # Ensure api_key_prefix is a dict when tokens are present, then mirror or
+    # initialize prefix entries so the Authorization header scheme is always set.
+    if config.api_key is not None:
+        if config.api_key_prefix is None:
+            config.api_key_prefix = {}
 
-    # Mirror prefix independently — even when both tokens were already present,
-    # a missing prefix entry would cause the Authorization header to be malformed
-    # for whichever client version reads the key that lacks a prefix.
-    if config.api_key_prefix is not None:
         has_bearer_prefix = 'BearerToken' in config.api_key_prefix
         has_auth_prefix = 'authorization' in config.api_key_prefix
+
         if has_bearer_prefix and not has_auth_prefix:
+            # Mirror the existing prefix to the missing key
             config.api_key_prefix['authorization'] = config.api_key_prefix['BearerToken']
         elif has_auth_prefix and not has_bearer_prefix:
             config.api_key_prefix['BearerToken'] = config.api_key_prefix['authorization']
+        elif not has_bearer_prefix and not has_auth_prefix:
+            # No prefix configured at all — set 'Bearer' as default for each token key present
+            for key in ('BearerToken', 'authorization'):
+                if key in config.api_key:
+                    config.api_key_prefix[key] = 'Bearer'
 
     return config
 

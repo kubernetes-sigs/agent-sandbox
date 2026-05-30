@@ -90,7 +90,9 @@ async function deployRouter(tc: TestContext, namespace: string): Promise<void> {
   const manifest = fs
     .readFileSync(ROUTER_YAML_PATH, "utf-8")
     .replaceAll("IMAGE_PLACEHOLDER", routerImage)
-    .replaceAll("${ROUTER_IMAGE}", routerImage);
+    .replaceAll("${ROUTER_IMAGE}", routerImage)
+    // Enable unauthenticated mode for E2E test execution (mirrors Python E2E test)
+    .replaceAll('value: "false"', 'value: "true"');
 
   console.log(`Applying router manifest to namespace: ${namespace}`);
   tc.applyManifestText(manifest, namespace);

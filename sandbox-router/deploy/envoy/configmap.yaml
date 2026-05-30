@@ -37,6 +37,11 @@ data:
               # Forward x-request-id, generate one if missing — useful when
               # paired with ext_proc to trace a request end-to-end.
               generate_request_id: true
+              # use_remote_address gives us X-Forwarded-For (client IP) and
+              # X-Forwarded-Proto (http/https from the listener) for free
+              # on every upstream request. X-Forwarded-Host is set
+              # separately in request_headers_to_add below — Envoy doesn't
+              # populate it as part of use_remote_address.
               use_remote_address: true
 
               access_log:
@@ -49,6 +54,18 @@ data:
                 virtual_hosts:
                 - name: any
                   domains: ["*"]
+                  # X-Forwarded-Host: copy the inbound :authority (the
+                  # client-visible Host) into a header the upstream can
+                  # read. Browser-facing backends like vscode-server and
+                  # Jupyter need this to construct correct self-links
+                  # and redirects when sitting behind a proxy that
+                  # dispatches by IP. Overwrite rather than append so a
+                  # well-formed single value reaches the backend.
+                  request_headers_to_add:
+                  - header:
+                      key: X-Forwarded-Host
+                      value: "%REQ(:AUTHORITY)%"
+                    append_action: OVERWRITE_IF_EXISTS_OR_ADD
                   routes:
                   # Cheap liveness — bypasses ext_proc so a broken
                   # ext-proc service doesn't take Envoy down with it.

@@ -51,6 +51,13 @@ Routing precedence:
 
 The ext_proc handler returns Python-router-compatible JSON error bodies (`{"detail":"..."}`) for validation failures so existing clients keep working.
 
+### WebSockets and X-Forwarded-* headers
+
+Two small carve-outs make browser-facing backends (vscode-server, Jupyter, anything that holds an Origin/Host CSRF check) work without changes:
+
+- **`Origin` is stripped on upgrade requests.** When the inbound request carries `Connection: Upgrade` + a non-empty `Upgrade:` header, the ext_proc handler returns a `HeaderMutation` with `RemoveHeaders: ["origin"]` alongside the dst-host set. The reason: vscode-server and similar backends reject the WebSocket upgrade with a `1006` close when the client-supplied `Origin` doesn't match the backend's own `Host`. Normal HTTP traffic preserves `Origin` so CORS preflights stay intact.
+- **`X-Forwarded-Host` is set in the Envoy config** via `request_headers_to_add` (the value is `%REQ(:AUTHORITY)%`). `X-Forwarded-For` and `X-Forwarded-Proto` come for free from `use_remote_address: true`. Browser-facing backends use these to construct correct self-links and redirects.
+
 ## Components
 
 | Path | Purpose |

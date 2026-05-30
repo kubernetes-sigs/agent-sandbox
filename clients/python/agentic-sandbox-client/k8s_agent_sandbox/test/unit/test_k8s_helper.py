@@ -182,36 +182,46 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
 
 
-@patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config")
-@patch("k8s_agent_sandbox.k8s_helper.client.ApiClient")
-@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
-@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-@patch("k8s_agent_sandbox.k8s_helper.config")
-class TestK8sHelperNormalization(unittest.TestCase):
+class _K8sHelperPatchedBase(unittest.TestCase):
+    """Base class that patches K8sHelper's external dependencies via setUp/tearDown."""
 
-    def test_k8s_helper_init_calls_normalization(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_api_client_cls, mock_normalize):
+    def setUp(self):
+        self.patchers = [
+            patch("k8s_agent_sandbox.k8s_helper.config"),
+            patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi"),
+            patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api"),
+            patch("k8s_agent_sandbox.k8s_helper.client.ApiClient"),
+            patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config"),
+        ]
+        (self.mock_config,
+         self.mock_custom_objects_api_cls,
+         self.mock_core_cls,
+         self.mock_api_client_cls,
+         self.mock_normalize) = [p.start() for p in self.patchers]
+        self.mock_config.ConfigException = Exception
+
+    def tearDown(self):
+        for p in self.patchers:
+            p.stop()
+
+
+class TestK8sHelperNormalization(_K8sHelperPatchedBase):
+
+    def test_k8s_helper_init_calls_normalization(self):
         """Test that K8sHelper.__init__ calls normalize_kubernetes_auth_config and passes the result to ApiClient."""
-        mock_config.ConfigException = Exception
-
         helper = K8sHelper()
 
-        mock_normalize.assert_called_once()
-        self.assertIn('client_module', mock_normalize.call_args.kwargs)
-        mock_api_client_cls.assert_called_once_with(configuration=mock_normalize.return_value)
+        self.mock_normalize.assert_called_once()
+        self.assertIn('client_module', self.mock_normalize.call_args.kwargs)
+        self.mock_api_client_cls.assert_called_once_with(configuration=self.mock_normalize.return_value)
 
 
-@patch("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config")
-@patch("k8s_agent_sandbox.k8s_helper.client.ApiClient")
-@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
-@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
-@patch("k8s_agent_sandbox.k8s_helper.config")
-class TestK8sHelperClose(unittest.TestCase):
+class TestK8sHelperClose(_K8sHelperPatchedBase):
 
-    def test_close_calls_api_client_close_and_nulls_state(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_api_client_cls, mock_normalize):
+    def test_close_calls_api_client_close_and_nulls_state(self):
         """Test that close() releases the ApiClient and nulls out API attributes."""
-        mock_config.ConfigException = Exception
         mock_api_client_instance = MagicMock()
-        mock_api_client_cls.return_value = mock_api_client_instance
+        self.mock_api_client_cls.return_value = mock_api_client_instance
 
         helper = K8sHelper()
         helper.close()
@@ -221,13 +231,19 @@ class TestK8sHelperClose(unittest.TestCase):
         self.assertIsNone(helper.custom_objects_api)
         self.assertIsNone(helper.core_v1_api)
 
-    def test_close_is_idempotent(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_api_client_cls, mock_normalize):
-        """Test that calling close() twice does not raise."""
-        mock_config.ConfigException = Exception
+    def test_close_is_idempotent(self):
+        """Test that calling close() twice only closes the ApiClient once and leaves state as None."""
+        mock_api_client_instance = MagicMock()
+        self.mock_api_client_cls.return_value = mock_api_client_instance
 
         helper = K8sHelper()
         helper.close()
         helper.close()
+
+        mock_api_client_instance.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+        self.assertIsNone(helper.custom_objects_api)
+        self.assertIsNone(helper.core_v1_api)
 
 
 if __name__ == '__main__':

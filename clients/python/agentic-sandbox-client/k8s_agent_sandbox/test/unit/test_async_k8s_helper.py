@@ -235,5 +235,38 @@ class TestAsyncK8sHelperNormalization(unittest.IsolatedAsyncioTestCase):
         # Verify the returned config was passed to ApiClient
         mock_client.ApiClient.assert_called_once_with(configuration=mock_normalize.return_value)
 
+class TestAsyncK8sHelperClose(unittest.IsolatedAsyncioTestCase):
+
+    async def test_close_nulls_state(self):
+        """Test that close() calls ApiClient.close() and nulls all API attributes."""
+        helper = AsyncK8sHelper()
+        mock_api_client = AsyncMock()
+        helper._api_client = mock_api_client
+        helper.custom_objects_api = MagicMock()
+        helper.core_v1_api = MagicMock()
+        helper._initialized = True
+
+        await helper.close()
+
+        mock_api_client.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+        self.assertIsNone(helper.custom_objects_api)
+        self.assertIsNone(helper.core_v1_api)
+        self.assertFalse(helper._initialized)
+
+    async def test_close_is_idempotent(self):
+        """Test that calling close() twice only closes the ApiClient once."""
+        helper = AsyncK8sHelper()
+        mock_api_client = AsyncMock()
+        helper._api_client = mock_api_client
+        helper._initialized = True
+
+        await helper.close()
+        await helper.close()
+
+        mock_api_client.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+
+
 if __name__ == "__main__":
     unittest.main()

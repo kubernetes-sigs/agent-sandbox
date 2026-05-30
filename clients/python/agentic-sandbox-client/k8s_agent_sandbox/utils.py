@@ -13,9 +13,10 @@
 # limitations under the License.
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 
-def normalize_kubernetes_auth_config(client_module=None):
+def normalize_kubernetes_auth_config(client_module: Any = None) -> Any:
     """Ensure both 'authorization' and 'BearerToken' api_key entries are populated.
 
     Some versions of the kubernetes and kubernetes_asyncio clients expect

@@ -445,3 +445,95 @@ func TestResolve_PrefersCacheOverDNS(t *testing.T) {
 		t.Errorf("source: got %q want cache", source)
 	}
 }
+
+// removeHeadersFrom extracts the RemoveHeaders list from a successful
+// HeadersResponse.
+func removeHeadersFrom(resp *extprocv3.ProcessingResponse) []string {
+	hr := resp.GetRequestHeaders()
+	if hr == nil || hr.Response == nil || hr.Response.HeaderMutation == nil {
+		return nil
+	}
+	return hr.Response.HeaderMutation.RemoveHeaders
+}
+
+func TestHandle_StripsOriginOnUpgrade(t *testing.T) {
+	s, stub := newServer(t)
+	uid := types.UID("ws-uid")
+	stub[uid] = cache.Entry{PodIP: "10.0.0.7"}
+
+	// True WebSocket upgrade: BOTH Connection: Upgrade AND a non-empty
+	// Upgrade header. Envoy normalizes header keys to lowercase, so
+	// "origin" — not "Origin" — is the key we must remove.
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID:  "alpha",
+		HeaderSandboxUID: string(uid),
+		"Connection":     "keep-alive, Upgrade",
+		"Upgrade":        "websocket",
+		"Origin":         "https://router.example.com",
+	}))
+	removed := removeHeadersFrom(resp)
+	found := false
+	for _, h := range removed {
+		if h == "origin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected RemoveHeaders to contain \"origin\"; got %v", removed)
+	}
+	// And the dst-host mutation must still be there — we're adding,
+	// not replacing the existing mutation.
+	if dst, ok := originalDstHostFrom(resp); !ok || dst != "10.0.0.7:8888" {
+		t.Fatalf("dst-host mutation lost: got %q (ok=%v)", dst, ok)
+	}
+}
+
+func TestHandle_NonUpgradePreservesOrigin(t *testing.T) {
+	// Guard against the strip leaking into normal HTTP — would break
+	// CORS preflights and any backend that uses Origin on
+	// non-WebSocket traffic.
+	s, stub := newServer(t)
+	uid := types.UID("plain-uid")
+	stub[uid] = cache.Entry{PodIP: "10.0.0.8"}
+
+	resp := s.handle(context.Background(), reqHeaders(map[string]string{
+		HeaderSandboxID:  "alpha",
+		HeaderSandboxUID: string(uid),
+		"Origin":         "https://client.example.com",
+		// no Connection / Upgrade headers
+	}))
+	for _, h := range removeHeadersFrom(resp) {
+		if h == "origin" {
+			t.Fatalf("Origin must not be stripped on non-upgrade; got RemoveHeaders=%v", removeHeadersFrom(resp))
+		}
+	}
+}
+
+func TestReadHeaders_UpgradeDetection(t *testing.T) {
+	// Locks in the predicate: an upgrade is recognized iff BOTH
+	// Connection contains an upgrade token AND Upgrade is non-empty.
+	// Matches httputil.ReverseProxy's internal check on the
+	// from-scratch router so behavior is consistent across PRs.
+	cases := []struct {
+		name string
+		hdrs map[string]string
+		want bool
+	}{
+		{"both present", map[string]string{"Connection": "Upgrade", "Upgrade": "websocket"}, true},
+		{"connection list with upgrade token", map[string]string{"Connection": "keep-alive, Upgrade", "Upgrade": "websocket"}, true},
+		{"case-insensitive scheme", map[string]string{"Connection": "upgrade", "Upgrade": "WebSocket"}, true},
+		{"missing Connection", map[string]string{"Upgrade": "websocket"}, false},
+		{"missing Upgrade", map[string]string{"Connection": "Upgrade"}, false},
+		{"connection without upgrade token", map[string]string{"Connection": "keep-alive", "Upgrade": "websocket"}, false},
+		{"empty Upgrade value", map[string]string{"Connection": "Upgrade", "Upgrade": ""}, false},
+		{"neither", map[string]string{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := readHeaders(hdrs(tc.hdrs).Headers).upgrade
+			if got != tc.want {
+				t.Fatalf("got upgrade=%v want %v (hdrs=%v)", got, tc.want, tc.hdrs)
+			}
+		})
+	}
+}

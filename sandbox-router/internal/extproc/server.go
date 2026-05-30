@@ -238,20 +238,33 @@ func (s *Server) onRequestHeaders(_ context.Context, hdrs *extprocv3.HttpHeaders
 		"source", source,
 	)
 
+	mutation := &extprocv3.HeaderMutation{
+		SetHeaders: []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:      HeaderOriginalDstHost,
+				RawValue: []byte(target),
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}},
+	}
+	if r.upgrade {
+		// Strip Origin on upgrade so WebSocket backends that validate
+		// Origin == Host for CSRF protection (vscode-server, Jupyter,
+		// etc.) don't reject the upgrade with a 1006 close because the
+		// client-supplied Origin (router's external hostname) doesn't
+		// match the backend's own Host. Envoy normalizes header keys
+		// to lowercase, so "origin" — not "Origin" — is the key to
+		// remove. Mirrors the equivalent fix on the from-scratch Go
+		// router (PR #838, commit d04bfb5).
+		mutation.RemoveHeaders = append(mutation.RemoveHeaders, "origin")
+	}
+
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
 				Response: &extprocv3.CommonResponse{
-					Status: extprocv3.CommonResponse_CONTINUE,
-					HeaderMutation: &extprocv3.HeaderMutation{
-						SetHeaders: []*corev3.HeaderValueOption{{
-							Header: &corev3.HeaderValue{
-								Key:      HeaderOriginalDstHost,
-								RawValue: []byte(target),
-							},
-							AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-						}},
-					},
+					Status:         extprocv3.CommonResponse_CONTINUE,
+					HeaderMutation: mutation,
 					// Route is recomputed after our mutation so Envoy picks
 					// the ORIGINAL_DST cluster with the new dst host.
 					ClearRouteCache: true,
@@ -283,6 +296,11 @@ type request struct {
 	uid       string
 	namespace string
 	port      int
+	// upgrade is true when the inbound request asked to switch
+	// protocols (Connection: Upgrade + Upgrade: <proto>, typically
+	// WebSocket). Used to trigger Origin stripping on the outbound
+	// request — see onRequestHeaders.
+	upgrade bool
 }
 
 // readHeaders extracts the X-Sandbox-* values from an Envoy HeaderMap.
@@ -294,6 +312,8 @@ func readHeaders(m *corev3.HeaderMap) request {
 	if m == nil {
 		return r
 	}
+	var hasConnectionUpgrade bool
+	var hasUpgradeValue bool
 	for _, h := range m.Headers {
 		switch strings.ToLower(h.Key) {
 		case HeaderSandboxID:
@@ -316,8 +336,26 @@ func readHeaders(m *corev3.HeaderMap) request {
 				continue
 			}
 			r.port = n
+		case "connection":
+			// RFC 7230 §6.7: Connection is a comma-separated list of
+			// option tokens. Check case-insensitively for an "upgrade"
+			// token, not equality, so values like "keep-alive, upgrade"
+			// are recognized.
+			for tok := range strings.SplitSeq(headerString(h), ",") {
+				if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+					hasConnectionUpgrade = true
+					break
+				}
+			}
+		case "upgrade":
+			if headerString(h) != "" {
+				hasUpgradeValue = true
+			}
 		}
 	}
+	// True upgrade requires BOTH headers — matches the predicate
+	// httputil.ReverseProxy uses internally.
+	r.upgrade = hasConnectionUpgrade && hasUpgradeValue
 	return r
 }
 

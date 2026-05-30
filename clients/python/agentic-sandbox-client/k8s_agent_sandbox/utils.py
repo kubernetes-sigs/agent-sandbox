@@ -16,37 +16,46 @@ from datetime import datetime, timedelta, timezone
 
 
 def normalize_kubernetes_auth_config(client_module=None):
-    """Normalize api_key to support both kubernetes <36.0.0 and >=36.0.0.
+    """Ensure both 'authorization' and 'BearerToken' api_key entries are populated.
 
-    Pre-36: Uses 'authorization' key
-    36+: Uses 'BearerToken' key
+    Some versions of the kubernetes and kubernetes_asyncio clients expect
+    'authorization'; others expect 'BearerToken'. This function copies the
+    token from whichever key is present to the one that is missing, so both
+    clients work regardless of which key was set by the config loader.
 
-    Copies the token to whichever key is missing. If both keys are already set,
-    no changes are made to avoid silently switching credentials.
-    Pass client_module to use a different client (e.g. kubernetes_asyncio.client for async usage).
+    If both keys are already set, no changes are made to avoid silently
+    switching credentials. api_key_prefix is mirrored using the same logic.
+
+    Pass client_module to target a specific client's configuration
+    (e.g. kubernetes_asyncio.client). Defaults to kubernetes.client.
     """
     if client_module is None:
         from kubernetes import client as client_module
 
     config = client_module.Configuration.get_default_copy()
+    changed = False
+
     if config.api_key:
         bearer_token = config.api_key.get('BearerToken')
         authorization = config.api_key.get('authorization')
 
         if bearer_token and not authorization:
             config.api_key['authorization'] = bearer_token
+            changed = True
             if config.api_key_prefix and 'authorization' not in config.api_key_prefix:
                 bearer_prefix = config.api_key_prefix.get('BearerToken')
                 if bearer_prefix:
                     config.api_key_prefix['authorization'] = bearer_prefix
         elif authorization and not bearer_token:
             config.api_key['BearerToken'] = authorization
+            changed = True
             if config.api_key_prefix and 'BearerToken' not in config.api_key_prefix:
                 auth_prefix = config.api_key_prefix.get('authorization')
                 if auth_prefix:
                     config.api_key_prefix['BearerToken'] = auth_prefix
 
-    client_module.Configuration.set_default(config)
+    if changed:
+        client_module.Configuration.set_default(config)
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:

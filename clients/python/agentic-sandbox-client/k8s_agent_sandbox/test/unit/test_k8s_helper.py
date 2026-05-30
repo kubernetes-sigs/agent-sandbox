@@ -188,7 +188,7 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestK8sHelperNormalization(unittest.TestCase):
 
-    def test_k8s_helper_init_calls_normalization(self, mock_config, mock_api_cls, mock_core_cls, mock_normalize):
+    def test_k8s_helper_init_calls_normalization(self, mock_config, mock_custom_objects_api_cls, mock_core_cls, mock_normalize):
         """Test that K8sHelper.__init__ calls normalize_kubernetes_auth_config."""
         mock_config.ConfigException = Exception
 

@@ -55,10 +55,10 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
         normalize_kubernetes_auth_config(client_module=mock_client)
 
-        # Both keys left as-is to avoid silently switching credentials
+        # Both keys left as-is; set_default not called since nothing changed
         self.assertEqual(mock_config.api_key['BearerToken'], 'new-token')
         self.assertEqual(mock_config.api_key['authorization'], 'old-token')
-        mock_client.Configuration.set_default.assert_called_once_with(mock_config)
+        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_with_both_keys_same_value(self):
         """Test normalization is a no-op when both keys already exist with same value."""
@@ -68,7 +68,7 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
 
         self.assertEqual(mock_config.api_key['BearerToken'], 'same-token')
         self.assertEqual(mock_config.api_key['authorization'], 'same-token')
-        mock_client.Configuration.set_default.assert_called_once_with(mock_config)
+        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_with_no_api_key(self):
         """Test normalization is a no-op when api_key is None."""
@@ -77,7 +77,7 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         normalize_kubernetes_auth_config(client_module=mock_client)
 
         self.assertIsNone(mock_config.api_key)
-        mock_client.Configuration.set_default.assert_called_once_with(mock_config)
+        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_with_empty_api_key(self):
         """Test normalization is a no-op when api_key is empty dict."""
@@ -86,7 +86,7 @@ class TestNormalizeKubernetesAuthConfig(unittest.TestCase):
         normalize_kubernetes_auth_config(client_module=mock_client)
 
         self.assertEqual(mock_config.api_key, {})
-        mock_client.Configuration.set_default.assert_called_once_with(mock_config)
+        mock_client.Configuration.set_default.assert_not_called()
 
     def test_normalize_copies_prefix_with_authorization_key(self):
         """Test that api_key_prefix is mirrored when copying authorization to BearerToken."""

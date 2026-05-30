@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -124,6 +125,11 @@ type SandboxReconciler struct {
 	Scheme        *runtime.Scheme
 	Tracer        asmetrics.Instrumenter
 	ClusterDomain string
+
+	// metricsCache stores the last known metrics labels for each sandbox.
+	metricsCache     map[types.NamespacedName]asmetrics.AgentSandboxesMetricKey
+	metricsCacheLock sync.Mutex
+	metricsInitOnce  sync.Once
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -147,14 +153,23 @@ type SandboxReconciler struct {
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	r.metricsInitOnce.Do(func() {
+		if err := r.initializeMetrics(ctx); err != nil {
+			logger.Error(err, "Failed to initialize metrics")
+		}
+	})
+
 	sandbox := &sandboxv1beta1.Sandbox{}
 	if err := r.Get(ctx, req.NamespacedName, sandbox); err != nil {
 		if k8serrors.IsNotFound(err) {
 			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
+			r.updateMetrics(req.NamespacedName, nil)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+
+	r.updateMetrics(req.NamespacedName, sandbox)
 
 	// Start Tracing Span
 	initialAttrs := map[string]string{
@@ -220,6 +235,59 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	// return errors seen
 	return result, err
+}
+
+func (r *SandboxReconciler) initializeMetrics(ctx context.Context) error {
+	var sandboxList sandboxv1beta1.SandboxList
+	if err := r.List(ctx, &sandboxList, client.UnsafeDisableDeepCopy); err != nil {
+		return err
+	}
+
+	r.metricsCacheLock.Lock()
+	defer r.metricsCacheLock.Unlock()
+
+	if r.metricsCache == nil {
+		r.metricsCache = make(map[types.NamespacedName]asmetrics.AgentSandboxesMetricKey)
+	}
+
+	for _, s := range sandboxList.Items {
+		key := asmetrics.CalculateAgentSandboxesMetricKey(&s)
+		nn := types.NamespacedName{Namespace: s.Namespace, Name: s.Name}
+		r.metricsCache[nn] = key
+		asmetrics.AgentSandboxes.WithLabelValues(key.Slice()...).Inc()
+	}
+
+	return nil
+}
+
+func (r *SandboxReconciler) updateMetrics(nn types.NamespacedName, sandbox *sandboxv1beta1.Sandbox) {
+	r.metricsCacheLock.Lock()
+	defer r.metricsCacheLock.Unlock()
+
+	if r.metricsCache == nil {
+		r.metricsCache = make(map[types.NamespacedName]asmetrics.AgentSandboxesMetricKey)
+	}
+
+	oldKey, found := r.metricsCache[nn]
+	if sandbox == nil {
+		if found {
+			asmetrics.AgentSandboxes.WithLabelValues(oldKey.Slice()...).Dec()
+			delete(r.metricsCache, nn)
+		}
+		return
+	}
+
+	newKey := asmetrics.CalculateAgentSandboxesMetricKey(sandbox)
+	if found {
+		if oldKey != newKey {
+			asmetrics.AgentSandboxes.WithLabelValues(oldKey.Slice()...).Dec()
+			asmetrics.AgentSandboxes.WithLabelValues(newKey.Slice()...).Inc()
+			r.metricsCache[nn] = newKey
+		}
+	} else {
+		asmetrics.AgentSandboxes.WithLabelValues(newKey.Slice()...).Inc()
+		r.metricsCache[nn] = newKey
+	}
 }
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {

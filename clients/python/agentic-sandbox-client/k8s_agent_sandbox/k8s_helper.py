@@ -43,6 +43,9 @@ class K8sHelper:
 
     def __init__(self):
         self._closed = False
+        self._api_client = None
+        self.custom_objects_api = None
+        self.core_v1_api = None
         cfg = client.Configuration()
         try:
             config.load_incluster_config(client_configuration=cfg)

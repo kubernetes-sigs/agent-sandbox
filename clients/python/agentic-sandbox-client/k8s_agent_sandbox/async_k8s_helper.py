@@ -328,9 +328,10 @@ class AsyncK8sHelper:
 
     async def close(self):
         """Closes the shared Kubernetes API client session."""
-        if self._api_client is not None:
-            await self._api_client.close()
-            self._api_client = None
-            self.custom_objects_api = None
-            self.core_v1_api = None
-            self._initialized = False
+        async with self._init_lock:
+            if self._api_client is not None:
+                await self._api_client.close()
+                self._api_client = None
+                self.custom_objects_api = None
+                self.core_v1_api = None
+                self._initialized = False

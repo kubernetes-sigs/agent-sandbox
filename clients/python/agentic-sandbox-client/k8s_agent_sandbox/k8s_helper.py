@@ -63,12 +63,14 @@ class K8sHelper:
 
     def close(self):
         """Closes the Kubernetes API client and releases connection pool resources."""
-        if self._api_client is not None:
-            self._api_client.close()
+        try:
+            if self._api_client is not None:
+                self._api_client.close()
+        finally:
             self._api_client = None
             self.custom_objects_api = None
             self.core_v1_api = None
-        self._closed = True
+            self._closed = True
 
     def __enter__(self):
         self._check_not_closed()

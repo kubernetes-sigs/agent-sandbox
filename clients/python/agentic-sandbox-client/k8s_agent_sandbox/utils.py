@@ -51,8 +51,8 @@ def normalize_kubernetes_auth_config(
 
     Pass an explicit configuration instance (loaded via client_configuration=
     on load_incluster_config / load_kube_config) to avoid touching the global
-    default entirely. If not provided, falls back to client_module.Configuration
-    .get_default_copy() (defaults to kubernetes.client).
+    default entirely. If not provided, falls back to
+    client_module.Configuration.get_default_copy() (defaults to kubernetes.client).
     """
     if configuration is None:
         if client_module is None:

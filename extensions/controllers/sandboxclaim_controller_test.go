@@ -930,7 +930,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					if isAdoptable(sb) != nil {
 						continue
 					}
-					warmPoolName := metav1.GetControllerOf(sb).Name
+					warmPoolName := getWarmPoolName(sb)
 					key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
 					reconciler.WarmSandboxQueue.Add(warmPoolName, key)
 				}
@@ -2044,7 +2044,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok {
 					// Only add valid, adoptable sandboxes to the queue
 					if isAdoptable(sb) == nil {
-						warmPoolName := metav1.GetControllerOf(sb).Name
+						warmPoolName := getWarmPoolName(sb)
 						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
 						warmSandboxQueue.Add(warmPoolName, key)
 					}
@@ -2556,7 +2556,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, warmPool, claim, warmSandbox).WithStatusSubresource(claim).Build()
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 		if isAdoptable(warmSandbox) == nil {
-			warmPoolName := metav1.GetControllerOf(warmSandbox).Name
+			warmPoolName := getWarmPoolName(warmSandbox)
 			key := queue.SandboxKey{Namespace: warmSandbox.Namespace, Name: warmSandbox.Name}
 			warmSandboxQueue.Add(warmPoolName, key)
 		}

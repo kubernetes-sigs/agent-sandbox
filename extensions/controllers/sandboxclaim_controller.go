@@ -704,7 +704,9 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				podCondition = "ready"
 			}
 			templateName := "unknown"
-			if template, err := r.getTemplate(ctx, claim); err == nil && template != nil {
+			if adopted.Annotations != nil && adopted.Annotations[v1beta1.SandboxTemplateRefAnnotation] != "" {
+				templateName = adopted.Annotations[v1beta1.SandboxTemplateRefAnnotation]
+			} else if template, err := r.getTemplate(ctx, claim); err == nil && template != nil {
 				templateName = template.Name
 			}
 			asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition)

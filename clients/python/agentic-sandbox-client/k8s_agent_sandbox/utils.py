@@ -38,9 +38,12 @@ def normalize_kubernetes_auth_config(
     token from whichever key is present to the one that is missing, so both
     clients work regardless of which key was set by the config loader.
 
-    Raises ValueError if both token keys or both prefix keys are set to
-    different values, as proceeding with a mismatch will cause auth failures.
-    api_key_prefix is mirrored using the same logic.
+    Raises ValueError if both token keys are set to different values.
+    When token keys are present, also raises ValueError if both api_key_prefix
+    entries are set to different values (prefix mismatches are only validated
+    when token-based auth is in use; unrelated prefix entries in cert/basic-auth
+    configurations are left untouched). api_key_prefix is mirrored on the same
+    condition.
 
     Returns the (possibly modified) Configuration instance. Callers should
     pass it into ApiClient(configuration=...) rather than relying on the

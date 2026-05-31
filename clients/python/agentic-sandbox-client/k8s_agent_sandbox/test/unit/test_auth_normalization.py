@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
+import builtins
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -168,7 +168,14 @@ class TestNormalizeKubernetesAuthConfigImport(unittest.TestCase):
 
     def test_raises_descriptive_import_error_when_kubernetes_not_installed(self):
         """Test that calling with no args raises ImportError with guidance when kubernetes is absent."""
-        with patch.dict(sys.modules, {'kubernetes': None, 'kubernetes.client': None}):
+        original_import = builtins.__import__
+
+        def blocked_import(name, *args, **kwargs):
+            if name == 'kubernetes' or name.startswith('kubernetes.'):
+                raise ImportError(f"No module named '{name}'")
+            return original_import(name, *args, **kwargs)
+
+        with patch.object(builtins, '__import__', side_effect=blocked_import):
             with self.assertRaisesRegex(ImportError, 'client_module'):
                 normalize_kubernetes_auth_config()
 

@@ -68,6 +68,7 @@ class K8sHelper:
         self._closed = True
 
     def __enter__(self):
+        self._check_not_closed()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

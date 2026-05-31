@@ -14,7 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "kubernetes",
+    "kubernetes>=12.0.0",
     "requests",
     "pydantic",
     "prometheus-client",

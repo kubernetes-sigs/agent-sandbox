@@ -21,10 +21,13 @@ class _Configuration(Protocol):
     api_key_prefix: dict[str, str] | None
 
 
+class _ConfigurationClass(Protocol):
+    @staticmethod
+    def get_default_copy() -> _Configuration: ...
+
+
 class _ClientModule(Protocol):
-    class Configuration:
-        @staticmethod
-        def get_default_copy() -> '_Configuration': ...
+    Configuration: type[_ConfigurationClass]
 
 
 def normalize_kubernetes_auth_config(

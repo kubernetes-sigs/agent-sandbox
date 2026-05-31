@@ -168,6 +168,8 @@ class TestNormalizeKubernetesAuthConfigImport(unittest.TestCase):
 
     def test_raises_descriptive_import_error_when_kubernetes_not_installed(self):
         """Test that calling with no args raises ImportError with guidance when kubernetes is absent."""
+        # Setting sys.modules[name] = None is CPython's defined way to block an
+        # import: the interpreter raises ImportError when it finds None in the cache.
         with patch.dict(sys.modules, {'kubernetes': None, 'kubernetes.client': None}):
             with self.assertRaisesRegex(ImportError, 'client_module'):
                 normalize_kubernetes_auth_config()

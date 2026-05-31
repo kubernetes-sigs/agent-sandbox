@@ -13,6 +13,9 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
+# kubernetes >=29.0.0 ensures client_configuration= kwarg support in config
+# loaders and ApiClient.close(). The <37.0.0 cap guards against future
+# breaking changes; update alongside kubernetes_asyncio when tested.
 dependencies = [
     "kubernetes>=29.0.0,<37.0.0",
     "requests",
@@ -46,6 +49,7 @@ exclude = [
 root = "../../.."
 
 [project.optional-dependencies]
+# kubernetes_asyncio bounds intentionally match kubernetes above.
 async = [
     "httpx",
     "kubernetes_asyncio>=29.0.0,<37.0.0",

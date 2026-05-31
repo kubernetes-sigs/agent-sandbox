@@ -34,8 +34,9 @@ class K8sHelper:
     """Helper class for Kubernetes API interactions.
 
     Instances are single-use: after calling close() (or exiting a with block),
-    all public methods raise RuntimeError. Use the context manager form to
-    ensure cleanup:
+    all operational methods raise RuntimeError. close() itself is idempotent
+    and safe to call multiple times. Use the context manager form to ensure
+    cleanup:
 
         with K8sHelper() as helper:
             helper.create_sandbox_claim(...)

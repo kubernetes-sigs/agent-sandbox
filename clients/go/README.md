@@ -83,7 +83,7 @@ Use `APIURL` to bypass discovery entirely. Useful for:
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
-    APIURL: "http://sandbox-router-svc.default.svc.cluster.local:8080",
+    APIURL: "http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080",
 })
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
@@ -335,5 +335,5 @@ go test ./clients/go/sandbox/ -tags=integration -v -timeout=300s \
 
 # Direct URL mode
 go test ./clients/go/sandbox/ -tags=integration -v -timeout=300s \
-    -args --api-url=http://sandbox-router:8080
+    -args --api-url=http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080
 ```

@@ -43,7 +43,7 @@ This is designed for running untrusted code safely:
 
 **Ingress (Incoming Traffic)**
 
-- **Allowed:**  Traffic is only allowed from the designated [Sandbox Router](../../../clients/python/agentic-sandbox-client/sandbox-router) (`app: sandbox-router`). The router must run in the template’s namespace for the secure default to work. 
+- **Allowed:**  Traffic is only allowed from the designated [Sandbox Router](../../../clients/python/agentic-sandbox-client/sandbox-router) (`app: sandbox-router`) residing in the `"agent-sandbox-system"` system namespace.
 
 - **Blocked:** All other internal cluster traffic and external ingress is explicitly denied.
 
@@ -127,7 +127,10 @@ spec:
 
       # 2. Re-allow the standard Sandbox Router (required if you override defaults)
       - from:
-        - podSelector:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-sandbox-system
+          podSelector:
             matchLabels:
               app: sandbox-router
 
@@ -188,7 +191,10 @@ spec:
     ingress:
       # Re-allow the standard Sandbox Router
       - from:
-        - podSelector:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-sandbox-system
+          podSelector:
             matchLabels:
               app: sandbox-router
     egress:

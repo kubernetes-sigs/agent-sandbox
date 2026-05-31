@@ -107,8 +107,16 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if len(np.Spec.PolicyTypes) != 2 {
 					t.Errorf("Expected 2 PolicyTypes, got %d", len(np.Spec.PolicyTypes))
 				}
-				if len(np.Spec.Ingress) != 1 || np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "sandbox-router" {
-					t.Errorf("Expected Default Ingress rule to target sandbox-router")
+				if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 1 {
+					t.Fatalf("Expected Default Ingress rule to contain exactly 1 peer source, got %d", len(np.Spec.Ingress[0].From))
+				}
+				peer1 := np.Spec.Ingress[0].From[0]
+				if peer1.PodSelector == nil || peer1.NamespaceSelector == nil {
+					t.Fatalf("Expected both PodSelector and NamespaceSelector to be non-nil")
+				}
+				if peer1.PodSelector.MatchLabels["app"] != "sandbox-router" ||
+					peer1.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "agent-sandbox-system" {
+					t.Errorf("Expected first Ingress peer to target sandbox-router in agent-sandbox-system namespace")
 				}
 				if len(np.Spec.Egress) != 1 {
 					t.Fatalf("Expected 1 Default Egress rule, got %d", len(np.Spec.Egress))

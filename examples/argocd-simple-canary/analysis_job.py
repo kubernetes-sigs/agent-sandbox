@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import shlex
+import json
 
 def run_command(cmd):
     args = shlex.split(cmd)
@@ -48,8 +49,6 @@ def check_claims(timeout_seconds=30):
         if not result.stdout.strip() or result.stdout.strip() == "{}":
             print("No active test claims found to analyze.")
             return True
-            
-        import json
         try:
             claims = json.loads(result.stdout)
             items = claims.get("items", [])

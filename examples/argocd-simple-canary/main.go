@@ -82,14 +82,6 @@ func main() {
 	if canaryPool == "" {
 		canaryPool = "python-pool-v2"
 	}
-	primaryTemplate := cm.Data["primary_template"]
-	if primaryTemplate == "" {
-		primaryTemplate = "sandbox-python-template-v1"
-	}
-	canaryTemplate := cm.Data["canary_template"]
-	if canaryTemplate == "" {
-		canaryTemplate = "sandbox-python-template-v2"
-	}
 	canaryPercentage := 0
 	if _, err := fmt.Sscanf(cm.Data["canary_percentage"], "%d", &canaryPercentage); err != nil {
 		log.Fatalf("Failed to parse canary_percentage: %v", err)
@@ -103,21 +95,17 @@ func main() {
 
 	// 2. Stochastic routing decision
 	selectedPool := primaryPool
-	selectedTemplate := primaryTemplate
 
 	// Generate a random number between 0 and 99.
 	// If it's less than the canary percentage, we route to the canary pool.
 	if rand.Intn(100) < canaryPercentage {
 		selectedPool = canaryPool
-		selectedTemplate = canaryTemplate
 		fmt.Println("[CANARY] Routing to Canary pool")
 	} else {
 		fmt.Println("[PRIMARY] Routing to Stable pool")
 	}
 
 	// 3. Create SandboxClaim using the selected pool
-
-	warmPoolPolicy := extv1beta1.WarmPoolPolicy(selectedPool)
 
 	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -128,10 +116,9 @@ func main() {
 			},
 		},
 		Spec: extv1beta1.SandboxClaimSpec{
-			TemplateRef: extv1beta1.SandboxTemplateRef{
-				Name: selectedTemplate, // Template defining the sandbox environment
+			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
+				Name: selectedPool,
 			},
-			WarmPool: &warmPoolPolicy, // Here we specify which pool to use
 		},
 	}
 

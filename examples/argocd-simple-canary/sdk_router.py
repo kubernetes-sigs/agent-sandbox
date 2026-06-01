@@ -20,7 +20,6 @@ when creating a SandboxClaim.
 
 from kubernetes import client, config
 import random
-import time
 import subprocess
 import sys
 
@@ -40,26 +39,21 @@ def get_routing_config():
     v1 = client.CoreV1Api()
     try:
         config_map = v1.read_namespaced_config_map(name="canary-routing-config", namespace="default")
-        data = config_map.data
-        cfg = {
-            "primary_pool": data.get("primary_pool", "python-pool-v1"),
-            "canary_pool": data.get("canary_pool", "python-pool-v2"),
-            "primary_template": data.get("primary_template", "sandbox-python-template-v1"),
-            "canary_template": data.get("canary_template", "sandbox-python-template-v2"),
-            "canary_percentage": int(data.get("canary_percentage", "0"))
-        }
-        if cfg["canary_percentage"] < 0 or cfg["canary_percentage"] > 100:
-            raise ValueError(f"Invalid canary percentage: {cfg['canary_percentage']}. Must be between 0 and 100.")
-        return cfg
+        data = config_map.data or {}
     except Exception as e:
-        print(f"Error reading configmap, defaulting to primary pool. Error: {e}")
-        return {
-            "primary_pool": "python-pool-v1", 
-            "canary_pool": "python-pool-v2",
-            "primary_template": "sandbox-python-template-v1",
-            "canary_template": "sandbox-python-template-v2",
-            "canary_percentage": 0
-        }
+        print(f"Error reading ConfigMap, defaulting to primary pool. Error: {e}")
+        data = {}
+
+    cfg = {
+        "primary_pool": data.get("primary_pool", "python-pool-v1"),
+        "canary_pool": data.get("canary_pool", "python-pool-v2"),
+        "primary_template": data.get("primary_template", "sandbox-python-template-v1"),
+        "canary_template": data.get("canary_template", "sandbox-python-template-v2"),
+        "canary_percentage": int(data.get("canary_percentage", "0"))
+    }
+    if cfg["canary_percentage"] < 0 or cfg["canary_percentage"] > 100:
+        raise ValueError(f"Invalid canary percentage: {cfg['canary_percentage']}. Must be between 0 and 100.")
+    return cfg
 
 def acquire_sandbox(claim_name):
     cfg = get_routing_config()
@@ -74,24 +68,34 @@ def acquire_sandbox(claim_name):
         selected_template = cfg["primary_template"]
         print(f"[PRIMARY] Routing claim to -> {selected_pool} (Stable) using template {selected_template}")
         
-    # Create actual SandboxClaim
-    yaml_content = f"""
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
-kind: SandboxClaim
-metadata:
-  name: {claim_name}
-  namespace: default
-  labels:
-    app: argocd-sdk-test
-spec:
-  sandboxTemplateRef:
-    name: {selected_template}
-  warmpool: {selected_pool}
-"""
-    process = subprocess.Popen(["kubectl", "apply", "-f", "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    stdout, stderr = process.communicate(input=yaml_content)
-    if process.returncode != 0:
-        print(f"Failed to create claim {claim_name}: {stderr}")
+    # Create actual SandboxClaim using the CustomObjectsApi client
+    custom_api = client.CustomObjectsApi()
+    body = {
+        "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+        "kind": "SandboxClaim",
+        "metadata": {
+            "name": claim_name,
+            "namespace": "default",
+            "labels": {
+                "app": "argocd-sdk-test"
+            }
+        },
+        "spec": {
+            "warmPoolRef": {
+                "name": selected_pool
+            }
+        }
+    }
+    try:
+        custom_api.create_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1beta1",
+            namespace="default",
+            plural="sandboxclaims",
+            body=body
+        )
+    except Exception as e:
+        print(f"Failed to create claim {claim_name}: {e}")
         return None
     
     return selected_pool

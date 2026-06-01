@@ -1,5 +1,5 @@
 # This file defines the SandboxTemplates used by the warm pools.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: sandbox-python-template-v1
@@ -17,7 +17,7 @@ spec:
             cpu: "100m"
             memory: "128Mi"
 ---
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: sandbox-python-template-v2

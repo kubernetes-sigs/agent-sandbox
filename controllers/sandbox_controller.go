@@ -1266,10 +1266,14 @@ func isPodReady(pod *corev1.Pod) bool {
 // podStatusChanged reports whether a Pod update is relevant to the Sandbox
 // controller. The controller's Owns(Pod) watch otherwise fires on every Kubelet
 // status write (~7 per pod lifecycle); this filters to the transitions the
-// reconciler actually depends on: Phase, Ready, and PodIPs (the Ready condition
-// is gated on PodIPs being populated, so a PodIPs change must trigger a
-// reconcile even when Phase and Ready are unchanged).
+// reconciler actually depends on: DeletionTimestamp (immediate reaction when a
+// Pod enters Terminating), Phase, Ready, and PodIPs (the Ready condition is
+// gated on PodIPs being populated, so a PodIPs change must trigger a reconcile
+// even when Phase and Ready are unchanged).
 func podStatusChanged(oldPod, newPod *corev1.Pod) bool {
+	if oldPod.DeletionTimestamp.IsZero() != newPod.DeletionTimestamp.IsZero() {
+		return true
+	}
 	if oldPod.Status.Phase != newPod.Status.Phase {
 		return true
 	}
@@ -1311,6 +1315,10 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1beta1.Sandbox{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.Pod{}, builder.WithPredicates(predicate.And(labelSelectorPredicate, podStatusChangedPredicate))).
+		// Services use only the label selector predicate; unlike Pods, they are
+		// stable and don't receive frequent status writes. If a service-mesh or
+		// ingress controller starts annotating Services at high frequency, add a
+		// state-filtering predicate here analogous to podStatusChangedPredicate.
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)

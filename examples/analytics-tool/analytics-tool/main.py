@@ -38,7 +38,7 @@ class ExecuteResponse(BaseModel):
 
 ALLOWED_COMMANDS = {"ls", "echo", "cat", "grep", "pwd", "zip", "unzip", "mv", "curl"}
 
-WORKING_DIR = "/app" if os.path.exists("/app") else os.getcwd()
+WORKING_DIR = "/app" if os.path.isdir("/app") else os.getcwd()
 
 app = FastAPI(
     title="Agentic Sandbox Runtime",

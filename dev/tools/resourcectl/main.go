@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -300,21 +301,22 @@ func runCleanup(ctx context.Context) error {
 		return err
 	}
 	var errs []error
+	var remainingResources []BoskosResource
+
 	for i := range state.BoskosResources {
 		r := &state.BoskosResources[i]
 		if err := killHeartbeatProcess(ctx, r); err != nil {
 			errs = append(errs, err)
-		} else {
-			r.HeartbeatPID = 0
 		}
+		r.HeartbeatPID = 0
 
 		if err := r.ReleaseFromBoskos(ctx); err != nil {
 			errs = append(errs, err)
-		} else {
-			r.Name = ""
-			r.Type = ""
+			remainingResources = append(remainingResources, *r)
 		}
 	}
+
+	state.BoskosResources = remainingResources
 
 	if err := writeState(state); err != nil {
 		return err
@@ -329,18 +331,52 @@ func killHeartbeatProcess(ctx context.Context, r *BoskosResource) error {
 		return nil
 	}
 
+	// Verify the process is actually the heartbeat process if we are on Linux.
+	if runtime.GOOS == "linux" {
+		if !isHeartbeatProcess(r.HeartbeatPID, r.Name) {
+			return nil
+		}
+	}
+
 	process, err := os.FindProcess(r.HeartbeatPID)
 	if err != nil {
 		return fmt.Errorf("error finding heartbeat process: %w", err)
 	}
 
-	// TODO: Verify the process is actually the heartbeat process
-
 	if err := process.Kill(); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
 		return fmt.Errorf("error killing heartbeat process: %w", err)
 	}
 
 	return nil
+}
+
+// isHeartbeatProcess verifies if the process with the given PID is actually our heartbeat process.
+func isHeartbeatProcess(pid int, resourceName string) bool {
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		return false
+	}
+
+	// The /proc/<pid>/cmdline file contains arguments separated by null bytes (\x00).
+	args := strings.Split(string(data), "\x00")
+
+	// Check if the arguments contain "heartbeat" and "--name" <resourceName>
+	hasHeartbeat := false
+	hasName := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "heartbeat" {
+			hasHeartbeat = true
+		}
+		if args[i] == "--name" && i+1 < len(args) && args[i+1] == resourceName {
+			hasName = true
+		}
+	}
+
+	return hasHeartbeat && hasName
 }
 
 // runHeartbeat sends periodic heartbeats to Boskos to keep the resource alive.

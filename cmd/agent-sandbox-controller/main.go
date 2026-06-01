@@ -22,6 +22,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -247,12 +248,33 @@ func main() {
 
 	if extensions {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+
+		var allowedDomains []string
+		configPath := "/etc/sandbox-config/allowed-label-domains"
+		if data, err := os.ReadFile(configPath); err == nil {
+			val := strings.TrimSpace(string(data))
+			if val != "" {
+				for _, d := range strings.FieldsFunc(val, func(c rune) bool {
+					return c == ',' || c == '\n' || c == '\r'
+				}) {
+					d = strings.ToLower(strings.TrimSpace(d))
+					if d != "" {
+						allowedDomains = append(allowedDomains, d)
+					}
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			setupLog.Error(err, "failed to read configuration file", "path", configPath)
+			os.Exit(1)
+		}
+
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
-			Client:           mgr.GetClient(),
-			Scheme:           mgr.GetScheme(),
-			WarmSandboxQueue: warmSandboxQueue,
-			Recorder:         mgr.GetEventRecorder("sandboxclaim-controller"),
-			Tracer:           instrumenter,
+			Client:              mgr.GetClient(),
+			Scheme:              mgr.GetScheme(),
+			WarmSandboxQueue:    warmSandboxQueue,
+			Recorder:            mgr.GetEventRecorder("sandboxclaim-controller"),
+			Tracer:              instrumenter,
+			AllowedLabelDomains: allowedDomains,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)

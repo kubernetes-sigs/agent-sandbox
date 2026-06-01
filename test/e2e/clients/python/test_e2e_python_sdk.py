@@ -68,6 +68,8 @@ def deploy_router(tc, temp_namespace):
 
     with open(ROUTER_YAML_PATH, "r") as f:
         manifest = f.read().replace("${ROUTER_IMAGE}", router_image)
+        # Enable unauthenticated mode for local E2E test execution
+        manifest = manifest.replace('value: "false"', 'value: "true"')
 
     print(f"Applying router manifest to namespace: {temp_namespace}")
     tc.apply_manifest_text(manifest, namespace=temp_namespace)

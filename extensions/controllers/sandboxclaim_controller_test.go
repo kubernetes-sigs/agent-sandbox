@@ -2724,7 +2724,7 @@ func TestClientClaimLatencyMetric(t *testing.T) {
 		},
 		{
 			name: "ignores client latency if annotation is not in parsable format",
-			claim: &extensionsv1alpha1.SandboxClaim{
+			claim: &extensionsv1beta1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "invalid-client-time",
 					Namespace:         "default",
@@ -2733,12 +2733,12 @@ func TestClientClaimLatencyMetric(t *testing.T) {
 						asmetrics.ClientAnnotation: "1713689880",
 					},
 				},
-				Spec: extensionsv1alpha1.SandboxClaimSpec{TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"}},
-				Status: extensionsv1alpha1.SandboxClaimStatus{
-					Conditions: []metav1.Condition{{Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "tpl"}},
+				Status: extensionsv1beta1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
 				},
 			},
-			oldStatus:            &extensionsv1alpha1.SandboxClaimStatus{},
+			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations: 0,
 		},
 	}

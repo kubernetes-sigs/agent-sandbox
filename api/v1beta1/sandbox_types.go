@@ -57,6 +57,12 @@ const (
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
+	// SandboxLaunchTypeLabel is the label used to track whether the Sandbox was cold-created or originated from a warm pool.
+	SandboxLaunchTypeLabel = "agents.x-k8s.io/launch-type"
+	// SandboxLaunchTypeCold indicates the Sandbox was cold-created.
+	SandboxLaunchTypeCold = "cold"
+	// SandboxLaunchTypeWarm indicates the Sandbox was pre-provisioned by or adopted from a SandboxWarmPool.
+	SandboxLaunchTypeWarm = "warm"
 	// SandboxPodTemplateHashLabel is the label used to track the pod template hash.
 	SandboxPodTemplateHashLabel = "agents.x-k8s.io/sandbox-pod-template-hash"
 	// SandboxPropagatedLabelsAnnotation is the annotation used to track the labels explicitly propagated from sandbox spec to pod.

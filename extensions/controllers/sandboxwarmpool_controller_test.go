@@ -358,6 +358,8 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 					controllerRef := metav1.GetControllerOf(&sb)
 					if controllerRef != nil && controllerRef.UID == warmPool.UID {
 						ownedCount++
+						require.Equal(t, sandboxv1beta1.SandboxLaunchTypeWarm, sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel],
+							"sandbox %s should have warm launch type label", sb.Name)
 					}
 				}
 			}
@@ -445,6 +447,8 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				"sandbox %s should have correct warm pool label", sb.Name)
 			require.Equal(t, sandboxcontrollers.NameHash(templateName), sb.Labels[sandboxTemplateRefHash],
 				"sandbox %s should have correct template ref label", sb.Name)
+			require.Equal(t, sandboxv1beta1.SandboxLaunchTypeWarm, sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel],
+				"sandbox %s should have warm launch type label", sb.Name)
 
 			// Verify pod template labels are propagated into the sandbox's pod template
 			require.Equal(t, "2.0", sb.Spec.PodTemplate.ObjectMeta.Labels["version"])

@@ -16,6 +16,7 @@ import subprocess
 import os
 import shlex
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
@@ -134,9 +135,12 @@ async def upload_file(file: UploadFile = File(...)):
     """
     try:
         logging.info(f"--- UPLOAD_FILE CALLED: Attempting to save '{file.filename}' ---")
-        file_path = os.path.join(WORKING_DIR, file.filename)
+        working_dir = Path(WORKING_DIR).resolve()
+        full_path = (working_dir / file.filename).resolve()
+        if not full_path.is_relative_to(working_dir) or full_path == working_dir:
+            return JSONResponse(status_code=400, content={"message": "Invalid file path"})
 
-        with open(file_path, "wb") as f:
+        with open(full_path, "wb") as f:
             f.write(await file.read())
 
         return JSONResponse(
@@ -155,7 +159,11 @@ async def download_file(file_path: str):
     """
     Downloads a specified file from the /app directory in the sandbox.
     """
-    full_path = os.path.join(WORKING_DIR, file_path)
-    if os.path.isfile(full_path):
-        return FileResponse(path=full_path, media_type='application/octet-stream', filename=file_path)
+    working_dir = Path(WORKING_DIR).resolve()
+    full_path = (working_dir / file_path).resolve()
+    if not full_path.is_relative_to(working_dir) or full_path == working_dir:
+        return JSONResponse(status_code=400, content={"message": "Invalid file path"})
+
+    if full_path.is_file():
+        return FileResponse(path=str(full_path), media_type='application/octet-stream', filename=os.path.basename(file_path))
     return JSONResponse(status_code=404, content={"message": "File not found"})

@@ -1,61 +1,36 @@
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
-  name: python-sandbox-template
-  namespace: default
+  # The test_client.py expects the template to have this name
+  name: ${SANDBOX_TEMPLATE_NAME}
+  namespace: ${SANDBOX_NAMESPACE}
 spec:
   podTemplate:
-    metadata:
-      labels:
-        sandbox-type: python-runtime
     spec:
-      runtimeClassName: gvisor # Required
-      automountServiceAccountToken: false # Required
-      securityContext:
-        runAsNonRoot: true # Required
-      nodeSelector:
-        sandbox.gke.io/runtime: gvisor # Required
-      tolerations:
-      - key: "sandbox.gke.io/runtime"
-        value: "gvisor"
-        effect: "NoSchedule" # Required
+      # Optional: uncomment one of the lines below to enable sandbox isolation.
+      # runtimeClassName: gvisor      # gVisor (see examples/quickstart/gvisor.md)
+      # runtimeClassName: kata-qemu   # Kata Containers (see examples/quickstart/kata-containers.md)
       containers:
-        # Container 1: The secure user Python execution environment
-        - name: runtime
-          image: registry.k8s.io/agent-sandbox/python-runtime-sandbox:v0.1.0
-          ports:
-            - containerPort: 8888
-          resources:
-            requests:
-              cpu: "250m"
-              memory: "512Mi"
-            limits:
-              cpu: "500m"
-              memory: "1Gi" # Required
-          securityContext:
-            capabilities:
-              drop: ["ALL"] # Required
-          volumeMounts:
-            - name: shared-workspace
-              mountPath: /workspace
-
-        # Container 2: Our new gRPC Sandbox Daemon (Data Plane Sidecar)
-        - name: sandbox-daemon
-          image: us-docker.pkg.dev/<your-project-id>/<your-registry-repo>/agent-sandbox-agent:latest
-          command: ["/bin/agent-sandbox-agent"]
-          args: ["--port=50051"]
-          ports:
-            - containerPort: 50051
-              name: grpc-port
-          securityContext:
-            runAsNonRoot: true
-            capabilities:
-              drop: ["ALL"]
-          volumeMounts:
-            - name: shared-workspace
-              mountPath: /workspace
-
-      restartPolicy: OnFailure
-      volumes:
-        - name: shared-workspace
-          emptyDir: {}
+      - name: python-runtime
+        # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox
+        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+        ports:
+        - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+            ephemeral-storage: "512Mi"
+      restartPolicy: "OnFailure"

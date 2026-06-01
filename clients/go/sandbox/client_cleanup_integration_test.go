@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"strings"
 	"syscall"
 	"testing"
@@ -34,16 +33,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestMain handles subprocess helper process requests.
-func TestMain(m *testing.M) {
-	// Check if we're running as a helper process
-	if os.Getenv("GO_TEST_HELPER_PROCESS") == "1" {
-		runHelperProcess()
-		os.Exit(0)
+// TestHelperProcess is the subprocess entry point invoked by integration tests.
+// It is selected via -test.run=TestHelperProcess and exits immediately when not
+// running as a helper so it does not interfere with the normal test suite.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_TEST_HELPER_PROCESS") != "1" {
+		return
 	}
-
-	// Run normal tests
-	os.Exit(m.Run())
+	runHelperProcess()
+	os.Exit(0)
 }
 
 // runHelperProcess executes the requested helper mode.
@@ -140,8 +138,7 @@ func TestCleanupOnSignalWithSIGTERM(t *testing.T) {
 		t.Skip("SANDBOX_TEMPLATE not set, skipping")
 	}
 
-	// Start subprocess using TestHelperProcess pattern
-	cmd := exec.Command(os.Args[0], "-test.run=TestCleanupOnSignalWithSIGTERM")
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess")
 	cmd.Env = append(os.Environ(),
 		"GO_TEST_HELPER_PROCESS=1",
 		"GO_TEST_HELPER_MODE=cleanup-on-signal",
@@ -224,7 +221,7 @@ func TestCleanupOnSignalDisabled(t *testing.T) {
 
 	// Start subprocess
 	var stdout bytes.Buffer
-	cmd := exec.Command(os.Args[0], "-test.run=TestCleanupOnSignalDisabled")
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess")
 	cmd.Env = append(os.Environ(),
 		"GO_TEST_HELPER_PROCESS=1",
 		"GO_TEST_HELPER_MODE=cleanup-disabled",
@@ -250,7 +247,7 @@ func TestCleanupOnSignalDisabled(t *testing.T) {
 		t.Fatalf("failed to create k8s helper: %v", err)
 	}
 
-	claim, err := k8s.SandboxClaimClient.SandboxClaims("default").Get(ctx, claimName, metav1.GetOptions{})
+	claim, err := k8s.ExtensionsClient.SandboxClaims("default").Get(ctx, claimName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("claim %s was deleted (should persist): %v", claimName, err)
 	}
@@ -266,7 +263,7 @@ func TestCleanupOnSignalDisabled(t *testing.T) {
 		t.Fatalf("failed to create client for cleanup: %v", err)
 	}
 
-	if err := client.Delete(ctx, Key{Namespace: "default", ClaimName: claim.Name}); err != nil {
+	if err := client.DeleteSandbox(ctx, claim.Name, "default"); err != nil {
 		t.Logf("warning: manual cleanup failed: %v", err)
 	}
 }
@@ -284,7 +281,7 @@ func TestCleanupWithDeferPattern(t *testing.T) {
 
 	// Start subprocess
 	var stdout bytes.Buffer
-	cmd := exec.Command(os.Args[0], "-test.run=TestCleanupWithDeferPattern")
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess")
 	cmd.Env = append(os.Environ(),
 		"GO_TEST_HELPER_PROCESS=1",
 		"GO_TEST_HELPER_MODE=defer-pattern",
@@ -335,7 +332,7 @@ func waitForClaimDeletion(t *testing.T, ctx context.Context, k8s *K8sHelper, nam
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		_, err := k8s.SandboxClaimClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+		_, err := k8s.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				// Claim is deleted

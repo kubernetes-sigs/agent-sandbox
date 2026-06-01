@@ -78,6 +78,8 @@ func main() {
 	flag.StringVar(&opts.Image, "image", opts.Image, "image")
 	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
 	flag.BoolVar(&opts.EnableServicePortal, "service-portal", opts.EnableServicePortal, "Enable service-portal proxy sidecar and iptables configuration")
+	flag.StringVar(&opts.Entrypoint, "entrypoint", opts.Entrypoint, "Entrypoint override to run inside the sandbox container; defaults to empty string (do not override)")
+	flag.StringVar(&opts.User, "user", opts.User, "User to run commands as inside the sandbox container. If empty, runs as root.")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
@@ -159,6 +161,12 @@ type Session struct {
 
 	// EnableServicePortal adds the initContainer and sidecar container to the Sandbox pod template spec.
 	EnableServicePortal bool
+
+	// Entrypoint is the command override to run inside the sandbox container.
+	Entrypoint []string
+
+	// User is the operating system user to run commands as inside the sandbox container.
+	User string
 }
 
 // Sandbox represents an active sandbox instance.
@@ -276,6 +284,11 @@ func (s *Sandbox) ExecCommand(ctx context.Context, opts tools.ExecCommandOptions
 		stderr = &stderrBuf
 	}
 
+	cmd := opts.Command
+	if s.session.User != "" {
+		cmd = append([]string{"runuser", "-u", s.session.User, "--"}, opts.Command...)
+	}
+
 	req := coreClient.RESTClient().Post().
 		Resource("pods").
 		Name(podID.Name).
@@ -283,7 +296,7 @@ func (s *Sandbox) ExecCommand(ctx context.Context, opts tools.ExecCommandOptions
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   opts.Command,
+			Command:   cmd,
 			Stdin:     opts.Stdin != nil,
 			Stdout:    true,
 			Stderr:    true,
@@ -496,7 +509,7 @@ func (s *Session) CreateSandbox(ctx context.Context, image, namespace string, in
 						{
 							Name:    "sandbox",
 							Image:   image,
-							Command: []string{"sleep", "infinity"},
+							Command: s.Entrypoint,
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "home",
@@ -621,6 +634,12 @@ type RunOptions struct {
 
 	// EnableServicePortal enables the GKE service portal sidecar and iptables init container.
 	EnableServicePortal bool
+
+	// Entrypoint is the command override to run inside the sandbox container.
+	Entrypoint string
+
+	// User is the operating system user to run commands as inside the sandbox container.
+	User string
 }
 
 func (o *RunOptions) InitDefaults() {
@@ -642,6 +661,11 @@ func (o *RunOptions) InitDefaults() {
 	o.HomeDir = os.Getenv("SANDBOX_HOME_DIR")
 	if o.HomeDir == "" {
 		o.HomeDir = "/home/clawtainer"
+	}
+
+	o.User = os.Getenv("SANDBOX_USER")
+	if o.User == "" {
+		o.User = "clawtainer"
 	}
 }
 
@@ -728,11 +752,18 @@ func run(ctx context.Context, opts RunOptions) error {
 	sessionsDir := filepath.Join(homeDir, ".local", "sandboxed-tools", "sessions")
 	sessionStore := sessions.NewFileStore(sessionsDir)
 
+	var entrypoint []string
+	if opts.Entrypoint != "" {
+		entrypoint = strings.Fields(opts.Entrypoint)
+	}
+
 	session := &Session{
 		Name:                opts.SessionName,
 		client:              sandboxClient,
 		HomeDir:             opts.HomeDir,
 		EnableServicePortal: opts.EnableServicePortal,
+		Entrypoint:          entrypoint,
+		User:                opts.User,
 	}
 
 	messages, err := sessionStore.LoadSession(ctx, opts.SessionName)

@@ -257,7 +257,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Requeue if dependency is missing, but don't return error to avoid log spam
 	if errors.Is(reconcileErr, ErrWarmPoolNotFound) || errors.Is(reconcileErr, ErrTemplateNotFound) {
-		logger.V(1).Info("Dependency not found yet, will retry", "error", reconcileErr)
+		if errors.Is(reconcileErr, ErrWarmPoolNotFound) {
+			logger.V(1).Info("SandboxWarmPool not found yet, will retry", "warmPool", claim.Spec.WarmPoolRef.Name, "error", reconcileErr)
+		} else {
+			logger.V(1).Info("SandboxTemplate of the warmpool not found yet, will retry", "warmPool", claim.Spec.WarmPoolRef.Name, "error", reconcileErr)
+		}
 
 		requeueDelay := 1 * time.Minute
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
@@ -332,7 +336,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		logger.V(1).Info("Fast path: sandbox found or adopted, reconciling network policy", "claim", claim.Name)
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {
-			logger.Error(templateErr, "failed to get template for network policy reconciliation (non-fatal)", "claim", claim.Name)
+			logger.Error(templateErr, "failed to get template of the warmpool for network policy reconciliation (non-fatal)", "claim", claim.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
 
 			// If we can't get the template but we have metadata to propagate, we should fail
 			// to ensure consistency and enforce the "No Overrides" rule.
@@ -373,7 +377,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	// Need template to create from scratch.
 	logger.V(1).Info("Cold path: no sandbox found, creating from template", "claim", claim.Name)
 	template, templateErr := r.getTemplate(ctx, claim)
-	if templateErr != nil && !k8errors.IsNotFound(templateErr) {
+	if templateErr != nil {
 		return nil, templateErr
 	}
 
@@ -703,12 +707,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			if isSandboxReady(adopted) {
 				podCondition = "ready"
 			}
-			templateName := "unknown"
-			if adopted.Annotations != nil && adopted.Annotations[v1beta1.SandboxTemplateRefAnnotation] != "" {
-				templateName = adopted.Annotations[v1beta1.SandboxTemplateRefAnnotation]
-			} else if template, err := r.getTemplate(ctx, claim); err == nil && template != nil {
-				templateName = template.Name
-			}
+			templateName := r.resolveTemplateName(adopted)
 			asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition)
 
 			return true, nil
@@ -977,7 +976,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	logger := log.FromContext(ctx)
 
 	if template == nil {
-		logger.Error(ErrTemplateNotFound, "cannot create sandbox")
+		logger.Error(ErrTemplateNotFound, "cannot create sandbox: template of the warmpool not found", "warmPool", claim.Spec.WarmPoolRef.Name)
 		return nil, ErrTemplateNotFound
 	}
 
@@ -1289,15 +1288,21 @@ func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensi
 		},
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(template), template); err != nil {
-		if !k8errors.IsNotFound(err) {
-			err = fmt.Errorf("failed to get sandbox template %q: %w", warmPool.Spec.TemplateRef.Name, err)
-		} else {
-			err = fmt.Errorf(`SandboxTemplate %q not found: %w`, warmPool.Spec.TemplateRef.Name, ErrTemplateNotFound)
+		if k8errors.IsNotFound(err) {
+			return nil, fmt.Errorf(`SandboxTemplate %q not found: %w`, warmPool.Spec.TemplateRef.Name, ErrTemplateNotFound)
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to get sandbox template %q: %w", warmPool.Spec.TemplateRef.Name, err)
 	}
 
 	return template, nil
+}
+
+// resolveTemplateName safely extracts the SandboxTemplate name from the Sandbox annotations.
+func (r *SandboxClaimReconciler) resolveTemplateName(sandbox *v1beta1.Sandbox) string {
+	if sandbox != nil && sandbox.Annotations != nil && sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] != "" {
+		return sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation]
+	}
+	return "__unknown__"
 }
 
 // getOrRecordObservedTime stores the first time an object is seen by the controller in an in-memory
@@ -1531,15 +1536,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		sandboxName = sandbox.Name
 	}
 
-	templateName := "unknown"
-	if sandbox != nil && sandbox.Annotations != nil && sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] != "" {
-		templateName = sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation]
-	} else {
-		template, err := r.getTemplate(ctx, claim)
-		if err == nil && template != nil {
-			templateName = template.Name
-		}
-	}
+	templateName := r.resolveTemplateName(sandbox)
 
 	logger.V(1).Info("SandboxClaim is marked as Ready", "claim", claim.Name, "sandbox", sandboxName, "duration", time.Since(claim.CreationTimestamp.Time))
 

@@ -798,6 +798,43 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
+			name:             "sandbox claim with Env bypasses available warm pool candidate",
+			claimToReconcile: claimWithEnv,
+			existingObjects: []client.Object{
+				templateWithEnvOverride,
+				&extensionsv1beta1.SandboxWarmPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool-env-override", Namespace: "default", UID: "wp-env-override-uid"},
+					Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template-env-override"}},
+				},
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "adoptable-warm-sandbox",
+						Namespace: "default",
+						Labels: map[string]string{
+							warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-warmpool-env-override"),
+							sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template-env-override"),
+						},
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+							Kind:       "SandboxWarmPool",
+							Name:       "test-warmpool-env-override",
+							UID:        "wp-env-override-uid",
+							Controller: new(true),
+						}},
+					},
+				},
+			},
+			expectSandbox: true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, _ *extensionsv1beta1.SandboxTemplate) {
+				if sandbox.Name != "test-claim-env" {
+					t.Errorf("Expected newly created sandbox to have the claim's name 'test-claim-env' (bypassing warm pool candidate), got %q", sandbox.Name)
+				}
+			},
+		},
+		{
 			name:             "sandbox creation fails when claim overrides environment variable and policy is Allowed (not Overrides)",
 			claimToReconcile: claimWithEnvOverrideNotAllowed,
 			existingObjects:  []client.Object{templateWithEnvAllowed, warmPoolWithEnvAllowed},
@@ -2530,6 +2567,9 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				Labels: map[string]string{
 					warmPoolSandboxLabel:   poolNameHash,
 					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+				},
+				Annotations: map[string]string{
+					sandboxv1beta1.SandboxTemplateRefAnnotation: "test-template",
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{

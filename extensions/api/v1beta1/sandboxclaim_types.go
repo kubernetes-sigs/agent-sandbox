@@ -85,7 +85,7 @@ type Lifecycle struct {
 type SandboxWarmPoolRef struct {
 	// name of the SandboxWarmPool
 	// +required
-	Name string `json:"name,omitempty"`
+	Name string `json:"name"`
 }
 
 // EnvVar represents a custom environment variable key-value pair.

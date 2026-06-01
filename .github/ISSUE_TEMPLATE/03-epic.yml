@@ -1,0 +1,46 @@
+name: Epic / Umbrella Issue (Maintainers Only)
+description: FOR PROJECT MAINTAINERS ONLY. Track large multi-part roadmap initiatives.
+labels: ["kind/feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!WARNING]
+        > **This template is strictly for project maintainers to track approved roadmap initiatives.** 
+        > If you are a community contributor requesting a new feature, please use the **Feature Request** template instead. Unsolicited community epics will be closed.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary / Goal
+      description: Provide a high-level summary of the initiative and what success looks like.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation / Value
+      description: Why is this initiative necessary? What value does it provide to users or maintainers?
+    validations:
+      required: true
+  - type: textarea
+    id: breakdown
+    attributes:
+      label: Work Breakdown / Tasks
+      description: Provide a checklist of child issues, PRs, or sub-tasks required to complete this epic.
+      value: |
+        - [ ] Task 1 (#issue)
+        - [ ] Task 2 (#issue)
+        - [ ] Docs update (#issue)
+    validations:
+      required: true
+  - type: input
+    id: milestone
+    attributes:
+      label: Target Milestone / Release
+      description: Which milestone or release is this epic targeted for?
+      placeholder: e.g., v0.5.0 (Beta) or Q3 2026
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Additional Context
+      description: Any related KEPs, design docs, diagrams, or roadmap links.

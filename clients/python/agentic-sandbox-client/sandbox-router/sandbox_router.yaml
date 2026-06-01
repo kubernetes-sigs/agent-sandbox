@@ -43,6 +43,13 @@ spec:
         env:
         - name: PROXY_TIMEOUT_SECONDS
           value: "180"
+        - name: ALLOW_UNAUTHENTICATED_ROUTER
+          value: "false"
+        # - name: ROUTER_AUTH_TOKEN
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: sandbox-router-auth
+        #       key: auth-token
         ports:
         - containerPort: 8080
         readinessProbe:

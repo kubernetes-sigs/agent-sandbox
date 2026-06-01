@@ -78,8 +78,7 @@ def deploy_router(tc, temp_namespace):
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
 
     print("Waiting for router deployment to be ready...")
-    tc.wait_for_deployment_ready(
-        "sandbox-router-deployment", namespace=temp_namespace)
+    tc.wait_for_deployment_ready("sandbox-router-deployment", namespace=temp_namespace)
 
 
 @pytest.fixture(scope="function")
@@ -175,24 +174,29 @@ def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_rou
         client.delete_all()
 
 
-def test_python_sdk_annotation(tc, temp_namespace, sandbox_template):
+def test_python_sdk_annotation(tc, temp_namespace, sandbox_coldpool):
     """Tests that the Python SDK creates SandboxClaim with correct annotation."""
-    from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
     from datetime import datetime
+    from k8s_agent_sandbox.constants import (
+        CLIENT_REQUEST_TIME_ANNOTATION,
+        CLAIM_API_GROUP,
+        CLAIM_API_VERSION,
+        CLAIM_PLURAL_NAME,
+    )
 
     client = SandboxClient()
     try:
         sandbox = client.create_sandbox(
-            template=sandbox_template,
+            warmpool=sandbox_coldpool,
             namespace=temp_namespace,
         )
 
         custom_objects_api = tc.get_custom_objects_api()
         claim = custom_objects_api.get_namespaced_custom_object(
-            group="extensions.agents.x-k8s.io",
-            version="v1alpha1",
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
             namespace=temp_namespace,
-            plural="sandboxclaims",
+            plural=CLAIM_PLURAL_NAME,
             name=sandbox.claim_name
         )
 

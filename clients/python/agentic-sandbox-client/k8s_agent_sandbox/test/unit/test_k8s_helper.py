@@ -177,12 +177,12 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
                 "metadata": {"name": "test-claim"}
             }
         }
-
+        
         mock_watch.stream.return_value = [mock_event]
         mock_watch_class.return_value = mock_watch
-
+        
         helper = K8sHelper()
-
+        
         with self.assertRaises(SandboxMetadataError) as context:
             helper.resolve_sandbox_name("test-claim", "default", timeout=5)
 

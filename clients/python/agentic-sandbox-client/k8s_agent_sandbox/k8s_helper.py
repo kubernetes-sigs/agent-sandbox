@@ -364,8 +364,8 @@ class K8sHelper:
                 kwargs["label_selector"] = label_selector
             response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
             return [
-                item.get("metadata", {}).get("name")
-                for item in response.get("items", [])
+                item.get("metadata", {}).get("name") 
+                for item in response.get("items", []) 
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:

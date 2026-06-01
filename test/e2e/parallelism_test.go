@@ -184,7 +184,7 @@ func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolS
 			claimObj := &extensionsv1beta1.SandboxClaim{}
 			claimObj.Name = claimName
 			claimObj.Namespace = ns.Name
-			claimObj.Spec.TemplateRef.Name = template.Name
+			claimObj.Spec.WarmPoolRef.Name = poolObj.Name
 			if err := tc.CreateWithCleanup(t.Context(), claimObj); err != nil {
 				errCh <- fmt.Errorf("failed creating claim %d: %w", idx, err)
 				return

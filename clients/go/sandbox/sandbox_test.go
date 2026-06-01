@@ -51,7 +51,7 @@ import (
 
 func defaultTestOpts() Options {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		APIURL:              "http://localhost:9999",
 		ServerPort:          8888,
@@ -205,16 +205,16 @@ func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeext
 // Validation tests
 // ---------------------------------------------------------------------------
 
-func TestNew_MissingTemplateName(t *testing.T) {
+func TestNew_MissingWarmPoolName(t *testing.T) {
 	opts := Options{Namespace: "default"}
 	opts.setDefaults()
 	if err := opts.validate(); err == nil {
-		t.Fatal("expected error for missing TemplateName")
+		t.Fatal("expected error for missing WarmPoolName")
 	}
 }
 
 func TestNew_InvalidPort(t *testing.T) {
-	opts := Options{TemplateName: "tpl", ServerPort: -1}
+	opts := Options{WarmPoolName: "pool", ServerPort: -1}
 	opts.setDefaults()
 	if err := opts.validate(); err == nil {
 		t.Fatal("expected error for negative ServerPort")
@@ -222,7 +222,7 @@ func TestNew_InvalidPort(t *testing.T) {
 }
 
 func TestNew_DefaultsApplied(t *testing.T) {
-	opts := Options{TemplateName: "tpl"}
+	opts := Options{WarmPoolName: "pool"}
 	opts.setDefaults()
 	if opts.Namespace != "default" {
 		t.Errorf("expected Namespace=default, got %s", opts.Namespace)
@@ -543,7 +543,7 @@ func TestResolveRouterPod_NoEndpoints(t *testing.T) {
 
 func TestModeSelection_Gateway(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "test-gateway",
 		GatewayNamespace:    "default",
@@ -603,7 +603,7 @@ func TestModeSelection_Gateway(t *testing.T) {
 
 func TestGatewayDiscovery_Timeout(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "missing-gateway",
 		GatewayNamespace:    "default",
@@ -682,7 +682,7 @@ func TestExtractGatewayAddress(t *testing.T) {
 
 func TestGatewayDiscovery_WatchUsesCorrectFieldSelector(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "test-gateway",
 		GatewayNamespace:    "default",
@@ -746,7 +746,7 @@ func TestGatewayDiscovery_WatchUsesCorrectFieldSelector(t *testing.T) {
 
 func TestGatewayDiscovery_ListUsesCorrectFieldSelector(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "test-gateway",
 		GatewayNamespace:    "default",
@@ -1349,7 +1349,7 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 	opts := defaultTestOpts()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
 
-	var capturedTemplate string
+	var capturedWarmPool string
 	fakeWatcher := watch.NewFake()
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -1359,7 +1359,7 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 			if claim.Name == "" && claim.GenerateName != "" {
 				claim.Name = claim.GenerateName + "test12345"
 			}
-			capturedTemplate = claim.Spec.TemplateRef.Name
+			capturedWarmPool = claim.Spec.WarmPoolRef.Name
 			go fakeWatcher.Add(readySandbox(claim.Name))
 		}
 		return false, nil, nil
@@ -1372,8 +1372,8 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 	}
 	defer c.Close(context.Background())
 
-	if capturedTemplate != opts.TemplateName {
-		t.Errorf("expected template name %q, got %q", opts.TemplateName, capturedTemplate)
+	if capturedWarmPool != opts.WarmPoolName {
+		t.Errorf("expected warm pool name %q, got %q", opts.WarmPoolName, capturedWarmPool)
 	}
 }
 
@@ -1536,13 +1536,13 @@ func TestValidation_NegativeTimeouts(t *testing.T) {
 		name string
 		opts Options
 	}{
-		{"negative SandboxReadyTimeout", Options{TemplateName: "t", SandboxReadyTimeout: -1}},
-		{"negative GatewayReadyTimeout", Options{TemplateName: "t", GatewayReadyTimeout: -1}},
-		{"negative PortForwardReadyTimeout", Options{TemplateName: "t", PortForwardReadyTimeout: -1}},
-		{"negative CleanupTimeout", Options{TemplateName: "t", CleanupTimeout: -1}},
-		{"negative RequestTimeout", Options{TemplateName: "t", RequestTimeout: -1}},
-		{"negative PerAttemptTimeout", Options{TemplateName: "t", PerAttemptTimeout: -1}},
-		{"negative MaxDownloadSize", Options{TemplateName: "t", MaxDownloadSize: -1}},
+		{"negative SandboxReadyTimeout", Options{WarmPoolName: "pool", SandboxReadyTimeout: -1}},
+		{"negative GatewayReadyTimeout", Options{WarmPoolName: "pool", GatewayReadyTimeout: -1}},
+		{"negative PortForwardReadyTimeout", Options{WarmPoolName: "pool", PortForwardReadyTimeout: -1}},
+		{"negative CleanupTimeout", Options{WarmPoolName: "pool", CleanupTimeout: -1}},
+		{"negative RequestTimeout", Options{WarmPoolName: "pool", RequestTimeout: -1}},
+		{"negative PerAttemptTimeout", Options{WarmPoolName: "pool", PerAttemptTimeout: -1}},
+		{"negative MaxDownloadSize", Options{WarmPoolName: "pool", MaxDownloadSize: -1}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1559,9 +1559,9 @@ func TestValidation_InvalidNames(t *testing.T) {
 		name string
 		opts Options
 	}{
-		{"uppercase GatewayName", Options{TemplateName: "t", GatewayName: "MyGateway"}},
-		{"uppercase Namespace", Options{TemplateName: "t", Namespace: "MyNS"}},
-		{"uppercase TemplateName", Options{TemplateName: "MyTemplate"}},
+		{"uppercase GatewayName", Options{WarmPoolName: "pool", GatewayName: "MyGateway"}},
+		{"uppercase Namespace", Options{WarmPoolName: "pool", Namespace: "MyNS"}},
+		{"uppercase WarmPoolName", Options{WarmPoolName: "MyWarmPool"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1579,7 +1579,7 @@ func TestValidation_InvalidNames(t *testing.T) {
 
 func TestGatewayDiscovery_Timeout_CleansUpClaim(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "missing-gateway",
 		GatewayNamespace:    "default",
@@ -1906,7 +1906,7 @@ func TestSyncBuffer_PartialTruncation(t *testing.T) {
 
 func TestOpen_ReconnectsAfterTransportDeath_GatewayMode(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "test-gateway",
 		GatewayNamespace:    "default",
@@ -1990,7 +1990,7 @@ func TestOpen_ReconnectsAfterTransportDeath_GatewayMode(t *testing.T) {
 
 func TestGatewayDiscovery_ListPath_AlreadyReady(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "test-gateway",
 		GatewayNamespace:    "default",
@@ -2298,7 +2298,7 @@ func TestValidation_InvalidAPIURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := Options{TemplateName: "t", APIURL: tc.apiURL}
+			opts := Options{WarmPoolName: "pool", APIURL: tc.apiURL}
 			opts.setDefaults()
 			if err := opts.validate(); err == nil {
 				t.Errorf("expected validation error for APIURL %q", tc.apiURL)
@@ -2315,7 +2315,7 @@ func TestValidation_ValidAPIURL(t *testing.T) {
 	}
 	for _, apiURL := range cases {
 		t.Run(apiURL, func(t *testing.T) {
-			opts := Options{TemplateName: "t", APIURL: apiURL}
+			opts := Options{WarmPoolName: "pool", APIURL: apiURL}
 			opts.setDefaults()
 			if err := opts.validate(); err != nil {
 				t.Errorf("unexpected validation error for APIURL %q: %v", apiURL, err)
@@ -2622,7 +2622,7 @@ func TestClose_DeleteFailure_ClearsIdentityButKeepsClaim(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestValidation_InvalidGatewayScheme(t *testing.T) {
-	opts := Options{TemplateName: "t", GatewayScheme: "ftp"}
+	opts := Options{WarmPoolName: "pool", GatewayScheme: "ftp"}
 	opts.setDefaults()
 	if err := opts.validate(); err == nil {
 		t.Fatal("expected error for invalid GatewayScheme")
@@ -2690,7 +2690,7 @@ func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 
 func TestOpen_ReconnectTransportFailure(t *testing.T) {
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		GatewayName:         "test-gateway",
 		GatewayNamespace:    "default",

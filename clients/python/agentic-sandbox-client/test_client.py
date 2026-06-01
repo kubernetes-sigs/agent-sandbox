@@ -19,7 +19,7 @@ import sys
 import subprocess
 from unittest.mock import MagicMock
 from pydantic import ValidationError
-from k8s_agent_sandbox import SandboxClient, SandboxTemplateNotFoundError
+from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -149,21 +149,21 @@ def run_sandbox_tests(sandbox: Sandbox):
     test_command_execution(sandbox)
     test_file_operations(sandbox)
 
-def test_wrong_template_name(client: SandboxClient, namespace: str):
-    print("\n--- Testing Wrong Template Name ---")
-    wrong_template = "this-template-does-not-exist-123"
-    print(f"Attempting to create sandbox with non-existent template '{wrong_template}'...")
+def test_wrong_warmpool_name(client: SandboxClient, namespace: str):
+    print("\n--- Testing Wrong Warmpool Name ---")
+    wrong_warmpool = "this-warmpool-does-not-exist-123"
+    print(f"Attempting to create sandbox with non-existent warm pool '{wrong_warmpool}'...")
     try:
-        client.create_sandbox(wrong_template, namespace=namespace)
-        raise AssertionError("Expected SandboxTemplateNotFoundError was not raised")
-    except SandboxTemplateNotFoundError as e:
-        print(f"Caught expected SandboxTemplateNotFoundError: {e}")
-    print("--- Wrong Template Name Test Passed! ---")
+        client.create_sandbox(wrong_warmpool, namespace=namespace)
+        raise AssertionError("Expected SandboxWarmPoolNotFoundError was not raised")
+    except SandboxWarmPoolNotFoundError as e:
+        print(f"Caught expected SandboxWarmPoolNotFoundError: {e}")
+    print("--- Wrong Warmpool Name Test Passed! ---")
 
 
-def test_explicit_close_connection_and_persistence(client: SandboxClient, template_name: str, namespace: str):
+def test_explicit_close_connection_and_persistence(client: SandboxClient, warmpool_name: str, namespace: str):
     print("\n--- Testing Explicit Disconnect and Persistence ---")
-    persist_sandbox = client.create_sandbox(template_name, namespace=namespace)
+    persist_sandbox = client.create_sandbox(warmpool_name, namespace=namespace)
     persist_claim = persist_sandbox.claim_name
     
     print(f"Explicitly closing connection for sandbox '{persist_claim}'...")
@@ -185,13 +185,13 @@ def test_explicit_close_connection_and_persistence(client: SandboxClient, templa
     reattached_sandbox.terminate()
     print("--- Explicit Close Connection Test Passed ---")
 
-def test_creation_get_and_list_sandboxes(client: SandboxClient, template_name: str, namespace: str) -> tuple[Sandbox, Sandbox]:
-    print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
-    sandbox = client.create_sandbox(template_name, namespace=namespace)
+def test_creation_get_and_list_sandboxes(client: SandboxClient, warmpool_name: str, namespace: str) -> tuple[Sandbox, Sandbox]:
+    print(f"Creating sandbox with warm pool '{warmpool_name}' in namespace '{namespace}'...")
+    sandbox = client.create_sandbox(warmpool_name, namespace=namespace)
     print(f"Sandbox created with claim name: {sandbox.claim_name}")
 
-    print(f"Creating second sandbox with template '{template_name}' in namespace '{namespace}'...")
-    sandbox2 = client.create_sandbox(template_name, namespace=namespace)
+    print(f"Creating second sandbox with warm pool '{warmpool_name}' in namespace '{namespace}'...")
+    sandbox2 = client.create_sandbox(warmpool_name, namespace=namespace)
     print(f"Sandbox 2 created with claim name: {sandbox2.claim_name}")
 
     print("\n--- Verifying Active Sandboxes ---")
@@ -320,7 +320,7 @@ cleanup_flag = sys.argv[1] == 'True'
 conn_config = {conn_code}
 client = SandboxClient(connection_config=conn_config, cleanup=cleanup_flag)
 
-sb = client.create_sandbox('{template_name}', namespace='{namespace}')
+sb = client.create_sandbox('{warmpool_name}', namespace='{namespace}')
 print(f"CLAIM_NAME:{{sb.claim_name}}")
 """
     
@@ -372,7 +372,7 @@ print(f"CLAIM_NAME:{{sb.claim_name}}")
     sb_false.terminate()
     print("--- SandboxClient cleanup flag Test Passed ---")
 
-def main(template_name: str, gateway_name: str | None, api_url: str | None, namespace: str,
+def main(warmpool_name: str, gateway_name: str | None, api_url: str | None, namespace: str,
                server_port: int, enable_tracing: bool):
     """
     Tests the Sandbox client by creating a sandbox, running a command,
@@ -415,10 +415,10 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
         cleanup=True
     )
     
-    test_client_cleanup_flag(client, template_name, namespace, connection_config)
+    test_client_cleanup_flag(client, warmpool_name, namespace, connection_config)
 
     try:
-        run_client_tests(client, template_name, namespace)
+        run_client_tests(client, warmpool_name, namespace)
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")
@@ -430,9 +430,9 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test the Sandbox client.")
     parser.add_argument(
-        "--template-name",
-        default="python-sandbox-template",
-        help="The name of the sandbox template to use for the test."
+        "--warmpool-name",
+        default="python-sandbox-pool",
+        help="The name of the sandbox warm pool to use for the test."
     )
 
     # Default is None to allow testing the Port-Forward fallback
@@ -456,7 +456,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(
-        template_name=args.template_name,
+        warmpool_name=args.warmpool_name,
         gateway_name=args.gateway_name,
         api_url=args.api_url,
         namespace=args.namespace,

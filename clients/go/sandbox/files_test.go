@@ -38,7 +38,7 @@ import (
 // newReadyTestSandbox creates a Sandbox that's already "connected" to the given server URL.
 func newReadyTestSandbox(serverURL string) *Sandbox {
 	opts := Options{
-		TemplateName:      "test-template",
+		WarmPoolName:      "test-warmpool",
 		Namespace:         "default",
 		APIURL:            serverURL,
 		ServerPort:        8888,
@@ -69,7 +69,7 @@ func newReadyTestSandbox(serverURL string) *Sandbox {
 // newUnreadyTestSandbox returns a Sandbox that has not been opened.
 func newUnreadyTestSandbox() *Sandbox {
 	opts := Options{
-		TemplateName:      "test-template",
+		WarmPoolName:      "test-warmpool",
 		Namespace:         "default",
 		APIURL:            "http://localhost:19999",
 		ServerPort:        8888,

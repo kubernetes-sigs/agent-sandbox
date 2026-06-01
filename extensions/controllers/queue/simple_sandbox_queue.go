@@ -26,15 +26,15 @@ type SandboxKey types.NamespacedName
 // SandboxQueue defines the interface for managing a thread-safe,
 // highly concurrent queue of adoptable warm pool sandboxes.
 type SandboxQueue interface {
-	Add(templateHash string, item SandboxKey)
-	Get(templateHash string) (SandboxKey, bool)
-	RemoveQueue(templateHash string)
-	RemoveItem(templateHash string, item SandboxKey)
+	Add(warmPoolName string, item SandboxKey)
+	Get(warmPoolName string) (SandboxKey, bool)
+	RemoveQueue(warmPoolName string)
+	RemoveItem(warmPoolName string, item SandboxKey)
 }
 
 // SimpleSandboxQueue implements SandboxQueue using simple synchronized slices.
 type SimpleSandboxQueue struct {
-	// queues is a thread-safe dictionary from template hash to a synchronizedQueue
+	// queues is a thread-safe dictionary from warm pool name to a synchronizedQueue
 	queues sync.Map
 }
 
@@ -43,24 +43,24 @@ func NewSimpleSandboxQueue() *SimpleSandboxQueue {
 	return &SimpleSandboxQueue{}
 }
 
-// Add pushes an item to the specific template's queue.
-func (s *SimpleSandboxQueue) Add(templateHash string, item SandboxKey) {
-	q, _ := s.queues.LoadOrStore(templateHash, newSynchronizedQueue())
+// Add pushes an item to the specific warm pool's queue.
+func (s *SimpleSandboxQueue) Add(warmPoolName string, item SandboxKey) {
+	q, _ := s.queues.LoadOrStore(warmPoolName, newSynchronizedQueue())
 	q.(*synchronizedQueue).Push(item)
 }
 
-// Get pops an item from the specific template's queue.
-func (s *SimpleSandboxQueue) Get(templateHash string) (SandboxKey, bool) {
-	q, ok := s.queues.Load(templateHash)
+// Get pops an item from the specific warm pool's queue.
+func (s *SimpleSandboxQueue) Get(warmPoolName string) (SandboxKey, bool) {
+	q, ok := s.queues.Load(warmPoolName)
 	if !ok {
 		return SandboxKey{}, false
 	}
 	return q.(*synchronizedQueue).Pop()
 }
 
-// RemoveItem deletes a specific sandbox from a template's queue.
-func (s *SimpleSandboxQueue) RemoveItem(templateHash string, item SandboxKey) {
-	if q, ok := s.queues.Load(templateHash); ok {
+// RemoveItem deletes a specific sandbox from a warm pool's queue.
+func (s *SimpleSandboxQueue) RemoveItem(warmPoolName string, item SandboxKey) {
+	if q, ok := s.queues.Load(warmPoolName); ok {
 		sq := q.(*synchronizedQueue)
 		sq.Remove(item)
 	}
@@ -92,7 +92,7 @@ func (q *synchronizedQueue) Remove(key SandboxKey) {
 
 // TODO(vicentefb): Implement queue cleanup mechanism.
 // We should remove the queue from the sync.Map when the corresponding
-// SandboxWarmPool for a given template is deleted to prevent memory leaks.
+// SandboxWarmPool is deleted to prevent memory leaks.
 type synchronizedQueue struct {
 	mu    sync.Mutex
 	items []SandboxKey
@@ -139,8 +139,8 @@ func (q *synchronizedQueue) Pop() (SandboxKey, bool) {
 	return item, true
 }
 
-// RemoveQueue completely deletes a template's queue from the sync.Map
-// to prevent memory leaks when SandboxTemplates or WarmPools are deleted.
-func (s *SimpleSandboxQueue) RemoveQueue(templateHash string) {
-	s.queues.Delete(templateHash)
+// RemoveQueue completely deletes a warm pool's queue from the sync.Map
+// to prevent memory leaks when WarmPools are deleted.
+func (s *SimpleSandboxQueue) RemoveQueue(warmPoolName string) {
+	s.queues.Delete(warmPoolName)
 }

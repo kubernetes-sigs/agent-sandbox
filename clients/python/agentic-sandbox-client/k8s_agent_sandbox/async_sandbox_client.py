@@ -106,22 +106,20 @@ class AsyncSandboxClient(Generic[T]):
 
     async def create_sandbox(
         self,
-        template: str,
+        warmpool: str,
         namespace: str = "default",
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
-        warmpool: str | None = None,
         *,
         shutdown_after_seconds: int | None = None,
     ) -> T:
         """Provisions a new Sandbox claim and returns an async Sandbox handle.
 
         Args:
-            template: Name of the SandboxTemplate to use.
+            warmpool: Name of the SandboxWarmPool to use.
             namespace: Kubernetes namespace for the claim.
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim.
-            warmpool: Optional warm pool policy for sandbox adoption (e.g. "default", "none", or custom).
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -131,11 +129,11 @@ class AsyncSandboxClient(Generic[T]):
         Example::
 
             async with AsyncSandboxClient(connection_config=config) as client:
-                sandbox = await client.create_sandbox("python-sandbox-template")
+                sandbox = await client.create_sandbox("python-sandbox-pool")
                 result = await sandbox.commands.run("echo 'Hello'")
         """
-        if not template:
-            raise ValueError("Template name cannot be empty.")
+        if not warmpool:
+            raise ValueError("Warmpool name cannot be empty.")
 
         if labels:
             self._validate_labels(labels)
@@ -145,7 +143,7 @@ class AsyncSandboxClient(Generic[T]):
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
         try:
-            await self._create_claim(claim_name, template, namespace, labels=labels, lifecycle=lifecycle, warmpool=warmpool)
+            await self._create_claim(claim_name, warmpool, namespace, labels=labels, lifecycle=lifecycle)
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, sandbox_ready_timeout
@@ -177,7 +175,7 @@ class AsyncSandboxClient(Generic[T]):
         claim_name: str,
         namespace: str = "default",
         resolve_timeout: int = 30,
-        template_name: str | None = None,
+        warmpool_name: str | None = None,
     ) -> T:
         """Retrieves an existing sandbox handle given a sandbox claim name.
 
@@ -186,10 +184,10 @@ class AsyncSandboxClient(Generic[T]):
             namespace: Kubernetes namespace the claim lives in.
             resolve_timeout: Seconds to wait while resolving the sandbox
                 name from the claim status.
-            template_name: Optional SandboxTemplate name to validate against
-                the existing claim's ``spec.sandboxTemplateRef.name``.
+            warmpool_name: Optional SandboxWarmPool name to validate against
+                the existing claim's ``spec.warmPoolRef.name``.
                 When supplied and the claim references a different
-                template, ``ValueError`` is raised before returning a
+                warmpool, ``ValueError`` is raised before returning a
                 handle. Mirrors the sync ``SandboxClient.get_sandbox``
                 guard so async session-reattach callers get the same
                 refuse-on-mismatch semantics.
@@ -205,7 +203,7 @@ class AsyncSandboxClient(Generic[T]):
             existing = self._active_connection_sandboxes.get(key)
 
         try:
-            if template_name is not None:
+            if warmpool_name is not None:
                 claim_object = await self.k8s_helper.get_sandbox_claim(
                     claim_name, namespace
                 )
@@ -213,15 +211,15 @@ class AsyncSandboxClient(Generic[T]):
                     raise SandboxNotFoundError(
                         f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'."
                     )
-                existing_template = (
+                existing_warmpool = (
                     claim_object.get("spec", {})
-                    .get("sandboxTemplateRef", {})
+                    .get("warmPoolRef", {})
                     .get("name")
                 )
-                if existing_template != template_name:
+                if existing_warmpool != warmpool_name:
                     raise ValueError(
                         f"SandboxClaim '{claim_name}' in namespace '{namespace}' references "
-                        f"template '{existing_template}', not '{template_name}'. Refusing "
+                        f"warmpool '{existing_warmpool}', not '{warmpool_name}'. Refusing "
                         f"to reattach."
                     )
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
@@ -231,7 +229,7 @@ class AsyncSandboxClient(Generic[T]):
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
         except ValueError:
-            # Template mismatch is a signed-off refusal — propagate
+            # Warmpool mismatch is a signed-off refusal — propagate
             # untouched so the caller sees the security-relevant reason
             # rather than a generic "not found" wrap.
             raise
@@ -364,11 +362,10 @@ class AsyncSandboxClient(Generic[T]):
     async def _create_claim(
         self,
         claim_name: str,
-        template_name: str,
+        warmpool_name: str,
         namespace: str,
         labels: dict[str, str] | None = None,
         lifecycle: dict | None = None,
-        warmpool: str | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():
@@ -384,7 +381,7 @@ class AsyncSandboxClient(Generic[T]):
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
         await self.k8s_helper.create_sandbox_claim(
-            claim_name, template_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle, warmpool=warmpool
+            claim_name, warmpool_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle
         )
 
     @async_trace_span("wait_for_sandbox_ready")

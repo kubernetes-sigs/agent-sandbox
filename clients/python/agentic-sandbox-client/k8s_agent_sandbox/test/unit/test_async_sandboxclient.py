@@ -62,10 +62,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
-            sandbox = await self.client.create_sandbox("test-template", "test-namespace")
+            sandbox = await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-template", "test-namespace", labels=None, lifecycle=None, warmpool=None
+                ANY, "test-warmpool", "test-namespace", labels=None, lifecycle=None
             )
             self.assertEqual(sandbox, mock_sandbox_instance)
 
@@ -81,7 +81,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
 
             with self.assertRaises(Exception) as ctx:
-                await self.client.create_sandbox("test-template", "test-namespace")
+                await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             self.assertEqual(str(ctx.exception), "Timeout")
             mock_delete.assert_called_once()
@@ -96,7 +96,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
 
             with self.assertRaises(asyncio.CancelledError):
-                await self.client.create_sandbox("test-template", "test-namespace")
+                await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_delete.assert_called_once()
 
@@ -220,7 +220,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
             await self.client.create_sandbox(
-                "test-template", "test-namespace", shutdown_after_seconds=300
+                "test-warmpool", "test-namespace", shutdown_after_seconds=300
             )
 
             mock_create.assert_called_once()
@@ -239,7 +239,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
-            await self.client.create_sandbox("test-template", "test-namespace")
+            await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             call_kwargs = mock_create.call_args
             lifecycle = call_kwargs[1].get("lifecycle")
@@ -295,7 +295,7 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(client, "_create_claim", new_callable=AsyncMock), \
              patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
-            await client.create_sandbox("my-template")
+            await client.create_sandbox("my-warmpool")
 
         call_kwargs = mock_sandbox_class.call_args.kwargs
         self.assertNotIn("use_pod_ip", call_kwargs,

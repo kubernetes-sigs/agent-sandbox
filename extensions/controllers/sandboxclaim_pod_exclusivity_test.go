@@ -109,14 +109,19 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 				UID:       types.UID(fmt.Sprintf("claim-%d-uid", i)),
 			},
 			Spec: extensionsv1beta1.SandboxClaimSpec{
-				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"},
+				WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "pool"},
 			},
 		}
 	}
 
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}},
+	}
+
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(template, poolSb0, poolSb1).
+		WithObjects(template, warmPool, poolSb0, poolSb1).
 		WithStatusSubresource(&extensionsv1beta1.SandboxClaim{})
 	for _, cl := range claims {
 		builder = builder.WithObjects(cl)
@@ -124,8 +129,8 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	fc := builder.Build()
 
 	testQueue := queue.NewSimpleSandboxQueue()
-	testQueue.Add(templateHash, queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
-	testQueue.Add(templateHash, queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
+	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
+	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
 
 	reconciler := &SandboxClaimReconciler{
 		Client: fc, Scheme: scheme,

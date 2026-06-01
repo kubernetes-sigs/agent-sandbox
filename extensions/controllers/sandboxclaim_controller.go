@@ -263,6 +263,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			logger.V(1).Info("SandboxTemplate of the warmpool not found yet, will retry", "warmPool", claim.Spec.WarmPoolRef.Name, "error", reconcileErr)
 		}
 
+		// TODO: This 1-minute requeue creates a latency regression vs an immediate watch trigger.
+		// Consider adding a lightweight SandboxTemplate -> claims map watch to reconcile promptly.
 		requeueDelay := 1 * time.Minute
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
@@ -1402,6 +1404,8 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 			handler.EnqueueRequestsFromMapFunc(r.mapWarmPoolToClaims),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
+		// TODO: Keep a lightweight SandboxTemplate -> claims map watch to promptly reconcile
+		// claims when a missing template is created, instead of relying on the 1-minute fallback.
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }

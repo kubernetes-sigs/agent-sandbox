@@ -25,6 +25,10 @@ class ExecuteRequest(BaseModel):
     """Request model for the /execute endpoint."""
     command: str
 
+class PythonExecuteRequest(BaseModel):
+    """Request model for the /execute-python endpoint."""
+    code: str
+
 class ExecuteResponse(BaseModel):
     """Response model for the /execute endpoint."""
     stdout: str
@@ -32,7 +36,9 @@ class ExecuteResponse(BaseModel):
     exit_code: int
 
 
-ALLOWED_COMMANDS = {"ls", "echo", "cat", "grep", "pwd", "zip", "unzip", "mv", "curl", "python"}
+ALLOWED_COMMANDS = {"ls", "echo", "cat", "grep", "pwd", "zip", "unzip", "mv", "curl"}
+
+WORKING_DIR = "/app" if os.path.exists("/app") else os.getcwd()
 
 app = FastAPI(
     title="Agentic Sandbox Runtime",
@@ -78,12 +84,37 @@ async def execute_command(request: ExecuteRequest):
                 exit_code=1
             )
 
-        # Execute the command, always from the /app directory
+        # Execute the command, always from the WORKING_DIR directory
         process = subprocess.run(
             args,
             capture_output=True,
             text=True,
-            cwd="/app",
+            cwd=WORKING_DIR,
+            timeout=30,
+        )
+        return ExecuteResponse(
+            stdout=process.stdout,
+            stderr=process.stderr,
+            exit_code=process.returncode
+        )
+    except subprocess.TimeoutExpired:
+        return ExecuteResponse(stdout="", stderr="Command timed out", exit_code=124)
+    except Exception as e:
+        return ExecuteResponse(stdout="", stderr=str(e), exit_code=1)
+
+@app.post("/execute-python", summary="Execute Python code", response_model=ExecuteResponse)
+async def execute_python(request: PythonExecuteRequest):
+    """
+    Executes arbitrary Python code inside the sandbox and returns its output.
+    """
+    try:
+        import shutil
+        python_exe = "python" if shutil.which("python") else "python3"
+        process = subprocess.run(
+            [python_exe, "-c", request.code],
+            capture_output=True,
+            text=True,
+            cwd=WORKING_DIR,
             timeout=30,
         )
         return ExecuteResponse(
@@ -103,7 +134,7 @@ async def upload_file(file: UploadFile = File(...)):
     """
     try:
         logging.info(f"--- UPLOAD_FILE CALLED: Attempting to save '{file.filename}' ---")
-        file_path = os.path.join("/app", file.filename)
+        file_path = os.path.join(WORKING_DIR, file.filename)
 
         with open(file_path, "wb") as f:
             f.write(await file.read())
@@ -124,7 +155,7 @@ async def download_file(file_path: str):
     """
     Downloads a specified file from the /app directory in the sandbox.
     """
-    full_path = os.path.join("/app", file_path)
+    full_path = os.path.join(WORKING_DIR, file_path)
     if os.path.isfile(full_path):
         return FileResponse(path=full_path, media_type='application/octet-stream', filename=file_path)
     return JSONResponse(status_code=404, content={"message": "File not found"})

@@ -44,6 +44,10 @@ type ServicePortalConfig struct {
 	// Defaults to "images.local/all-in-one-portal:latest" if empty.
 	SidecarImage string
 
+	// RunSandboxAsNonRoot specifies whether to force the sandbox container to run as non-root.
+	// Defaults to false.
+	RunSandboxAsNonRoot bool
+
 	// // Services is a list of services to proxy.
 	// // If empty, defaults to DefaultServices.
 	// Services []ServiceConfig
@@ -275,15 +279,17 @@ func AddServicePortal(sb *sandboxv1beta1.Sandbox, config ServicePortalConfig) {
 	for i, container := range podSpec.Containers {
 		if container.Name == "sandbox" {
 			container := &podSpec.Containers[i]
-			if container.SecurityContext == nil {
-				container.SecurityContext = &corev1.SecurityContext{}
+			if config.RunSandboxAsNonRoot {
+				if container.SecurityContext == nil {
+					container.SecurityContext = &corev1.SecurityContext{}
+				}
+				container.SecurityContext.RunAsNonRoot = &trueVal
+				if container.SecurityContext.RunAsUser == nil {
+					userVal := int64(1000)
+					container.SecurityContext.RunAsUser = &userVal
+				}
+				container.SecurityContext.AllowPrivilegeEscalation = &falseVal
 			}
-			container.SecurityContext.RunAsNonRoot = &trueVal
-			if container.SecurityContext.RunAsUser == nil {
-				userVal := int64(1000)
-				container.SecurityContext.RunAsUser = &userVal
-			}
-			container.SecurityContext.AllowPrivilegeEscalation = &falseVal
 
 			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 				Name:      "ca-cert",

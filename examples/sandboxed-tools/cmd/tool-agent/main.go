@@ -205,6 +205,9 @@ func parseAllowedCommand(args []string) Command {
 	if v := parseAptGetInstall(args); v != nil {
 		return v
 	}
+	if v := parseAptGetUpdate(args); v != nil {
+		return v
+	}
 
 	return nil
 }
@@ -228,30 +231,6 @@ func isPackageName(s string) bool {
 		}
 	}
 	return true
-}
-
-// parseAptGetInstall parses a command to check if it is an apt-get install command.
-func parseAptGetInstall(args []string) *AptGetInstall {
-	if len(args) == 0 {
-		return nil
-	}
-
-	cmdName := filepath.Base(args[0])
-
-	switch cmdName {
-	// We start very strict
-	case "apt-get":
-		if len(args) >= 4 {
-			if args[1] == "install" && args[2] == "--yes" && isPackageName(args[3]) {
-				return &AptGetInstall{
-					Packages: args[3:],
-					Yes:      true,
-				}
-			}
-		}
-	}
-
-	return nil
 }
 
 type RunOptions struct {

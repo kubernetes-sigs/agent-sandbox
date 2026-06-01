@@ -10,9 +10,63 @@ import (
 	"strings"
 )
 
+type AptGetUpdate struct {
+}
+
+// parseAptGetUpdate parses a command to check if it is an apt-get update command.
+func parseAptGetUpdate(args []string) *AptGetUpdate {
+	if len(args) == 2 && args[0] == "apt-get" && args[1] == "update" {
+		return &AptGetUpdate{}
+	}
+
+	return nil
+}
+
+func (c *AptGetUpdate) Run(ctx context.Context, opt RunOptions) error {
+	args := []string{"apt-get", "update"}
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Stdin = nil
+	cmd.Stdout = opt.Stdout
+	cmd.Stderr = opt.Stderr
+	return cmd.Run()
+}
+
+func (c *AptGetUpdate) PostRun(ctx context.Context) error {
+	return nil
+}
+
 type AptGetInstall struct {
 	Packages []string
 	Yes      bool
+}
+
+// parseAptGetInstall parses a command to check if it is an apt-get install command.
+func parseAptGetInstall(args []string) *AptGetInstall {
+	if len(args) == 0 {
+		return nil
+	}
+
+	if len(args) >= 4 {
+		if args[0] == "apt-get" && args[1] == "install" && args[2] == "--yes" {
+			packageNames := args[3:]
+			allValid := true
+			for _, p := range packageNames {
+				if !isPackageName(p) {
+					allValid = false
+					break
+				}
+			}
+			if allValid {
+				return &AptGetInstall{
+					Packages: packageNames,
+					Yes:      true,
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (c *AptGetInstall) Run(ctx context.Context, opt RunOptions) error {

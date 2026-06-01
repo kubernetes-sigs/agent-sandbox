@@ -1,9 +1,11 @@
 title: Agent Sandbox Suspended Condition Status
-kep-number: 2
+kep-number: 119
 authors:
   - "@SHRUTI6991"
 status: implementable
-creation-date: 2026-03-16
+creation-date: "2026-03-16"
+last-updated: "2026-05-29"
+stage: alpha
 reviewers:
   - "@barney-s"
 approvers:

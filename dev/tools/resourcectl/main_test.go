@@ -47,7 +47,10 @@ func TestIsHeartbeatProcess(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start helper process: %v", err)
 	}
-	defer cmd.Process.Kill()
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
 	// Let the OS populate /proc/<pid>/cmdline
 	time.Sleep(50 * time.Millisecond)
 
@@ -66,7 +69,10 @@ func TestIsHeartbeatProcess(t *testing.T) {
 	if err := dummy.Start(); err != nil {
 		t.Fatalf("failed to start dummy process: %v", err)
 	}
-	defer dummy.Process.Kill()
+	defer func() {
+		_ = dummy.Process.Kill()
+		_ = dummy.Wait()
+	}()
 
 	if isHeartbeatProcess(dummy.Process.Pid, "test-resource") {
 		t.Errorf("expected isHeartbeatProcess to return false for generic process, but got true")
@@ -105,7 +111,13 @@ func TestRunCleanup(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start matching helper process: %v", err)
 	}
-	defer cmd.Process.Kill()
+	var cmdWaited bool
+	defer func() {
+		_ = cmd.Process.Kill()
+		if !cmdWaited {
+			_ = cmd.Wait()
+		}
+	}()
 
 	// 2. Spawn a recycled/innocent process that should NOT be killed.
 	// We'll use a simple sleep command as the innocent process.
@@ -113,7 +125,10 @@ func TestRunCleanup(t *testing.T) {
 	if err := innocentCmd.Start(); err != nil {
 		t.Fatalf("failed to start innocent process: %v", err)
 	}
-	defer innocentCmd.Process.Kill()
+	defer func() {
+		_ = innocentCmd.Process.Kill()
+		_ = innocentCmd.Wait()
+	}()
 
 	// Let the OS populate /proc/<pid>/cmdline for both processes
 	time.Sleep(50 * time.Millisecond)
@@ -174,6 +189,7 @@ func TestRunCleanup(t *testing.T) {
 	// Verify matching heartbeat is killed.
 	// Since the child process was killed by SIGKILL, wait should return an error indicating it was signaled.
 	err = cmd.Wait()
+	cmdWaited = true
 	if err == nil {
 		t.Errorf("expected matching heartbeat process to be killed, but it exited cleanly")
 	} else {

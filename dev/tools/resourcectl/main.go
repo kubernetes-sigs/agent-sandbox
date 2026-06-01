@@ -307,8 +307,9 @@ func runCleanup(ctx context.Context) error {
 		r := &state.BoskosResources[i]
 		if err := killHeartbeatProcess(ctx, r); err != nil {
 			errs = append(errs, err)
+		} else {
+			r.HeartbeatPID = 0
 		}
-		r.HeartbeatPID = 0
 
 		if err := r.ReleaseFromBoskos(ctx); err != nil {
 			errs = append(errs, err)
@@ -331,11 +332,18 @@ func killHeartbeatProcess(ctx context.Context, r *BoskosResource) error {
 		return nil
 	}
 
+	log := klog.FromContext(ctx)
+
 	// Verify the process is actually the heartbeat process if we are on Linux.
+	// On non-Linux platforms (e.g., macOS), we currently skip this verification
+	// because /proc is not available. This leaves a small window for PID-recycling
+	// issues on those platforms.
 	if runtime.GOOS == "linux" {
 		if !isHeartbeatProcess(r.HeartbeatPID, r.Name) {
 			return nil
 		}
+	} else {
+		log.V(4).Info("skipping heartbeat process verification on non-linux platform", "goos", runtime.GOOS, "pid", r.HeartbeatPID)
 	}
 
 	process, err := os.FindProcess(r.HeartbeatPID)

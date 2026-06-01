@@ -99,9 +99,15 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 
 func commandExecutable(command string) string {
 	fields := strings.Fields(command)
-	if len(fields) == 0 {
-		return ""
+	for _, field := range fields {
+		// Skip leading inline environment variables (e.g., KEY=VALUE)
+		if strings.Contains(field, "=") {
+			continue
+		}
+		// Extract base executable name (strip directory paths)
+		parts := strings.Split(field, "/")
+		return parts[len(parts)-1]
 	}
-	return fields[0]
+	return ""
 }
 

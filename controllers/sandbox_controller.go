@@ -799,6 +799,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if k == sandboxLabel {
+			continue // Do not allow users to override the routing hash
+		}
 		podLabels[k] = v
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
@@ -886,6 +889,9 @@ func (r *SandboxReconciler) updatePodMetadata(pod *corev1.Pod, sandbox *sandboxv
 	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption)
 	var managedLabelKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Labels {
+		if k == sandboxLabel {
+			continue // Do not allow users to override the routing hash
+		}
 		if pod.Labels[k] != v {
 			pod.Labels[k] = v
 			updated = true

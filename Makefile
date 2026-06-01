@@ -14,6 +14,11 @@ generate-api-docs: ## Generate API reference documentation
 	$(GOPATH)/bin/crd-ref-docs --source-path=./ --config=./docs/crd-ref-docs.yaml --renderer=markdown --output-path=./docs/api.md --max-depth=10
 	rm -rf ./tmp-api-source
 
+.PHONY: proto
+proto: ## Generate gRPC Protobuf stubs
+	go generate ./api/proto/v1/...
+
+
 VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
 
 GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
@@ -27,6 +32,8 @@ LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 .PHONY: build
 build:
 	go build -ldflags "$(LD_FLAGS)" -o bin/manager cmd/agent-sandbox-controller/main.go
+	go build -ldflags "$(LD_FLAGS)" -o bin/agent-sandbox-agent cmd/agent-sandbox-agent/main.go
+
 
 KIND_CLUSTER=agent-sandbox
 

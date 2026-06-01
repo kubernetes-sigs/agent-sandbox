@@ -129,6 +129,16 @@ spec:
 
 This will create a new Sandbox named `my-sandbox` running the image you specify. You can then access the Sandbox using its stable hostname, `my-sandbox`.
 
+### Portable gRPC Sandbox Daemon (POC)
+We have introduced a container-optimized, language-agnostic gRPC Sandbox Daemon (`agent-sandbox-agent`) that runs inside your sandboxes to provide high-performance file transfers, shell execution, and stateful Python interpreter runtimes.
+
+To deploy the daemon, build and push the sidecar container, and E2E verify it, refer to the **[Deployment Guide](E2E_DEPLOYMENT_GUIDE.md)**.
+
+For an interactive walkthrough of spawning stateful notebook sessions and running Python code inside GKE sandboxes, you can run our **Jupyter Notebook POC Guide**:
+*   **[examples/jupyter_poc_guide.ipynb](file:///google/cog/cloud/labolorunke/git/backend_final/agent-sandbox/examples/jupyter_poc_guide.ipynb)**
+
+You can upload this `.ipynb` file directly into **Google Colab** to compile stubs and run E2E checks dynamically.
+
 For more complex examples, including how to use the extensions, please see the [examples/](examples/) and [extensions/examples/](extensions/examples/) directories.
 
 ## Motivation

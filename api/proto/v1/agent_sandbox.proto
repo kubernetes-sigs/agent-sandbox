@@ -1,0 +1,271 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package agentsandbox.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/kubernetes-sigs/agent-sandbox/api/proto/v1;agentsandboxv1";
+option java_multiple_files = true;
+option java_package = "io.agentsandbox.api.v1";
+
+// ==========================================
+// 1. PROCESS SERVICE (Core OS Execution)
+// ==========================================
+service ProcessService {
+  // Start spawns an OS process inside the sandbox container and streams
+  // its stdout and stderr outputs back in real-time.
+  rpc Start(StartRequest) returns (stream StreamOutputResponse);
+  
+  // Execute runs an OS process inside the sandbox container synchronously
+  // and blocks until completion, returning the full output and exit code.
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  
+  // SendSignal sends a Unix signal (e.g. SIGINT, SIGKILL) to an active process
+  // allowing graceful termination or aborting of running commands.
+  rpc SendSignal(SendSignalRequest) returns (google.protobuf.Empty);
+}
+
+// ==========================================
+// 2. FILESYSTEM SERVICE (Disk Manipulation)
+// ==========================================
+service FilesystemService {
+  // WriteFile uploads or writes a file's binary content to a specific path.
+  rpc WriteFile(WriteFileRequest) returns (google.protobuf.Empty);
+  
+  // ReadFile downloads or reads a file's binary content from a specific path.
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  
+  // ListFiles lists directory contents with file sizes and metadata.
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  
+  // StatFile retrieves detailed metadata for a single file or directory.
+  rpc StatFile(StatFileRequest) returns (StatFileResponse);
+  
+  // MakeDir creates a directory (and parent directories if missing).
+  rpc MakeDir(MakeDirRequest) returns (google.protobuf.Empty);
+  
+  // Remove deletes a file or directory (with optional recursive deletion).
+  rpc Remove(RemoveRequest) returns (google.protobuf.Empty);
+}
+
+// ==========================================
+// 3. JUPYTER SERVICE (Stateful Code Interpreter)
+// ==========================================
+service JupyterService {
+  // CreateSession spawns a persistent stateful Python interpreter session
+  // managed by a local Jupyter kernel inside the sandbox.
+  rpc CreateSession(CreateJupyterSessionRequest) returns (JupyterSession);
+  
+  // ExecuteCode runs Python commands inside an active session. Variables,
+  // imports, and states persist across consecutive execution calls.
+  rpc ExecuteCode(ExecuteJupyterCodeRequest) returns (ExecuteJupyterCodeResponse);
+}
+
+// ==========================================
+// 4. ADMIN SERVICE (Sandbox Reusability)
+// ==========================================
+service AdminService {
+  // Setup pulls down a golden state workspace or base rootfs tarball and 
+  // extracts it, initializing the environment for a task.
+  rpc Setup(SetupRequest) returns (google.protobuf.Empty);
+  
+  // Clean forcefully terminates all background user processes and wipes
+  // filesystem changes, resetting the sandbox to its base golden state.
+  rpc Clean(CleanRequest) returns (google.protobuf.Empty);
+}
+
+// ==========================================
+// MESSAGE PAYLOADS
+// ==========================================
+
+// --- Process Messages ---
+
+message StartRequest {
+  // Command and arguments (e.g., ["pip", "install", "numpy"])
+  repeated string command = 1;
+  
+  // Environment variables to set for this process execution context
+  map<string, string> env_vars = 2;
+}
+
+message StreamOutputResponse {
+  // Streamed stdout output chunk
+  string stdout = 1;
+  
+  // Streamed stderr output chunk
+  string stderr = 2;
+}
+
+message ExecuteRequest {
+  // Command and arguments to run synchronously
+  repeated string command = 1;
+  
+  // Environment variables to set for this execution context
+  map<string, string> env_vars = 2;
+}
+
+message ExecuteResponse {
+  // Process exit code (0 indicates success)
+  int32 exit_code = 1;
+  
+  // Consolidated stdout output
+  string stdout = 2;
+  
+  // Consolidated stderr output
+  string stderr = 3;
+}
+
+message SendSignalRequest {
+  // The system process ID (PID) of the process to target
+  int32 process_id = 1;
+  
+  // The Unix signal code to send (e.g., 2 for SIGINT, 9 for SIGKILL)
+  int32 signal = 2;
+}
+
+// --- Filesystem Messages ---
+
+message WriteFileRequest {
+  // Destination absolute path inside the sandbox filesystem (e.g., "/workspace/app.py")
+  string path = 1;
+  
+  // Raw file contents in binary format
+  bytes content = 2;
+}
+
+message ReadFileRequest {
+  // Source absolute path to read
+  string path = 1;
+}
+
+message ReadFileResponse {
+  // Raw file contents in binary format
+  bytes content = 1;
+}
+
+message ListFilesRequest {
+  // Absolute path of the directory to list
+  string path = 1;
+}
+
+message ListFilesResponse {
+  // Listed files and directories
+  repeated FileEntry entries = 1;
+}
+
+message FileEntry {
+  // File or directory name
+  string name = 1;
+  
+  // True if this entry is a directory
+  bool is_dir = 2;
+  
+  // File size in bytes (0 for directories)
+  int64 size = 3;
+  
+  // Timestamp indicating when the file was last modified
+  google.protobuf.Timestamp mod_time = 4;
+}
+
+message StatFileRequest {
+  // Absolute path of the target file or directory
+  string path = 1;
+}
+
+message StatFileResponse {
+  // Resolved absolute path
+  string path = 1;
+  
+  // True if the path is a directory
+  bool is_dir = 2;
+  
+  // File size in bytes
+  int64 size = 3;
+  
+  // Modification timestamp
+  google.protobuf.Timestamp mod_time = 4;
+}
+
+message MakeDirRequest {
+  // Absolute path of the directory to create
+  string path = 1;
+}
+
+message RemoveRequest {
+  // Absolute path to delete
+  string path = 1;
+  
+  // If true, recursively deletes subdirectories and files
+  bool recursive = 2;
+}
+
+// --- Jupyter Messages ---
+
+message CreateJupyterSessionRequest {
+  // Spawns a specific language kernel (defaults to "python3")
+  string kernel_name = 1;
+}
+
+message JupyterSession {
+  // Unique session identifier assigned by the sandbox kernel manager
+  string session_id = 1;
+  
+  // Status of the kernel (e.g. "starting", "idle", "busy")
+  string status = 2;
+}
+
+message ExecuteJupyterCodeRequest {
+  // Target session to run the code in
+  string session_id = 1;
+  
+  // Raw python code execution block
+  string code = 2;
+}
+
+message ExecuteJupyterCodeResponse {
+  // Status after execution completes ("ok", "error")
+  string status = 1;
+  
+  // Standard stdout logs captured during execution
+  string stdout = 2;
+  
+  // Standard stderr logs captured during execution
+  string stderr = 3;
+  
+  // Rich execution output payloads (plots, tables, images)
+  repeated JupyterOutput outputs = 4;
+}
+
+message JupyterOutput {
+  // MIME type indicating content format (e.g., "text/plain", "image/png", "application/json")
+  string type = 1;
+  
+  // Raw output data in binary format
+  bytes data = 2;
+}
+
+// --- Admin Messages ---
+
+message SetupRequest {
+  // Target URL pointing to a rootfs tarball, image, or base workspace to extract
+  string rootfs_url = 1;
+}
+
+message CleanRequest {
+  // Intentionally empty to support future options (like partial vs. deep cleans)
+}

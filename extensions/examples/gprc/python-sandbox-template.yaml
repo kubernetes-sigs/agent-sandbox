@@ -1,7 +1,7 @@
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
-  name: python-sandbox-template
+  name: python-sandbox-template-2
   namespace: default
 spec:
   podTemplate:
@@ -9,8 +9,8 @@ spec:
       labels:
         sandbox-type: python-runtime
     spec:
-      runtimeClassName: gvisor # Required
-      automountServiceAccountToken: false # Required
+      runtimeClassName: gvisor # Required for sandbox isolation
+      automountServiceAccountToken: false # Required security context
       securityContext:
         runAsNonRoot: true # Required
       nodeSelector:
@@ -31,23 +31,34 @@ spec:
               memory: "512Mi"
             limits:
               cpu: "500m"
-              memory: "1Gi" # Required
+              memory: "1Gi" # Required limit
           securityContext:
             capabilities:
-              drop: ["ALL"] # Required
+              drop: ["ALL"] # Required drops
           volumeMounts:
             - name: shared-workspace
               mountPath: /workspace
 
         # Container 2: Our new gRPC Sandbox Daemon (Data Plane Sidecar)
         - name: sandbox-daemon
-          image: us-docker.pkg.dev/<your-project-id>/<your-registry-repo>/agent-sandbox-agent:latest
+          image: us-central1-docker.pkg.dev/labolorunke-gke-dev/agentsandbox/agent-sandbox-agent:latest
           command: ["/bin/agent-sandbox-agent"]
           args: ["--port=50051"]
           ports:
             - containerPort: 50051
               name: grpc-port
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          env:
+            - name: HOME
+              value: /tmp
           securityContext:
+            runAsUser: 1000
             runAsNonRoot: true
             capabilities:
               drop: ["ALL"]

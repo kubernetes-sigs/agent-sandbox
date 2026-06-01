@@ -98,8 +98,8 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 }
 
 func commandExecutable(command string) string {
-	fields := strings.Fields(command)
-	for _, field := range fields {
+	fields := strings.FieldsSeq(command)
+	for field := range fields {
 		// Skip leading inline environment variables (e.g., KEY=VALUE)
 		if strings.Contains(field, "=") {
 			continue
@@ -110,4 +110,3 @@ func commandExecutable(command string) string {
 	}
 	return ""
 }
-

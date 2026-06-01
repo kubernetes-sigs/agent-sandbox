@@ -520,4 +520,3 @@ func TestCommandExecutable(t *testing.T) {
 		})
 	}
 }
-

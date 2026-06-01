@@ -128,25 +128,60 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionReq
 	}
 	log.V(1).Info("making LLM request", "request", string(bodyBytes))
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("llm: failed to create http request: %w", err)
-	}
+	var resp *http.Response
+	var respBody []byte
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	maxAttempts := 5
+	backoff := 1 * time.Second
 
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("llm: http request failed: %w", err)
-	}
-	defer resp.Body.Close()
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			log.Info("retrying LLM request due to temporary error", "attempt", attempt, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("llm: failed to read response body: %w", err)
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, fmt.Errorf("llm: failed to create http request: %w", err)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+		resp, err = c.httpClient.Do(httpReq)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if attempt < maxAttempts {
+				continue
+			}
+			return nil, fmt.Errorf("llm: http request failed: %w", err)
+		}
+
+		respBody, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			if attempt < maxAttempts {
+				continue
+			}
+			return nil, fmt.Errorf("llm: failed to read response body: %w", err)
+		}
+		log.V(1).Info("response from LLM", "status", resp.StatusCode, "body", string(respBody))
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			if attempt < maxAttempts {
+				continue
+			}
+		}
+
+		break
 	}
-	log.V(1).Info("response from LLM", "status", resp.StatusCode, "body", string(respBody))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("llm: api error (status %d): %s", resp.StatusCode, string(respBody))

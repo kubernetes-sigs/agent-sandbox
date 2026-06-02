@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,6 +32,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -46,6 +46,9 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	agentsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sandboxes"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sessions"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/tools"
 )
 
 func main() {
@@ -74,6 +77,9 @@ func main() {
 	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
 	flag.StringVar(&opts.Image, "image", opts.Image, "image")
 	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
+	flag.BoolVar(&opts.EnableServicePortal, "service-portal", opts.EnableServicePortal, "Enable service-portal proxy sidecar and iptables configuration")
+	flag.StringVar(&opts.Entrypoint, "entrypoint", opts.Entrypoint, "Entrypoint override to run inside the sandbox container; defaults to empty string (do not override)")
+	flag.StringVar(&opts.User, "user", opts.User, "User to run commands as inside the sandbox container. If empty, runs as root.")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
@@ -152,6 +158,15 @@ type Session struct {
 	// HomeDir is the home directory; we mount a tmpfs volume here.
 	// We currently only snapshot and restore this directory.
 	HomeDir string
+
+	// EnableServicePortal adds the initContainer and sidecar container to the Sandbox pod template spec.
+	EnableServicePortal bool
+
+	// Entrypoint is the command override to run inside the sandbox container.
+	Entrypoint []string
+
+	// User is the operating system user to run commands as inside the sandbox container.
+	User string
 }
 
 // Sandbox represents an active sandbox instance.
@@ -182,6 +197,27 @@ func (s *Sandbox) PodNamespacedName() types.NamespacedName {
 		Namespace: s.id.Namespace,
 		Name:      s.podName,
 	}
+}
+
+// ExtendLifecycle updates the ShutdownTime of the Sandbox in Kubernetes to now + inactivityTimeout.
+func (s *Sandbox) ExtendLifecycle(ctx context.Context, inactivityTimeout time.Duration) error {
+	agentsClient := s.session.client.agentsClient
+
+	// Fetch latest spec
+	latest, err := agentsClient.AgentsV1beta1().Sandboxes(s.id.Namespace).Get(ctx, s.id.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to fetch latest sandbox spec to extend lifecycle: %w", err)
+	}
+
+	// Update ShutdownTime
+	latest.Spec.ShutdownTime = &metav1.Time{Time: time.Now().Add(inactivityTimeout)}
+
+	_, err = agentsClient.AgentsV1beta1().Sandboxes(s.id.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update sandbox lifecycle: %w", err)
+	}
+
+	return nil
 }
 
 // WaitForReady polls the Sandbox resource until it becomes ready and resolves the underlying Pod name.
@@ -224,40 +260,9 @@ readyLoop:
 	return nil
 }
 
-// ExecutionResult holds the captured stdout, stderr, and exit code of a command.
-type ExecutionResult struct {
-	// Stdout contains the captured standard output.
-	// This is only populated if ExecOptions.Stdout was nil.
-	Stdout string
-
-	// Stderr contains the captured standard error.
-	// This is only populated if ExecOptions.Stderr was nil.
-	Stderr string
-
-	// ExitCode is the exit status returned by the command.
-	ExitCode int
-}
-
-// ExecOptions contains the options for executing a command inside the sandbox container.
-type ExecOptions struct {
-	// Command is the process name and arguments to run (e.g. []string{"sh", "-c", "uname -a"}).
-	Command []string
-
-	// Stdin is an optional reader to pipe into the command's standard input.
-	Stdin io.Reader
-
-	// Stdout is an optional writer where standard output will be written.
-	// If nil, Stdout will be captured internally and returned as a string in the ExecutionResult.
-	Stdout io.Writer
-
-	// Stderr is an optional writer where standard error will be written.
-	// If nil, Stderr will be captured internally and returned as a string in the ExecutionResult.
-	Stderr io.Writer
-}
-
-// Exec executes a command inside the sandbox container with specified options.
-// If Stdout or Stderr are nil in ExecOptions, they are captured internally and returned in the ExecutionResult.
-func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult, error) {
+// ExecCommand executes a command inside the sandbox container with specified options.
+// If Stdout or Stderr are nil in tools.ExecCommandOptions, they are captured internally and returned in the tools.ExecCommandResult.
+func (s *Sandbox) ExecCommand(ctx context.Context, opts tools.ExecCommandOptions) (*tools.ExecCommandResult, error) {
 	coreClient := s.session.client.coreClient
 	restConfig := s.session.client.restConfig
 
@@ -279,6 +284,11 @@ func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult,
 		stderr = &stderrBuf
 	}
 
+	cmd := opts.Command
+	if s.session.User != "" {
+		cmd = append([]string{"runuser", "-u", s.session.User, "--"}, opts.Command...)
+	}
+
 	req := coreClient.RESTClient().Post().
 		Resource("pods").
 		Name(podID.Name).
@@ -286,7 +296,7 @@ func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult,
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "sandbox",
-			Command:   opts.Command,
+			Command:   cmd,
 			Stdin:     opts.Stdin != nil,
 			Stdout:    true,
 			Stderr:    true,
@@ -315,7 +325,7 @@ func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult,
 		}
 	}
 
-	res := &ExecutionResult{
+	res := &tools.ExecCommandResult{
 		ExitCode: exitCode,
 	}
 	if opts.Stdout == nil {
@@ -326,14 +336,6 @@ func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult,
 	}
 
 	return res, nil
-}
-
-// Run executes a shell command in the sandbox pod.
-func (s *Sandbox) Run(ctx context.Context, command string) (*ExecutionResult, error) {
-	opts := ExecOptions{
-		Command: []string{"sh", "-c", command},
-	}
-	return s.Exec(ctx, opts)
 }
 
 // getBackupDir gets the backup directory for the session.
@@ -421,11 +423,11 @@ func (s *Sandbox) RestoreFS(ctx context.Context) error {
 	}
 	defer f.Close()
 
-	opts := ExecOptions{
+	opts := tools.ExecCommandOptions{
 		Command: []string{"tar", "-zxf", "-", "-C", s.session.HomeDir},
 		Stdin:   f,
 	}
-	res, err := s.Exec(ctx, opts)
+	res, err := s.ExecCommand(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to execute restore: %w", err)
 	}
@@ -455,11 +457,11 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 	}
 	defer backupFile.Close()
 
-	opts := ExecOptions{
+	opts := tools.ExecCommandOptions{
 		Command: []string{"tar", "-zcf", "-", "-C", s.session.HomeDir, "."},
 		Stdout:  backupFile,
 	}
-	res, err := s.Exec(ctx, opts)
+	res, err := s.ExecCommand(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to execute snapshot: %w", err)
 	}
@@ -486,17 +488,20 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 }
 
 // CreateSandbox creates a Sandbox resource.
-func (s *Session) CreateSandbox(ctx context.Context, image, namespace string) (*Sandbox, error) {
+func (s *Session) CreateSandbox(ctx context.Context, image, namespace string, inactivityTimeout time.Duration) (*Sandbox, error) {
 	agentsClient := s.client.agentsClient
 
-	// TODO: Use shutdownPolicy (and maybe cache the sandbox between tool calls)
-
+	policy := sandboxv1beta1.ShutdownPolicyDelete
 	sb := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "sandbox-tool-",
-			Namespace:    namespace,
+			Name:      s.Name,
+			Namespace: namespace,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   &metav1.Time{Time: time.Now().Add(inactivityTimeout)},
+				ShutdownPolicy: &policy,
+			},
 			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: new(false),
@@ -504,7 +509,7 @@ func (s *Session) CreateSandbox(ctx context.Context, image, namespace string) (*
 						{
 							Name:    "sandbox",
 							Image:   image,
-							Command: []string{"sleep", "infinity"},
+							Command: s.Entrypoint,
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "home",
@@ -531,6 +536,10 @@ func (s *Session) CreateSandbox(ctx context.Context, image, namespace string) (*
 				},
 			},
 		},
+	}
+
+	if s.EnableServicePortal {
+		sandboxes.AddServicePortal(sb, sandboxes.ServicePortalConfig{})
 	}
 
 	created, err := agentsClient.AgentsV1beta1().Sandboxes(namespace).Create(ctx, sb, metav1.CreateOptions{})
@@ -622,9 +631,23 @@ type RunOptions struct {
 	// HomeDir is the home directory inside the sandbox.
 	// This is currently the only path that we persist between execs in the sandbox.
 	HomeDir string
+
+	// EnableServicePortal enables the GKE service portal sidecar and iptables init container.
+	EnableServicePortal bool
+
+	// Entrypoint is the command override to run inside the sandbox container.
+	Entrypoint string
+
+	// User is the operating system user to run commands as inside the sandbox container.
+	User string
 }
 
 func (o *RunOptions) InitDefaults() {
+	o.SessionName = os.Getenv("SESSION_NAME")
+	if o.SessionName == "" {
+		o.SessionName = "default"
+	}
+
 	o.Image = os.Getenv("SANDBOX_IMAGE")
 	if o.Image == "" {
 		o.Image = "debian:bookworm-slim"
@@ -638,6 +661,11 @@ func (o *RunOptions) InitDefaults() {
 	o.HomeDir = os.Getenv("SANDBOX_HOME_DIR")
 	if o.HomeDir == "" {
 		o.HomeDir = "/home/clawtainer"
+	}
+
+	o.User = os.Getenv("SANDBOX_USER")
+	if o.User == "" {
+		o.User = "clawtainer"
 	}
 }
 
@@ -665,8 +693,15 @@ func run(ctx context.Context, opts RunOptions) error {
 		modelName = "gemini-3.5-flash"
 	}
 
+	// We require the session name to contain only alphanumeric characters.
+	// We could be more liberal, but we want to err on the side of caution for now.
 	if !isAlphaNumeric(opts.SessionName) {
 		return fmt.Errorf("invalid session name %q: must be alphanumeric", opts.SessionName)
+	}
+
+	// Limit length; erring on the side of caution.
+	if len(opts.SessionName) > 40 {
+		return fmt.Errorf("invalid session name %q: must be at most 40 characters", opts.SessionName)
 	}
 
 	llmClient, err := llm.NewClient(baseURL, apiKey)
@@ -683,51 +718,94 @@ func run(ctx context.Context, opts RunOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize sandbox client: %w", err)
 	}
+	var (
+		activeSandbox            *Sandbox
+		sandboxInactivityTimeout = 5 * time.Minute
+	)
+
 	defer func() {
-		if err := sandboxClient.DeleteAllSandboxes(context.WithoutCancel(ctx)); err != nil {
-			log.Error(err, "failed to delete all sandboxes")
+		if activeSandbox != nil {
+			log.Info("taking final snapshot before program exit...", "sandbox.name", activeSandbox.SandboxName())
+			if err := activeSandbox.SnapshotFS(context.WithoutCancel(ctx)); err != nil {
+				log.Error(err, "failed to take final snapshot on program exit")
+			}
 		}
+
+		// if err := sandboxClient.DeleteAllSandboxes(context.WithoutCancel(ctx)); err != nil {
+		// 	log.Error(err, "failed to delete all sandboxes")
+		// }
 	}()
 
+	toolsRegistry := tools.NewRegistry()
+	toolsRegistry.Add(&tools.RunCommand{})
+
+	toolsRegistry.Add(&tools.ListFilesTool{})
+	toolsRegistry.Add(&tools.ReadFileTool{})
+	toolsRegistry.Add(&tools.WriteFileTool{})
+
+	llmTools := toolsRegistry.All()
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	sessionsDir := filepath.Join(homeDir, ".local", "sandboxed-tools", "sessions")
+	sessionStore := sessions.NewFileStore(sessionsDir)
+
+	var entrypoint []string
+	if opts.Entrypoint != "" {
+		entrypoint = strings.Fields(opts.Entrypoint)
+	}
+
 	session := &Session{
-		Name:   opts.SessionName,
-		client: sandboxClient,
+		Name:                opts.SessionName,
+		client:              sandboxClient,
+		HomeDir:             opts.HomeDir,
+		EnableServicePortal: opts.EnableServicePortal,
+		Entrypoint:          entrypoint,
+		User:                opts.User,
 	}
 
-	runCmdTool := llm.Tool{
-		Type: "function",
-		Function: llm.ToolFunction{
-			Name:        "run_command",
-			Description: "Executes a shell command inside a sandbox and returns the stdout and stderr.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"command": map[string]any{
-						"type":        "string",
-						"description": "The shell command to execute",
-					},
-				},
-				"required": []string{"command"},
-			},
-		},
+	messages, err := sessionStore.LoadSession(ctx, opts.SessionName)
+	if err != nil {
+		return fmt.Errorf("failed to load session: %w", err)
 	}
 
-	messages := []llm.Message{
-		{
-			Role: "system",
-			Content: "You are a helpful AI assistant with access to a sandboxed environment. " +
-				"You can use the run_command tool to execute shell commands to answer user questions or perform tasks. " +
-				"Always explain what you are doing.",
-		},
-	}
+	if len(messages) == 0 {
+		systemPrompt := "You are a helpful AI assistant with access to a sandboxed environment. " +
+			"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
+			"Always explain what you are doing."
 
-	fmt.Println("================================================================================")
-	fmt.Println("Welcome to the Sandboxed Tools example!")
-	fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
-	fmt.Println("Key Concept: An Agent Sandbox is launched ONLY when a tool needs to be executed,")
-	fmt.Println("             and is immediately deleted afterward.")
-	fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
-	fmt.Println("================================================================================")
+		sysMsg := llm.Message{
+			Role:    "system",
+			Content: &systemPrompt,
+		}
+		messages = []llm.Message{sysMsg}
+		if err := sessionStore.AppendMessage(ctx, opts.SessionName, sysMsg); err != nil {
+			return fmt.Errorf("failed to persist system prompt: %w", err)
+		}
+
+		fmt.Println("================================================================================")
+		fmt.Println("Welcome to the Sandboxed Tools example!")
+		fmt.Printf("Session Name: %s\n", opts.SessionName)
+		fmt.Printf("Sandbox Image: %s (Namespace: %s)\n", opts.Image, opts.Namespace)
+		fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
+		fmt.Println("Key Concept: An Agent Sandbox is launched ONCE on the first tool call for warm reuse,")
+		fmt.Println("             and automatically deleted by the cluster after 5 minutes of inactivity.")
+		fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
+		fmt.Println("================================================================================")
+	} else {
+		fmt.Println("================================================================================")
+		fmt.Printf("Resumed session %q with %d messages in history:\n", opts.SessionName, len(messages))
+		fmt.Println("================================================================================")
+		for _, msg := range messages {
+			if msg.Role == "user" {
+				fmt.Printf("User> %s\n", valueOf(msg.Content))
+			} else if msg.Role == "assistant" && msg.Content != nil && *msg.Content != "" {
+				fmt.Printf("Agent> %s\n", *msg.Content)
+			}
+		}
+	}
 
 	for {
 		fmt.Print("\nUser> ")
@@ -750,13 +828,17 @@ func run(ctx context.Context, opts RunOptions) error {
 			break
 		}
 
-		messages = append(messages, llm.Message{Role: "user", Content: input})
+		userMsg := llm.Message{Role: "user", Content: &input}
+		messages = append(messages, userMsg)
+		if err := sessionStore.AppendMessage(ctx, opts.SessionName, userMsg); err != nil {
+			return fmt.Errorf("failed to persist user message: %w", err)
+		}
 
 		for {
 			req := llm.ChatCompletionRequest{
 				Model:    modelName,
 				Messages: messages,
-				Tools:    []llm.Tool{runCmdTool},
+				Tools:    llmTools,
 			}
 
 			resp, err := llmClient.CreateChatCompletion(ctx, req)
@@ -772,103 +854,125 @@ func run(ctx context.Context, opts RunOptions) error {
 
 			msg := resp.Choices[0].Message
 			messages = append(messages, msg)
+			if err := sessionStore.AppendMessage(ctx, opts.SessionName, msg); err != nil {
+				return fmt.Errorf("failed to persist assistant message: %w", err)
+			}
 
 			if len(msg.ToolCalls) == 0 {
-				fmt.Printf("\nAgent> %s\n", msg.Content)
+				fmt.Printf("\nAgent> %s\n", valueOf(msg.Content))
 				break
 			}
 
-			for _, tc := range msg.ToolCalls {
-				if tc.Function.Name == "run_command" {
-					var args struct {
-						Command string `json:"command"`
+			sb := activeSandbox
+
+			if sb != nil {
+				// Check if the sandbox still exists in the cluster
+				_, err := sandboxClient.agentsClient.AgentsV1beta1().Sandboxes(sb.id.Namespace).Get(ctx, sb.id.Name, metav1.GetOptions{})
+				if err != nil {
+					if k8serrors.IsNotFound(err) {
+						log.Info("Active sandbox was deleted or expired, will recreate it", "sandbox.name", sb.SandboxName())
+						activeSandbox = nil
+						sb = nil
+					} else {
+						return fmt.Errorf("failed to verify active sandbox status: %w", err)
 					}
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						fmt.Printf("[Tool Error] Failed to parse arguments: %v\n", err)
-						messages = append(messages, llm.Message{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Content:    fmt.Sprintf("Failed to parse arguments: %v", err),
-						})
-						continue
-					}
+				}
+			}
 
-					fmt.Printf("\n[Tool Execution] LLM requested tool %q with command: %q\n", tc.Function.Name, args.Command)
-					log.Info("launching sandbox for tool execution...")
+			if sb == nil {
+				log.Info("launching sandbox for tool execution...")
 
-					sb, err := session.CreateSandbox(ctx, opts.Image, opts.Namespace)
-					if err != nil {
-						fmt.Printf("[Sandbox Error] Failed to create sandbox: %v\n", err)
-						messages = append(messages, llm.Message{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Content:    fmt.Sprintf("Sandbox creation failed: %v", err),
-						})
-						continue
-					}
+				var err error
+				sb, err = session.CreateSandbox(ctx, opts.Image, opts.Namespace, sandboxInactivityTimeout)
+				if err != nil {
+					return fmt.Errorf("failed to create sandbox: %w", err)
+				}
 
-					if err := sb.WaitForReady(ctx); err != nil {
-						log.Error(err, "sandbox not ready")
-						_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
-						return err
-					}
+				if err := sb.WaitForReady(ctx); err != nil {
+					log.Error(err, "sandbox not ready")
+					_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+					return err
+				}
 
-					log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+				log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
 
-					log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
-					if err := sb.RestoreFS(ctx); err != nil {
-						log.Error(err, "failed to restore filesystem", "sandbox.name", sb.SandboxName())
-						_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
-						messages = append(messages, llm.Message{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Content:    fmt.Sprintf("Filesystem restore failed: %v", err),
-						})
-						continue
-					}
+				log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
+				if err := sb.RestoreFS(ctx); err != nil {
+					log.Error(err, "failed to restore filesystem; starting with a fresh sandbox instead", "sandbox.name", sb.SandboxName())
+				}
 
-					log.Info("executing command in sandbox", "sandbox.name", sb.SandboxName(), "command", args.Command)
-					// TODO: Add a timeout to the tool execution?
-					res, err := sb.Run(ctx, args.Command)
+				activeSandbox = sb
+			} else {
+				log.Info("reusing active sandbox...", "sandbox.name", sb.SandboxName())
+				log.Info("extending sandbox lifecycle...", "sandbox.name", sb.SandboxName())
+				if err := sb.ExtendLifecycle(ctx, sandboxInactivityTimeout); err != nil {
+					if k8serrors.IsNotFound(err) {
+						log.Info("sandbox vanished while extending lifecycle, recreating...")
+						activeSandbox = nil
+						sb = nil
 
-					// We don't snapshot if there was an error, but we do snapshot if the tool just
-					// returned a non-zero exit code.
-					if err == nil {
-						log.Info("snapshotting filesystem from sandbox...", "sandbox.name", sb.SandboxName())
-						if err := sb.SnapshotFS(ctx); err != nil {
-							// Maybe this should be surfaced as an error ... but let's deal with this
-							// when we cache the sandbox.
-							log.Error(err, "failed to snapshot filesystem")
+						var recreateErr error
+						sb, recreateErr = session.CreateSandbox(ctx, opts.Image, opts.Namespace, sandboxInactivityTimeout)
+						if recreateErr != nil {
+							return fmt.Errorf("failed to recreate sandbox: %w", recreateErr)
 						}
-					}
 
-					log.Info("deleting sandbox", "sandbox.name", sb.SandboxName())
-					if deleteErr := sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb); deleteErr != nil {
-						log.Error(deleteErr, "failed to delete sandbox", "sandbox.name", sb.SandboxName())
+						if err := sb.WaitForReady(ctx); err != nil {
+							log.Error(err, "sandbox not ready")
+							_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+							return err
+						}
+
+						log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+
+						log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
+						if err := sb.RestoreFS(ctx); err != nil {
+							log.Error(err, "failed to restore filesystem", "sandbox.name", sb.SandboxName())
+							_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+							return err
+						}
+
+						activeSandbox = sb
 					} else {
-						log.V(1).Info("sandbox deleted successfully.", "sandbox.name", sb.SandboxName())
+						log.Error(err, "failed to extend sandbox lifecycle")
 					}
+				}
+			}
 
-					var toolResult string
-					if err != nil {
-						toolResult = fmt.Sprintf("Execution error: %v", err)
-					} else {
-						toolResult = fmt.Sprintf("stdout:\n%s\nstderr:\n%s\nexit_code: %d", res.Stdout, res.Stderr, res.ExitCode)
-					}
-					fmt.Printf("[Tool Result] %s\n", toolResult)
+			shouldSnapshot := true
 
-					messages = append(messages, llm.Message{
+			for _, tc := range msg.ToolCalls {
+				// TODO: Add a timeout to the tool execution?
+				result, err := toolsRegistry.Call(ctx, sb, tc)
+
+				// We don't snapshot if there was an error, but we do snapshot if the tool just
+				// returned a non-zero exit code.
+				if err != nil {
+					shouldSnapshot = false
+				}
+
+				var toolMsg llm.Message
+				if err != nil {
+					log.Error(err, "error calling tool", "tool", tc.Function.Name)
+					content := fmt.Sprintf("Error calling tool %q: %v", tc.Function.Name, err)
+					toolMsg = llm.Message{
 						Role:       "tool",
 						ToolCallID: tc.ID,
-						Content:    toolResult,
-					})
+						Content:    &content,
+					}
 				} else {
-					fmt.Printf("[Tool Error] Unknown tool requested: %s\n", tc.Function.Name)
-					messages = append(messages, llm.Message{
-						Role:       "tool",
-						ToolCallID: tc.ID,
-						Content:    fmt.Sprintf("Unknown tool %q", tc.Function.Name),
-					})
+					toolMsg = result
+				}
+				messages = append(messages, toolMsg)
+				if err := sessionStore.AppendMessage(ctx, opts.SessionName, toolMsg); err != nil {
+					return fmt.Errorf("failed to persist tool response: %w", err)
+				}
+			}
+
+			if shouldSnapshot {
+				log.Info("snapshotting filesystem from sandbox...", "sandbox.name", sb.SandboxName())
+				if err := sb.SnapshotFS(ctx); err != nil {
+					log.Error(err, "failed to snapshot filesystem")
 				}
 			}
 		}
@@ -892,4 +996,14 @@ func isAlphaNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+// valueOf is a helper that safely gets a value from a pointer,
+// if the pointer is nil it returns the default (zero) value.
+func valueOf[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
 }

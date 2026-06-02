@@ -27,9 +27,32 @@ The application is configured via environment variables:
 # Set your API key
 export GEMINI_API_KEY="your-api-key-here"
 
-# Run the chat interface
+# Run the chat interface with the default session name ("default")
 go run ./examples/sandboxed-tools/main.go
+
+# Or specify a custom session name to resume/create a specific session
+go run ./examples/sandboxed-tools/main.go -session mysession
+
+# Run with the GKE service portal integration enabled to proxy external APIs securely with tokens
+go run ./examples/sandboxed-tools/main.go -service-portal
 ```
+
+## Session Persistence, Warm Sandbox Reuse & Inactivity Expiry
+
+`sandboxed-tools` uses an advanced architectural design to balance **visual responsiveness**, **resource efficiency**, and **cluster-wide cleanup guarantees**:
+
+### 1. Warm Sandbox Reuse (Fast Execution)
+Instead of launching and deleting a sandbox on every single tool call, the application launches the sandbox Pod only on the **first tool call**. For subsequent tool calls within the same session, the application **reuses** the warm, active sandbox directly. This cuts execution overhead down from several seconds to milliseconds, keeping the agent loop incredibly fast.
+
+### 2. Kubernetes-Native Inactivity Expiry
+To prevent orphaned containers and resource leaks in your cluster, the application leverages the Sandbox's built-in **Lifecycle Spec**:
+- During creation, the sandbox is configured with a 5-minute inactivity lifetime: `Spec.Lifecycle.ShutdownTime` is set to `now + 5 minutes` and `Spec.Lifecycle.ShutdownPolicy` is set to `Delete`.
+- Every time a new tool is executed, the application automatically **extends the lifecycle** by updating the sandbox's `ShutdownTime` in Kubernetes to `now + 5 minutes`.
+- If no new tool calls are made for 5 minutes (e.g., because the CLI was closed, crashed, or left idle), the **Kubernetes controller automatically terminates the Pod and deletes the Sandbox resource**.
+
+### 3. Resuming & Local Filesystem Backups
+- **Message History**: Chat history is saved in real-time to a JSONL file at `~/.local/sandboxed-tools/sessions/<session-name>.jsonl`, and restored automatically on startup.
+- **Durable Backups**: Before the sandbox is cleaned up (on CLI exit or upon inactivity), the filesystem state of `/home/clawtainer` is archived to a timestamped backup at `~/.local/sandboxed-tools/<session-name>/fs`. If a session is resumed and the sandbox was already cleaned up by Kubernetes, a new sandbox is created and restored seamlessly from the latest local backup!
 
 ## Example Session
 

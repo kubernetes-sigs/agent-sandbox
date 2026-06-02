@@ -42,7 +42,7 @@ client = PodSnapshotSandboxClient()
 
 # Create a sandbox with snapshot capabilities enabled
 sandbox = client.create_sandbox(
-    template="python-counter-template",
+    warmpool="python-sandbox-warmpool",
     namespace="default"
 )
 
@@ -133,14 +133,16 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
 
 5.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 
+6. **Sandbox Warmpool**: A `SandboxWarmpool` (e.g., `python-counter-warmpool`) with appropriate replica count that references the `SandboxTemplate` must be available in the cluster.
+
 ### Running Tests:
 
 To run the integration test, execute the script with the appropriate arguments:
 
 ```bash
 python3 clients/python/agentic-sandbox-client/test_podsnapshot_extension.py \
-  --template-name python-counter-template \
+  --warmpool-name python-counter-warmpool \
   --namespace sandbox-test
 ```
 
-Adjust the `--namespace`, `--template-name` as needed for your environment.
+Adjust the `--namespace`, `--warmpool-name` as needed for your environment.

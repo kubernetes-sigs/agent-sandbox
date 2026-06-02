@@ -208,7 +208,15 @@ func (s *Server) onRequestHeaders(_ context.Context, hdrs *extprocv3.HttpHeaders
 	if r.id == "" {
 		return immediate(400, `{"detail":"X-Sandbox-ID header is required."}`)
 	}
-	if !validNamespace(r.namespace) {
+	// DNS-label validation on ID + namespace prevents DNS injection
+	// (e.g. id="foo.evil.com" interpolating extra components into
+	// "<id>.<ns>.svc.<cluster-domain>") and traversal-style inputs
+	// (e.g. id="foo/bar"). Matches the Python router's
+	// _is_valid_dns_label check and the same fix on PR #838.
+	if !validDNSLabel(r.id) {
+		return immediate(400, `{"detail":"Invalid sandbox ID format."}`)
+	}
+	if !validDNSLabel(r.namespace) {
 		return immediate(400, `{"detail":"Invalid namespace format."}`)
 	}
 	// TCP port range is [1, 65535]. Reject anything outside it (and the
@@ -246,6 +254,17 @@ func (s *Server) onRequestHeaders(_ context.Context, hdrs *extprocv3.HttpHeaders
 			},
 			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 		}},
+		// Always strip Authorization on the way to the upstream.
+		// Identity-checking authorizers (TokenReview, JWT, etc.) sit in
+		// front of ext_proc and consume the bearer credential there;
+		// forwarding it to the sandbox would let the sandbox
+		// impersonate the caller against the K8s API or any other
+		// Bearer-protected service. Envoy normalizes header keys to
+		// lowercase, so "authorization" is the key to remove. Matches
+		// the same fix on the from-scratch Go router (PR #838) and the
+		// Python router, which strips Authorization right next to Host
+		// before forwarding.
+		RemoveHeaders: []string{"authorization"},
 	}
 	if r.upgrade {
 		// Strip Origin on upgrade so WebSocket backends that validate
@@ -369,29 +388,37 @@ func headerString(h *corev3.HeaderValue) string {
 	return h.Value
 }
 
-// validNamespace mirrors the Python router's namespace check:
+// validDNSLabel reports whether s is a syntactically valid DNS-1123
+// label. Mirrors the Python router's
 //
-//	namespace.replace("-", "").isalnum()
+//	^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$
 //
-// At least one ASCII alphanumeric, only ASCII letters/digits/hyphens
-// otherwise. Empty input and hyphen-only input both rejected.
-func validNamespace(s string) bool {
-	if s == "" {
+// regex with a 63-character cap. Applied to both X-Sandbox-ID and
+// X-Sandbox-Namespace before either gets interpolated into the DNS-
+// form upstream FQDN, so callers can't inject extra DNS components or
+// traversal sequences ("foo.evil.com", "foo/bar", etc.). Stricter
+// than the previous validNamespace: rejects uppercase, leading/
+// trailing hyphens, and anything over 63 chars — same shape K8s
+// itself enforces on Pod and Namespace names.
+func validDNSLabel(s string) bool {
+	if s == "" || len(s) > 63 {
 		return false
 	}
-	hasAlphanum := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-			hasAlphanum = true
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z':
 		case c == '-':
-			// allowed
+			// Hyphen is allowed only in the interior — not first or last.
+			if i == 0 || i == len(s)-1 {
+				return false
+			}
 		default:
 			return false
 		}
 	}
-	return hasAlphanum
+	return true
 }
 
 // joinHostPort formats "host:port", bracketing IPv6 literals per

@@ -93,6 +93,22 @@ data:
                       timeout: 180s
 
               http_filters:
+              # Strip any inbound x-envoy-original-dst-host BEFORE
+              # ext_proc runs. ext_proc always sets this header via
+              # HeaderMutation, so after this filter chain the value
+              # in the header is provably the one ext_proc wrote (or
+              # absent if ext_proc was bypassed for the route, in
+              # which case the ORIGINAL_DST cluster won't find a
+              # target and returns 503 — fail-closed). Defense-in-
+              # depth: keeps the security of the data path from
+              # resting on "ext_proc is enabled on every route".
+              - name: envoy.filters.http.header_mutation
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                  mutations:
+                    request_mutations:
+                    - remove: x-envoy-original-dst-host
+
               # ext_proc must run before the router filter so we get the
               # header mutation applied + route cache cleared before the
               # routing decision is made.

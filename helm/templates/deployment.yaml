@@ -21,9 +21,9 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: agent-sandbox-controller
-      {{- if not (empty .Values.podSecurityContext) }}
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
       - name: agent-sandbox-controller
@@ -54,9 +54,9 @@ spec:
         resources:
           {{- toYaml . | nindent 10 }}
         {{- end }}
-        {{- if not (empty .Values.containerSecurityContext) }}
+        {{- with .Values.containerSecurityContext }}
         securityContext:
-          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
+          {{- toYaml . | nindent 10 }}
         {{- end }}
         volumeMounts:
         - name: config-volume

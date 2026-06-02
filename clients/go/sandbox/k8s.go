@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
 	"strings"
 	"time"
 
@@ -427,7 +428,19 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 		state.PodName = sb.Name
 	}
 	if len(sb.Status.PodIPs) > 0 {
-		state.PodIP = sb.Status.PodIPs[0]
+		// Prefer IPv4 if present in dual-stack setups, otherwise default to first.
+		var selectedIP string
+		for _, ip := range sb.Status.PodIPs {
+			parsed := net.ParseIP(ip)
+			if parsed != nil && parsed.To4() != nil {
+				selectedIP = ip
+				break
+			}
+		}
+		if selectedIP == "" {
+			selectedIP = sb.Status.PodIPs[0]
+		}
+		state.PodIP = selectedIP
 	}
 	return state
 }

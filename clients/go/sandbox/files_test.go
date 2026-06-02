@@ -486,8 +486,8 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 	if headers.Get(headerSandboxID) != "my-claim" {
 		t.Errorf("wrong %s: %s", headerSandboxID, headers.Get(headerSandboxID))
 	}
-	if headers.Get(headerSandboxPodIP) != "" {
-		t.Errorf("expected empty %s, got %q", headerSandboxPodIP, headers.Get(headerSandboxPodIP))
+	if _, ok := headers[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
+		t.Errorf("expected header %s to be absent, but it was present", headerSandboxPodIP)
 	}
 }
 

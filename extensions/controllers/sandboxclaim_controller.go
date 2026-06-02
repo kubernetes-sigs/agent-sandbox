@@ -1015,15 +1015,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		}
 	}
 
-	// Propagate the template's resource-level labels onto the Sandbox. The
-	// SandboxTemplate is the only place to set Sandbox labels, so copy them here
-	// as a base. System/claim-identity labels applied below take precedence.
-	for k, v := range template.Labels {
-		if sandbox.Labels == nil {
-			sandbox.Labels = make(map[string]string)
-		}
-		sandbox.Labels[k] = v
-	}
+	// Propagate template labels, but system/claim-identity labels take precedence.
+	sandbox.Labels = maps.Clone(template.Labels)
 
 	// Propagate claim identity labels for discovery and NetworkPolicy targeting.
 	// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata

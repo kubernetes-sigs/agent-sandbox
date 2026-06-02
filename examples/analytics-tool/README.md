@@ -3,9 +3,9 @@
 ## Getting Started
 
 ### Prerequisites
-- Running **GKE** cluster (**Standard** or **Autopilot**))
+- Running **GKE** cluster (**Standard** or **Autopilot**)
 - `kubectl` access to a Kubernetes **GKE Standard** or **GKE Autopilot** cluster
-- Agent-sandbox installed on GKE. Here is the ([Installation Guide](../../getting_started/))
+- Agent-sandbox installed on GKE. Here is the [Installation Guide](../../getting_started/)
 
 ## Deploy analytics tools
 

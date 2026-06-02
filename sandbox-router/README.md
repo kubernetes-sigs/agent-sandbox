@@ -38,10 +38,12 @@ Envoy expects these headers from the client (preserved from the Python router fo
 
 | Header | Required? | Default | Notes |
 |---|---|---|---|
-| `X-Sandbox-ID` | yes | — | Sandbox name. Used for DNS-form fallback when UID is missing or uncached. |
+| `X-Sandbox-ID` | yes | — | Sandbox name. Used for DNS-form fallback when UID is missing or uncached. Must be a valid DNS-1123 label (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, max 63 chars). |
 | `X-Sandbox-UID` | recommended | — | Sandbox CR UID. Primary key for cache lookup; non-guessable. |
-| `X-Sandbox-Namespace` | no | `default` | ASCII letters/digits/hyphens, ≥1 alphanumeric. |
-| `X-Sandbox-Port` | no | `8888` | Numeric. |
+| `X-Sandbox-Namespace` | no | `default` | Same DNS-1123 label check as ID. |
+| `X-Sandbox-Port` | no | `8888` | Integer in `[1, 65535]`. |
+
+DNS-label validation on both ID and namespace prevents DNS injection (e.g. `foo.evil.com` interpolating extra components into the upstream FQDN) and traversal-style inputs (e.g. `foo/bar`). Matches the Python router's `_is_valid_dns_label` check.
 
 Routing precedence:
 
@@ -50,6 +52,14 @@ Routing precedence:
 3. If `X-Sandbox-ID` is missing → 400 `{"detail":"X-Sandbox-ID header is required."}`.
 
 The ext_proc handler returns Python-router-compatible JSON error bodies (`{"detail":"..."}`) for validation failures so existing clients keep working.
+
+### Headers stripped before forwarding
+
+The `HeaderMutation` returned to Envoy always removes:
+
+- **`Authorization`** — identity-checking authorizers in front of ext_proc (TokenReview, JWT, etc.) consume the bearer credential. Forwarding it to the sandbox would let the sandbox impersonate the caller against the K8s API or any other Bearer-protected service. Matches the Python router, which strips `Authorization` right next to `Host`.
+- **`x-envoy-original-dst-host`** on the listener (defense in depth) — an `envoy.filters.http.header_mutation` filter runs *before* ext_proc and removes any client-supplied value, so ext_proc is provably the only writer of that header. Without this, a future route that disables ext_proc and uses the ORIGINAL_DST cluster would dispatch to whatever the client asked for.
+- **`Origin` on upgrade requests** — see the WebSockets section below.
 
 ### WebSockets and X-Forwarded-* headers
 

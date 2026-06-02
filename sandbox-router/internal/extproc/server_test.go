@@ -198,6 +198,35 @@ func TestHandle_InvalidNamespaceRejected(t *testing.T) {
 	}
 }
 
+func TestHandle_InvalidIDRejected(t *testing.T) {
+	// Mirrors the Python router's DNS-label check on sandbox_id. Without
+	// this, a caller could interpolate extra DNS components into the
+	// upstream FQDN via the DNS form ("<id>.<ns>.svc.<cluster-domain>").
+	cases := map[string]string{
+		"dot in id (would inject extra DNS components)": "foo.evil.com",
+		"slash in id (traversal flavor)":                "foo/bar",
+		"underscore in id":                              "foo_bar",
+		"uppercase":                                     "FooBar",
+		"leading hyphen":                                "-foo",
+		"trailing hyphen":                               "foo-",
+	}
+	s, _ := newServer(t)
+	for name, id := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp := s.handle(context.Background(), reqHeaders(map[string]string{
+				HeaderSandboxID: id,
+			}))
+			ir := resp.GetImmediateResponse()
+			if ir == nil || ir.Status.Code != 400 {
+				t.Fatalf("id=%q: expected 400 immediate; got: %+v", id, resp)
+			}
+			if !strings.Contains(string(ir.Body), "Invalid sandbox ID") {
+				t.Errorf("id=%q: body should mention Invalid sandbox ID: %s", id, ir.Body)
+			}
+		})
+	}
+}
+
 func TestHandle_InvalidPortRejected(t *testing.T) {
 	// Port must fall in [1, 65535]. Anything else gets rejected with a
 	// 400 immediate before we hand the value to net.JoinHostPort, so a
@@ -350,26 +379,42 @@ func TestHandle_UnknownPhaseReturnsNil(t *testing.T) {
 	}
 }
 
-func TestValidNamespace(t *testing.T) {
+func TestValidDNSLabel(t *testing.T) {
+	// Stricter than the previous validNamespace: rejects uppercase,
+	// leading/trailing hyphens, and labels > 63 chars. Same shape as
+	// RFC 1123 / K8s' own DNS-label rules and the Python router's
+	// _is_valid_dns_label regex.
 	cases := map[string]bool{
-		"default": true,
-		"prod":    true,
-		"my-ns":   true,
-		"my-ns-1": true,
-		"MY-NS":   true,
-		"a":       true,
-		"":        false,
-		"-":       false,
-		"---":     false,
-		"my_ns":   false,
-		"my.ns":   false,
-		" ns":     false,
-		"ns ":     false,
+		// accepted
+		"default":               true,
+		"prod":                  true,
+		"my-ns":                 true,
+		"my-ns-1":               true,
+		"a":                     true,
+		"abc123":                true,
+		"1abc":                  true, // leading digit OK in RFC 1123 (vs the older 952)
+		strings.Repeat("a", 63): true,
+
+		// rejected — character class
+		"MY-NS":   false, // uppercase
+		"my_ns":   false, // underscore
+		"my.ns":   false, // dot would inject extra DNS components
+		"foo/bar": false, // slash, traversal flavor
+		" ns":     false, // leading space
+		"ns ":     false, // trailing space
 		"bad!":    false,
+
+		// rejected — structure
+		"":                      false, // empty
+		"-":                     false, // single hyphen
+		"---":                   false, // hyphens only
+		"-x":                    false, // leading hyphen
+		"x-":                    false, // trailing hyphen
+		strings.Repeat("a", 64): false, // exceeds 63-char cap
 	}
 	for in, want := range cases {
-		if got := validNamespace(in); got != want {
-			t.Errorf("validNamespace(%q) = %v, want %v", in, got, want)
+		if got := validDNSLabel(in); got != want {
+			t.Errorf("validDNSLabel(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
@@ -506,6 +551,45 @@ func TestHandle_NonUpgradePreservesOrigin(t *testing.T) {
 		if h == "origin" {
 			t.Fatalf("Origin must not be stripped on non-upgrade; got RemoveHeaders=%v", removeHeadersFrom(resp))
 		}
+	}
+}
+
+// TestHandle_AlwaysStripsAuthorization is the regression test for the
+// privilege-escalation hazard the Python router avoids by stripping
+// Authorization. When the router is fronted by an identity-checking
+// authorizer (TokenReview, JWT, etc.) the caller's bearer credential
+// is meant for the router, not the sandbox. Forwarding it would let
+// the sandbox impersonate the caller against the K8s API or any
+// other Bearer-protected service. The strip applies to both upgrade
+// and non-upgrade paths, so we assert it on each.
+func TestHandle_AlwaysStripsAuthorization(t *testing.T) {
+	s, stub := newServer(t)
+	uid := types.UID("auth-uid")
+	stub[uid] = cache.Entry{PodIP: "10.0.0.9"}
+
+	for _, name := range []string{"non-upgrade", "upgrade"} {
+		t.Run(name, func(t *testing.T) {
+			hdrs := map[string]string{
+				HeaderSandboxID:  "alpha",
+				HeaderSandboxUID: string(uid),
+				"Authorization":  "Bearer should-not-leak",
+			}
+			if name == "upgrade" {
+				hdrs["Connection"] = "Upgrade"
+				hdrs["Upgrade"] = "websocket"
+			}
+			resp := s.handle(context.Background(), reqHeaders(hdrs))
+			found := false
+			for _, h := range removeHeadersFrom(resp) {
+				if h == "authorization" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s: expected RemoveHeaders to contain \"authorization\"; got %v",
+					name, removeHeadersFrom(resp))
+			}
+		})
 	}
 }
 

@@ -181,7 +181,7 @@ Open `clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml` 
 ```bash
 envsubst '${ROUTER_IMAGE}' \
     < clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml \
-    | kubectl apply -n agent-sandbox-demo -f -
+    | kubectl apply -n agent-sandbox-system -f -
 ```
 
 ### 7.3 Verify WarmPool
@@ -209,13 +209,13 @@ python-warmpool-fghij     1/1     Running   0          15s
 
 ```bash
 # Check router pods
-kubectl get pods -l app=sandbox-router
+kubectl get pods -l app=sandbox-router -n agent-sandbox-system
 
 # Check router service
-kubectl get svc sandbox-router-svc
+kubectl get svc sandbox-router-svc -n agent-sandbox-system
 
 # Test router health
-kubectl port-forward svc/sandbox-router-svc 8080:8080 &
+kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system &
 PF_PID=$!
 sleep 2
 curl http://localhost:8080/healthz

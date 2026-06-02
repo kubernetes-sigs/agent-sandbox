@@ -18,7 +18,10 @@ from test.e2e.clients.python.framework.context import TestContext
 import pytest
 import yaml
 from k8s_agent_sandbox import SandboxClient
-from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig
+from k8s_agent_sandbox.models import (
+    SandboxGatewayConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+)
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
 TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
@@ -154,7 +157,8 @@ def run_sdk_tests(sandbox):
 
 def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_router, sandbox_coldpool):
     """Tests the Python SDK in Sandbox Router (Developer/Tunnel) mode without warmpool."""
-    client = SandboxClient()
+    config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
+    client = SandboxClient(connection_config=config)
     try:
         sandbox = client.create_sandbox(
             warmpool=sandbox_coldpool,
@@ -174,7 +178,8 @@ def test_python_sdk_router_mode_warmpool(
     tc, temp_namespace, sandbox_template, deploy_router, sandbox_warmpool
 ):
     """Tests the Python SDK in Sandbox Router mode with warmpool."""
-    client = SandboxClient()
+    config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
+    client = SandboxClient(connection_config=config)
     try:
         sandbox = client.create_sandbox(
             warmpool=sandbox_warmpool,

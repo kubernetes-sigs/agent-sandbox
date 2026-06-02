@@ -692,5 +692,30 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
         self.assertNotIn('pod_ip', call_kwargs)
 
 
+from pydantic import ValidationError
+
+class TestConnectionConfigValidation(unittest.TestCase):
+    def test_valid_router_namespace(self):
+        valid_namespaces = ["default", "agent-sandbox-system", "my-namespace-123", "kube-system"]
+        for ns in valid_namespaces:
+            config = SandboxLocalTunnelConnectionConfig(router_namespace=ns)
+            self.assertEqual(config.router_namespace, ns)
+
+    def test_invalid_router_namespace(self):
+        invalid_namespaces = [
+            "-invalid",        # starts with hyphen
+            "invalid-",        # ends with hyphen
+            "Uppercase",       # contains uppercase letters
+            "ns_with_under",   # contains underscore
+            "ns;echo",         # command injection attempt
+            "ns|sh",           # pipe attempt
+            "ns&rm",           # ampersand attempt
+            "",                # empty namespace
+        ]
+        for ns in invalid_namespaces:
+            with self.assertRaises(ValidationError):
+                SandboxLocalTunnelConnectionConfig(router_namespace=ns)
+
+
 if __name__ == '__main__':
     unittest.main()

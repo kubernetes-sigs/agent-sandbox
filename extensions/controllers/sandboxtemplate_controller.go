@@ -155,6 +155,21 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // buildDefaultNetworkPolicySpec generates the "Secure by Default" network policy.
 func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPolicySpec {
+	peers := []networkingv1.NetworkPolicyPeer{
+		{
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"kubernetes.io/metadata.name": "agent-sandbox-system",
+				},
+			},
+			PodSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "sandbox-router",
+				},
+			},
+		},
+	}
+
 	return networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{
 			MatchLabels: map[string]string{
@@ -168,15 +183,7 @@ func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPoli
 		// 1. INGRESS: Allow traffic only from the Sandbox Router
 		Ingress: []networkingv1.NetworkPolicyIngressRule{
 			{
-				From: []networkingv1.NetworkPolicyPeer{
-					{
-						PodSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"app": "sandbox-router",
-							},
-						},
-					},
-				},
+				From: peers,
 			},
 		},
 		// 2. EGRESS: Secure Default Configuration

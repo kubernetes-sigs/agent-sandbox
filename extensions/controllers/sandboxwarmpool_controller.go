@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -57,7 +58,16 @@ type SandboxWarmPoolReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
+	MaxCreateRatePerWindow int
+	CreateRateWindow       time.Duration
 	EnableWarmPoolEviction bool
+	createRateMu           sync.Mutex
+	createRateWindows      map[types.NamespacedName]createRateWindow
+}
+
+type createRateWindow struct {
+	startedAt time.Time
+	created   int
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
@@ -90,8 +100,9 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	oldStatus := warmPool.Status.DeepCopy()
 
 	// Reconcile the pool (create or delete Sandboxes as needed)
-	if err := r.reconcilePool(ctx, warmPool); err != nil {
-		return ctrl.Result{}, err
+	result, err := r.reconcilePoolWithResult(ctx, warmPool)
+	if err != nil {
+		return result, err
 	}
 
 	// Update status if it has changed
@@ -100,11 +111,18 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return result, nil
 }
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
 func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) error {
+	_, err := r.reconcilePoolWithResult(ctx, warmPool)
+	return err
+}
+
+// reconcilePoolWithResult ensures the correct number of pre-allocated sandboxes
+// exist in the pool and returns a requeue result when creation is rate-limited.
+func (r *SandboxWarmPoolReconciler) reconcilePoolWithResult(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Compute hash of the warm pool name for the pool label
@@ -121,7 +139,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		Namespace:     warmPool.Namespace,
 	}); err != nil {
 		logger.Error(err, "Failed to list sandboxes")
-		return err
+		return ctrl.Result{}, err
 	}
 
 	// Fetch template and compute hash once to avoid repeated expensive operations
@@ -174,8 +192,22 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// Create new sandboxes if we need more
 	if currentReplicas < desiredReplicas && tmplErr == nil {
-		sandboxesToCreate := min(desiredReplicas-currentReplicas, maxBatchSize)
-		logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
+		deficit := desiredReplicas - currentReplicas
+		sandboxesToCreate := int(min(deficit, maxBatchSize))
+		createCount, requeueAfter := r.reserveCreateRate(warmPool, sandboxesToCreate)
+
+		if createCount == 0 {
+			logger.Info("Delaying warm pool sandbox creation",
+				"remainingDelay", requeueAfter.Round(time.Millisecond),
+				"desired", desiredReplicas,
+				"current", currentReplicas,
+				"deficit", deficit,
+				"maxCreateRatePerWindow", r.MaxCreateRatePerWindow,
+				"createRateWindow", r.CreateRateWindow)
+			return ctrl.Result{RequeueAfter: requeueAfter}, allErrors
+		}
+
+		logger.Info("Creating new pool sandboxes", "count", createCount, "deficit", deficit)
 
 		sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash)
 		if err != nil {
@@ -183,13 +215,17 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			allErrors = errors.Join(allErrors, err)
 		} else {
 			// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
-			_, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
+			_, createErr := slowStartBatch(ctx, createCount, 1, func(_ int) error {
 				return r.createPoolSandbox(ctx, warmPool, sandboxCR)
 			})
 			if createErr != nil {
 				logger.Error(createErr, "Failed to create pool sandboxes")
 				allErrors = errors.Join(allErrors, createErr)
 			}
+		}
+
+		if createCount < sandboxesToCreate {
+			return ctrl.Result{RequeueAfter: requeueAfter}, allErrors
 		}
 	}
 
@@ -227,7 +263,51 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		allErrors = errors.Join(allErrors, tmplErr)
 	}
 
-	return allErrors
+	return ctrl.Result{}, allErrors
+}
+
+func (r *SandboxWarmPoolReconciler) reserveCreateRate(warmPool *extensionsv1beta1.SandboxWarmPool, requested int) (int, time.Duration) {
+	if r.MaxCreateRatePerWindow <= 0 || r.CreateRateWindow <= 0 {
+		return requested, 0
+	}
+
+	now := time.Now()
+	key := types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}
+
+	r.createRateMu.Lock()
+	defer r.createRateMu.Unlock()
+
+	if r.createRateWindows == nil {
+		r.createRateWindows = make(map[types.NamespacedName]createRateWindow)
+	}
+
+	window, ok := r.createRateWindows[key]
+	if !ok || now.Sub(window.startedAt) >= r.CreateRateWindow {
+		window = createRateWindow{startedAt: now}
+	}
+
+	remainingBudget := r.MaxCreateRatePerWindow - window.created
+	if remainingBudget <= 0 {
+		r.createRateWindows[key] = window
+		return 0, remainingCreateRateWindowDelay(now, window.startedAt, r.CreateRateWindow)
+	}
+
+	createCount := min(requested, remainingBudget)
+	window.created += createCount
+	r.createRateWindows[key] = window
+
+	if createCount < requested {
+		return createCount, remainingCreateRateWindowDelay(now, window.startedAt, r.CreateRateWindow)
+	}
+	return createCount, 0
+}
+
+func remainingCreateRateWindowDelay(now, startedAt time.Time, window time.Duration) time.Duration {
+	remaining := window - now.Sub(startedAt)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
 }
 
 // adoptSandbox sets this warmpool as the owner of an orphaned sandbox.

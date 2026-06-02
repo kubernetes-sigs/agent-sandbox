@@ -67,6 +67,8 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
+	var sandboxWarmPoolMaxCreateRatePerWindow int
+	var sandboxWarmPoolCreateRateWindow time.Duration
 	var enableWarmPoolEviction bool
 	var printVersion bool
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
@@ -97,6 +99,8 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300.")
+	flag.IntVar(&sandboxWarmPoolMaxCreateRatePerWindow, "sandbox-warm-pool-max-create-rate-per-window", 0, "Max warm pool sandboxes to create per rate window. 0 disables create rate limiting.")
+	flag.DurationVar(&sandboxWarmPoolCreateRateWindow, "sandbox-warm-pool-create-rate-window", 0, "Warm pool sandbox create rate limit window. Must be set with --sandbox-warm-pool-max-create-rate-per-window.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	opts := zap.Options{
 		Development: false,
@@ -117,6 +121,8 @@ func main() {
 		"sandboxWarmPool", sandboxWarmPoolConcurrentWorkers,
 		"sandboxTemplate", sandboxTemplateConcurrentWorkers,
 		"sandboxWarmPoolMaxBatchSize", sandboxWarmPoolMaxBatchSize,
+		"sandboxWarmPoolMaxCreateRatePerWindow", sandboxWarmPoolMaxCreateRatePerWindow,
+		"sandboxWarmPoolCreateRateWindow", sandboxWarmPoolCreateRateWindow,
 	)
 
 	// Validation checks for concurrency flags
@@ -127,6 +133,18 @@ func main() {
 	// Validation checks for sandboxWarmPoolMaxBatchSize (maximum batch size for sandbox creation and deletion in SandboxWarmPool controller)
 	if sandboxWarmPoolMaxBatchSize <= 0 {
 		setupLog.Error(nil, "sandbox-warm-pool-max-batch-size must be greater than 0")
+		os.Exit(1)
+	}
+	if sandboxWarmPoolMaxCreateRatePerWindow < 0 {
+		setupLog.Error(nil, "sandbox-warm-pool-max-create-rate-per-window must be greater than or equal to 0")
+		os.Exit(1)
+	}
+	if sandboxWarmPoolCreateRateWindow < 0 {
+		setupLog.Error(nil, "sandbox-warm-pool-create-rate-window must be greater than or equal to 0")
+		os.Exit(1)
+	}
+	if (sandboxWarmPoolMaxCreateRatePerWindow == 0) != (sandboxWarmPoolCreateRateWindow == 0) {
+		setupLog.Error(nil, "sandbox warm pool create rate limit requires both max-create-rate-per-window and create-rate-window to be set, or both disabled")
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -294,6 +312,8 @@ func main() {
 			Client:                 mgr.GetClient(),
 			Scheme:                 mgr.GetScheme(),
 			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
+			MaxCreateRatePerWindow: sandboxWarmPoolMaxCreateRatePerWindow,
+			CreateRateWindow:       sandboxWarmPoolCreateRateWindow,
 			EnableWarmPoolEviction: enableWarmPoolEviction,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")

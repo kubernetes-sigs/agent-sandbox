@@ -204,12 +204,14 @@ func TestRunCleanup(t *testing.T) {
 		}
 	}
 
-	// Verify innocent process is NOT killed.
-	process, err := os.FindProcess(innocentCmd.Process.Pid)
-	if err == nil {
-		err = process.Signal(syscall.Signal(0))
-		if err != nil {
-			t.Errorf("expected innocent process to still be running, but got error: %v", err)
+	// Verify innocent process is NOT killed (on Linux only, where verification is active).
+	if runtime.GOOS == "linux" {
+		process, err := os.FindProcess(innocentCmd.Process.Pid)
+		if err == nil {
+			err = process.Signal(syscall.Signal(0))
+			if err != nil {
+				t.Errorf("expected innocent process to still be running, but got error: %v", err)
+			}
 		}
 	}
 

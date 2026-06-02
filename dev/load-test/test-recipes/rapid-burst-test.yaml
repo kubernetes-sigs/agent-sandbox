@@ -184,7 +184,7 @@ steps:
     - basename: agent-claim
       objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
       templateFillMap:
-        TemplateName: template-0
+        WarmPoolName: warmpool-0
 
 - name: Wait for Burst {{$burstIteration}} Sandbox Claims to be Ready
   measurements:

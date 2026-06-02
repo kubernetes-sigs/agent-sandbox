@@ -25,7 +25,7 @@ Create and apply a template and a claim that rely on secure defaults:
 
 `dns-poc-template.yaml`:
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: dns-poc-template
@@ -44,17 +44,29 @@ spec:
         command: ["/bin/sh", "-c", "sleep 3600"]
 ```
 
+`dns-poc-warmpool.yaml`:
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: dns-poc-warmpool
+  namespace: default
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: dns-poc-template
+```
+
 `dns-poc-claim.yaml`:
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   name: dns-poc-claim
   namespace: default
 spec:
-  sandboxTemplateRef:
-    name: dns-poc-template
-  warmpool: none
+  warmPoolRef:
+    name: dns-poc-warmpool
 ```
 
 ```bash
@@ -109,7 +121,7 @@ Create and apply a template that blocks the general link-local range but adds a 
 
 `dns-autopilot-template.yaml`:
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: dns-autopilot-template
@@ -158,22 +170,34 @@ spec:
         image: alpine:3.20
         command: ["/bin/sh", "-c", "sleep 3600"]
 ```
+`dns-autopilot-warmpool.yaml`: 
+```yaml 
+apiVersion: extensions.agents.x-k8s.io/v1beta1 
+kind: SandboxWarmPool 
+metadata:
+  name: dns-autopilot-warmpool
+  namespace: default 
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: dns-autopilot-template 
+```
 
 `dns-autopilot-claim.yaml`:
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   name: dns-autopilot-claim
   namespace: default
 spec:
-  sandboxTemplateRef:
-    name: dns-autopilot-template
-  warmpool: none
+  warmPoolRef:
+    name: dns-autopilot-warmpool
 ```
 
 ```bash
 kubectl apply -f dns-autopilot-template.yaml
+kubectl apply -f dns-autopilot-warmpool.yaml
 kubectl apply -f dns-autopilot-claim.yaml
 ```
 
@@ -222,4 +246,3 @@ As a result:
 * The moment the packet leaves `eth0`, it becomes subject to the pod's egress `NetworkPolicy` rules.
 * If the `networkPolicy` blocks `169.254.0.0/16` (which the default Secure Policy does), the CNI drops the packet at the egress filter.
 * If you explicitly permit egress to `169.254.20.10/32` on port 53 in your custom `networkPolicy.egress` list, the packet safely traverses `eth0` into the host namespace, where GKE's host-level routing tables intercept and direct it to GKE's local DNS cache container.
-

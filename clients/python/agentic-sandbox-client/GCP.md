@@ -13,8 +13,8 @@ with any backend that supports OTLP (OpenTelemetry Protocol).
 - The user or service account must have the `roles/logging.logWriter`,
   `roles/monitoring.metricWriter`, and `roles/cloudtrace.agent` permissions.
 - Ensure you have `docker`, `kubectl`, and the `gcloud CLI` installed and configured.
-- Follow all of the prerequisites and steps in the [README](README.md#prerequisites) to create a
-  cluster, install the controller, deploy the router, create a sandboxtemplate, and create a virtual
+- Follow all of the prerequisites and steps in the README to create a
+  cluster, install the controller, deploy the router, create a sandboxwarmpool, and create a virtual
   environment with the agent-sandbox-client and the tracing dependencies installed into the .venv.
 
 ### Local Development
@@ -65,7 +65,7 @@ from k8s_agent_sandbox import SandboxClient
 def main():
     # ...
     sb = SandboxClient(tracer_config=SandboxTracerConfig(enable_tracing=True))
-    sandbox = sb.create_sandbox(template="python-sandbox-template")
+    sandbox = sb.create_sandbox(warmpool="python-sandbox-warmpool")
     try:
         sandbox.commands.run("echo 'Hello, World!'")
     finally:

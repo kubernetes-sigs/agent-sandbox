@@ -47,7 +47,7 @@ Optimizing the operational footprint, reducing latencies, and lowering cloud/inf
 *   **Improve Claim Latency (200ms ➔ 100ms ➔ 50ms)** `📅 Planned`
     *   Analyze critical paths in the controller to reduce end-to-end sandbox assignment latencies down to sub-100ms.
 *   **Scale to Zero** `📅 Planned`
-    *   Scale sandbox replicas down to zero when inactive, preserving underlying resources while maintaining rapid resume paths.
+    *   Suspend sandboxes when inactive, preserving underlying resources while maintaining rapid resume paths.
 *   **Measure & Improve TFFI (Time to First Instruction) Latency** `📅 Planned`
     *   Define benchmarks and optimize the time required from invoking a sandbox to successfully executing the first code instruction.
 *   **Support OpenClaw Price-Performance Targets** `⏳ In Progress`

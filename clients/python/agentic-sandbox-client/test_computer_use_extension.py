@@ -109,13 +109,13 @@ class TestComputerUseSandbox(unittest.TestCase):
     def test_agent_with_api_key(self):
         """Tests the agent endpoint with a valid API key."""
         logging.info("Starting test_agent_with_api_key...")
-        template_name = "sandbox-python-computeruse-template"
+        warmpool_name = "sandbox-python-computeruse-warmpool"
         
         connection_config = SandboxLocalTunnelConnectionConfig(server_port=8888)
         sandbox_client = ComputerUseSandboxClient(connection_config=connection_config)
         
         try:
-            sandbox = sandbox_client.create_sandbox(template_name, "default")
+            sandbox = sandbox_client.create_sandbox(warmpool_name, "default")
             self.assertTrue(sandbox.is_active)
             logging.info("Sandbox is ready.")
             
@@ -150,14 +150,14 @@ class TestComputerUseSandbox(unittest.TestCase):
                 logging.error(f"Error deleting secret for test: {e}")
                 raise
 
-        template_name = "sandbox-python-computeruse-template"
+        warmpool_name = "sandbox-python-computeruse-warmpool"
         connection_config = SandboxLocalTunnelConnectionConfig(server_port=8888)
         # Set a shorter timeout to speed up the failure test
         sandbox_client = ComputerUseSandboxClient(connection_config=connection_config)
 
         try:
             with self.assertRaises(TimeoutError) as cm:
-                sandbox_client.create_sandbox(template_name, "default", sandbox_ready_timeout=30)
+                sandbox_client.create_sandbox(warmpool_name, "default", sandbox_ready_timeout=30)
             self.assertIn("did not become ready within", str(cm.exception))
         finally:
             sandbox_client.delete_all()

@@ -283,24 +283,24 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
             break
     print("--- Sandbox 2 Retrieval Failure Verified ---")
 
-def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
+def run_client_tests(client: SandboxClient, warmpool_name: str, namespace: str):
     # Test Create, Get and List sandboxes
-    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, template_name, namespace)
+    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, warmpool_name, namespace)
 
-    # Test wrong template name
-    test_wrong_template_name(client, namespace)
+    # Test wrong warmpool name
+    test_wrong_warmpool_name(client, namespace)
 
     # Run Sandbox Tests
     run_sandbox_tests(sandbox)
 
     # Test persistence of Sandbox in Kubernetes cluster after client side disconnection
-    test_explicit_close_connection_and_persistence(client, template_name, namespace)
+    test_explicit_close_connection_and_persistence(client, warmpool_name, namespace)
 
     # Test Sandbox deletion at Kubernetes cluster
     test_termination_and_deletion(client, sandbox, sandbox2, namespace)
     
 
-def test_client_cleanup_flag(client: SandboxClient, template_name: str, namespace: str, connection_config):
+def test_client_cleanup_flag(client: SandboxClient, warmpool_name: str, namespace: str, connection_config):
     print("\n--- Testing SandboxClient cleanup flag (Subprocess Simulation) ---")
     
     # Reconstruct the connection config dynamically for the subprocess

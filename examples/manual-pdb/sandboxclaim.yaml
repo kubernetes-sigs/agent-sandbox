@@ -1,11 +1,11 @@
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   # This will be the name of your sandbox pod and its associated resources.
   name: manual-protection-claim
-  # This MUST be in the same namespace as the SandboxTemplate.
+  # This MUST be in the same namespace as the SandboxWarmPool.
   namespace: default
 spec:
-  sandboxTemplateRef:
-    # This name must exactly match the 'metadata.name' of your SandboxTemplate.
-    name: secure-template
+  warmPoolRef:
+    # This name must exactly match the 'metadata.name' of your SandboxWarmPool.
+    name: secure-warmpool

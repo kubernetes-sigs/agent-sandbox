@@ -17,7 +17,7 @@ from k8s_agent_sandbox import SandboxClient
 
 @ray.remote
 class RLEnvironmentWorker:
-    def __init__(self, template_name: str, pool_name: str):
+    def __init__(self, pool_name: str):
         print("Initializing RL Environment Worker...")
         
         # --- THE PRODUCTION-GRADE EXTERNAL CONFIG ---
@@ -35,7 +35,6 @@ class RLEnvironmentWorker:
         
         # The rest of your claiming logic remains identical
         self.sandbox = self.client.create_sandbox(
-            template=template_name,
             warmpool=pool_name,
             shutdown_after_seconds=3600
         )
@@ -86,7 +85,7 @@ def main():
     # ==========================================
 
     print("Spawning Ray RL Environment Worker...")
-    env_worker = RLEnvironmentWorker.remote(template_name="ray-python-template", pool_name="ray-pool")
+    env_worker = RLEnvironmentWorker.remote(pool_name="ray-pool")
 
     # --- Episode 1: The Exploration Phase (Malicious/Destructive Action) ---
     print("\n[Episode 1] Agent attempts a destructive action during exploration...")

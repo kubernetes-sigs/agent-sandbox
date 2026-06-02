@@ -30,7 +30,7 @@ client = ComputerUseSandboxClient(
 
 # Create the sandbox with computer use support enabled
 sandbox = client.create_sandbox(
-    template="sandbox-python-computeruse-template", 
+    warmpool="sandbox-python-computeruse-warmpool", 
     namespace="default"
 )
 
@@ -70,7 +70,7 @@ Before running the tests, you must have the following set up:
     ```
 
 3.  **Apply Sandbox Configuration**: The necessary agent-sandbox controller, extensions, including the `sandbox-router` deployment, must be applied to your Kubernetes cluster.
-4.  **Apply the Gemini computer-use runtime configuration** Please refer to `examples/gemini-cu-sandbox` to see prerequsities and apply the correct `SandboxTemplate`.
+4.  **Apply the Gemini computer-use runtime configuration** Please refer to `examples/gemini-cu-sandbox` to see prerequsities and apply the correct `SandboxWarmPool`.
     ```bash
     kubectl apply -f examples/gemini-cu-sandbox/sandbox-gemini-computer-use.yaml
     ```

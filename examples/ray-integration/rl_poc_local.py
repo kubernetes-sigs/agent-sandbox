@@ -23,7 +23,7 @@ class RLEnvironmentWorker:
     A Ray Rollout Worker acting as an RL Environment. 
     It safely executes the Agent's actions (code) and returns Observations and Rewards.
     """
-    def __init__(self, template_name: str, pool_name: str):
+    def __init__(self, pool_name: str):
         print("Initializing RL Environment Worker...")
         
         # --- CONNECTION SETUP ---
@@ -35,7 +35,6 @@ class RLEnvironmentWorker:
         # --- SANDBOX PROVISIONING ---
         # Claim a hot sandbox from the warm pool for instant environment reset
         self.sandbox = self.client.create_sandbox(
-            template=template_name,
             warmpool=pool_name,
             shutdown_after_seconds=3600
         )
@@ -87,7 +86,7 @@ def main():
     # ==========================================
 
     print("Spawning Ray RL Environment Worker...")
-    env_worker = RLEnvironmentWorker.remote(template_name="ray-python-template", pool_name="ray-pool")
+    env_worker = RLEnvironmentWorker.remote(pool_name="ray-pool")
 
     # --- Episode 1: The Exploration Phase (Malicious/Destructive Action) ---
     print("\n[Episode 1] Agent attempts a destructive action during exploration...")

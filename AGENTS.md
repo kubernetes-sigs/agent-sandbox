@@ -6,16 +6,16 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 
 `agent-sandbox` is a Kubernetes controller that provides the `Sandbox` CRD: a stateful, singleton, pod-backed workload with a stable identity, intended for AI agent runtimes, dev environments, notebooks, and similar use cases. It is a SIG Apps subproject (`sigs.k8s.io/agent-sandbox`) and follows Kubernetes / `controller-runtime` conventions.
 
-- API group `agents.x-k8s.io/v1alpha1`: `Sandbox` (core).
-- API group `extensions.agents.x-k8s.io/v1alpha1`: `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` (opt-in extensions).
+- API group `agents.x-k8s.io/v1beta1`: `Sandbox` (core).
+- API group `extensions.agents.x-k8s.io/v1beta1`: `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` (opt-in extensions).
 - Go module: `sigs.k8s.io/agent-sandbox` (Go 1.26.x, see [go.mod](go.mod)).
 
 ## Repository layout
 
 | Path | What lives there |
 | --- | --- |
-| [api/v1alpha1/](api/v1alpha1/) | Core `Sandbox` types and kubebuilder markers. |
-| [extensions/api/v1alpha1/](extensions/api/v1alpha1/) | `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` types. |
+| [api/v1beta1/](api/v1beta1/) | Core `Sandbox` types and kubebuilder markers. |
+| [extensions/api/v1beta1/](extensions/api/v1beta1/) | `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` types. |
 | [controllers/](controllers/) | Core `Sandbox` reconciler + tests. |
 | [extensions/controllers/](extensions/controllers/) | Reconcilers for the extension CRDs. |
 | [cmd/agent-sandbox-controller/](cmd/agent-sandbox-controller/) | Controller manager entrypoint. |
@@ -70,7 +70,7 @@ If you change one of these, preview the rendered output (`hugo server` from [sit
 - Errors: wrap with context (`fmt.Errorf("...: %w", err)`); surface meaningful conditions on the resource status rather than swallowing.
 - Concurrency: respect `context.Context` cancellation; avoid goroutines without lifetime ownership; protect shared state.
 - Logging: use `logr.Logger` from controller-runtime (`log.FromContext(ctx)`); use structured key/value pairs, not `fmt.Sprintf`.
-- API changes are versioned (`v1alpha1`). Treat any user-visible field, label, or annotation rename as a breaking change — discuss in an issue or KEP first ([docs/keps/](docs/keps/)).
+- API changes are versioned (`v1beta1`). Treat any user-visible field, label, or annotation rename as a breaking change — discuss in an issue or KEP first [docs/keps/](docs/keps/).
 - Match existing kubebuilder marker style; required vs optional, default values, and validation belong on the type, not in the controller.
 
 ## Python SDK conventions

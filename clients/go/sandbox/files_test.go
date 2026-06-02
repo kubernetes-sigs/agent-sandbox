@@ -439,11 +439,11 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 	defer server.Close()
 
 	c := newReadyTestSandbox(server.URL)
+	c.connector.SetIdentity("my-claim")
+	c.connector.SetPodIP("10.244.0.42")
 	c.connector.mu.Lock()
-	c.connector.sandboxID = "my-claim"
 	c.connector.namespace = "my-ns"
 	c.connector.serverPort = 9999
-	c.connector.podIP = "10.244.0.42"
 	c.connector.mu.Unlock()
 
 	_, err := c.Exists(context.Background(), "x")
@@ -481,11 +481,11 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 	defer server.Close()
 
 	c := newReadyTestSandbox(server.URL)
+	c.connector.SetIdentity("my-claim")
+	c.connector.SetPodIP("")
 	c.connector.mu.Lock()
-	c.connector.sandboxID = "my-claim"
 	c.connector.namespace = "my-ns"
 	c.connector.serverPort = 9999
-	c.connector.podIP = ""
 	c.connector.mu.Unlock()
 
 	_, err := c.Exists(context.Background(), "x")

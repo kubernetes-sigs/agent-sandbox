@@ -41,6 +41,7 @@ import (
 func newRouter(t *testing.T) *Handler {
 	t.Helper()
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.ProxyTimeout = 5 * time.Second
 	cfg.ResponseHeaderTimeout = 2 * time.Second
 	return NewHandler(Options{
@@ -248,6 +249,7 @@ func (s *stubLookup) Invalidate(uid types.UID) bool {
 // falls through to DNS instead of retrying the stale IP.
 func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.ProxyTimeout = 2 * time.Second
 	cfg.ResponseHeaderTimeout = 1 * time.Second
 	// Disable retries so a single dial failure shows up cleanly as one
@@ -301,6 +303,7 @@ func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 // metric, which would be misleading.
 func TestIntegration_NoInvalidationOnDNSDialError(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.ProxyTimeout = 2 * time.Second
 	cfg.ResponseHeaderTimeout = 1 * time.Second
 	cfg.UpstreamMaxRetries = 0
@@ -347,5 +350,39 @@ func TestIntegration_MissingSandboxIDReturns400(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400", resp.StatusCode)
+	}
+}
+
+// TestIntegration_AuthorizationStrippedFromUpstream is the regression
+// test for the privilege-escalation hazard the Python router avoids by
+// dropping Authorization before forwarding. With --authz-mode=
+// tokenreview the router consumes the caller's K8s bearer token; if
+// that same token reached the sandbox, the sandbox could impersonate
+// the caller against the K8s API or any other Bearer-protected
+// service. The router must strip it.
+func TestIntegration_AuthorizationStrippedFromUpstream(t *testing.T) {
+	gotAuth := "<unset>"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+	router := httptest.NewServer(newRouter(t))
+	defer router.Close()
+
+	req, _ := http.NewRequest("GET", router.URL+"/", nil)
+	for k, vs := range podIPHeaders(t, backend.URL) {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer should-not-leak-to-upstream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if gotAuth != "" {
+		t.Fatalf("upstream saw Authorization=%q, want empty (router must strip)", gotAuth)
 	}
 }

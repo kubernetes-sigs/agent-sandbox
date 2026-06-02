@@ -99,6 +99,20 @@ type Config struct {
 	// 0 means unlimited.
 	MaxRequestBodyBytes int64
 
+	// AllowLoopbackPodIP, when true, lets X-Sandbox-Pod-IP carry a
+	// loopback address (127.0.0.0/8 or ::1). The default-false
+	// behavior matches the Python router: loopback/link-local/
+	// multicast/unspecified addresses are rejected with 400 so the
+	// router can't be turned into an SSRF gadget pointed at the
+	// router pod's own loopback or cloud metadata endpoints.
+	//
+	// Enable only when the sandbox runs as a sidecar in the same Pod
+	// as the router (so 127.0.0.1 is the correct dial address) or in
+	// integration tests that spin up an httptest backend on
+	// localhost. Link-local, multicast, and unspecified addresses
+	// stay rejected even when this flag is on.
+	AllowLoopbackPodIP bool
+
 	// EnableTracing enables OTel tracing via the OTLP gRPC exporter. The
 	// exporter endpoint is read from OTEL_EXPORTER_OTLP_ENDPOINT.
 	EnableTracing bool

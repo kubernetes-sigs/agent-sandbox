@@ -110,6 +110,7 @@ func TestIntegration_RetrySucceedsWhenBackendComesUp(t *testing.T) {
 	port := pickFreePort(t)
 
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.UpstreamMaxRetries = 20
 	cfg.UpstreamRetryInitialDelay = 20 * time.Millisecond
 	cfg.UpstreamRetryMaxDelay = 100 * time.Millisecond
@@ -177,6 +178,7 @@ func TestIntegration_RetryGivesUpAndReturns502(t *testing.T) {
 	deadPort := pickFreePort(t)
 
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.UpstreamMaxRetries = 3
 	cfg.UpstreamRetryInitialDelay = 10 * time.Millisecond
 	cfg.UpstreamRetryMaxDelay = 50 * time.Millisecond

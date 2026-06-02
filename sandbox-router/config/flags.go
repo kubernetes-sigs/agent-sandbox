@@ -86,6 +86,12 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Time budget for draining in-flight requests on SIGTERM.")
 	fs.Int64Var(&c.MaxRequestBodyBytes, "max-request-body-bytes", c.MaxRequestBodyBytes,
 		"Optional cap on inbound request body size in bytes. 0 means unlimited.")
+	fs.BoolVar(&c.AllowLoopbackPodIP, "allow-loopback-pod-ip", c.AllowLoopbackPodIP,
+		"Allow X-Sandbox-Pod-IP to carry a loopback address (127.0.0.0/8 or ::1). "+
+			"Default false (loopback rejected with 400). Enable for sidecar "+
+			"deployments where the sandbox shares a Pod with the router, or for "+
+			"integration tests using a localhost backend. Link-local, multicast, "+
+			"and unspecified addresses stay rejected regardless of this flag.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+

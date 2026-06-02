@@ -58,6 +58,7 @@ func (a *recordingAuthz) Authorize(_ context.Context, r *http.Request, ns, name 
 
 func TestAuthzAllowedByDefault(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.ProxyTimeout = 2 * time.Second
 	cfg.UpstreamMaxRetries = 0
 	// No Authorizer set → AllowAll.
@@ -96,6 +97,7 @@ func TestAuthzDenialMapsToStatus(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Defaults()
+			cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 			cfg.ProxyTimeout = 2 * time.Second
 			cfg.UpstreamMaxRetries = 0
 			a := &recordingAuthz{err: tc.denyErr}
@@ -141,6 +143,7 @@ func TestAuthzDenialMapsToStatus(t *testing.T) {
 
 func TestAuthzPassesNamespaceAndID(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.ProxyTimeout = 2 * time.Second
 	cfg.UpstreamMaxRetries = 0
 	a := &recordingAuthz{err: nil}

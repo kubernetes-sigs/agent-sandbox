@@ -137,6 +137,7 @@ func (c *connector) SetPodIP(ip string) {
 		return
 	}
 	if net.ParseIP(ip) == nil {
+		c.log.V(1).Info("skipping invalid pod IP address", "ip", ip)
 		c.podIP = ""
 		return
 	}

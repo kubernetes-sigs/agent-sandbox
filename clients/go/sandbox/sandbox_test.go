@@ -147,6 +147,7 @@ func readySandbox(name string) *sandboxv1beta1.Sandbox {
 			},
 		},
 		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{"10.244.0.42"},
 			Conditions: []metav1.Condition{
 				{
 					Type:   string(sandboxv1beta1.SandboxConditionReady),
@@ -262,6 +263,9 @@ func TestOpen_CreatesClaimAndBecomesReady(t *testing.T) {
 	}
 	if c.SandboxName() != c.ClaimName() {
 		t.Errorf("expected SandboxName to match ClaimName %s, got %s", c.ClaimName(), c.SandboxName())
+	}
+	if c.PodIP() != "10.244.0.42" {
+		t.Errorf("expected PodIP=10.244.0.42, got %s", c.PodIP())
 	}
 	if c.connector.BaseURL() != opts.APIURL {
 		t.Errorf("expected baseURL=%s, got %s", opts.APIURL, c.connector.BaseURL())

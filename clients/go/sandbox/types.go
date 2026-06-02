@@ -117,6 +117,7 @@ type Info interface {
 	ClaimName() string
 	SandboxName() string
 	PodName() string
+	PodIP() string
 	Annotations() map[string]string
 }
 

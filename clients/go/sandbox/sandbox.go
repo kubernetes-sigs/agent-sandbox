@@ -556,6 +556,12 @@ func (s *Sandbox) PodName() string {
 	return s.podName
 }
 
+func (s *Sandbox) PodIP() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.podIP
+}
+
 func (s *Sandbox) Annotations() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

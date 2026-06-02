@@ -44,6 +44,7 @@ import (
 type sandboxState struct {
 	SandboxName string
 	PodName     string
+	PodIP       string
 	Annotations map[string]string
 }
 
@@ -424,6 +425,9 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 		state.PodName = name
 	} else {
 		state.PodName = sb.Name
+	}
+	if len(sb.Status.PodIPs) > 0 {
+		state.PodIP = sb.Status.PodIPs[0]
 	}
 	return state
 }

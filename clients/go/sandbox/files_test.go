@@ -440,6 +440,7 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 	c.connector.sandboxID = "my-claim"
 	c.connector.namespace = "my-ns"
 	c.connector.serverPort = 9999
+	c.connector.podIP = "10.244.0.42"
 	c.connector.mu.Unlock()
 
 	_, err := c.Exists(context.Background(), "x")
@@ -455,6 +456,38 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 	}
 	if headers.Get(headerSandboxPort) != "9999" {
 		t.Errorf("wrong %s: %s", headerSandboxPort, headers.Get(headerSandboxPort))
+	}
+	if headers.Get(headerSandboxPodIP) != "10.244.0.42" {
+		t.Errorf("wrong %s: %s", headerSandboxPodIP, headers.Get(headerSandboxPodIP))
+	}
+}
+
+func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
+	var headers http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = r.Header.Clone()
+		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.connector.mu.Lock()
+	c.connector.sandboxID = "my-claim"
+	c.connector.namespace = "my-ns"
+	c.connector.serverPort = 9999
+	c.connector.podIP = ""
+	c.connector.mu.Unlock()
+
+	_, err := c.Exists(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("Exists() error: %v", err)
+	}
+
+	if headers.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, headers.Get(headerSandboxID))
+	}
+	if headers.Get(headerSandboxPodIP) != "" {
+		t.Errorf("expected empty %s, got %q", headerSandboxPodIP, headers.Get(headerSandboxPodIP))
 	}
 }
 

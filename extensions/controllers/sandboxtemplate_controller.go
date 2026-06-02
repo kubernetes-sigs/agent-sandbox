@@ -202,7 +202,8 @@ func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPoli
 						IPBlock: &networkingv1.IPBlock{
 							CIDR: "::/0", // IPv6 Catch-all
 							Except: []string{
-								"fc00::/7", // Block IPv6 Unique Local Addresses (Internal)
+								"fc00::/7",  // Block IPv6 Unique Local Addresses (Internal)
+								"fe80::/10", // Block IPv6 Link-Local
 							},
 						},
 					},

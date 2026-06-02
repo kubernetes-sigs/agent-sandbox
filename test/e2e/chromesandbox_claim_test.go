@@ -104,7 +104,7 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			metrics := runChromeSandboxClaim(tc, ns.Name, template.Name)
+			metrics := runChromeSandboxClaim(tc, ns.Name, warmPool.Name)
 
 			mu.Lock()
 			totalClaimReadySec += metrics.ClaimReady.Seconds()
@@ -118,7 +118,7 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	}
 }
 
-func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName string) *ChromeSandboxClaimMetrics {
+func runChromeSandboxClaim(tc *framework.TestContext, namespace, warmPoolName string) *ChromeSandboxClaimMetrics {
 	metrics := &ChromeSandboxClaimMetrics{}
 
 	// Unique name for this claim
@@ -127,7 +127,7 @@ func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName st
 	claim := &extensionsv1beta1.SandboxClaim{}
 	claim.Name = claimName
 	claim.Namespace = namespace
-	claim.Spec.TemplateRef.Name = templateName
+	claim.Spec.WarmPoolRef.Name = warmPoolName
 	claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
 		ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
 	}

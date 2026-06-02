@@ -129,6 +129,23 @@ Sandbox is the Schema for the sandboxes API.
 | `status` _[SandboxStatus](#sandboxstatus)_ | status defines the observed state of Sandbox |  | Optional: \{\} <br /> |
 
 
+#### SandboxOperatingMode
+
+_Underlying type:_ _string_
+
+SandboxOperatingMode defines the desired operational state of the Sandbox.
+
+
+
+_Appears in:_
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description |
+| --- | --- |
+| `Running` | SandboxOperatingModeRunning indicates the sandbox should be actively running.<br /> |
+| `Suspended` | SandboxOperatingModeSuspended indicates the sandbox should be suspended.<br /> |
+
+
 #### SandboxSpec
 
 
@@ -146,7 +163,7 @@ _Appears in:_
 | `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.<br />Every claim in this list must have at least one matching access mode with a provisioner volume. |  | Optional: \{\} <br /> |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `replicas` _integer_ | replicas is the number of desired replicas.<br />The only allowed values are 0 and 1.<br />Defaults to 1. | 1 | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+| `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for this Sandbox.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 
 
@@ -166,7 +183,6 @@ _Appears in:_
 | `serviceFQDN` _string_ | serviceFQDN that is valid for default cluster settings<br />The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag. |  | Optional: \{\} <br /> |
 | `service` _string_ | service is a sandbox-example |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions defines the status conditions array |  | Optional: \{\} <br /> |
-| `replicas` _integer_ | replicas is the number of actual replicas. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters. |  | Optional: \{\} <br /> |
 
@@ -327,11 +343,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox. |  | Required: \{\} <br /> |
+| `warmPoolRef` _[SandboxWarmPoolRef](#sandboxwarmpoolref)_ | warmPoolRef targets the specific pre-warmed infrastructure pool to check out from. |  | Required: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
-| `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -397,7 +412,6 @@ SandboxTemplateRef references a SandboxTemplate.
 
 
 _Appears in:_
-- [SandboxClaimSpec](#sandboxclaimspec)
 - [SandboxWarmPoolSpec](#sandboxwarmpoolspec)
 
 | Field | Description | Default | Validation |
@@ -445,6 +459,22 @@ SandboxWarmPool is the Schema for the sandboxwarmpools API.
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 | `spec` _[SandboxWarmPoolSpec](#sandboxwarmpoolspec)_ | spec defines the desired state of SandboxWarmPool |  | Required: \{\} <br /> |
 | `status` _[SandboxWarmPoolStatus](#sandboxwarmpoolstatus)_ | status defines the observed state of SandboxWarmPool |  | Optional: \{\} <br /> |
+
+
+#### SandboxWarmPoolRef
+
+
+
+SandboxWarmPoolRef references a SandboxWarmPool.
+
+
+
+_Appears in:_
+- [SandboxClaimSpec](#sandboxclaimspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name of the SandboxWarmPool |  | Required: \{\} <br /> |
 
 
 #### SandboxWarmPoolSpec
@@ -535,26 +565,5 @@ _Appears in:_
 | `Delete` | ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.<br /> |
 | `DeleteForeground` | ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground<br />cascade deletion. The claim remains in the API (with a deletionTimestamp) until its<br />underlying Sandbox and Pod are fully terminated. This allows external systems to observe<br />shutdown progress by checking whether the claim still exists.<br /> |
 | `Retain` | ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).<br />The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,<br />but the SandboxClaim object itself remains.<br /> |
-
-
-#### WarmPoolPolicy
-
-_Underlying type:_ _string_
-
-WarmPoolPolicy describes the policy for using warm pools.
-It can be one of the following:
-  - "none": Do not use any warm pool, always create fresh sandboxes
-  - "default": Select from all available warm pools that match the template (default)
-  - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
-
-
-
-_Appears in:_
-- [SandboxClaimSpec](#sandboxclaimspec)
-
-| Field | Description |
-| --- | --- |
-| `none` | WarmPoolPolicyNone indicates that no warm pool should be used.<br />A fresh sandbox will always be created.<br /> |
-| `default` | WarmPoolPolicyDefault indicates the default behavior: select from all<br />available warm pools that match the template. This is the default behavior<br />if warmpool is not specified.<br /> |
 
 

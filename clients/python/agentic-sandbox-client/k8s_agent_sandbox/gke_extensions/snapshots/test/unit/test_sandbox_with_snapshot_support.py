@@ -1137,7 +1137,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 namespace=self.sandbox.namespace,
                 plural=SANDBOX_PLURAL_NAME,
                 name=self.sandbox.sandbox_id,
-                body={"spec": {"replicas": 0}}
+                body={"spec": {"operatingMode": "Suspended"}}
             )
 
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_termination')
@@ -1189,7 +1189,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 namespace=self.sandbox.namespace,
                 plural=SANDBOX_PLURAL_NAME,
                 name=self.sandbox.sandbox_id,
-                body={"spec": {"replicas": 1}}
+                body={"spec": {"operatingMode": "Running"}}
             )
 
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_termination')
@@ -1336,14 +1336,14 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
 
     def test_is_suspended_true(self):
         self.mock_k8s_helper.custom_objects_api.get_namespaced_custom_object.return_value = {
-            "spec": {"replicas": 0},
+            "spec": {"operatingMode": "Suspended"},
             "status": {}
         }
         self.assertTrue(self.sandbox.is_suspended())
 
     def test_is_suspended_false(self):
         self.mock_k8s_helper.custom_objects_api.get_namespaced_custom_object.return_value = {
-            "spec": {"replicas": 1},
+            "spec": {"operatingMode": "Running"},
             "status": {"podIPs": ["10.0.0.1"]}
         }
         self.assertFalse(self.sandbox.is_suspended())

@@ -49,13 +49,15 @@ const (
 	sandboxTemplateRefHash          = "agents.x-k8s.io/sandbox-template-ref-hash"
 	warmPoolSandboxLabel            = "agents.x-k8s.io/warm-pool-sandbox"
 	sandboxCreateDeleteMaxBatchSize = 300
+	warmPoolEvictionAnnotation      = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
 type SandboxWarmPoolReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	MaxBatchSize int
+	Scheme                 *runtime.Scheme
+	MaxBatchSize           int
+	EnableWarmPoolEviction bool
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
@@ -233,7 +235,19 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
 		return err
 	}
+	setWarmLaunchTypeLabelIfNeeded(sb)
 	return r.Update(ctx, sb)
+}
+
+func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
+	if sb.Labels == nil {
+		sb.Labels = make(map[string]string)
+	}
+	if sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		return false
+	}
+	sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] = sandboxv1beta1.SandboxLaunchTypeWarm
+	return true
 }
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
@@ -286,6 +300,14 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 			}
 		}
 
+		if isControlledByPool && setWarmLaunchTypeLabelIfNeeded(&sb) {
+			if err := r.Update(ctx, &sb); err != nil {
+				logger.Error(err, "Failed to update sandbox launch type label", "sandbox", sb.Name)
+				allErrors = errors.Join(allErrors, err)
+				continue
+			}
+		}
+
 		if isOrphan {
 			logger.Info("Adopting orphaned sandbox", "sandbox", sb.Name)
 			if err := r.adoptSandbox(ctx, warmPool, &sb); err != nil {
@@ -329,6 +351,7 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 	sandboxLabels := map[string]string{
 		warmPoolSandboxLabel:                       poolNameHash,
 		sandboxTemplateRefHash:                     SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
+		sandboxv1beta1.SandboxLaunchTypeLabel:      sandboxv1beta1.SandboxLaunchTypeWarm,
 		sandboxv1beta1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
 	}
 
@@ -348,7 +371,13 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
 
-	replicas := int32(1)
+	// Respect the template's custom eviction annotation if explicitly specified.
+	// Only apply the default eviction behavior if the annotation is not defined.
+	if _, exists := template.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
+		if r.EnableWarmPoolEviction {
+			podAnnotations[warmPoolEvictionAnnotation] = "true"
+		}
+	}
 
 	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -358,8 +387,7 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 			Annotations:  sandboxAnnotations,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			Replicas: &replicas,
-			Service:  template.Spec.Service,
+			Service: template.Spec.Service,
 			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
 				ObjectMeta: sandboxv1beta1.PodMetadata{

@@ -121,7 +121,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		launchTypeStr := LaunchTypeCold
-		if _, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] != "" {
+		if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
 			launchTypeStr = LaunchTypeWarm
 		}
 

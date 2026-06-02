@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-func TestSandboxReplicas(t *testing.T) {
+func TestSandboxOperatingMode(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
 	// Set up a namespace
@@ -36,7 +36,7 @@ func TestSandboxReplicas(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 	// Create a Sandbox Object
 	sandboxObj := simpleSandbox(ns.Name)
-	sandboxObj.Spec.Replicas = new(int32(1))
+	sandboxObj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
 	nameHash := NameHash(sandboxObj.Name)
@@ -45,7 +45,6 @@ func TestSandboxReplicas(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
@@ -70,9 +69,9 @@ func TestSandboxReplicas(t *testing.T) {
 	service.Namespace = ns.Name
 	tc.MustExist(service)
 
-	// Set replicas to zero
+	// Set operating mode to suspended
 	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
-		obj.Spec.Replicas = new(int32(0))
+		obj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
 	})
 
 	// Wait for sandbox status to reflect new state
@@ -80,7 +79,6 @@ func TestSandboxReplicas(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			Replicas:      0,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{

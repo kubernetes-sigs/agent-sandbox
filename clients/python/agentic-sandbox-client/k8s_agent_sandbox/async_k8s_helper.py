@@ -31,8 +31,8 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
 )
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
 from .utils import normalize_kubernetes_auth_config
+from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 
 
 class AsyncK8sHelper:
@@ -64,12 +64,11 @@ class AsyncK8sHelper:
     async def create_sandbox_claim(
         self,
         name: str,
-        template: str,
+        warmpool: str,
         namespace: str,
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
-        warmpool: str | None = None,
     ):
         """Creates a SandboxClaim custom resource."""
         await self._ensure_initialized()
@@ -82,14 +81,12 @@ class AsyncK8sHelper:
             metadata["labels"] = labels
 
         spec = {
-            "sandboxTemplateRef": {
-                "name": template,
+            "warmPoolRef": {
+                "name": warmpool,
             }
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
-        if warmpool:
-            spec["warmpool"] = warmpool
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
@@ -98,7 +95,7 @@ class AsyncK8sHelper:
             "spec": spec,
         }
         logger.info(
-            f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'..."
+            f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'..."
         )
         await self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
@@ -154,6 +151,10 @@ class AsyncK8sHelper:
                             ):
                                 raise SandboxTemplateNotFoundError(
                                     f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                                )
+                            elif cond.get("reason") == "WarmPoolNotFound":
+                                raise SandboxWarmPoolNotFoundError(
+                                    f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
                                 )
 
                         sandbox_status = status.get("sandbox", {})

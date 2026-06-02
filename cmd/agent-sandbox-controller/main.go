@@ -22,6 +22,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -66,6 +67,7 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
+	var enableWarmPoolEviction bool
 	var printVersion bool
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
@@ -95,6 +97,7 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300.")
+	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -245,12 +248,33 @@ func main() {
 
 	if extensions {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+
+		var allowedDomains []string
+		configPath := "/etc/sandbox-config/allowed-label-domains"
+		if data, err := os.ReadFile(configPath); err == nil {
+			val := strings.TrimSpace(string(data))
+			if val != "" {
+				for _, d := range strings.FieldsFunc(val, func(c rune) bool {
+					return c == ',' || c == '\n' || c == '\r'
+				}) {
+					d = strings.ToLower(strings.TrimSpace(d))
+					if d != "" {
+						allowedDomains = append(allowedDomains, d)
+					}
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			setupLog.Error(err, "failed to read configuration file", "path", configPath)
+			os.Exit(1)
+		}
+
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
-			Client:           mgr.GetClient(),
-			Scheme:           mgr.GetScheme(),
-			WarmSandboxQueue: warmSandboxQueue,
-			Recorder:         mgr.GetEventRecorder("sandboxclaim-controller"),
-			Tracer:           instrumenter,
+			Client:              mgr.GetClient(),
+			Scheme:              mgr.GetScheme(),
+			WarmSandboxQueue:    warmSandboxQueue,
+			Recorder:            mgr.GetEventRecorder("sandboxclaim-controller"),
+			Tracer:              instrumenter,
+			AllowedLabelDomains: allowedDomains,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
@@ -267,9 +291,10 @@ func main() {
 		}
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
-			Client:       mgr.GetClient(),
-			Scheme:       mgr.GetScheme(),
-			MaxBatchSize: sandboxWarmPoolMaxBatchSize,
+			Client:                 mgr.GetClient(),
+			Scheme:                 mgr.GetScheme(),
+			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
+			EnableWarmPoolEviction: enableWarmPoolEviction,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)

@@ -71,18 +71,15 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
-              sandboxTemplateRef:
+              warmPoolRef:
                 properties:
                   name:
                     type: string
                 required:
                 - name
                 type: object
-              warmpool:
-                default: default
-                type: string
             required:
-            - sandboxTemplateRef
+            - warmPoolRef
             type: object
           status:
             properties:

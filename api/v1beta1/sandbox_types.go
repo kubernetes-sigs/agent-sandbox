@@ -57,12 +57,20 @@ const (
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
+	// SandboxLaunchTypeLabel is the label used to track whether the Sandbox was cold-created or originated from a warm pool.
+	SandboxLaunchTypeLabel = "agents.x-k8s.io/launch-type"
+	// SandboxLaunchTypeCold indicates the Sandbox was cold-created.
+	SandboxLaunchTypeCold = "cold"
+	// SandboxLaunchTypeWarm indicates the Sandbox was pre-provisioned by or adopted from a SandboxWarmPool.
+	SandboxLaunchTypeWarm = "warm"
 	// SandboxPodTemplateHashLabel is the label used to track the pod template hash.
 	SandboxPodTemplateHashLabel = "agents.x-k8s.io/sandbox-pod-template-hash"
 	// SandboxPropagatedLabelsAnnotation is the annotation used to track the labels explicitly propagated from sandbox spec to pod.
 	SandboxPropagatedLabelsAnnotation = "agents.x-k8s.io/propagated-labels"
 	// SandboxPropagatedAnnotationsAnnotation is the annotation used to track the annotations explicitly propagated from sandbox spec to pod.
 	SandboxPropagatedAnnotationsAnnotation = "agents.x-k8s.io/propagated-annotations"
+	// SandboxAdoptableLabel is the label used to authorize a Sandbox to adopt an existing unowned resource.
+	SandboxAdoptableLabel = "agents.x-k8s.io/adoptable"
 )
 
 type PodMetadata struct {
@@ -126,6 +134,16 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec"`
 }
 
+// SandboxOperatingMode defines the desired operational state of the Sandbox.
+type SandboxOperatingMode string
+
+const (
+	// SandboxOperatingModeRunning indicates the sandbox should be actively running.
+	SandboxOperatingModeRunning SandboxOperatingMode = "Running"
+	// SandboxOperatingModeSuspended indicates the sandbox should be suspended.
+	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
+)
+
 // SandboxSpec defines the desired state of Sandbox.
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
@@ -145,14 +163,12 @@ type SandboxSpec struct {
 	// +optional
 	Lifecycle `json:",inline"`
 
-	// replicas is the number of desired replicas.
-	// The only allowed values are 0 and 1.
-	// Defaults to 1.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1
-	// +kubebuilder:default=1
+	// operatingMode specifies the desired operational state of the Sandbox.
+	// Defaults to Running if not specified.
+	// +kubebuilder:default=Running
+	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
-	Replicas *int32 `json:"replicas,omitempty"`
+	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
 
 	// service controls whether the controller should automatically create a
 	// headless Service for this Sandbox.
@@ -206,11 +222,6 @@ type SandboxStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// replicas is the number of actual replicas.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
-
 	// selector is the label selector for pods.
 	// +optional
 	LabelSelector string `json:"selector,omitempty"`
@@ -224,7 +235,6 @@ type SandboxStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {

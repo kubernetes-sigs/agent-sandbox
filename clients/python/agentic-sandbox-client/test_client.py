@@ -283,12 +283,64 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
             break
     print("--- Sandbox 2 Retrieval Failure Verified ---")
 
+def test_claim_annotation(client: SandboxClient, template_name: str, namespace: str):
+    print("\n--- Testing SandboxClaim Annotation ---")
+    import uuid
+    from datetime import datetime
+    from k8s_agent_sandbox.constants import (
+        CLIENT_REQUEST_TIME_ANNOTATION,
+        CLAIM_API_GROUP,
+        CLAIM_API_VERSION,
+        CLAIM_PLURAL_NAME,
+    )
+
+    claim_name = f"test-annotation-{uuid.uuid4().hex[:8]}"
+
+    # Create claim using client
+    client._create_claim(claim_name, template_name, namespace)
+
+    try:
+        # Get claim using k8s_helper
+        claim = client.k8s_helper.custom_objects_api.get_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            name=claim_name
+        )
+
+        annotations = claim.get("metadata", {}).get("annotations", {})
+        print(f"Annotations: {annotations}")
+
+        assert CLIENT_REQUEST_TIME_ANNOTATION in annotations, f"Expected annotation '{CLIENT_REQUEST_TIME_ANNOTATION}' missing"
+
+        timestamp_str = annotations[CLIENT_REQUEST_TIME_ANNOTATION]
+        print(f"Timestamp: {timestamp_str}")
+
+        # Verify it can be parsed
+        try:
+            dt = datetime.fromisoformat(timestamp_str)
+            assert dt.tzname() == 'UTC', "Timestamp should be in UTC"
+            print(f"Parsed datetime: {dt}")
+        except ValueError as e:
+            raise AssertionError(f"Failed to parse timestamp '{timestamp_str}': {e}")
+
+        print("--- SandboxClaim Annotation Test Passed! ---")
+
+    finally:
+        print(f"Cleaning up claim {claim_name}...")
+        client._delete_claim(claim_name, namespace)
+
+
 def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
     # Test Create, Get and List sandboxes
     sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, template_name, namespace)
 
     # Test wrong template name
     test_wrong_template_name(client, namespace)
+
+    # Test SandboxClaim annotation
+    test_claim_annotation(client, template_name, namespace)
 
     # Run Sandbox Tests
     run_sandbox_tests(sandbox)

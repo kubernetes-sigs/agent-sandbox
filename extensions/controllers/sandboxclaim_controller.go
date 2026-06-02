@@ -243,7 +243,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
+	r.recordCreationLatencyMetrics(ctx, claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -1542,8 +1542,23 @@ func (r *SandboxClaimReconciler) recordSandboxCreationLatency(sandbox *v1beta1.S
 	}
 }
 
-// recordCreationLatencyMetric detects and records transitions to Ready state.
-func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
+// recordClientClaimStartupLatency records the client claim startup latency based on annotation.
+func (r *SandboxClaimReconciler) recordClientClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string) {
+	logger := log.FromContext(ctx)
+	clientRequestTime := claim.Annotations[asmetrics.ClientAnnotation]
+	if clientRequestTime == "" {
+		return
+	}
+	requestTime, err := time.Parse(time.RFC3339Nano, clientRequestTime)
+	if err != nil {
+		logger.Error(err, "Failed to parse client request time", "value", clientRequestTime)
+		return
+	}
+	asmetrics.RecordClientClaimStartupLatency(ctx, requestTime, launchType, templateName)
+}
+
+// recordCreationLatencyMetrics detects and records transitions to Ready state.
+func (r *SandboxClaimReconciler) recordCreationLatencyMetrics(
 	ctx context.Context,
 	claim *extensionsv1beta1.SandboxClaim,
 	oldStatus *extensionsv1beta1.SandboxClaimStatus,
@@ -1582,6 +1597,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
+	r.recordClientClaimStartupLatency(ctx, claim, launchType, templateName)
 }
 
 func hasSandboxExpiredCondition(conditions []metav1.Condition) bool {

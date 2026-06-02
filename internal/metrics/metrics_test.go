@@ -52,6 +52,29 @@ func TestClaimLatencyRecording(t *testing.T) {
 	}
 }
 
+func TestClientClaimLatencyRecording(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		name       string
+		launchType string
+	}{
+		{"Warm", LaunchTypeWarm},
+		{"Cold", LaunchTypeCold},
+		{"Unknown", LaunchTypeUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ClientClaimStartupLatency.Reset()
+			RecordClientClaimStartupLatency(ctx, time.Now().Add(-1*time.Second), tc.launchType, "test-tmpl")
+
+			if testutil.CollectAndCount(ClientClaimStartupLatency) != 1 {
+				t.Errorf("Expected 1 observation")
+			}
+		})
+	}
+}
+
 func TestSandboxCreationLatencyRecording(t *testing.T) {
 	testCases := []struct {
 		name       string

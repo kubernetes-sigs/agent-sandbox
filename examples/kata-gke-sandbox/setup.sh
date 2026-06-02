@@ -77,6 +77,8 @@ else
         --num-nodes "${NUM_NODES}" \
         --machine-type "${MACHINE_TYPE}" \
         --image-type "${IMAGE_TYPE}" \
+        --enable-dataplane-v2 \
+        --enable-ip-alias \
         --enable-nested-virtualization; then
         echo "### GKE Cluster creation failed. ###"
         exit 1

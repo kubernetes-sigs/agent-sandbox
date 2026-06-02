@@ -2992,3 +2992,75 @@ func TestDisconnect_DoubleDisconnect(t *testing.T) {
 	// Clean up.
 	c.Close(context.Background())
 }
+
+func TestExtractState_PodIPs(t *testing.T) {
+	cases := []struct {
+		name     string
+		ips      []string
+		expected string
+	}{
+		{
+			name:     "no IPs",
+			ips:      nil,
+			expected: "",
+		},
+		{
+			name:     "single valid IPv4",
+			ips:      []string{"10.244.0.42"},
+			expected: "10.244.0.42",
+		},
+		{
+			name:     "single valid IPv6",
+			ips:      []string{"2001:db8::1"},
+			expected: "2001:db8::1",
+		},
+		{
+			name:     "dual-stack prioritizing IPv4 first",
+			ips:      []string{"10.244.0.42", "2001:db8::1"},
+			expected: "10.244.0.42",
+		},
+		{
+			name:     "dual-stack prioritizing IPv4 when IPv6 is first",
+			ips:      []string{"2001:db8::1", "10.244.0.42"},
+			expected: "10.244.0.42",
+		},
+		{
+			name:     "multiple IPv6 selects first parseable",
+			ips:      []string{"2001:db8::1", "2001:db8::2"},
+			expected: "2001:db8::1",
+		},
+		{
+			name:     "ignores invalid IP and falls back to valid IPv4",
+			ips:      []string{"not-a-valid-ip", "10.244.0.42"},
+			expected: "10.244.0.42",
+		},
+		{
+			name:     "ignores invalid IP and falls back to valid IPv6",
+			ips:      []string{"not-a-valid-ip", "2001:db8::1"},
+			expected: "2001:db8::1",
+		},
+		{
+			name:     "all invalid IPs leaves it empty",
+			ips:      []string{"not-a-valid-ip", "bad-address"},
+			expected: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox",
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					PodIPs: tc.ips,
+				},
+			}
+
+			state := extractState(sb)
+			if state.PodIP != tc.expected {
+				t.Errorf("expected extracted PodIP %q, got %q", tc.expected, state.PodIP)
+			}
+		})
+	}
+}

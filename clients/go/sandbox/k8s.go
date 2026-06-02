@@ -428,7 +428,7 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 		state.PodName = sb.Name
 	}
 	if len(sb.Status.PodIPs) > 0 {
-		// Prefer IPv4 if present in dual-stack setups, otherwise default to first.
+		// Prioritize the first valid IPv4 address.
 		var selectedIP string
 		for _, ip := range sb.Status.PodIPs {
 			parsed := net.ParseIP(ip)
@@ -437,10 +437,18 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 				break
 			}
 		}
+		// If no IPv4 address is found, fall back to the first valid parseable IP (e.g., IPv6).
 		if selectedIP == "" {
-			selectedIP = sb.Status.PodIPs[0]
+			for _, ip := range sb.Status.PodIPs {
+				if net.ParseIP(ip) != nil {
+					selectedIP = ip
+					break
+				}
+			}
 		}
-		state.PodIP = selectedIP
+		if selectedIP != "" {
+			state.PodIP = selectedIP
+		}
 	}
 	return state
 }

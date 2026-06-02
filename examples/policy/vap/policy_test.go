@@ -105,6 +105,7 @@ func TestSecureSandboxVAP(t *testing.T) {
 	// 4. Test Scenarios
 	tests := []struct {
 		name          string
+		annotations   map[string]string // sandbox-level annotations (e.g. trusted-init-containers)
 		mutateSpec    func(spec *corev1.PodSpec) // Function to inject the vulnerability
 		expectAllowed bool
 	}{
@@ -321,13 +322,211 @@ func TestSecureSandboxVAP(t *testing.T) {
 			},
 			expectAllowed: false,
 		},
+
+		// --- 6. Trusted Init Container Annotation ---
+		{
+			name:        "Success: Trusted init container adds allowed caps and runs as root",
+			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "sidecar-init"},
+			mutateSpec: func(spec *corev1.PodSpec) {
+				spec.InitContainers = []corev1.Container{
+					{
+						Name:  "sidecar-init",
+						Image: "us.gcr.io/snap-mesh-images/sidecar-init:latest",
+						SecurityContext: &corev1.SecurityContext{
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+								Add:  []corev1.Capability{"NET_ADMIN", "NET_RAW", "NET_BIND_SERVICE", "SETUID", "SETGID"},
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("100m"),
+								corev1.ResourceMemory: parserQuantity("128Mi"),
+							},
+						},
+					},
+				}
+			},
+			expectAllowed: true,
+		},
+		{
+			name:        "Success: Multiple trusted init containers declared",
+			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "sidecar-init,auth-init"},
+			mutateSpec: func(spec *corev1.PodSpec) {
+				spec.InitContainers = []corev1.Container{
+					{
+						Name:  "sidecar-init",
+						Image: "us.gcr.io/snap-mesh-images/sidecar-init:latest",
+						SecurityContext: &corev1.SecurityContext{
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+								Add:  []corev1.Capability{"NET_ADMIN", "NET_RAW"},
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("100m"),
+								corev1.ResourceMemory: parserQuantity("128Mi"),
+							},
+						},
+					},
+					{
+						Name:  "auth-init",
+						Image: "us.gcr.io/security-mesh-images/auth-init:latest",
+						SecurityContext: &corev1.SecurityContext{
+							RunAsNonRoot: ptr.To(true),
+							Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("50m"),
+								corev1.ResourceMemory: parserQuantity("64Mi"),
+							},
+						},
+					},
+				}
+			},
+			expectAllowed: true,
+		},
+		{
+			name: "Violation: Init container adds caps without being declared trusted",
+			mutateSpec: func(spec *corev1.PodSpec) {
+				spec.InitContainers = []corev1.Container{
+					{
+						Name:  "sneaky-init",
+						Image: "attacker/image:latest",
+						SecurityContext: &corev1.SecurityContext{
+							RunAsNonRoot: ptr.To(true),
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+								Add:  []corev1.Capability{"NET_ADMIN"},
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("100m"),
+								corev1.ResourceMemory: parserQuantity("128Mi"),
+							},
+						},
+					},
+				}
+			},
+			expectAllowed: false,
+		},
+		{
+			name:        "Success: Trusted init container may add any capability",
+			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "sidecar-init"},
+			mutateSpec: func(spec *corev1.PodSpec) {
+				spec.InitContainers = []corev1.Container{
+					{
+						Name:  "sidecar-init",
+						Image: "us.gcr.io/snap-mesh-images/sidecar-init:latest",
+						SecurityContext: &corev1.SecurityContext{
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+								Add:  []corev1.Capability{"NET_ADMIN", "NET_RAW", "SYS_ADMIN"},
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("100m"),
+								corev1.ResourceMemory: parserQuantity("128Mi"),
+							},
+						},
+					},
+				}
+			},
+			expectAllowed: true,
+		},
+		{
+			name:        "Violation: Trusted init container does not drop ALL",
+			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "sidecar-init"},
+			mutateSpec: func(spec *corev1.PodSpec) {
+				spec.InitContainers = []corev1.Container{
+					{
+						Name:  "sidecar-init",
+						Image: "us.gcr.io/snap-mesh-images/sidecar-init:latest",
+						SecurityContext: &corev1.SecurityContext{
+							Capabilities: &corev1.Capabilities{
+								Add: []corev1.Capability{"NET_ADMIN"},
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("100m"),
+								corev1.ResourceMemory: parserQuantity("128Mi"),
+							},
+						},
+					},
+				}
+			},
+			expectAllowed: false,
+		},
+		{
+			name:        "Violation: Annotation names a main container as trusted",
+			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "test"},
+			mutateSpec: func(spec *corev1.PodSpec) {
+				spec.Containers[0].SecurityContext.Capabilities.Add = []corev1.Capability{"NET_ADMIN"}
+			},
+			expectAllowed: false,
+		},
+		{
+			name:        "Success: Trusted init container with restartPolicy Always is permitted",
+			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "sidecar-init"},
+			mutateSpec: func(spec *corev1.PodSpec) {
+				restartAlways := corev1.ContainerRestartPolicyAlways
+				spec.InitContainers = []corev1.Container{
+					{
+						Name:          "sidecar-init",
+						Image:         "us.gcr.io/snap-mesh-images/sidecar-init:latest",
+						RestartPolicy: &restartAlways,
+						SecurityContext: &corev1.SecurityContext{
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+								Add:  []corev1.Capability{"NET_ADMIN", "NET_RAW"},
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("100m"),
+								corev1.ResourceMemory: parserQuantity("128Mi"),
+							},
+						},
+					},
+				}
+			},
+			expectAllowed: true,
+		},
+		{
+			name:        "Violation: Trusted init container is privileged",
+			annotations: map[string]string{"agents.x-k8s.io/trusted-init-containers": "sidecar-init"},
+			mutateSpec: func(spec *corev1.PodSpec) {
+				spec.InitContainers = []corev1.Container{
+					{
+						Name:  "sidecar-init",
+						Image: "us.gcr.io/snap-mesh-images/sidecar-init:latest",
+						SecurityContext: &corev1.SecurityContext{
+							Privileged:   ptr.To(true),
+							Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    parserQuantity("100m"),
+								corev1.ResourceMemory: parserQuantity("128Mi"),
+							},
+						},
+					},
+				}
+			},
+			expectAllowed: false,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// DeepCopy the secure spec to start fresh every time
 			sandbox := &sandboxv1beta1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", Annotations: tc.annotations},
 				Spec: sandboxv1beta1.SandboxSpec{
 					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: *secureSpec.DeepCopy(),

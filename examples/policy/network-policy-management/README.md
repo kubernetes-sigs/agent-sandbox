@@ -73,7 +73,7 @@ When you provide a custom networkPolicy block within your template, it completel
 You can override the secure defaults by defining custom rules within the `SandboxTemplate`. The schema uses standard Kubernetes `NetworkPolicyIngressRule` and `NetworkPolicyEgressRule` formats.
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: custom-net-template
@@ -91,7 +91,7 @@ spec:
 If you are running an agent that purely performs computation and requires absolute network isolation, you can pass empty arrays to explicitly block all traffic.
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: airgapped-template
@@ -107,7 +107,7 @@ spec:
 Here is a practical example of a `SandboxTemplate` configured for an AI agent that requires access to an internal database, the public internet, and incoming health checks from a monitoring namespace.
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: custom-agent-template
@@ -178,7 +178,7 @@ To support Google Cloud APIs natively without experiencing these latency hangs o
 3. Configure custom DNS resolvers (like public Google/Cloudflare DNS) directly in the sandbox `podTemplate`. Since defining a custom `networkPolicy` disables the automatic "Secure-by-Default" DNS override, and since RFC1918 private subnets are blocked by the custom egress rules, the sandbox would be unable to reach internal cluster DNS (CoreDNS), causing DNS lookups for external domains to fail.
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: gcp-agent-template
@@ -244,13 +244,15 @@ kubectl get networkpolicy <template-name>-network-policy -n <namespace> -o yaml
 
 **As a user, how do I determine what policies are attached to my SandboxClaim?**
 
-Look at the `SandboxTemplate` your claim references.
+Look at the `SandboxTemplate` referenced by your claim's `SandboxWarmPool`.
 
-1. Run `kubectl get sandboxtemplate <template-name> -o yaml`.
+1. Run `kubectl get sandboxwarmpool <warmpool-name> -o yaml` to find the underlying template name.
 
-2. Check the `spec.networkPolicyManagement` field.
+2. Run `kubectl get sandboxtemplate <template-name> -o yaml`.
 
-3. If it is `Managed` and `spec.networkPolicy` is empty, the Secure by Default posture is active. If `spec.networkPolicy` is populated, those exact custom rules are applied.
+3. Check the `spec.networkPolicyManagement` field.
+
+4. If it is `Managed` and `spec.networkPolicy` is empty, the Secure by Default posture is active. If `spec.networkPolicy` is populated, those exact custom rules are applied.
 
 **Will admins be able to set default policies for Layer 7 (L7)?**
 

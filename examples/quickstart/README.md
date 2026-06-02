@@ -93,7 +93,7 @@ Create a WarmPool that references the template from Step 4 (see [`extensions/exa
 
 ```bash
 kubectl apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
   name: python-warmpool
@@ -111,14 +111,14 @@ With the WarmPool running, create a SandboxClaim and verify it is fulfilled imme
 
 ```bash
 kubectl apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   name: quickstart-test
   namespace: agent-sandbox-demo
 spec:
-  sandboxTemplateRef:
-    name: python-runtime-template
+  warmPoolRef:
+    name: python-warmpool
 EOF
 
 kubectl wait --for=condition=Ready sandbox/quickstart-test --timeout=60s
@@ -245,7 +245,7 @@ Run it against the quickstart namespace and template:
 
 ```bash
 python clients/python/agentic-sandbox-client/test_client.py \
-    --template-name python-runtime-template \
+    --warmpool-name python-warmpool \
     --namespace agent-sandbox-demo
 ```
 

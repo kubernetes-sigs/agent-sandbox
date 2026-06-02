@@ -62,7 +62,7 @@ kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/sandbox_ro
 Create a file named `ray-autopilot-setup.yaml` to define the execution environment and the warm pool. You can also find an example of a python runtime image here: https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/python-runtime-sandbox
 ```yaml
 ---
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: ray-python-template
@@ -82,7 +82,7 @@ spec:
             cpu: "250m"
             memory: "512Mi"
 ---
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
   name: ray-pool
@@ -118,7 +118,6 @@ self.client = SandboxClient(connection_config=config, cleanup=True)
 
 # Claim a hot sandbox from the warm pool instantly
 self.sandbox = self.client.create_sandbox(
-    template="ray-python-template",
     warmpool="ray-pool"
 )
 ```

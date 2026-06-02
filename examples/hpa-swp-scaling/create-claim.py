@@ -19,7 +19,7 @@ from kubernetes import client, config
 
 # Configuration
 NAMESPACE = "hpa-test"
-TEMPLATE = "python-sandbox-template"
+WARMPOOL = "python-sdk-warmpool"
 RATE_PER_SECOND = 1
 TEST_DURATION_MINUTES = 10
 CLEANUP_INTERVAL_SECONDS = 30
@@ -41,7 +41,7 @@ def delete_expired_claims():
             # List all sandbox claims
             claims = custom_api.list_namespaced_custom_object(
                 group="extensions.agents.x-k8s.io",
-                version="v1alpha1",
+                version="v1beta1",
                 namespace=NAMESPACE,
                 plural="sandboxclaims"
             )
@@ -56,7 +56,7 @@ def delete_expired_claims():
                     name = claim['metadata']['name']
                     custom_api.delete_namespaced_custom_object(
                         group="extensions.agents.x-k8s.io",
-                        version="v1alpha1",
+                        version="v1beta1",
                         name=name,
                         namespace=NAMESPACE,
                         plural="sandboxclaims",
@@ -72,15 +72,15 @@ def create_claim(index):
     """Creates a single SandboxClaim."""
     name = f"loadtest-{int(time.time())}-{index}"
     body = {
-        "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+        "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
         "kind": "SandboxClaim",
         "metadata": {"name": name, "namespace": NAMESPACE},
-        "spec": {"sandboxTemplateRef": {"name": TEMPLATE}}
+        "spec": {"warmPoolRef": {"name": WARMPOOL}}
     }
     try:
         custom_api.create_namespaced_custom_object(
             group="extensions.agents.x-k8s.io",
-            version="v1alpha1",
+            version="v1beta1",
             namespace=NAMESPACE,
             plural="sandboxclaims",
             body=body

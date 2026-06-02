@@ -34,7 +34,7 @@ Key features of the `Sandbox` CRD include:
 The `extensions` module provides additional CRDs and controllers that build on the core `Sandbox` API to provide more advanced features.
 
 *   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
-*   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
+*   `SandboxClaim`: Allows users to create Sandboxes from a `SandboxWarmPool`, abstracting away the details of the underlying Sandbox configuration.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandboxes that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
 ## Architecture
@@ -68,7 +68,7 @@ flowchart LR
     User -->|creates| Claim
 
     %% Claim workflow
-    Claim -->|references| Template
+    WarmPool -->|references| Template
     Claim -->|adopts| Sandbox
 
     %% Pod handling
@@ -115,7 +115,7 @@ For advanced scale and concurrency tuning (e.g., API QPS and worker counts), ple
 Once you have installed the controller, you can create a simple Sandbox by applying the following YAML to your cluster:
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: my-sandbox

@@ -45,7 +45,7 @@ class AsyncSandboxClient(Generic[T]):
     Use as an async context manager for automatic cleanup::
 
         async with AsyncSandboxClient(connection_config=config) as client:
-            sandbox = await client.create_sandbox("template")
+            sandbox = await client.create_sandbox("python-sandbox-pool")
             result = await sandbox.commands.run("echo hello")
 
     ``connection_config`` is required — the async client does not support

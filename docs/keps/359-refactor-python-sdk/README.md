@@ -43,7 +43,7 @@ class SandboxClient:
     def __init__(self,router_dns: str):
         self.router_dns = router_dns
 
-    def create_sandbox(self, template: str, namespace: str = "default") -> Sandbox:
+    def create_sandbox(self, warmpool: str, namespace: str = "default") -> Sandbox:
         """Provisions a new sandbox and returns a Resource Handle."""
         return Sandbox("sandbox_id", self.router_dns, self)
 
@@ -100,7 +100,7 @@ The final result is a library that feels like a native extension of the Agent's 
 client = SandboxClient(router_dns="router.sandbox.svc")
 
 # Provision - No context manager used
-sbx = client.create_sandbox(template="python-ml")
+sbx = client.create_sandbox(warmpool="python-ml-pool")
 
 # Use modular engines
 sbx.files.write("data.py", "x = 42")

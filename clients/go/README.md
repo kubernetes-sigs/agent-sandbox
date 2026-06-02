@@ -24,7 +24,7 @@ The client operates in three modes:
 - A running Kubernetes cluster with a valid kubeconfig (or in-cluster config). This is required even in Direct URL mode because the client creates Kubernetes clientsets for SandboxClaim lifecycle management.
 - The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
 - The **Sandbox Router** deployed in the target namespace (`sandbox-router-svc`).
-- A `SandboxTemplate` created in the target namespace.
+- A `SandboxWarmPool` created in the target namespace.
 - Go 1.26+.
 
 ## Installation
@@ -48,7 +48,7 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
 
-sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
 if err != nil { log.Fatal(err) }
 
 result, err := sb.Run(ctx, "echo 'Hello from Cloud!'")
@@ -66,7 +66,7 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{})
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
 
-sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
 if err != nil { log.Fatal(err) }
 
 result, err := sb.Run(ctx, "echo 'Hello from Local!'")
@@ -88,7 +88,7 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
 
-sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
 if err != nil { log.Fatal(err) }
 
 entries, err := sb.List(ctx, ".")
@@ -143,8 +143,8 @@ stop := client.EnableAutoCleanup() // cleanup on SIGINT/SIGTERM
 defer stop()
 defer client.DeleteAll(ctx)
 
-sb1, _ := client.CreateSandbox(ctx, "python-template", "default")
-sb2, _ := client.CreateSandbox(ctx, "node-template", "default")
+sb1, _ := client.CreateSandbox(ctx, "python-pool", "default")
+sb2, _ := client.CreateSandbox(ctx, "node-pool", "default")
 
 // List tracked sandboxes
 for _, key := range client.ListActiveSandboxes() {
@@ -160,7 +160,7 @@ sb, _ := client.GetSandbox(ctx, sb1.ClaimName(), "default")
 All options are documented on the `Options` struct in
 [options.go](sandbox/options.go). Key fields:
 
-- `TemplateName`: passed per-sandbox to `CreateSandbox`.
+- `WarmPoolName`: passed per-sandbox to `CreateSandbox`.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
@@ -323,7 +323,7 @@ go test ./clients/go/sandbox/ -v -count=1
 ### Integration Tests
 
 Integration tests require a running cluster with the Agent Sandbox controller and a
-`SandboxTemplate` installed. They are behind the `integration` build tag.
+`SandboxWarmPool` installed. They are behind the `integration` build tag.
 
 ```bash
 # Dev mode (port-forward)

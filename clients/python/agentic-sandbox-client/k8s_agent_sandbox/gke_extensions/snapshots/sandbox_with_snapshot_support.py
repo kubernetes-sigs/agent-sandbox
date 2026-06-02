@@ -164,7 +164,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_code=SUCCESS_CODE
             )
 
-        # Ensure the sandbox name hash is fetched and cached before we scale down to 0 replicas.
+        # Ensure the sandbox name hash is fetched and cached before we terminate the pod.
         try:
             sandbox_name_hash = self.get_sandbox_name_hash()
             if not sandbox_name_hash:

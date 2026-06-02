@@ -351,15 +351,18 @@ class AsyncSandboxClient(Generic[T]):
         async def _do_cleanup():
             helper = AsyncK8sHelper()
             try:
-                for (ns, claim_name) in claims:
+                async def _delete_one(ns, claim_name):
                     try:
                         await helper.delete_sandbox_claim(claim_name, ns)
                     except Exception as e:
-                        print(
-                            f"[agent-sandbox] Warning: failed to delete sandbox claim "
-                            f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
-                            file=sys.stderr,
-                        )
+                        if sys.stderr is not None:
+                            print(
+                                f"[agent-sandbox] Warning: failed to delete sandbox claim "
+                                f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
+                                file=sys.stderr,
+                            )
+
+                await asyncio.gather(*(_delete_one(ns, claim_name) for ns, claim_name in claims))
             finally:
                 await helper.close()
 

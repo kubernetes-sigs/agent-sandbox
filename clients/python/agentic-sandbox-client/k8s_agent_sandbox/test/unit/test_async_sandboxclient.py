@@ -227,9 +227,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
             self.client._atexit_cleanup()
 
-        calls = {call.args for call in mock_helper_instance.delete_sandbox_claim.call_args_list}
-        self.assertIn(("claim-abc", "default"), calls)
-        self.assertIn(("claim-xyz", "other-ns"), calls)
+        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-abc", "default")
+        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-xyz", "other-ns")
         mock_helper_instance.close.assert_called_once()
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):

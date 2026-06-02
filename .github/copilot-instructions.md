@@ -20,8 +20,6 @@ If the repo's lint gate (`make lint-go` and `make lint-api`, which wrap `./dev/t
 **Scope of Review:**
 
 Focus on substantive findings tied to the lines the PR actually changes — logic bugs, security issues, controller-runtime misuse, API/contract breaks, missing tests for the new behavior. In particular:
-
-- Do **not** comment on lines that are unchanged by the diff unless they materially interact with a changed line (e.g. the change breaks an invariant the surrounding code assumed).
 - Do **not** flag style issues in pre-existing code that the PR happens to move or re-format mechanically.
 
 When in doubt between flagging a marginal nit and staying silent: stay silent. Each comment costs the contributor attention, and a noisy review erodes the signal of the substantive findings.

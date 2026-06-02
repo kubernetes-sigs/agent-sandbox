@@ -428,9 +428,12 @@ func TestRetry_ServerErrorThenSuccess(t *testing.T) {
 }
 
 func TestHTTPHeaders_AllSet(t *testing.T) {
+	var mu sync.Mutex
 	var headers http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		headers = r.Header.Clone()
+		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
 	}))
 	defer server.Close()
@@ -448,24 +451,31 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 		t.Fatalf("Exists() error: %v", err)
 	}
 
-	if headers.Get(headerSandboxID) != "my-claim" {
-		t.Errorf("wrong %s: %s", headerSandboxID, headers.Get(headerSandboxID))
+	mu.Lock()
+	capturedHeaders := headers.Clone()
+	mu.Unlock()
+
+	if capturedHeaders.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, capturedHeaders.Get(headerSandboxID))
 	}
-	if headers.Get(headerSandboxNamespace) != "my-ns" {
-		t.Errorf("wrong %s: %s", headerSandboxNamespace, headers.Get(headerSandboxNamespace))
+	if capturedHeaders.Get(headerSandboxNamespace) != "my-ns" {
+		t.Errorf("wrong %s: %s", headerSandboxNamespace, capturedHeaders.Get(headerSandboxNamespace))
 	}
-	if headers.Get(headerSandboxPort) != "9999" {
-		t.Errorf("wrong %s: %s", headerSandboxPort, headers.Get(headerSandboxPort))
+	if capturedHeaders.Get(headerSandboxPort) != "9999" {
+		t.Errorf("wrong %s: %s", headerSandboxPort, capturedHeaders.Get(headerSandboxPort))
 	}
-	if headers.Get(headerSandboxPodIP) != "10.244.0.42" {
-		t.Errorf("wrong %s: %s", headerSandboxPodIP, headers.Get(headerSandboxPodIP))
+	if capturedHeaders.Get(headerSandboxPodIP) != "10.244.0.42" {
+		t.Errorf("wrong %s: %s", headerSandboxPodIP, capturedHeaders.Get(headerSandboxPodIP))
 	}
 }
 
 func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
+	var mu sync.Mutex
 	var headers http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		headers = r.Header.Clone()
+		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
 	}))
 	defer server.Close()
@@ -483,10 +493,14 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 		t.Fatalf("Exists() error: %v", err)
 	}
 
-	if headers.Get(headerSandboxID) != "my-claim" {
-		t.Errorf("wrong %s: %s", headerSandboxID, headers.Get(headerSandboxID))
+	mu.Lock()
+	capturedHeaders := headers.Clone()
+	mu.Unlock()
+
+	if capturedHeaders.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, capturedHeaders.Get(headerSandboxID))
 	}
-	if _, ok := headers[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
+	if _, ok := capturedHeaders[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
 		t.Errorf("expected header %s to be absent, but it was present", headerSandboxPodIP)
 	}
 }

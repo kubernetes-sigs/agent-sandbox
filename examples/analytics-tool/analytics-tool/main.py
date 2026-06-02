@@ -16,6 +16,7 @@ import subprocess
 import os
 import shlex
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File
@@ -109,8 +110,13 @@ async def execute_python(request: PythonExecuteRequest):
     Executes arbitrary Python code inside the sandbox and returns its output.
     """
     try:
-        import shutil
-        python_exe = "python" if shutil.which("python") else "python3"
+        python_exe = shutil.which("python3") or shutil.which("python")
+        if not python_exe:
+            return ExecuteResponse(
+                stdout="",
+                stderr="Python interpreter not found",
+                exit_code=1
+            )
         process = subprocess.run(
             [python_exe, "-c", request.code],
             capture_output=True,
@@ -131,7 +137,7 @@ async def execute_python(request: PythonExecuteRequest):
 @app.post("/upload", summary="Upload a file to the sandbox")
 async def upload_file(file: UploadFile = File(...)):
     """
-    Receives a file and saves it to the /app directory in the sandbox.
+    Receives a file and saves it to the working directory in the sandbox.
     """
     try:
         logging.info(f"--- UPLOAD_FILE CALLED: Attempting to save '{file.filename}' ---")
@@ -140,6 +146,7 @@ async def upload_file(file: UploadFile = File(...)):
         if not full_path.is_relative_to(working_dir) or full_path == working_dir:
             return JSONResponse(status_code=400, content={"message": "Invalid file path"})
 
+        full_path.parent.mkdir(parents=True, exist_ok=True)
         with open(full_path, "wb") as f:
             f.write(await file.read())
 
@@ -157,7 +164,7 @@ async def upload_file(file: UploadFile = File(...)):
 @app.get("/download/{file_path:path}", summary="Download a file from the sandbox")
 async def download_file(file_path: str):
     """
-    Downloads a specified file from the /app directory in the sandbox.
+    Downloads a specified file from the working directory in the sandbox.
     """
     working_dir = Path(WORKING_DIR).resolve()
     full_path = (working_dir / file_path).resolve()

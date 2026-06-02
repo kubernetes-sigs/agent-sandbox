@@ -127,9 +127,19 @@ func (c *connector) SetIdentity(sandboxName string) {
 }
 
 // SetPodIP sets the sandbox pod's IP address to be sent as X-Sandbox-Pod-IP.
+// The input is sanitized and validated to prevent net/http header injection errors.
 func (c *connector) SetPodIP(ip string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		c.podIP = ""
+		return
+	}
+	if net.ParseIP(ip) == nil {
+		c.podIP = ""
+		return
+	}
 	c.podIP = ip
 }
 

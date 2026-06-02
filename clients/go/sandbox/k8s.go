@@ -428,6 +428,11 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 		state.PodName = sb.Name
 	}
 	if len(sb.Status.PodIPs) > 0 {
+		// Select a deterministic, valid IP address from the status list.
+		// In dual-stack environments, we explicitly prefer IPv4 over IPv6 for the
+		// X-Sandbox-Pod-IP header. This matches the Python SDK's extraction precedence
+		// and ensures maximum compatibility with the downstream router's routing
+		// handler. If no IPv4 is found, we fall back to the first syntactically valid IP.
 		var firstValid string
 		var firstIPv4 string
 		for _, ip := range sb.Status.PodIPs {

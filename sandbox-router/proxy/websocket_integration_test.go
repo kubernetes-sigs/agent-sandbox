@@ -136,6 +136,7 @@ func TestIntegration_WebSocketOutlivesProxyTimeout(t *testing.T) {
 	defer backend.Close()
 
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true             // httptest binds to 127.0.0.1
 	cfg.ProxyTimeout = 500 * time.Millisecond // deliberately tiny
 	cfg.ResponseHeaderTimeout = 2 * time.Second
 	router := httptest.NewServer(NewHandler(Options{
@@ -183,6 +184,7 @@ func TestIntegration_NonUpgradeStillRespectsProxyTimeout(t *testing.T) {
 	defer backend.Close()
 
 	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
 	cfg.ProxyTimeout = 300 * time.Millisecond
 	cfg.ResponseHeaderTimeout = 5 * time.Second // don't let this fire first
 	cfg.UpstreamMaxRetries = 0

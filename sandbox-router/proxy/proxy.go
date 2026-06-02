@@ -112,7 +112,9 @@ func NewHandler(o Options) *Handler {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	target, perr := ParseSandboxHeaders(r.Header)
+	target, perr := ParseSandboxHeaders(r.Header, ParseOptions{
+		AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP,
+	})
 	if perr != nil {
 		WriteJSONError(w, perr)
 		return
@@ -163,6 +165,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Clear inbound Host so net/http picks the URL host. Matches the
 			// Python router's behavior of stripping Host before forwarding.
 			pr.Out.Host = ""
+			// Strip Authorization before forwarding. The router consumes
+			// it (e.g. --authz-mode=tokenreview validates a Bearer token
+			// via the K8s TokenReview API); the sandbox must not see the
+			// caller's credential because it would let any sandbox
+			// impersonate the caller against the K8s API or any other
+			// Bearer-protected service. Matches the Python router, which
+			// strips Authorization right next to Host.
+			pr.Out.Header.Del("Authorization")
 			// X-Forwarded-{For,Host,Proto} so the upstream sandbox can
 			// reconstruct the client-visible URL for self-links and
 			// redirects. SetXForwarded is the canonical helper —

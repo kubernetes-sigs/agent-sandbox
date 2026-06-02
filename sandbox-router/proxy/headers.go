@@ -16,6 +16,7 @@
 package proxy
 
 import (
+	"net"
 	"net/http"
 	"strconv"
 )
@@ -58,20 +59,38 @@ type Target struct {
 	PodIP string
 }
 
+// ParseOptions controls validation behaviors that need to differ
+// between production and certain self-loopback deployments. Adding new
+// knobs in a struct rather than as positional args keeps the call
+// site readable as the validation surface grows.
+type ParseOptions struct {
+	// AllowLoopbackPodIP, when true, lets a loopback address in
+	// X-Sandbox-Pod-IP pass validation. See config.Config for the
+	// production reasoning.
+	AllowLoopbackPodIP bool
+}
+
 // ParseSandboxHeaders extracts and validates the routing headers from h.
 // On any validation failure it returns a non-nil *Error with the same
 // status codes and detail-message shape as the Python router.
-func ParseSandboxHeaders(h http.Header) (Target, *Error) {
+func ParseSandboxHeaders(h http.Header, opts ParseOptions) (Target, *Error) {
 	id := h.Get(HeaderSandboxID)
 	if id == "" {
 		return Target{}, &Error{Status: http.StatusBadRequest, Detail: "X-Sandbox-ID header is required."}
+	}
+	// DNS-label validation prevents DNS injection and traversal-style
+	// inputs from being interpolated into the upstream FQDN
+	// "<id>.<ns>.svc.<cluster-domain>". Matches the Python router's
+	// _is_valid_dns_label check.
+	if !validDNSLabel(id) {
+		return Target{}, &Error{Status: http.StatusBadRequest, Detail: "Invalid sandbox ID format."}
 	}
 
 	ns := h.Get(HeaderSandboxNamespace)
 	if ns == "" {
 		ns = DefaultSandboxNamespace
 	}
-	if !validNamespace(ns) {
+	if !validDNSLabel(ns) {
 		return Target{}, &Error{Status: http.StatusBadRequest, Detail: "Invalid namespace format."}
 	}
 
@@ -92,37 +111,93 @@ func ParseSandboxHeaders(h http.Header) (Target, *Error) {
 		port = n
 	}
 
+	podIP := h.Get(HeaderSandboxPodIP)
+	if podIP != "" && !validPodIP(podIP, opts.AllowLoopbackPodIP) {
+		// validPodIP folds the parse + class check into one decision.
+		// We use the same 400 message regardless of parse-vs-class so
+		// callers don't get to probe the boundary between "looks like
+		// an IP" and "is a routable IP".
+		return Target{}, &Error{Status: http.StatusBadRequest, Detail: "Invalid target IP address."}
+	}
+
 	return Target{
 		ID:        id,
 		UID:       h.Get(HeaderSandboxUID),
 		Namespace: ns,
 		Port:      port,
-		PodIP:     h.Get(HeaderSandboxPodIP),
+		PodIP:     podIP,
 	}, nil
 }
 
-// validNamespace mirrors the Python router's check
+// validDNSLabel reports whether s is a syntactically valid DNS-1123
+// label (RFC 1123). Mirrors the Python router's
 //
-//	namespace.replace("-", "").isalnum()
+//	^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$
 //
-// in pure ASCII terms: at least one alphanumeric character, and only ASCII
-// letters/digits/hyphens otherwise. Empty input and hyphen-only input are
-// both rejected.
-func validNamespace(s string) bool {
-	if s == "" {
+// regex with a 63-character cap. Applied to both X-Sandbox-ID and
+// X-Sandbox-Namespace before either gets interpolated into the
+// upstream FQDN, so callers can't inject extra DNS components or
+// traversal sequences ("foo.evil.com", "..", "foo/bar", etc.).
+//
+// Note this is intentionally stricter than the previous
+// validNamespace: it rejects uppercase letters, leading/trailing
+// hyphens, and anything over 63 chars. K8s itself enforces the same
+// rule on Namespace and Pod names, so any sandbox we'd actually want
+// to route to already conforms.
+func validDNSLabel(s string) bool {
+	if s == "" || len(s) > 63 {
 		return false
 	}
-	hasAlphanum := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-			hasAlphanum = true
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z':
 		case c == '-':
-			// allowed
+			// Hyphen is allowed only in the interior — not first or last.
+			if i == 0 || i == len(s)-1 {
+				return false
+			}
 		default:
 			return false
 		}
 	}
-	return hasAlphanum
+	return true
+}
+
+// validPodIP reports whether s is a syntactically valid IP literal AND
+// belongs to a routable address class. We reject the IP classes the
+// Python router rejects — loopback, link-local (unicast and multicast,
+// covers IPv6 fe80::/10 as well as IPv4 169.254.0.0/16, which
+// importantly blocks cloud metadata endpoints like 169.254.169.254),
+// multicast, and the unspecified address. These are not valid Pod IPs
+// and accepting them as X-Sandbox-Pod-IP would turn the router into
+// an SSRF gadget — letting a caller dial cluster-internal admin
+// endpoints, the loopback of the router pod itself, or cloud
+// instance-metadata services.
+//
+// We do NOT additionally restrict to "looks like a Pod CIDR" because
+// the SDK fast-path (caller just created the Sandbox, knows its IP)
+// is a supported use case and Pod CIDRs vary per cluster.
+//
+// allowLoopback exists for the sidecar deployment shape (sandbox in
+// the same Pod as the router) and for integration tests using a
+// localhost httptest backend. Even with allowLoopback=true the other
+// IP classes (link-local, multicast, unspecified) stay rejected —
+// nothing legitimate would use those as a Pod IP regardless of the
+// deployment shape.
+func validPodIP(s string, allowLoopback bool) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	if ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() {
+		return false
+	}
+	if ip.IsLoopback() && !allowLoopback {
+		return false
+	}
+	return true
 }

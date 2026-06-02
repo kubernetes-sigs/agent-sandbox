@@ -44,7 +44,19 @@ The router constructs the upstream URL as:
 - DNS form: `http://<ID>.<Namespace>.svc.<cluster-domain>:<port>/<path>?<query>`
 - Pod-IP form (cache hit or override): `http://<Pod-IP>:<port>/<path>?<query>`
 
-It strips the inbound `Host` header before forwarding so `net/http` uses the upstream URL's host. All other headers pass through.
+It strips the inbound `Host` and `Authorization` headers before forwarding. `Host` is stripped so `net/http` picks the upstream URL's host; `Authorization` is stripped because the router consumes it (e.g. `--authz-mode=tokenreview` validates a Bearer token via the K8s TokenReview API) and forwarding the credential to the sandbox would let any sandbox impersonate the caller against the K8s API. All other headers pass through.
+
+### Input validation
+
+The router validates the routing headers before constructing the upstream URL, matching the Python router's checks:
+
+| Input | Check |
+|---|---|
+| `X-Sandbox-ID` | required; must be a valid DNS-1123 label (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, max 63 chars). Rejects DNS injection inputs like `foo.evil.com` and traversal-style inputs like `foo/bar`. |
+| `X-Sandbox-Namespace` | optional (defaults to `default`); same DNS-1123 label check. |
+| `X-Sandbox-Port` | optional (defaults to `8888`); must parse as integer in `[1, 65535]`. |
+| `X-Sandbox-Pod-IP` | optional; must be a valid IP literal AND not loopback / link-local / multicast / unspecified. The class check is the SSRF defense — without it, a caller could set `X-Sandbox-Pod-IP: 169.254.169.254` and have the router proxy to cloud metadata. With `AllowAll` as the default authorizer (Python compatibility), this validation is the only thing preventing the gadget. See `--allow-loopback-pod-ip` for the sidecar case. |
+| `X-Sandbox-UID` | optional; used as cache lookup key only, no further validation. |
 
 ### Endpoints
 
@@ -58,8 +70,10 @@ Errors are JSON with a single `detail` field — same shape as the Python router
 | Cause | Status | Body |
 |---|---|---|
 | Missing `X-Sandbox-ID` | 400 | `{"detail":"X-Sandbox-ID header is required."}` |
+| Invalid `X-Sandbox-ID` (not a DNS label) | 400 | `{"detail":"Invalid sandbox ID format."}` |
 | Invalid `X-Sandbox-Namespace` | 400 | `{"detail":"Invalid namespace format."}` |
-| Non-numeric `X-Sandbox-Port` | 400 | `{"detail":"Invalid port format."}` |
+| `X-Sandbox-Port` not numeric or out of `[1, 65535]` | 400 | `{"detail":"Invalid port format."}` |
+| `X-Sandbox-Pod-IP` malformed or in a rejected class | 400 | `{"detail":"Invalid target IP address."}` |
 | Upstream dial fails (after retries) | 502 | `{"detail":"Could not connect to the backend sandbox: <id>"}` |
 
 ## Behavior on missing sandboxes
@@ -100,6 +114,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
+| `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |

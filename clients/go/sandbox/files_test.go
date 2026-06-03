@@ -36,7 +36,10 @@ import (
 // ---------------------------------------------------------------------------
 
 // newReadyTestSandboxWithOptions creates a Sandbox with the given options,
-// and simulates a successful connection.
+// filling in required defaults (such as WarmPoolName, Namespace, ServerPort,
+// and timeouts) if they are left empty. If opts.APIURL is empty, it is set
+// to serverURL, forcing the client into direct URL connection strategy.
+// It also simulates a successful connection.
 func newReadyTestSandboxWithOptions(serverURL string, opts Options) *Sandbox {
 	if opts.WarmPoolName == "" {
 		opts.WarmPoolName = "test-warmpool"

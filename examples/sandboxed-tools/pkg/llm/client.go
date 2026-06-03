@@ -43,8 +43,14 @@ type ChatCompletionRequest struct {
 
 // Message represents a single chat message in the conversation history.
 type Message struct {
-	Role             string     `json:"role"`
-	Content          string     `json:"content,omitempty"`
+	// Role is the role of the message sender, identifying the "speaker".
+	// Common values: "user", "assistant", "system".
+	Role string `json:"role"`
+
+	// Content is the content of the message.
+	// This is a pointer, because some models expect an empty string to be passed.
+	Content *string `json:"content,omitempty"`
+
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 	ThoughtSignature string     `json:"thought_signature,omitempty"`

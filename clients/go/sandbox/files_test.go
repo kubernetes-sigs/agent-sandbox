@@ -46,6 +46,9 @@ func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 		opts.Namespace = "default"
 	}
 	opts.APIURL = serverURL
+	if opts.ServerPort == 0 {
+		opts.ServerPort = 8888
+	}
 	if opts.RequestTimeout == 0 {
 		opts.RequestTimeout = 5 * time.Second
 	}

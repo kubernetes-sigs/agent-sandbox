@@ -17,7 +17,6 @@
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 import ipaddress
-from typing import Any, Protocol
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
@@ -50,14 +49,7 @@ def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[
     }
 
 
-class HasIP(Protocol):
-    ip: str
-
-
-IPEntry = str | Mapping[str, Any] | HasIP
-
-
-def select_pod_ip(ips: Sequence[IPEntry] | None) -> str | None:
+def select_pod_ip(ips: Sequence[object] | None) -> str | None:
     """Selects a prioritized and normalized Pod IP address from a list of IPs.
 
     Scans the list of IP entries, validates them, and returns the

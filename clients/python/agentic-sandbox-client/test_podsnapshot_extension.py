@@ -65,7 +65,7 @@ def wait_for_snapshot_ready(sandbox, snapshot_uid: str, max_retries: int = 30, s
     return False
 
 
-def test_manual_snapshots(client, sandbox, template_name: str, namespace: str) -> tuple[str, str]:
+def test_manual_snapshots(client, sandbox, warmpool_name: str, namespace: str) -> tuple[str, str]:
     """Tests creating manual snapshots and restoring a sandbox from the latest snapshot."""
     first_snapshot_trigger_name = "test-snapshot-10"
     second_snapshot_trigger_name = "test-snapshot-20"
@@ -124,7 +124,7 @@ def test_suspend_resume(sandbox) -> str:
     return suspend_third_snapshot_uid
 
 
-def test_suspend_resume_new_sandbox(client, template_name: str, namespace: str) -> None:
+def test_suspend_resume_new_sandbox(client, warmpool_name: str, namespace: str) -> None:
     """
     Tests creating a sandbox, suspending it (generating a snapshot), terminating it, 
     provisioning a sandbox handle for the same sandbox, and resuming the sandbox from that snapshot.
@@ -132,8 +132,8 @@ def test_suspend_resume_new_sandbox(client, template_name: str, namespace: str) 
     print("\n======= Testing Suspend and Resume in a NEW Sandbox =======")
 
     # Create the initial sandbox to take the snapshot from
-    print(f"Creating initial sandbox from template '{template_name}'...")
-    sandbox = client.create_sandbox(template_name, namespace=namespace)
+    print(f"Creating initial sandbox from warm pool '{warmpool_name}'...")
+    sandbox = client.create_sandbox(warmpool_name, namespace=namespace)
     print(f"Initial sandbox '{sandbox.sandbox_id}' ready.")
 
     print(f"\nSuspending current sandbox '{sandbox.sandbox_id}'...")
@@ -236,7 +236,7 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
 
 
 def main(
-    template_name: str,
+    warmpool_name: str,
     api_url: str | None,
     namespace: str,
     server_port: int,
@@ -273,10 +273,10 @@ def main(
 
         print("\n======= Testing Pod Snapshot Extension =======")
 
-        sandbox = client.create_sandbox(template_name, namespace=namespace)
+        sandbox = client.create_sandbox(warmpool_name, namespace=namespace)
         
         first_snapshot_uid, second_snapshot_uid = test_manual_snapshots(
-            client, sandbox, template_name, namespace
+            client, sandbox, warmpool_name, namespace
         )
         suspend_third_snapshot_uid = test_suspend_resume(sandbox)
         
@@ -288,7 +288,7 @@ def main(
 
         # Create a fresh sandbox to test suspend-resume flow on a brand new instance
         print("\n***** Phase 2: Testing Suspend/Resume on a new Sandbox *****")
-        test_suspend_resume_new_sandbox(client, template_name, namespace)
+        test_suspend_resume_new_sandbox(client, warmpool_name, namespace)
 
         print("--- Pod Snapshot Test Passed! ---")
 
@@ -304,9 +304,9 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test the Sandbox client.")
     parser.add_argument(
-        "--template-name",
-        default="python-sandbox-template",
-        help="The name of the sandbox template to use for the test.",
+        "--warmpool-name",
+        default="python-sandbox-pool",
+        help="The name of the sandbox warm pool to use for the test.",
     )
 
     parser.add_argument(
@@ -327,7 +327,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(
-        template_name=args.template_name,
+        warmpool_name=args.warmpool_name,
         api_url=args.api_url,
         namespace=args.namespace,
         server_port=args.server_port,

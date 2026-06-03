@@ -155,7 +155,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     "kubectl", "port-forward",
                     ROUTER_SERVICE_NAME,
                     f"{local_port}:8080",
-                    "-n", self.namespace
+                    "-n", self.config.router_namespace
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE

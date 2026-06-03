@@ -91,7 +91,7 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		TracerProvider:      tp,
 		TraceServiceName:    "test-svc",
@@ -253,7 +253,7 @@ func TestTracingLifecycleAndOperations(t *testing.T) {
 	}
 
 	// Verify Run attributes
-	assertSpanAttr(t, spanByName["test-svc.run"], "sandbox.command", "echo hello")
+	assertSpanAttr(t, spanByName["test-svc.run"], "sandbox.command.executable", "echo")
 	assertSpanAttrInt(t, spanByName["test-svc.run"], "sandbox.exit_code", 0)
 
 	// Verify Write attributes
@@ -320,7 +320,7 @@ func TestTracingNoopWithoutProvider(t *testing.T) {
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
@@ -378,7 +378,7 @@ func TestTracingErrorRecording(t *testing.T) {
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		TracerProvider:      tp,
 		TraceServiceName:    "test-svc",
@@ -483,4 +483,40 @@ func assertSpanAttrBool(t *testing.T, span tracetest.SpanStub, key string, want 
 		}
 	}
 	t.Errorf("span %s: missing attribute %s", span.Name, key)
+}
+
+func TestCommandExecutable(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "simple command",
+			command: "echo hello",
+			want:    "echo",
+		},
+		{
+			name:    "command with path",
+			command: "/usr/bin/python3 -c 'print()'",
+			want:    "python3",
+		},
+		{
+			name:    "command with leading env vars",
+			command: "API_KEY=secret_token TOKEN=xyz ./run.sh --arg",
+			want:    "run.sh",
+		},
+		{
+			name:    "empty command",
+			command: "  ",
+			want:    "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := commandExecutable(tt.command); got != tt.want {
+				t.Errorf("commandExecutable(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
 }

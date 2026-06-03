@@ -2,7 +2,7 @@
 {{- $md := resources.Get $file -}}
 
 {{/* Remove first heading */}}
-{{- $content := replaceRE `(\s*#[^\n$]*\n*)` "" $md.Content 1 -}}
+{{- $content := replaceRE `(?m)^#[^\n]*\n*` "" $md.Content 1 -}}
 
 {{/* Get the current page's section path */}}
 {{- $pagePath := .Page.RelPermalink -}}

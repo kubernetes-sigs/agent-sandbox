@@ -35,13 +35,13 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     For both Gateway Mode and Tunnel Mode, follow the instructions in [sandbox-router](sandbox-router/README.md)
     to build, push, and apply the router image and resources.
 
-2.  **Create a Sandbox Template:**
+2.  **Create a Sandbox Warmpool:**
 
-    Ensure a `SandboxTemplate` exists in your target namespace. The [test_client.py](test_client.py)
+    Ensure a `SandboxWarmPool` exists in your target namespace. The test_client.py
     uses the [python-runtime-sandbox](../../../examples/python-runtime-sandbox/) image.
 
     ```bash
-    kubectl apply -f python-sandbox-template.yaml
+    kubectl apply -f python-sandbox-warmpool.yaml
     ```
 
 ## Installation
@@ -124,7 +124,7 @@ client = SandboxClient(
     )
 )
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     print(sandbox.commands.run("echo 'Hello from Cloud!'").stdout)
 finally:
@@ -145,7 +145,7 @@ client = SandboxClient(
     connection_config=SandboxLocalTunnelConnectionConfig()
 )
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     print(sandbox.commands.run("echo 'Hello from Local!'").stdout)
 finally:
@@ -182,7 +182,7 @@ connection_config = SandboxInClusterConnectionConfig()
 
 client = SandboxClient(connection_config=connection_config)
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     print(sandbox.commands.run("echo 'Hello from in-cluster!'").stdout)
 finally:
@@ -202,11 +202,11 @@ from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 
 client = SandboxClient(
     connection_config=SandboxDirectConnectionConfig(
-       api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+       api_url="http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080"
     )
 )
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     sandbox.commands.run("ls -la")
 finally:
@@ -225,7 +225,7 @@ client = SandboxClient(
     connection_config=SandboxLocalTunnelConnectionConfig(server_port=3000)
 )
 
-sandbox = client.create_sandbox(template="node-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="node-sandbox-warmpool", namespace="default")
 ```
 
 ### 6. Async Client
@@ -251,12 +251,12 @@ from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 
 async def main():
     config = SandboxDirectConnectionConfig(
-        api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+        api_url="http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080"
     )
 
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
-            template="python-sandbox-template",
+            warmpool="python-sandbox-warmpool",
             namespace="default",
         )
         result = await sandbox.commands.run("echo 'Hello from async!'")
@@ -277,7 +277,7 @@ async def main():
 
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
-            template="python-sandbox-template",
+            warmpool="python-sandbox-warmpool",
             namespace="default",
         )
         result = await sandbox.commands.run("echo 'Hello from async!'")

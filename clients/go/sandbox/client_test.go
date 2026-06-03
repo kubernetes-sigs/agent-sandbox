@@ -38,7 +38,7 @@ func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		APIURL:              "http://localhost:9999",
 		SandboxReadyTimeout: 2 * time.Second,
@@ -184,12 +184,12 @@ func TestClient_DeleteSandbox_Untracked(t *testing.T) {
 	}
 }
 
-func TestClient_CreateSandbox_EmptyTemplate(t *testing.T) {
+func TestClient_CreateSandbox_EmptyWarmPool(t *testing.T) {
 	c, _ := newTestClient(t)
 
 	_, err := c.CreateSandbox(context.Background(), "", "default")
 	if err == nil {
-		t.Error("expected error for empty template")
+		t.Error("expected error for empty warm pool")
 	}
 }
 

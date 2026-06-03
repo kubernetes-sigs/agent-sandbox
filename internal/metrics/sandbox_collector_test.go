@@ -86,6 +86,45 @@ func TestSandboxCollector(t *testing.T) {
 			},
 		},
 		{
+			name: "cold launch label with pod name annotation remains cold",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-cold",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeCold,
+						},
+						Annotations: map[string]string{
+							sandboxv1beta1.SandboxPodNameAnnotation: "sandbox-cold",
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
+			},
+		},
+		{
+			name: "warm launch label reports warm",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-warm",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm,
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"expired:false launch_type:warm namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
+			},
+		},
+		{
 			name: "mixed sandboxes",
 			sandboxes: []runtime.Object{
 				&sandboxv1beta1.Sandbox{
@@ -106,6 +145,9 @@ func TestSandboxCollector(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sandbox-2",
 						Namespace: "test-ns",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm,
+						},
 						Annotations: map[string]string{
 							sandboxv1beta1.SandboxPodNameAnnotation:     "adopted-pod",
 							sandboxv1beta1.SandboxTemplateRefAnnotation: "my-template",

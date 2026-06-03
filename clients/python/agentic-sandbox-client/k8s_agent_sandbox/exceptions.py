@@ -31,6 +31,10 @@ class SandboxTemplateNotFoundError(SandboxError):
     """Raised when the requested sandbox template does not exist."""
 
 
+class SandboxWarmPoolNotFoundError(SandboxError):
+    """Raised when the requested sandbox warm pool does not exist."""
+
+
 class SandboxPortForwardError(SandboxError):
     """Raised when the port-forward process crashes."""
 

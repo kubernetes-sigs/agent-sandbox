@@ -32,31 +32,10 @@ const (
 
 	// AssignedSandboxNameAnnotation is the annotation key applied to the claim to identify the adopted Sandbox Name.
 	AssignedSandboxNameAnnotation = "agents.x-k8s.io/sandbox-name"
+
+	// WarmPoolRefField is the field used for indexing SandboxClaims by their warm pool reference name.
+	WarmPoolRefField = ".spec.warmPoolRef.name"
 )
-
-// WarmPoolPolicy describes the policy for using warm pools.
-// It can be one of the following:
-//   - "none": Do not use any warm pool, always create fresh sandboxes
-//   - "default": Select from all available warm pools that match the template (default)
-//   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
-type WarmPoolPolicy string
-
-const (
-	// WarmPoolPolicyNone indicates that no warm pool should be used.
-	// A fresh sandbox will always be created.
-	WarmPoolPolicyNone WarmPoolPolicy = "none"
-
-	// WarmPoolPolicyDefault indicates the default behavior: select from all
-	// available warm pools that match the template. This is the default behavior
-	// if warmpool is not specified.
-	WarmPoolPolicyDefault WarmPoolPolicy = "default"
-)
-
-// IsSpecificPool returns true if the policy specifies a specific warm pool name
-// (not "none" or "default").
-func (p WarmPoolPolicy) IsSpecificPool() bool {
-	return p != WarmPoolPolicyNone && p != WarmPoolPolicyDefault && p != ""
-}
 
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
 // +kubebuilder:validation:Enum=Delete;DeleteForeground;Retain
@@ -102,11 +81,11 @@ type Lifecycle struct {
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
-// SandboxTemplateRef references a SandboxTemplate.
-type SandboxTemplateRef struct {
-	// name of the SandboxTemplate
+// SandboxWarmPoolRef references a SandboxWarmPool.
+type SandboxWarmPoolRef struct {
+	// name of the SandboxWarmPool
 	// +required
-	Name string `json:"name,omitempty"`
+	Name string `json:"name"`
 }
 
 // EnvVar represents a custom environment variable key-value pair.
@@ -127,28 +106,22 @@ type EnvVar struct {
 
 // SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
-	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
+	// warmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
 	// +required
-	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
+	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
 
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
-
-	// warmpool specifies the warm pool policy for sandbox adoption.
-	// - "none": Do not use any warm pool, always create fresh sandboxes
-	// - "default": Use default behavior, select from all matching warm pools (default)
-	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
-	// +optional
-	// +kubebuilder:default=default
-	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
 	// +optional
 	AdditionalPodMetadata sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
-	// env is a list of environment variables to inject into the sandbox
+	// env is a list of environment variables to inject into the sandbox.
+	// Please note adding this field means the Sandbox will always be cold-started from the
+	// template of the warmpool.
 	// +listType=atomic
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`

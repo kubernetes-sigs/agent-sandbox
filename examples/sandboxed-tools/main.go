@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,6 +45,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	agentsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/tools"
 )
 
 func main() {
@@ -224,40 +224,10 @@ readyLoop:
 	return nil
 }
 
-// ExecutionResult holds the captured stdout, stderr, and exit code of a command.
-type ExecutionResult struct {
-	// Stdout contains the captured standard output.
-	// This is only populated if ExecOptions.Stdout was nil.
-	Stdout string
-
-	// Stderr contains the captured standard error.
-	// This is only populated if ExecOptions.Stderr was nil.
-	Stderr string
-
-	// ExitCode is the exit status returned by the command.
-	ExitCode int
-}
-
-// ExecOptions contains the options for executing a command inside the sandbox container.
-type ExecOptions struct {
-	// Command is the process name and arguments to run (e.g. []string{"sh", "-c", "uname -a"}).
-	Command []string
-
-	// Stdin is an optional reader to pipe into the command's standard input.
-	Stdin io.Reader
-
-	// Stdout is an optional writer where standard output will be written.
-	// If nil, Stdout will be captured internally and returned as a string in the ExecutionResult.
-	Stdout io.Writer
-
-	// Stderr is an optional writer where standard error will be written.
-	// If nil, Stderr will be captured internally and returned as a string in the ExecutionResult.
-	Stderr io.Writer
-}
-
-// Exec executes a command inside the sandbox container with specified options.
-// If Stdout or Stderr are nil in ExecOptions, they are captured internally and returned in the ExecutionResult.
-func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult, error) {
+// ExecCommand executes a command inside the sandbox container with specified options.
+// If Stdout or Stderr are nil in tools.ExecCommandOptions, they are captured internally and returned in the tools.ExecCommandResult.
+// If the command returns a non-zero exit code, that is _not_ treated as an error; the exit code is returned in the result.
+func (s *Sandbox) ExecCommand(ctx context.Context, opts tools.ExecCommandOptions) (*tools.ExecCommandResult, error) {
 	coreClient := s.session.client.coreClient
 	restConfig := s.session.client.restConfig
 
@@ -315,7 +285,7 @@ func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult,
 		}
 	}
 
-	res := &ExecutionResult{
+	res := &tools.ExecCommandResult{
 		ExitCode: exitCode,
 	}
 	if opts.Stdout == nil {
@@ -326,14 +296,6 @@ func (s *Sandbox) Exec(ctx context.Context, opts ExecOptions) (*ExecutionResult,
 	}
 
 	return res, nil
-}
-
-// Run executes a shell command in the sandbox pod.
-func (s *Sandbox) Run(ctx context.Context, command string) (*ExecutionResult, error) {
-	opts := ExecOptions{
-		Command: []string{"sh", "-c", command},
-	}
-	return s.Exec(ctx, opts)
 }
 
 // getBackupDir gets the backup directory for the session.
@@ -421,11 +383,11 @@ func (s *Sandbox) RestoreFS(ctx context.Context) error {
 	}
 	defer f.Close()
 
-	opts := ExecOptions{
+	opts := tools.ExecCommandOptions{
 		Command: []string{"tar", "-zxf", "-", "-C", s.session.HomeDir},
 		Stdin:   f,
 	}
-	res, err := s.Exec(ctx, opts)
+	res, err := s.ExecCommand(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to execute restore: %w", err)
 	}
@@ -455,11 +417,21 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 	}
 	defer backupFile.Close()
 
-	opts := ExecOptions{
+	// Clean up the temp file if something goes wrong
+	shouldDeleteTempFile := true
+	defer func() {
+		if shouldDeleteTempFile {
+			if err := os.Remove(tmpFilename); err != nil {
+				log.Error(err, "unable to remove temporary backup file")
+			}
+		}
+	}()
+
+	opts := tools.ExecCommandOptions{
 		Command: []string{"tar", "-zcf", "-", "-C", s.session.HomeDir, "."},
 		Stdout:  backupFile,
 	}
-	res, err := s.Exec(ctx, opts)
+	res, err := s.ExecCommand(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to execute snapshot: %w", err)
 	}
@@ -475,6 +447,9 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 	if err := os.Rename(tmpFilename, backupFilename); err != nil {
 		return fmt.Errorf("failed to rename temp backup file to final path: %w", err)
 	}
+
+	// Don't delete the temp file; we successfully created the backup
+	shouldDeleteTempFile = false
 
 	// Prune backups, keeping only the last 5
 	if err := s.session.PruneBackups(ctx, 5); err != nil {
@@ -665,8 +640,23 @@ func run(ctx context.Context, opts RunOptions) error {
 		modelName = "gemini-3.5-flash"
 	}
 
+	if opts.HomeDir == "" {
+		return fmt.Errorf("homeDir must not be empty")
+	}
+
+	if opts.SessionName == "" {
+		return fmt.Errorf("sessionName is required")
+	}
+
+	// We require the session name to contain only alphanumeric characters.
+	// We could be more liberal, but we want to err on the side of caution for now.
 	if !isAlphaNumeric(opts.SessionName) {
 		return fmt.Errorf("invalid session name %q: must be alphanumeric", opts.SessionName)
+	}
+
+	// Limit length; erring on the side of caution.
+	if len(opts.SessionName) > 40 {
+		return fmt.Errorf("invalid session name %q: must be at most 40 characters", opts.SessionName)
 	}
 
 	llmClient, err := llm.NewClient(baseURL, apiKey)
@@ -689,40 +679,36 @@ func run(ctx context.Context, opts RunOptions) error {
 		}
 	}()
 
+	toolsRegistry := tools.NewRegistry()
+	toolsRegistry.Add(&tools.RunCommand{})
+
+	toolsRegistry.Add(&tools.ListFilesTool{})
+	toolsRegistry.Add(&tools.ReadFileTool{})
+	toolsRegistry.Add(&tools.WriteFileTool{})
+
+	llmTools := toolsRegistry.All()
+
 	session := &Session{
-		Name:   opts.SessionName,
-		client: sandboxClient,
+		Name:    opts.SessionName,
+		client:  sandboxClient,
+		HomeDir: opts.HomeDir,
 	}
 
-	runCmdTool := llm.Tool{
-		Type: "function",
-		Function: llm.ToolFunction{
-			Name:        "run_command",
-			Description: "Executes a shell command inside a sandbox and returns the stdout and stderr.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"command": map[string]any{
-						"type":        "string",
-						"description": "The shell command to execute",
-					},
-				},
-				"required": []string{"command"},
-			},
-		},
-	}
+	systemPrompt := "You are a helpful AI assistant with access to a sandboxed environment. " +
+		"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
+		"Always explain what you are doing."
 
 	messages := []llm.Message{
 		{
-			Role: "system",
-			Content: "You are a helpful AI assistant with access to a sandboxed environment. " +
-				"You can use the run_command tool to execute shell commands to answer user questions or perform tasks. " +
-				"Always explain what you are doing.",
+			Role:    "system",
+			Content: &systemPrompt,
 		},
 	}
 
 	fmt.Println("================================================================================")
 	fmt.Println("Welcome to the Sandboxed Tools example!")
+	fmt.Printf("Session Name: %s (Namespace: %s)\n", opts.SessionName, opts.Namespace)
+	fmt.Printf("Sandbox Image: %s\n", opts.Image)
 	fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
 	fmt.Println("Key Concept: An Agent Sandbox is launched ONLY when a tool needs to be executed,")
 	fmt.Println("             and is immediately deleted afterward.")
@@ -750,13 +736,13 @@ func run(ctx context.Context, opts RunOptions) error {
 			break
 		}
 
-		messages = append(messages, llm.Message{Role: "user", Content: input})
+		messages = append(messages, llm.Message{Role: "user", Content: &input})
 
 		for {
 			req := llm.ChatCompletionRequest{
 				Model:    modelName,
 				Messages: messages,
-				Tools:    []llm.Tool{runCmdTool},
+				Tools:    llmTools,
 			}
 
 			resp, err := llmClient.CreateChatCompletion(ctx, req)
@@ -774,102 +760,69 @@ func run(ctx context.Context, opts RunOptions) error {
 			messages = append(messages, msg)
 
 			if len(msg.ToolCalls) == 0 {
-				fmt.Printf("\nAgent> %s\n", msg.Content)
+				fmt.Printf("\nAgent> %s\n", valueOf(msg.Content))
 				break
 			}
 
+			log.Info("launching sandbox for tool execution...")
+
+			sb, err := session.CreateSandbox(ctx, opts.Image, opts.Namespace)
+			if err != nil {
+				return fmt.Errorf("failed to create sandbox: %w", err)
+			}
+
+			if err := sb.WaitForReady(ctx); err != nil {
+				log.Error(err, "sandbox not ready")
+				_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+				return err
+			}
+
+			log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+
+			log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
+			if err := sb.RestoreFS(ctx); err != nil {
+				log.Error(err, "failed to restore filesystem; starting with a fresh sandbox instead", "sandbox.name", sb.SandboxName())
+			}
+
+			shouldSnapshot := true
+
 			for _, tc := range msg.ToolCalls {
-				if tc.Function.Name == "run_command" {
-					var args struct {
-						Command string `json:"command"`
-					}
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						fmt.Printf("[Tool Error] Failed to parse arguments: %v\n", err)
-						messages = append(messages, llm.Message{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Content:    fmt.Sprintf("Failed to parse arguments: %v", err),
-						})
-						continue
-					}
+				// TODO: Add a timeout to the tool execution?
+				result, err := toolsRegistry.Call(ctx, sb, tc)
 
-					fmt.Printf("\n[Tool Execution] LLM requested tool %q with command: %q\n", tc.Function.Name, args.Command)
-					log.Info("launching sandbox for tool execution...")
+				// We don't snapshot if there was an error, but we do snapshot if the tool just
+				// returned a non-zero exit code.
+				if err != nil {
+					shouldSnapshot = false
+				}
 
-					sb, err := session.CreateSandbox(ctx, opts.Image, opts.Namespace)
-					if err != nil {
-						fmt.Printf("[Sandbox Error] Failed to create sandbox: %v\n", err)
-						messages = append(messages, llm.Message{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Content:    fmt.Sprintf("Sandbox creation failed: %v", err),
-						})
-						continue
-					}
-
-					if err := sb.WaitForReady(ctx); err != nil {
-						log.Error(err, "sandbox not ready")
-						_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
-						return err
-					}
-
-					log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
-
-					log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
-					if err := sb.RestoreFS(ctx); err != nil {
-						log.Error(err, "failed to restore filesystem", "sandbox.name", sb.SandboxName())
-						_ = sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
-						messages = append(messages, llm.Message{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Content:    fmt.Sprintf("Filesystem restore failed: %v", err),
-						})
-						continue
-					}
-
-					log.Info("executing command in sandbox", "sandbox.name", sb.SandboxName(), "command", args.Command)
-					// TODO: Add a timeout to the tool execution?
-					res, err := sb.Run(ctx, args.Command)
-
-					// We don't snapshot if there was an error, but we do snapshot if the tool just
-					// returned a non-zero exit code.
-					if err == nil {
-						log.Info("snapshotting filesystem from sandbox...", "sandbox.name", sb.SandboxName())
-						if err := sb.SnapshotFS(ctx); err != nil {
-							// Maybe this should be surfaced as an error ... but let's deal with this
-							// when we cache the sandbox.
-							log.Error(err, "failed to snapshot filesystem")
-						}
-					}
-
-					log.Info("deleting sandbox", "sandbox.name", sb.SandboxName())
-					if deleteErr := sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb); deleteErr != nil {
-						log.Error(deleteErr, "failed to delete sandbox", "sandbox.name", sb.SandboxName())
-					} else {
-						log.V(1).Info("sandbox deleted successfully.", "sandbox.name", sb.SandboxName())
-					}
-
-					var toolResult string
-					if err != nil {
-						toolResult = fmt.Sprintf("Execution error: %v", err)
-					} else {
-						toolResult = fmt.Sprintf("stdout:\n%s\nstderr:\n%s\nexit_code: %d", res.Stdout, res.Stderr, res.ExitCode)
-					}
-					fmt.Printf("[Tool Result] %s\n", toolResult)
-
+				if err != nil {
+					log.Error(err, "error calling tool", "tool", tc.Function.Name)
+					content := fmt.Sprintf("Error calling tool %q: %v", tc.Function.Name, err)
 					messages = append(messages, llm.Message{
 						Role:       "tool",
 						ToolCallID: tc.ID,
-						Content:    toolResult,
+						Content:    &content,
 					})
 				} else {
-					fmt.Printf("[Tool Error] Unknown tool requested: %s\n", tc.Function.Name)
-					messages = append(messages, llm.Message{
-						Role:       "tool",
-						ToolCallID: tc.ID,
-						Content:    fmt.Sprintf("Unknown tool %q", tc.Function.Name),
-					})
+					messages = append(messages, result)
 				}
+			}
+
+			if shouldSnapshot {
+				log.Info("snapshotting filesystem from sandbox...", "sandbox.name", sb.SandboxName())
+				if err := sb.SnapshotFS(ctx); err != nil {
+					// Maybe this should be surfaced as an error ... but let's deal with this
+					// when we cache the sandbox.
+					log.Error(err, "failed to snapshot filesystem")
+				}
+			}
+
+			log.Info("deleting sandbox", "sandbox.name", sb.SandboxName())
+			if deleteErr := sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb); deleteErr != nil {
+				log.Error(deleteErr, "failed to delete sandbox", "sandbox.name", sb.SandboxName())
+			} else {
+				log.V(1).Info("sandbox deleted successfully.", "sandbox.name", sb.SandboxName())
 			}
 		}
 	}
@@ -892,4 +845,14 @@ func isAlphaNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+// valueOf is a helper that safely gets a value from a pointer,
+// if the pointer is nil it returns the default (zero) value.
+func valueOf[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
 }

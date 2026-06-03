@@ -174,7 +174,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	claim := &extensionsv1beta1.SandboxClaim{}
 	claim.Name = "test-claim"
 	claim.Namespace = ns.Name
-	claim.Spec.TemplateRef.Name = template.Name
+	claim.Spec.WarmPoolRef.Name = warmPool.Name
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
 	// Wait for claim to be ready with sandbox name in status
@@ -265,7 +265,7 @@ func TestWarmPoolPodNameAnnotationBeforeReady(t *testing.T) {
 	claim := &extensionsv1beta1.SandboxClaim{}
 	claim.Name = "test-claim"
 	claim.Namespace = ns.Name
-	claim.Spec.TemplateRef.Name = template.Name
+	claim.Spec.WarmPoolRef.Name = warmPool.Name
 
 	// Creating the claim should not observe Ready before the pod-name annotation is set
 	requirePodNameAnnotationWhenReady(t, tc, ns.Name, claim)

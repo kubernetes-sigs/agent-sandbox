@@ -28,6 +28,13 @@ const (
 	TemplateRefField = ".spec.sandboxTemplateRef.name"
 )
 
+// SandboxTemplateRef references a SandboxTemplate.
+type SandboxTemplateRef struct {
+	// name of the SandboxTemplate
+	// +required
+	Name string `json:"name"`
+}
+
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpec struct {
 	// replicas is the desired number of sandboxes in the pool.

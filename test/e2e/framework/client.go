@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -108,22 +109,22 @@ func (cl *ClusterClient) Update(ctx context.Context, obj client.Object) error {
 }
 
 // MustUpdateObject updates the specified object, using the provided updateFunc to modify
-// the object.  This ensures that we always update the latest version of the object from the cluster.
-// In future we might support automatic retries on optimistic-concurrency "misses".
+// the object. It fetches the latest version before each attempt and retries automatically
+// on optimistic-concurrency conflicts.
 func MustUpdateObject[T client.Object](cl *ClusterClient, obj T, updateFunc func(obj T)) {
 	cl.Helper()
 
 	ctx := cl.Context()
-
 	id := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
-	latest := reflect.New(reflect.TypeOf(obj).Elem()).Interface().(T)
-	if err := cl.Get(ctx, id, latest); err != nil {
-		cl.Fatalf("MustUpdateObject: failed to get latest %T (%s): %v", obj, id.String(), err)
-	}
 
-	updateFunc(latest)
-
-	if err := cl.Update(ctx, latest); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := reflect.New(reflect.TypeOf(obj).Elem()).Interface().(T)
+		if err := cl.Get(ctx, id, latest); err != nil {
+			return err
+		}
+		updateFunc(latest)
+		return cl.Update(ctx, latest)
+	}); err != nil {
 		cl.Fatalf("MustUpdateObject: failed to update %T (%s): %v", obj, id.String(), err)
 	}
 }

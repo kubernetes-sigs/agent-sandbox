@@ -3,5 +3,5 @@ kind: SandboxClaim
 metadata:
   name: {{.Name}}
 spec:
-  sandboxTemplateRef:
-    name: {{.TemplateName}}
+  warmPoolRef:
+    name: {{.WarmPoolName}}

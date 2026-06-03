@@ -14,9 +14,9 @@ The main entry point for the snapshot extension. It inherits from the base `Sand
 
 This class wraps the base `Sandbox` to seamlessly provide snapshot capabilities. It manages the sandbox lifecycle while granting access to the underlying snapshot operations via the `.snapshots` property.
 
-- **Suspend**: Scales the sandbox down to 0 replicas, temporarily pausing execution. It can optionally take a snapshot immediately before suspending (enabled by default).
-- **Resume**: Scales the sandbox back up to 1 replica, automatically restoring its state from the most recent available snapshot.
-- **Is Suspended**: Checks if the sandbox is currently suspended (i.e., scaled down to 0 replicas).
+- **Suspend**: Terminates the Pod. It can optionally take a snapshot immediately before suspending (enabled by default).
+- **Resume**: Recreates the pod, automatically restoring its state from the most recent available snapshot.
+- **Is Suspended**: Checks if the sandbox is currently suspended (i.e., spec.operatingMode is set to `Suspended`).
 
 > **Note**: A sandbox can only be restored from its own previous snapshots (via the Suspend/Resume lifecycle). A new or different sandbox cannot be restored from the snapshot of another sandbox.
 
@@ -42,7 +42,7 @@ client = PodSnapshotSandboxClient()
 
 # Create a sandbox with snapshot capabilities enabled
 sandbox = client.create_sandbox(
-    template="python-counter-template",
+    warmpool="python-counter-pool",
     namespace="default"
 )
 
@@ -131,7 +131,7 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
             maxSnapshotCountPerGroup: 3
     ```
 
-5.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
+5.  **Sandbox WarmPool**: A `SandboxWarmPool` (e.g., `python-counter-pool`) referencing a template with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 
 ### Running Tests:
 
@@ -139,8 +139,8 @@ To run the integration test, execute the script with the appropriate arguments:
 
 ```bash
 python3 clients/python/agentic-sandbox-client/test_podsnapshot_extension.py \
-  --template-name python-counter-template \
+  --warmpool-name python-counter-pool \
   --namespace sandbox-test
 ```
 
-Adjust the `--namespace`, `--template-name` as needed for your environment.
+Adjust the `--namespace`, `--warmpool-name` as needed for your environment.

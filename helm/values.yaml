@@ -60,3 +60,23 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Pod-level securityContext (spec.template.spec.securityContext). Default null — omitted unless set.
+# Example for Kyverno / restricted Pod Security:
+# podSecurityContext:
+#   runAsNonRoot: true
+#   seccompProfile:
+#     type: RuntimeDefault
+podSecurityContext: null
+
+# Container-level securityContext for the controller. Default null — omitted unless set.
+# Example:
+# containerSecurityContext:
+#   allowPrivilegeEscalation: false
+#   capabilities:
+#     drop:
+#       - ALL
+#   runAsNonRoot: true
+#   seccompProfile:
+#     type: RuntimeDefault
+containerSecurityContext: null

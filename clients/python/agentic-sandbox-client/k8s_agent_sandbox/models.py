@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from typing import Literal, Union
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
@@ -44,6 +45,14 @@ class SandboxLocalTunnelConnectionConfig(BaseModel):
     """Configuration for connecting via kubectl port-forward."""
     port_forward_ready_timeout: int = 30  # Timeout in seconds to wait for port-forward to be ready.
     server_port: int = 8888  # Port the sandbox container listens on.
+    router_namespace: str = "agent-sandbox-system"  # Namespace where the Router service resides.
+
+    @field_validator("router_namespace")
+    @classmethod
+    def validate_namespace(cls, v: str) -> str:
+        if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", v):
+            raise ValueError("Invalid Kubernetes namespace name format")
+        return v
 
 class SandboxInClusterConnectionConfig(BaseModel):
     """Configuration for direct in-cluster connection to the sandbox pod, bypassing the router.

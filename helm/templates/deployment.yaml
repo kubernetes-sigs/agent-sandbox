@@ -21,6 +21,10 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: agent-sandbox-controller
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: agent-sandbox-controller
         image: {{ include "agent-sandbox.image" . }}
@@ -48,6 +52,10 @@ spec:
           periodSeconds: 10
         {{- with .Values.resources }}
         resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.containerSecurityContext }}
+        securityContext:
           {{- toYaml . | nindent 10 }}
         {{- end }}
         volumeMounts:

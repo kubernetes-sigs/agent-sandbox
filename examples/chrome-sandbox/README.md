@@ -13,7 +13,7 @@ This example is actively maintained and serves as the foundation for end-to-end 
 Below is an example of running Chrome inside a Sandbox resource:
 
 ```yaml
-apiVersion: sandbox.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: chrome-sandbox

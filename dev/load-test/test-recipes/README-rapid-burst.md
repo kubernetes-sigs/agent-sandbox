@@ -106,7 +106,7 @@ The primary test parameters can be modified by editing the variables at the top 
 - **`QPS`**: The maximum creation rate (Queries Per Second) for SandboxClaim objects.
 - **`TOTAL_BURSTS`**: The total number of burst cycles to run.
 - **`WARMPOOL_SIZE`**: The target number of pre-warmed sandboxes to maintain.
-- **`RUNTIME_CLASS`**: The RuntimeClassName for the SandboxTemplate such as `gvisor`.
+- **`RUNTIME_CLASS`**: The RuntimeClassName for the underlying SandboxTemplate linked to the pool, such as `gvisor`.
 
 The total number of claims created by the test will be `BURST_SIZE * TOTAL_BURSTS`.
 

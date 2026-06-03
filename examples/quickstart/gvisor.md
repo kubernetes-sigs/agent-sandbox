@@ -63,14 +63,14 @@ After completing the full setup from the main guide (including [Step 5 — Sandb
 ```bash
 # Create a test sandbox
 kubectl apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   name: isolation-test
   namespace: agent-sandbox-demo
 spec:
-  sandboxTemplateRef:
-    name: python-runtime-template
+  warmPoolRef:
+    name: python-warmpool
 EOF
 
 kubectl wait --for=condition=Ready sandbox/isolation-test --timeout=60s

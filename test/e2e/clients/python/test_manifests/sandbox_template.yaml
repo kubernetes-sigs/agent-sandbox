@@ -3,6 +3,19 @@ kind: SandboxTemplate
 metadata:
   name: python-sdk-test-template
 spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: sandbox-router
+    egress:
+      - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        - ipBlock:
+            cidr: ::/0
   podTemplate:
     metadata:
       labels:

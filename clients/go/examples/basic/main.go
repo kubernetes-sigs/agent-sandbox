@@ -38,7 +38,7 @@ func main() {
 	defer client.DeleteAll(ctx)
 
 	// Create a sandbox.
-	sb, err := client.CreateSandbox(ctx, "my-sandbox-template", "default")
+	sb, err := client.CreateSandbox(ctx, "my-warmpool", "default")
 	if err != nil {
 		log.Fatal(err)
 	}

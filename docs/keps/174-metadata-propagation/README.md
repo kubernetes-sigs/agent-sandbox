@@ -73,8 +73,8 @@ type SandboxClaimSpec struct {
     // ...
 
     // New
-    // Another option is to create AdditionalPodMetadata instead of depending on sandboxv1alpha1.
-    AdditionalPodMetadata     sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
+    // Another option is to create AdditionalPodMetadata instead of depending on sandboxv1beta1.
+    AdditionalPodMetadata     sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 }
 ```
 

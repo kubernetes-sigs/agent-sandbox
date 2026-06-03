@@ -56,7 +56,6 @@ func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 		opts.PerAttemptTimeout = 2 * time.Second
 	}
 
-
 	k8s := &K8sHelper{}
 	opts.K8sHelper = k8s
 	sb, err := New(context.Background(), opts)

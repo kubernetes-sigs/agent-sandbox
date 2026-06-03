@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utility functions for the Kubernetes Agent Sandbox python client."""
+"""Utility functions for the Kubernetes Agent Sandbox Python client."""
 
 import ipaddress
 from datetime import datetime, timedelta, timezone
@@ -60,11 +60,9 @@ def select_pod_ip(ips: list[str] | None) -> str | None:
 
     first_valid = None
     for ip_str in ips:
-        if not isinstance(ip_str, str):
+        if not ip_str:
             continue
         cleaned = ip_str.strip()
-        if not cleaned:
-            continue
         try:
             parsed = ipaddress.ip_address(cleaned)
             if parsed.version == 4:

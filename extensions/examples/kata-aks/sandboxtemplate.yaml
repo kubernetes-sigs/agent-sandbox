@@ -65,6 +65,22 @@ spec:
         # Mutable tags like :v1 cache aggressively on Kata nodes; force a
         # pull so a rebuilt-and-repushed image is actually picked up.
         imagePullPolicy: Always
+        # The agent Dockerfile already creates a non-root user (uid/gid
+        # 1000) and runs uvicorn as it; the securityContext below
+        # enforces that posture at the pod-spec level so the example
+        # stays compliant even if someone later edits the Dockerfile,
+        # and so it satisfies common admission policies (PSA
+        # `restricted`, OPA/Kyverno baselines, etc.) out of the box.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
         # Per-request identity comes from the X-Owner header forwarded by
         # the router; the pod itself is owner-agnostic, which is what lets
         # a single warm pool serve every user.

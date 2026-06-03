@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Two-user example for the kata-aks SandboxTemplate.
+// Single-user CLI for the kata-aks SandboxTemplate.
 //
-// Provisions one Kata-isolated agent sandbox per user in parallel via
-// the Go SDK, then sends each user's prompt to their own sandbox through
-// the shared sandbox-router. Each user lands on a separate Kata VM; the
-// per-template NetworkPolicy (where the CNI enforces it) keeps the two
-// pods from talking to each other.
+// One invocation provisions (or adopts) exactly one Kata-isolated agent
+// sandbox keyed by `-name`, sends one prompt to that sandbox through
+// the shared sandbox-router, and (in one-shot mode) tears it down on
+// exit. To exercise the "multiple users in parallel" story, run the
+// CLI concurrently in separate shells with different `-name` values —
+// each invocation lands on its own Kata VM, and the per-template
+// NetworkPolicy (where the CNI enforces it) keeps the pods isolated
+// from each other.
 //
 // The agent image baked into the template is owner-agnostic. Identity
 // comes from the `X-Owner` header on the incoming request, which is
@@ -70,6 +73,15 @@ const (
 	agentPort    = "8080" // FastAPI agent in sandboxtemplate.yaml
 )
 
+// httpClient is a dedicated client with an explicit Timeout, shared by
+// /chat and /reset. http.DefaultClient is shared process-wide and has
+// no Timeout, so a stalled DNS or TCP handshake can hang the CLI
+// indefinitely even when the request context has a deadline. The
+// 5-minute ceiling is generous enough to cover slow model responses
+// (the router itself uses PROXY_TIMEOUT_SECONDS=180 server-side) and
+// well under the main 10-minute context budget in main().
+var httpClient = &http.Client{Timeout: 5 * time.Minute}
+
 type chatResponse struct {
 	Owner        string `json:"owner"`
 	Reply        string `json:"reply"`
@@ -95,7 +107,7 @@ func chat(ctx context.Context, routerBaseURL, sandboxName, ns, owner, prompt str
 	req.Header.Set("X-Sandbox-Port", agentPort)
 	req.Header.Set("X-Owner", owner)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +174,7 @@ func resetHistory(ctx context.Context, routerBaseURL string, sb *sandbox.Sandbox
 	req.Header.Set("X-Sandbox-Namespace", namespace)
 	req.Header.Set("X-Sandbox-Port", agentPort)
 	req.Header.Set("X-Owner", owner)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

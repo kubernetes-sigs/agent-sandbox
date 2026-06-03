@@ -42,7 +42,7 @@ with `I am bob's agent`, the routing is broken.
 | File | Purpose |
 | --- | --- |
 | [`agent/`](agent/) | Source for the owner-aware FastAPI agent: `agent.py`, `Dockerfile`, `requirements.txt`. Build it into your ACR (Step 2). |
-| [`sandboxtemplate.yaml`](sandboxtemplate.yaml) | Admin-owned blueprint: agent container + AKS Pod Sandboxing runtime + Foundry Secret references + per-template NetworkPolicy. |
+| [`sandboxtemplate.yaml`](sandboxtemplate.yaml) | Admin-owned blueprint: agent container + AKS Pod Sandboxing runtime + OpenAI-compatible endpoint Secret references + per-template NetworkPolicy. |
 | [`sandboxwarmpool.yaml`](sandboxwarmpool.yaml) | Pre-warms N Kata agent pods so claim adoption is fast. |
 | [`sandboxclaim.yaml`](sandboxclaim.yaml) | User-facing claim that adopts one agent sandbox from the pool. |
 | [`router.yaml`](router.yaml) | The sandbox-router `Deployment`, a `ClusterIP` Service for in-cluster callers, and a `LoadBalancer` Service for the public Azure LB IP. |
@@ -145,14 +145,21 @@ on `sandbox-agent-demo` across all the YAML files in this directory
 
 ## Step 1 — Create the model endpoint Secret
 
-The agent reads three values from a `Secret` named
+**What you need:** an **OpenAI-compatible v1 REST endpoint** for chat
+completions — i.e. something that accepts `POST /chat/completions`
+against the OpenAI Python client. Any provider that speaks that API
+will work without code changes: Microsoft Foundry, Azure OpenAI,
+OpenAI directly, Together, Anyscale, a self-hosted vLLM, etc. Pick
+one, grab its base URL, API key, and model (or deployment) name.
+
+The agent reads those three values from a `Secret` named
 `azure-foundry` in the same namespace as the template:
 
-| Key | Example (Azure OpenAI) | Example (OpenAI) |
-| --- | --- | --- |
-| `OPENAI_BASE_URL` | `https://<resource>.openai.azure.com/openai/v1/` | `https://api.openai.com/v1` |
-| `OPENAI_API_KEY` | Azure OpenAI key | OpenAI API key |
-| `LLM_MODEL` | `gpt-4o` (deployment name) | `gpt-4o` (model name) |
+| Key | Description | Example (Microsoft Foundry / Azure OpenAI) | Example (OpenAI) |
+| --- | --- | --- | --- |
+| `OPENAI_BASE_URL` | OpenAI-compatible v1 base URL | `https://<resource>.openai.azure.com/openai/v1/` | `https://api.openai.com/v1` |
+| `OPENAI_API_KEY` | API key for that endpoint | Azure OpenAI key | OpenAI API key |
+| `LLM_MODEL` | Model (or deployment) name to call | `gpt-4o` (deployment name) | `gpt-4o` (model name) |
 
 ```bash
 kubectl create secret generic azure-foundry \
@@ -165,16 +172,17 @@ kubectl create secret generic azure-foundry \
 The Secret name (`azure-foundry`) and the three keys above are what
 [`sandboxtemplate.yaml`](sandboxtemplate.yaml) references via
 `secretKeyRef`, and [`agent/agent.py`](agent/agent.py) reads them
-out of the environment under those exact names. If you rename any
-of them, update both files to match.
+out of the environment under those exact names. The Secret name is
+historical — feel free to rename it to something provider-neutral if
+you prefer, but update both files to match.
 
 ### Switching providers
 
-The agent uses the upstream `openai` Python client — anything that speaks
-the OpenAI v1 `/chat/completions` API (Azure OpenAI, OpenAI directly,
-Together, Anyscale, self-hosted vLLM, …) will work without any code change.
-Just point the Secret's `OPENAI_BASE_URL` and `OPENAI_API_KEY` at the
-provider you want and put their model name in `LLM_MODEL`.
+Because the agent only assumes the OpenAI v1 `/chat/completions`
+shape, swapping providers is a Secret-only change: point
+`OPENAI_BASE_URL` and `OPENAI_API_KEY` at the new endpoint and put
+the right model identifier in `LLM_MODEL`. No image rebuild, no code
+edits.
 
 ## Step 2 — Build the agent image into your ACR
 

@@ -110,11 +110,11 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 
 	conn := newConnector(connectorConfig{
-		Strategy:          strategy,
-		Namespace:         opts.Namespace,
-		ServerPort:        opts.ServerPort,
-		RequestTimeout:    opts.RequestTimeout,
-		PerAttemptTimeout: opts.PerAttemptTimeout,
+		Strategy:            strategy,
+		Namespace:           opts.Namespace,
+		ServerPort:          opts.ServerPort,
+		RequestTimeout:      opts.RequestTimeout,
+		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,
 		Log:                 opts.Logger,
 		Tracer:              tracer,

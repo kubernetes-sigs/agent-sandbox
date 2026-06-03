@@ -3067,4 +3067,3 @@ func TestNew_DisablePodIPRoutingPropagation(t *testing.T) {
 		t.Error("expected connector.disablePodIPRouting to be true, got false")
 	}
 }
-

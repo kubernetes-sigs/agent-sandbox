@@ -14,9 +14,9 @@
 
 """Utility functions for the Kubernetes Agent Sandbox Python client."""
 
-import ipaddress
-from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timedelta, timezone
+import ipaddress
 from typing import Any, Protocol
 
 
@@ -76,7 +76,7 @@ def select_pod_ip(ips: Sequence[IPEntry] | None) -> str | None:
     if not ips:
         return None
 
-    first_valid = None
+    first_valid: str | None = None
     for ip_entry in ips:
         ip_str = None
         if isinstance(ip_entry, str):

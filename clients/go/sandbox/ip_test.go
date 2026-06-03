@@ -79,6 +79,11 @@ func TestSelectPodIP(t *testing.T) {
 			ips:      []string{"2001:db8:0:0:0:0:2:1"},
 			expected: "2001:db8::2:1",
 		},
+		{
+			name:     "normalizes IP address format (IPv4-mapped IPv6)",
+			ips:      []string{"::ffff:10.0.0.1"},
+			expected: "10.0.0.1",
+		},
 	}
 
 	for _, tc := range cases {

@@ -31,11 +31,11 @@ func selectPodIP(ips []string) string {
 		ip = strings.TrimSpace(ip)
 		parsed := net.ParseIP(ip)
 		if parsed != nil {
+			if parsed.To4() != nil {
+				return parsed.To4().String() // IPv4 has highest precedence; stop scanning.
+			}
 			if firstValid == "" {
 				firstValid = parsed.String()
-			}
-			if parsed.To4() != nil {
-				return parsed.String() // IPv4 has highest precedence; stop scanning.
 			}
 		}
 	}

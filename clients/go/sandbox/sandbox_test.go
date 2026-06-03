@@ -3045,25 +3045,3 @@ func TestConnector_SetPodIP(t *testing.T) {
 		})
 	}
 }
-
-func TestNew_DisablePodIPRoutingPropagation(t *testing.T) {
-	opts := defaultTestOpts()
-	opts.DisablePodIPRouting = true
-
-	c, agentsCS, extensionsCS := newTestSandbox(opts)
-	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("sb"))
-
-	ctx := context.Background()
-	if err := c.Open(ctx); err != nil {
-		t.Fatalf("Open() returned error: %v", err)
-	}
-	defer c.Close(context.Background())
-
-	c.connector.mu.Lock()
-	gotDisable := c.connector.disablePodIPRouting
-	c.connector.mu.Unlock()
-
-	if !gotDisable {
-		t.Error("expected connector.disablePodIPRouting to be true, got false")
-	}
-}

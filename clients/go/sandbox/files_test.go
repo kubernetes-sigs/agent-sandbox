@@ -35,24 +35,27 @@ import (
 // Shared test helpers
 // ---------------------------------------------------------------------------
 
-// newReadyTestSandbox creates a Sandbox that's already "connected" to the given server URL.
-func newReadyTestSandbox(serverURL string) *Sandbox {
-	opts := Options{
-		WarmPoolName:      "test-warmpool",
-		Namespace:         "default",
-		APIURL:            serverURL,
-		ServerPort:        8888,
-		RequestTimeout:    5 * time.Second,
-		PerAttemptTimeout: 2 * time.Second,
-		Quiet:             true,
+// newReadyTestSandboxWithOptions creates a Sandbox with the given options,
+// and simulates a successful connection.
+func newReadyTestSandboxWithOptions(serverURL string, opts Options) *Sandbox {
+	opts.WarmPoolName = "test-warmpool"
+	if opts.Namespace == "" {
+		opts.Namespace = "default"
 	}
+	opts.APIURL = serverURL
+	if opts.ServerPort == 0 {
+		opts.ServerPort = 8888
+	}
+	opts.RequestTimeout = 5 * time.Second
+	opts.PerAttemptTimeout = 2 * time.Second
+	opts.Quiet = true
 	opts.setDefaults()
 
 	k8s := &K8sHelper{Log: opts.Logger}
 	opts.K8sHelper = k8s
 	sb, err := New(context.Background(), opts)
 	if err != nil {
-		panic("newReadyTestSandbox: " + err.Error())
+		panic("newReadyTestSandboxWithOptions: " + err.Error())
 	}
 	// Simulate being connected
 	sb.connector.mu.Lock()
@@ -64,6 +67,11 @@ func newReadyTestSandbox(serverURL string) *Sandbox {
 	sb.claimName = "test-claim-abc123"
 	sb.mu.Unlock()
 	return sb
+}
+
+// newReadyTestSandbox creates a Sandbox that's already "connected" to the given server URL.
+func newReadyTestSandbox(serverURL string) *Sandbox {
+	return newReadyTestSandboxWithOptions(serverURL, Options{})
 }
 
 // newUnreadyTestSandbox returns a Sandbox that has not been opened.
@@ -438,13 +446,13 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newReadyTestSandbox(server.URL)
+	opts := Options{
+		Namespace:  "my-ns",
+		ServerPort: 9999,
+	}
+	c := newReadyTestSandboxWithOptions(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
 	c.connector.SetPodIP("10.244.0.42")
-	c.connector.mu.Lock()
-	c.connector.namespace = "my-ns"
-	c.connector.serverPort = 9999
-	c.connector.mu.Unlock()
 
 	_, err := c.Exists(context.Background(), "x")
 	if err != nil {
@@ -480,13 +488,13 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newReadyTestSandbox(server.URL)
+	opts := Options{
+		Namespace:  "my-ns",
+		ServerPort: 9999,
+	}
+	c := newReadyTestSandboxWithOptions(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
 	c.connector.SetPodIP("")
-	c.connector.mu.Lock()
-	c.connector.namespace = "my-ns"
-	c.connector.serverPort = 9999
-	c.connector.mu.Unlock()
 
 	_, err := c.Exists(context.Background(), "x")
 	if err != nil {
@@ -1560,14 +1568,14 @@ func TestHTTPHeaders_DisablePodIPRouting(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newReadyTestSandbox(server.URL)
+	opts := Options{
+		DisablePodIPRouting: true,
+		Namespace:           "my-ns",
+		ServerPort:          9999,
+	}
+	c := newReadyTestSandboxWithOptions(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
 	c.connector.SetPodIP("10.244.0.42")
-	c.connector.mu.Lock()
-	c.connector.disablePodIPRouting = true
-	c.connector.namespace = "my-ns"
-	c.connector.serverPort = 9999
-	c.connector.mu.Unlock()
 
 	_, err := c.Exists(context.Background(), "x")
 	if err != nil {

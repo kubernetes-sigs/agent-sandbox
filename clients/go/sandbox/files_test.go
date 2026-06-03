@@ -1548,3 +1548,40 @@ func TestWithMaxAttempts_CustomCount(t *testing.T) {
 		t.Errorf("expected exactly 3 attempts with WithMaxAttempts(3), got %d", got)
 	}
 }
+
+func TestHTTPHeaders_DisablePodIPRouting(t *testing.T) {
+	var mu sync.Mutex
+	var headers http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headers = r.Header.Clone()
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.connector.SetIdentity("my-claim")
+	c.connector.SetPodIP("10.244.0.42")
+	c.connector.mu.Lock()
+	c.connector.disablePodIPRouting = true
+	c.connector.namespace = "my-ns"
+	c.connector.serverPort = 9999
+	c.connector.mu.Unlock()
+
+	_, err := c.Exists(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("Exists() error: %v", err)
+	}
+
+	mu.Lock()
+	capturedHeaders := headers.Clone()
+	mu.Unlock()
+
+	if capturedHeaders.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, capturedHeaders.Get(headerSandboxID))
+	}
+	if _, ok := capturedHeaders[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
+		t.Errorf("expected header %s to be absent when disablePodIPRouting is true, but it was present", headerSandboxPodIP)
+	}
+}

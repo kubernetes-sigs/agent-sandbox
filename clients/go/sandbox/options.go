@@ -136,6 +136,9 @@ type Options struct {
 	// TracerProvider sets the OpenTelemetry TracerProvider for span creation.
 	// If nil, falls back to otel.GetTracerProvider (noop by default).
 	TracerProvider trace.TracerProvider
+
+	// DisablePodIPRouting disables routing requests directly to the sandbox Pod IP.
+	DisablePodIPRouting bool
 }
 
 func (o *Options) setDefaults() {

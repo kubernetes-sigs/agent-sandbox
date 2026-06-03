@@ -115,10 +115,11 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		ServerPort:        opts.ServerPort,
 		RequestTimeout:    opts.RequestTimeout,
 		PerAttemptTimeout: opts.PerAttemptTimeout,
-		HTTPTransport:     opts.HTTPTransport,
-		Log:               opts.Logger,
-		Tracer:            tracer,
-		TraceServiceName:  svcName,
+		HTTPTransport:       opts.HTTPTransport,
+		Log:                 opts.Logger,
+		Tracer:              tracer,
+		TraceServiceName:    svcName,
+		DisablePodIPRouting: opts.DisablePodIPRouting,
 	})
 
 	// Wire tunnel's connector reference for death notifications.

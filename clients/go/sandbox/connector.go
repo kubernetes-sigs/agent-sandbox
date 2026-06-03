@@ -74,6 +74,9 @@ type connector struct {
 	log           logr.Logger
 	tracer        trace.Tracer
 	svcName       string
+
+	// disablePodIPRouting disables the direct Pod IP routing mechanism.
+	disablePodIPRouting bool
 }
 
 // connectorConfig holds the parameters needed to construct a connector.
@@ -87,6 +90,9 @@ type connectorConfig struct {
 	Log               logr.Logger
 	Tracer            trace.Tracer
 	TraceServiceName  string
+
+	// DisablePodIPRouting disables the direct Pod IP routing mechanism.
+	DisablePodIPRouting bool
 }
 
 // newConnector creates a connector with the given configuration.
@@ -113,9 +119,10 @@ func newConnector(cfg connectorConfig) *connector {
 		httpClient: &http.Client{
 			Transport: transport,
 		},
-		log:     cfg.Log,
-		tracer:  cfg.Tracer,
-		svcName: cfg.TraceServiceName,
+		log:                 cfg.Log,
+		tracer:              cfg.Tracer,
+		svcName:             cfg.TraceServiceName,
+		disablePodIPRouting: cfg.DisablePodIPRouting,
 	}
 }
 
@@ -254,6 +261,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		namespace := c.namespace
 		port := c.serverPort
 		podIP := c.podIP
+		disableRouting := c.disablePodIPRouting
 		c.mu.Unlock()
 
 		var bodyReader io.Reader
@@ -284,7 +292,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		req.Header.Set(headerSandboxNamespace, namespace)
 		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
 		req.Header.Set(headerRequestID, reqID)
-		if podIP != "" {
+		if podIP != "" && !disableRouting {
 			req.Header.Set(headerSandboxPodIP, podIP)
 		}
 		if contentType != "" {

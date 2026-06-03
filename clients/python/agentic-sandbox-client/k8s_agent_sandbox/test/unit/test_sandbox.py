@@ -282,9 +282,6 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
     @patch('k8s_agent_sandbox.sandbox.SandboxConnector')
     def _build_sandbox(self, mock_connector, mock_tracer, mock_cmd, mock_files):
         mock_tracer.return_value = (MagicMock(), MagicMock())
-        from k8s_agent_sandbox.models import (
-            SandboxLocalTunnelConnectionConfig, SandboxTracerConfig,
-        )
         k8s_helper = MagicMock()
         return Sandbox(
             claim_name="my-claim",

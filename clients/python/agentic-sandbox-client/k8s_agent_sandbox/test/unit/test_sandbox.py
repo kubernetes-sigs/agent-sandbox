@@ -362,7 +362,17 @@ class TestSelectPodIP(unittest.TestCase):
         self.assertEqual(select_pod_ip(["::ffff:10.0.0.1"]), "10.0.0.1")
 
     def test_select_pod_ip_non_string(self):
-        self.assertEqual(select_pod_ip([None, 123, {"ip": "1.2.3.4"}, "10.244.0.42"]), "10.244.0.42") # type: ignore
+        class ObjWithIP:
+            def __init__(self, ip: str):
+                self.ip = ip
+
+        mixed_ips = [
+            None,
+            123,
+            {"ip": "2001:db8::1"},
+            ObjWithIP("10.244.0.42"),
+        ]
+        self.assertEqual(select_pod_ip(mixed_ips), "10.244.0.42")  # type: ignore[arg-type]
 
 
 if __name__ == '__main__':

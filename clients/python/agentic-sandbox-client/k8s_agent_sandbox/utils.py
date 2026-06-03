@@ -61,7 +61,15 @@ def select_pod_ip(ips: list[str] | None) -> str | None:
         return None
 
     first_valid = None
-    for ip_str in ips:
+    for ip_entry in ips:
+        ip_str = None
+        if isinstance(ip_entry, str):
+            ip_str = ip_entry
+        elif isinstance(ip_entry, dict):
+            ip_str = ip_entry.get("ip")
+        elif ip_entry is not None:
+            ip_str = getattr(ip_entry, "ip", None)
+
         if not isinstance(ip_str, str) or not ip_str:
             continue
         cleaned = ip_str.strip()

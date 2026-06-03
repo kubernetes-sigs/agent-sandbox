@@ -38,17 +38,27 @@ import (
 // newReadyTestSandboxWithOptions creates a Sandbox with the given options,
 // and simulates a successful connection.
 func newReadyTestSandboxWithOptions(serverURL string, opts Options) *Sandbox {
-	opts.WarmPoolName = "test-warmpool"
+	if opts.WarmPoolName == "" {
+		opts.WarmPoolName = "test-warmpool"
+	}
 	if opts.Namespace == "" {
 		opts.Namespace = "default"
 	}
-	opts.APIURL = serverURL
+	if opts.APIURL == "" {
+		opts.APIURL = serverURL
+	}
 	if opts.ServerPort == 0 {
 		opts.ServerPort = 8888
 	}
-	opts.RequestTimeout = 5 * time.Second
-	opts.PerAttemptTimeout = 2 * time.Second
-	opts.Quiet = true
+	if opts.RequestTimeout == 0 {
+		opts.RequestTimeout = 5 * time.Second
+	}
+	if opts.PerAttemptTimeout == 0 {
+		opts.PerAttemptTimeout = 2 * time.Second
+	}
+	if opts.Logger.GetSink() == nil {
+		opts.Quiet = true
+	}
 	opts.setDefaults()
 
 	k8s := &K8sHelper{Log: opts.Logger}

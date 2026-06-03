@@ -117,11 +117,10 @@ you want to deploy into.
    az aks update --resource-group <rg> --name <aks-cluster> --attach-acr <your-acr>
    ```
 
-5. **Access to a Microsoft Foundry / Azure OpenAI deployment exposing
-   the OpenAI-compatible `/openai/v1/` endpoint.** You will need the
-   base URL, an API key, and a model deployment name. Any other
-   OpenAI-compatible endpoint works too — see "Switching providers"
-   near the bottom.
+5. **An OpenAI-compatible REST endpoint** (e.g., Azure OpenAI,
+   Microsoft Foundry, OpenAI directly, or a self-hosted service like
+   vLLM). You will need the base URL, an API key, and a model name.
+   See "Switching providers" below for details.
 
 6. **Go 1.22+** on your workstation if you want to run the SDK demo
    in Step 6.
@@ -144,37 +143,38 @@ If you would rather use a different namespace, do a find-and-replace
 on `sandbox-agent-demo` across all the YAML files in this directory
 (and in [`client/main.go`](client/main.go)) before you start.
 
-## Step 1 — Create the Foundry Secret
+## Step 1 — Create the model endpoint Secret
 
 The agent reads three values from a `Secret` named
 `azure-foundry` in the same namespace as the template:
 
-| Key | Where it comes from |
-| --- | --- |
-| `AZURE_FOUNDRY_BASE_URL` | Your Foundry / Azure OpenAI resource's v1 endpoint, e.g. `https://<resource>.openai.azure.com/openai/v1/`. |
-| `AZURE_FOUNDRY_API_KEY` | KEY 1 or KEY 2 from the same resource's "Keys and Endpoint" view. |
-| `AZURE_FOUNDRY_MODEL` | The model deployment name (e.g. `gpt-4o`, `gpt-5.4-mini`). |
+| Key | Example (Azure OpenAI) | Example (OpenAI) |
+| --- | --- | --- |
+| `OPENAI_BASE_URL` | `https://<resource>.openai.azure.com/openai/v1/` | `https://api.openai.com/v1` |
+| `OPENAI_API_KEY` | Azure OpenAI key | OpenAI API key |
+| `LLM_MODEL` | `gpt-4o` (deployment name) | `gpt-4o` (model name) |
 
 ```bash
 kubectl create secret generic azure-foundry \
   -n sandbox-agent-demo \
-  --from-literal=AZURE_FOUNDRY_BASE_URL="https://<resource>.openai.azure.com/openai/v1/" \
-  --from-literal=AZURE_FOUNDRY_API_KEY="<your-azure-foundry-key>" \
-  --from-literal=AZURE_FOUNDRY_MODEL="gpt-4o"
+  --from-literal=OPENAI_BASE_URL="https://<your-endpoint>/v1/" \
+  --from-literal=OPENAI_API_KEY="<your-api-key>" \
+  --from-literal=LLM_MODEL="<model-name>"
 ```
 
-The Secret name (`azure-foundry`) is what
+The Secret name (`azure-foundry`) and the three keys above are what
 [`sandboxtemplate.yaml`](sandboxtemplate.yaml) references via
-`secretKeyRef`. If you rename the Secret, update the template too.
+`secretKeyRef`, and [`agent/agent.py`](agent/agent.py) reads them
+out of the environment under those exact names. If you rename any
+of them, update both files to match.
 
 ### Switching providers
 
-The agent uses the upstream `openai` Python client pointed at
-`AZURE_FOUNDRY_BASE_URL` — anything that speaks the OpenAI v1
-`/chat/completions` shape (OpenAI directly, Together, Anyscale,
-self-hosted vLLM, …) will work without any code change. Just point the
-Secret's `AZURE_FOUNDRY_BASE_URL` and `AZURE_FOUNDRY_API_KEY` at the
-provider you want and put their model name in `AZURE_FOUNDRY_MODEL`.
+The agent uses the upstream `openai` Python client — anything that speaks
+the OpenAI v1 `/chat/completions` API (Azure OpenAI, OpenAI directly,
+Together, Anyscale, self-hosted vLLM, …) will work without any code change.
+Just point the Secret's `OPENAI_BASE_URL` and `OPENAI_API_KEY` at the
+provider you want and put their model name in `LLM_MODEL`.
 
 ## Step 2 — Build the agent image into your ACR
 
@@ -285,6 +285,19 @@ router pods — a `ClusterIP` (`sandbox-router-svc`) for in-cluster
 callers and the NetworkPolicy, plus a `LoadBalancer`
 (`sandbox-router-public`) that AKS fronts with an Azure Standard Load
 Balancer public IP.
+
+> ⚠️ **Demo-only authentication.** [`router.yaml`](router.yaml) sets
+> `ALLOW_UNAUTHENTICATED_ROUTER=true` so the public LoadBalancer
+> accepts every request unconditionally. **This is fine for a throwaway
+> demo cluster you are about to delete; it is not fine for anything
+> else** — anyone who finds the public IP can use the router as an open
+> proxy into your sandbox pods. For a real deployment, mint a token,
+> store it in a Secret, plumb it in as `ROUTER_AUTH_TOKEN`, and have
+> callers send `Authorization: Bearer <token>`. The shape to copy lives
+> at [`clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`](../../../clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml).
+> Note that the Go SDK used in Step 6 does not yet plumb `Authorization`
+> headers, so swapping to token auth requires either an SDK change or
+> bypassing the SDK for the HTTP layer.
 
 Substitute the image and apply (`envsubst` ships in the
 `gettext-base` package on most distros):

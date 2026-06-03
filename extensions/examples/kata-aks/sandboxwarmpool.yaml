@@ -5,7 +5,7 @@
 # The pool is sized for a small demo. For production use, drive `replicas`
 # from an HPA on the claim-creation-rate custom metric — see
 # examples/hpa-swp-scaling/ for a working setup.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
   name: kata-aks-warmpool

@@ -6,7 +6,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Per-owner agent backed by Azure Foundry's OpenAI-compatible v1 endpoint.
+"""Per-owner agent backed by OpenAI-compatible endpoint.
 
 Each pod is identical; the per-user identity comes from the X-Owner header
 on the incoming request, so a single warm-pool of pods can serve every
@@ -21,18 +21,18 @@ from fastapi import FastAPI, Header
 from openai import OpenAI
 from pydantic import BaseModel
 
-# AZURE_FOUNDRY_BASE_URL must point at the OpenAI-compatible v1 endpoint,
+# OPENAI_BASE_URL must point at the OpenAI-compatible v1 endpoint,
 # e.g. https://<resource>.openai.azure.com/openai/v1/ .
-_base_url = os.getenv("AZURE_FOUNDRY_BASE_URL")
-_api_key = os.getenv("AZURE_FOUNDRY_API_KEY")
-_model = os.getenv("AZURE_FOUNDRY_MODEL")
+_base_url = os.getenv("OPENAI_BASE_URL")
+_api_key = os.getenv("OPENAI_API_KEY")
+_model = os.getenv("LLM_MODEL")
 
 _missing_settings = [
     name
     for name, value in (
-        ("AZURE_FOUNDRY_BASE_URL", _base_url),
-        ("AZURE_FOUNDRY_API_KEY", _api_key),
-        ("AZURE_FOUNDRY_MODEL", _model),
+        ("OPENAI_BASE_URL", _base_url),
+        ("OPENAI_API_KEY", _api_key),
+        ("LLM_MODEL", _model),
     )
     if not value
 ]

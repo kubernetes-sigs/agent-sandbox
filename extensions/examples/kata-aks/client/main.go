@@ -65,7 +65,7 @@ import (
 )
 
 const (
-	templateName = "kata-aks-template"
+	warmPoolName = "kata-aks-warmpool"
 	namespace    = "sandbox-agent-demo"
 	agentPort    = "8080" // FastAPI agent in sandboxtemplate.yaml
 )
@@ -119,7 +119,7 @@ func chat(ctx context.Context, routerBaseURL, sandboxName, ns, owner, prompt str
 // DeleteAll is the safety net if this best-effort cleanup is skipped
 // (e.g. panic).
 func runForUser(ctx context.Context, client *sandbox.Client, routerBaseURL, owner, prompt string) {
-	sb, err := client.CreateSandbox(ctx, templateName, namespace)
+	sb, err := client.CreateSandbox(ctx, warmPoolName, namespace)
 	if err != nil {
 		log.Printf("[%s] create failed: %v", owner, err)
 		return
@@ -237,7 +237,7 @@ func runReuse(ctx context.Context, client *sandbox.Client, routerBaseURL, owner,
 	}
 	if sb == nil {
 		var err error
-		sb, err = client.CreateSandbox(ctx, templateName, namespace)
+		sb, err = client.CreateSandbox(ctx, warmPoolName, namespace)
 		if err != nil {
 			log.Printf("[%s] create failed: %v", owner, err)
 			return
@@ -293,7 +293,7 @@ func main() {
 	defer cancel()
 
 	client, err := sandbox.NewClient(ctx, sandbox.Options{
-		TemplateName: templateName,
+		WarmPoolName: warmPoolName,
 		Namespace:    namespace,
 	})
 	if err != nil {

@@ -2,20 +2,18 @@
 # warm pool defined in sandboxwarmpool.yaml. The claim is the only object a
 # regular (non-admin) user is expected to create — they do not need access
 # to the SandboxTemplate or SandboxWarmPool.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   name: my-aks-agent
-  # Must be the same namespace as the SandboxTemplate.
+  # Must be the same namespace as the SandboxWarmPool.
   namespace: sandbox-agent-demo
 spec:
-  sandboxTemplateRef:
-    name: kata-aks-template
-
-  # Prefer adopting from the named warm pool. Set to "none" to always
-  # provision a fresh sandbox (incurs Kata VM cold-start), or "default" to
-  # let the controller pick any matching pool.
-  warmpool: kata-aks-warmpool
+  # Adopt a pre-warmed sandbox from the named warm pool. The pool's
+  # sandboxTemplateRef determines the pod blueprint; the claim itself
+  # no longer references the SandboxTemplate directly in v1beta1.
+  warmPoolRef:
+    name: kata-aks-warmpool
 
   # Example lifecycle: auto-shut down 1h after the claim is created and
   # delete the claim (and its underlying Sandbox/Pod/PVC) on expiry.

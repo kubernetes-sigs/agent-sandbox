@@ -15,7 +15,7 @@
 # the same name; newer documentation sometimes calls it
 # `kata-mshv-vm-isolation`, but it is the same feature — use whichever
 # RuntimeClass actually exists on the cluster).
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: kata-aks-template
@@ -69,21 +69,21 @@ spec:
         # the router; the pod itself is owner-agnostic, which is what lets
         # a single warm pool serve every user.
         env:
-        - name: AZURE_FOUNDRY_BASE_URL
+        - name: OPENAI_BASE_URL
           valueFrom:
             secretKeyRef:
               name: azure-foundry
-              key: AZURE_FOUNDRY_BASE_URL
-        - name: AZURE_FOUNDRY_API_KEY
+              key: OPENAI_BASE_URL
+        - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
               name: azure-foundry
-              key: AZURE_FOUNDRY_API_KEY
-        - name: AZURE_FOUNDRY_MODEL
+              key: OPENAI_API_KEY
+        - name: LLM_MODEL
           valueFrom:
             secretKeyRef:
               name: azure-foundry
-              key: AZURE_FOUNDRY_MODEL
+              key: LLM_MODEL
         ports:
         - containerPort: 8080
           name: http

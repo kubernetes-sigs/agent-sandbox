@@ -77,6 +77,13 @@ spec:
         env:
         - name: PROXY_TIMEOUT_SECONDS
           value: "180"
+        # DEMO ONLY. The router fronts a public LoadBalancer below; in any
+        # real deployment, replace this with ROUTER_AUTH_TOKEN sourced from
+        # a Secret and have callers send `Authorization: Bearer <token>`.
+        # See clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml
+        # for the production-shaped manifest.
+        - name: ALLOW_UNAUTHENTICATED_ROUTER
+          value: "true"
         ports:
         - containerPort: 8080
         readinessProbe:

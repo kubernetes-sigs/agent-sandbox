@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig, SandboxTracerConfig
+from k8s_agent_sandbox.utils import select_pod_ip
 
 
 class TestSandbox(unittest.TestCase):
@@ -327,8 +328,6 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
         self.assertIsNone(sandbox.claim_name)
 
 
-
-from k8s_agent_sandbox.utils import select_pod_ip
 
 class TestSelectPodIP(unittest.TestCase):
     def test_select_pod_ip_empty(self):

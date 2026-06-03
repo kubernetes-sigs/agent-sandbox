@@ -21,6 +21,7 @@ from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
 from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
+from .utils import select_pod_ip
 
 
 class AsyncSandbox:
@@ -95,7 +96,7 @@ class AsyncSandbox:
         return self._pod_name
 
     async def get_pod_ip(self) -> str | None:
-        """Fetches the first pod IP from the Sandbox status, prioritized and normalized.
+        """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
 
         Always queries the K8s API for the latest IP — the pod IP can change
         after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed 
@@ -104,7 +105,6 @@ class AsyncSandbox:
         """
         sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         pod_ips = sandbox_object.get("status", {}).get("podIPs", [])
-        from .utils import select_pod_ip
         return select_pod_ip(pod_ips)
 
     @property

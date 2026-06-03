@@ -32,6 +32,7 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
 )
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .utils import select_pod_ip
 
 
 class AsyncK8sHelper:
@@ -197,7 +198,6 @@ class AsyncK8sHelper:
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
                                 logger.info(f"Sandbox {name} is ready.")
                                 pod_ips = status.get("podIPs", [])
-                                from .utils import select_pod_ip
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
                         logger.error(f"Sandbox {name} was deleted before becoming ready.")

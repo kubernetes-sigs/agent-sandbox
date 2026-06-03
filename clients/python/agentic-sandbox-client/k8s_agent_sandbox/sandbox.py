@@ -28,6 +28,7 @@ from .exceptions import SandboxNotFoundError
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
+from .utils import select_pod_ip
 
 class Sandbox:
     """
@@ -112,7 +113,7 @@ class Sandbox:
         return None
 
     def get_pod_ip(self) -> str | None:
-        """Fetches the first pod IP from the Sandbox status, prioritized and normalized.
+        """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
 
         Always queries the K8s API for the latest IP — the pod IP can change
         after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed 
@@ -121,7 +122,6 @@ class Sandbox:
         """
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         pod_ips = sandbox_object.get('status', {}).get('podIPs', [])
-        from .utils import select_pod_ip
         return select_pod_ip(pod_ips)
 
     def status(self) -> tuple[str, str]:

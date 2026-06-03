@@ -28,6 +28,7 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
 )
+from .utils import select_pod_ip
 
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
@@ -164,7 +165,6 @@ class K8sHelper:
                             logging.info(f"Sandbox {name} is ready.")
                             w.stop()
                             pod_ips = status.get('podIPs', [])
-                            from .utils import select_pod_ip
                             return select_pod_ip(pod_ips)
                 elif event["type"] == "DELETED":
                     logging.error(f"Sandbox {name} was deleted before becoming ready.")

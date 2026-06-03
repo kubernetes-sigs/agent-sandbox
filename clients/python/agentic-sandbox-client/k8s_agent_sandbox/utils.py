@@ -71,7 +71,7 @@ def select_pod_ip(ips: list[str] | None) -> str | None:
                 return str(parsed)
             if parsed.version == 6 and parsed.ipv4_mapped:
                 return str(parsed.ipv4_mapped)
-            
+
             if first_valid is None:
                 first_valid = str(parsed)
         except ValueError:

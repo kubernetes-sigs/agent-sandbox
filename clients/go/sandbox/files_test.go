@@ -35,12 +35,12 @@ import (
 // Shared test helpers
 // ---------------------------------------------------------------------------
 
-// newReadyTestSandboxWithOptions creates a Sandbox with the given options,
-// filling in required defaults (such as WarmPoolName, Namespace, ServerPort,
-// and timeouts) if they are left empty. If opts.APIURL is empty, it is set
-// to serverURL, forcing the client into direct URL connection strategy.
+// newReadyTestSandboxWithDirectURL creates a Sandbox with the given options,
+// using DirectStrategy with the mock serverURL (assigned to opts.APIURL).
+// It fills in required defaults (such as WarmPoolName, Namespace, ServerPort,
+// and timeouts) if they are left empty.
 // It also simulates a successful connection.
-func newReadyTestSandboxWithOptions(serverURL string, opts Options) *Sandbox {
+func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 	if opts.WarmPoolName == "" {
 		opts.WarmPoolName = "test-warmpool"
 	}
@@ -68,7 +68,7 @@ func newReadyTestSandboxWithOptions(serverURL string, opts Options) *Sandbox {
 	opts.K8sHelper = k8s
 	sb, err := New(context.Background(), opts)
 	if err != nil {
-		panic("newReadyTestSandboxWithOptions: " + err.Error())
+		panic("newReadyTestSandboxWithDirectURL: " + err.Error())
 	}
 	// Simulate being connected
 	sb.connector.mu.Lock()
@@ -84,7 +84,7 @@ func newReadyTestSandboxWithOptions(serverURL string, opts Options) *Sandbox {
 
 // newReadyTestSandbox creates a Sandbox that's already "connected" to the given server URL.
 func newReadyTestSandbox(serverURL string) *Sandbox {
-	return newReadyTestSandboxWithOptions(serverURL, Options{})
+	return newReadyTestSandboxWithDirectURL(serverURL, Options{})
 }
 
 // newUnreadyTestSandbox returns a Sandbox that has not been opened.
@@ -463,7 +463,7 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 		Namespace:  "my-ns",
 		ServerPort: 9999,
 	}
-	c := newReadyTestSandboxWithOptions(server.URL, opts)
+	c := newReadyTestSandboxWithDirectURL(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
 	c.connector.SetPodIP("10.244.0.42")
 
@@ -509,7 +509,7 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 		Namespace:  "my-ns",
 		ServerPort: 9999,
 	}
-	c := newReadyTestSandboxWithOptions(server.URL, opts)
+	c := newReadyTestSandboxWithDirectURL(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
 	c.connector.SetPodIP("")
 
@@ -1594,7 +1594,7 @@ func TestHTTPHeaders_DisablePodIPRouting(t *testing.T) {
 		Namespace:           "my-ns",
 		ServerPort:          9999,
 	}
-	c := newReadyTestSandboxWithOptions(server.URL, opts)
+	c := newReadyTestSandboxWithDirectURL(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
 	c.connector.SetPodIP("10.244.0.42")
 

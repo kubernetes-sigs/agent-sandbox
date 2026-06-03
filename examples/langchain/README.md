@@ -159,6 +159,18 @@ limits:
 - Use a smaller model
 - Add GPU support to your Kind cluster
 - Use a hosted API instead
+
+### Environment Isolation and Custom Environment Variables
+
+**Problem**: The generated python script fails to execute locally because some necessary environment variables (like proxy settings or virtual environment paths) are stripped.
+
+**Expected**: To prevent sensitive credential leakage (such as `HF_TOKEN`) to untrusted code execution, the agent isolates the environment of the execution subprocess, preserving only `PATH`, `LANG`, and `LC_ALL` by default.
+
+**Solution**: If you are running in a local or non-containerized environment that requires additional variables (e.g., `PYTHONPATH`, `VIRTUAL_ENV`, `LD_LIBRARY_PATH`, or proxy variables like `HTTP_PROXY` / `HTTPS_PROXY`), you can specify them as a comma-separated list in the `SUBPROCESS_ENV_PASSTHROUGH` environment variable before starting the agent:
+
+```bash
+export SUBPROCESS_ENV_PASSTHROUGH="VIRTUAL_ENV,PYTHONPATH,HTTP_PROXY"
+```
 ## Switching Models
 To use a different model, update these files:
 ### `download_model.py`

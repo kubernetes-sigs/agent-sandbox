@@ -44,8 +44,13 @@ class LocalCodeExecutor:
             # Use sys.executable as the interpreter path, and provide a minimal sanitized environment
             # containing only safe and necessary variables (like PATH). This prevents exposure of
             # sensitive orchestrator credentials (like HF_TOKEN) to untrusted code execution.
+            passthrough_keys = ["PATH", "LANG", "LC_ALL"]
+            extra_keys = os.getenv("SUBPROCESS_ENV_PASSTHROUGH", "")
+            if extra_keys:
+                passthrough_keys.extend([k.strip() for k in extra_keys.split(",") if k.strip()])
+
             env = {}
-            for key in ["PATH", "LANG", "LC_ALL"]:
+            for key in passthrough_keys:
                 if key in os.environ:
                     env[key] = os.environ[key]
 
@@ -113,14 +118,16 @@ class CodeGenerationLLM:
                 cache_dir=cache_dir
             )
         except OSError as e:
-            print(f"\nERROR: Failed to load model '{model_id}' from local cache at '{cache_dir}'.", file=sys.stderr)
-            print(f"Details: {e}", file=sys.stderr)
-            print("\nThis usually indicates that the model files have not been downloaded or cached yet.", file=sys.stderr)
-            print("Please ensure that the 'model-downloader' initContainer ran successfully,", file=sys.stderr)
-            print("or download the model manually by running:", file=sys.stderr)
-            print("   python download_model.py", file=sys.stderr)
-            print("=" * 80, file=sys.stderr)
-            sys.exit(1)
+            error_msg = (
+                f"Failed to load model '{model_id}' from local cache at '{cache_dir}'.\n"
+                f"Details: {e}\n\n"
+                "This usually indicates that the model files have not been downloaded or cached yet.\n"
+                "Please ensure that the 'model-downloader' initContainer ran successfully,\n"
+                "or download the model manually by running:\n"
+                "   python download_model.py\n"
+                "================================================================================"
+            )
+            raise RuntimeError(error_msg) from e
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -364,7 +371,12 @@ async def interactive_chat():
     print("=" * 80)
     
     print("\nInitializing LLM (this takes 2-5 minutes)...")
-    llm = CodeGenerationLLM()
+    try:
+        llm = CodeGenerationLLM()
+    except RuntimeError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+        
     executor = LocalCodeExecutor()
     graph = create_graph(llm, executor)
     print("Ready!\n")

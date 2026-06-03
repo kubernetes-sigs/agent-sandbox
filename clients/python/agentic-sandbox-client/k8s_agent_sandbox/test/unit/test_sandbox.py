@@ -361,6 +361,9 @@ class TestSelectPodIP(unittest.TestCase):
     def test_select_pod_ip_ipv4_mapped_ipv6_normalization(self):
         self.assertEqual(select_pod_ip(["::ffff:10.0.0.1"]), "10.0.0.1")
 
+    def test_select_pod_ip_non_string(self):
+        self.assertEqual(select_pod_ip([None, 123, {"ip": "1.2.3.4"}, "10.244.0.42"]), "10.244.0.42") # type: ignore
+
 
 if __name__ == '__main__':
     unittest.main()

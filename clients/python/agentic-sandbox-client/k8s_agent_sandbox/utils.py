@@ -65,6 +65,8 @@ def select_pod_ip(ips: list[str] | None) -> str | None:
         if not ip_str:
             continue
         cleaned = ip_str.strip()
+        if not cleaned:
+            continue
         try:
             parsed = ipaddress.ip_address(cleaned)
             if parsed.version == 4:

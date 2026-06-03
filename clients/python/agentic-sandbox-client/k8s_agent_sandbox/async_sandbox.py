@@ -99,7 +99,7 @@ class AsyncSandbox:
         """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
 
         Always queries the K8s API for the latest IP — the pod IP can change
-        after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed 
+        after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed
         via setting spec.operatingMode to Running).
         Returns None if no valid IP can be selected.
         """

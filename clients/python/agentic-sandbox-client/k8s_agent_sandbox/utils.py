@@ -49,7 +49,9 @@ def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[
 
 
 def select_pod_ip(ips: list[str] | None) -> str | None:
-    """Scans the list of IP addresses, validates them, and returns the
+    """Selects a prioritized and normalized Pod IP address from a list of IPs.
+
+    Scans the list of IP addresses, validates them, and returns the
     normalized/canonical IP address string (preferring IPv4 over IPv6).
 
     In dual-stack environments, we explicitly prefer IPv4 over IPv6.

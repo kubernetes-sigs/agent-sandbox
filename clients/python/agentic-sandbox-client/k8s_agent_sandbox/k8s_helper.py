@@ -135,8 +135,8 @@ class K8sHelper:
     def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
-        Returns the first pod IP from the sandbox status when ready, or None if
-        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        Returns the selected pod IP from the sandbox status when ready, or None if
+        no valid IP can be selected.
         """
         deadline = time.monotonic() + timeout
         logging.info(f"Watching for Sandbox {name} to become ready...")

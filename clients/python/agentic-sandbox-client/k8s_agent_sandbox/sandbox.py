@@ -118,7 +118,7 @@ class Sandbox:
         Always queries the K8s API for the latest IP — the pod IP can change
         after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed 
         via setting spec.operatingMode to Running).
-        Returns None if the controller does not populate podIPs.
+        Returns None if no valid IP can be selected.
         """
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         pod_ips = sandbox_object.get('status', {}).get('podIPs', [])

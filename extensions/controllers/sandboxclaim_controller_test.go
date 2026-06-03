@@ -117,15 +117,15 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WarmPoolRef:       extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
-			SafeToEvict:       &onCompletion,
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+			SafeToEvict: &onCompletion,
 		},
 	}
 
 	claimWithoutEvict := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-no-evict", Namespace: "default", UID: "claim-no-evict-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WarmPoolRef:       extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
 		},
 	}
 
@@ -410,7 +410,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		{
 			name:             "sandbox is created without safe-to-evict when not requested",
 			claimToReconcile: claimWithoutEvict,
-			existingObjects:  []client.Object{template},
+			existingObjects:  []client.Object{template, warmPool},
 			expectSandbox:    true,
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",

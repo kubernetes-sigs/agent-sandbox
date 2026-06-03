@@ -164,7 +164,8 @@ class K8sHelper:
                             logging.info(f"Sandbox {name} is ready.")
                             w.stop()
                             pod_ips = status.get('podIPs', [])
-                            return pod_ips[0] if pod_ips else None
+                            from .utils import select_pod_ip
+                            return select_pod_ip(pod_ips)
                 elif event["type"] == "DELETED":
                     logging.error(f"Sandbox {name} was deleted before becoming ready.")
                     w.stop()

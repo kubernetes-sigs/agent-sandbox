@@ -197,7 +197,8 @@ class AsyncK8sHelper:
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
                                 logger.info(f"Sandbox {name} is ready.")
                                 pod_ips = status.get("podIPs", [])
-                                return pod_ips[0] if pod_ips else None
+                                from .utils import select_pod_ip
+                                return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
                         logger.error(f"Sandbox {name} was deleted before becoming ready.")
                         raise SandboxNotFoundError(

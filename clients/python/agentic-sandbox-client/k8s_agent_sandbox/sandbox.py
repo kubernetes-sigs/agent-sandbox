@@ -112,7 +112,7 @@ class Sandbox:
         return None
 
     def get_pod_ip(self) -> str | None:
-        """Fetches the first pod IP from the Sandbox status.
+        """Fetches the first pod IP from the Sandbox status, prioritized and normalized.
 
         Always queries the K8s API for the latest IP — the pod IP can change
         after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed 
@@ -121,7 +121,8 @@ class Sandbox:
         """
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         pod_ips = sandbox_object.get('status', {}).get('podIPs', [])
-        return pod_ips[0] if pod_ips else None
+        from .utils import select_pod_ip
+        return select_pod_ip(pod_ips)
 
     def status(self) -> tuple[str, str]:
         """

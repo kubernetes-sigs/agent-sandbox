@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utility functions for the Kubernetes Agent Sandbox python client."""
+
+import ipaddress
 from datetime import datetime, timedelta, timezone
 
 
@@ -43,3 +46,35 @@ def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[
         "shutdownTime": shutdown_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "shutdownPolicy": "Delete",
     }
+
+
+def select_pod_ip(ips: list[str] | None) -> str | None:
+    """Scans the list of IP addresses, validates them, and returns the
+    normalized/canonical IP address string (preferring IPv4 over IPv6).
+
+    In dual-stack environments, we explicitly prefer IPv4 over IPv6.
+    If no IPv4 is found, it falls back to the first syntactically valid IP.
+    """
+    if not ips:
+        return None
+
+    first_valid = None
+    for ip_str in ips:
+        if not isinstance(ip_str, str):
+            continue
+        cleaned = ip_str.strip()
+        if not cleaned:
+            continue
+        try:
+            parsed = ipaddress.ip_address(cleaned)
+            if parsed.version == 4:
+                return str(parsed)
+            if parsed.version == 6 and parsed.ipv4_mapped:
+                return str(parsed.ipv4_mapped)
+            
+            if first_valid is None:
+                first_valid = str(parsed)
+        except ValueError:
+            continue
+
+    return first_valid

@@ -16,7 +16,8 @@
 
 import ipaddress
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
@@ -49,7 +50,14 @@ def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[
     }
 
 
-def select_pod_ip(ips: list[Any] | None) -> str | None:
+class HasIP(Protocol):
+    ip: str
+
+
+IPEntry = str | Mapping[str, Any] | HasIP
+
+
+def select_pod_ip(ips: Sequence[IPEntry] | None) -> str | None:
     """Selects a prioritized and normalized Pod IP address from a list of IPs.
 
     Scans the list of IP entries, validates them, and returns the
@@ -57,11 +65,13 @@ def select_pod_ip(ips: list[Any] | None) -> str | None:
 
     The elements in the input list can be:
     - String representation of IP addresses (e.g. "10.0.0.1").
-    - Dictionaries containing an "ip" key (e.g. {"ip": "10.0.0.1"}).
+    - Mappings containing an "ip" key (e.g. {"ip": "10.0.0.1"}).
     - Objects containing an "ip" attribute.
 
     In dual-stack environments, we explicitly prefer IPv4 over IPv6.
     If no IPv4 is found, it falls back to the first syntactically valid IP.
+    IPv4-mapped IPv6 addresses (e.g., "::ffff:10.0.0.1") are normalized and
+    returned as standard IPv4 addresses (e.g., "10.0.0.1").
     """
     if not ips:
         return None
@@ -71,7 +81,7 @@ def select_pod_ip(ips: list[Any] | None) -> str | None:
         ip_str = None
         if isinstance(ip_entry, str):
             ip_str = ip_entry
-        elif isinstance(ip_entry, dict):
+        elif isinstance(ip_entry, Mapping):
             ip_str = ip_entry.get("ip")
         elif ip_entry is not None:
             ip_str = getattr(ip_entry, "ip", None)

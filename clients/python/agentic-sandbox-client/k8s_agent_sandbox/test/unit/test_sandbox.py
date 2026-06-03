@@ -372,7 +372,7 @@ class TestSelectPodIP(unittest.TestCase):
             {"ip": "2001:db8::1"},
             ObjWithIP("10.244.0.42"),
         ]
-        self.assertEqual(select_pod_ip(mixed_ips), "10.244.0.42")
+        self.assertEqual(select_pod_ip(mixed_ips), "10.244.0.42")  # type: ignore[arg-type]
 
 
 if __name__ == '__main__':

@@ -29,7 +29,7 @@ The router is a Python application built with FastAPI and Uvicorn.
 
 ### Prerequisites
 
-- Python 3.13+
+- Python 3.14+
 - Docker
 
 ### Build Steps
@@ -105,6 +105,14 @@ This file contains unit tests for the Sandbox Router. The tests use `pytest` wit
       `X-Sandbox-Port` headers using internal Kubernetes DNS
       (`<id>.<namespace>.svc.cluster.local:<port>`).
     * The original `Host` header is not forwarded to the sandbox.
+    * A backend `101 Switching Protocols` response on the HTTP proxy path returns `502 Bad Gateway`
+      with a message indicating WebSocket connections must use the WebSocket protocol (uvicorn/h11
+      cannot emit 101 through a plain HTTP response).
+
+* **`TestWebSocketProxyValidation`**: Validates routing headers on the WebSocket proxy path.
+    * Missing `X-Sandbox-ID` closes the connection with WebSocket status `1008` and an explanatory
+      reason.
+    * Invalid `X-Sandbox-Namespace` format closes the connection with status `1008`.
 
 #### Prerequisites
 

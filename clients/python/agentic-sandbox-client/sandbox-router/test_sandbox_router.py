@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import importlib
 import os
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 os.environ["ALLOW_UNAUTHENTICATED_ROUTER"] = "true"
 import sandbox_router
@@ -599,6 +603,50 @@ class TestProxyRouting:
             )
             assert "authorization" not in captured_request.get("headers", {})
 
+    def test_connection_nominated_headers_not_forwarded(self, client):
+        """Headers named by Connection must not be forwarded to the sandbox."""
+        captured_request = {}
+
+        async def capture_send(req, **kwargs):
+            captured_request["headers"] = dict(req.headers)
+            raise httpx.ConnectError("stop here")
+
+        with patch.object(sandbox_router.client, "send", side_effect=capture_send):
+            client.post(
+                "/execute",
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "Connection": "close, X-Custom-Hop",
+                    "X-Custom-Hop": "should-not-forward",
+                    "X-App-Header": "keep-me",
+                },
+            )
+            forwarded = {
+                key.lower(): value
+                for key, value in captured_request.get("headers", {}).items()
+            }
+            assert "x-custom-hop" not in forwarded
+            assert forwarded.get("x-app-header") == "keep-me"
+
+    def test_proxy_headers_strip_connection_nominated_headers(self):
+        forwarded = sandbox_router._proxy_headers({
+            "connection": "close, X-Custom-Hop",
+            "X-Custom-Hop": "secret",
+            "X-Forwarded-For": "203.0.113.10",
+        })
+        lowered = {key.lower() for key in forwarded}
+        assert "x-custom-hop" not in lowered
+        assert "connection" not in lowered
+        assert forwarded.get("X-Forwarded-For") == "203.0.113.10"
+
+    def test_response_headers_strip_connection_nominated_headers(self):
+        forwarded = sandbox_router._response_headers({
+            "connection": "Foo",
+            "Foo": "bar",
+            "Content-Type": "application/json",
+        })
+        assert forwarded == {"Content-Type": "application/json"}
+
     def test_query_parameters_forwarded(self, client):
         """Query parameters should be preserved in the proxied request."""
         captured_request = {}
@@ -645,6 +693,179 @@ class TestProxyRouting:
         assert hasattr(
             sent_request.stream, "__aiter__"
         ), "Content should be an async iterable"
+
+    def test_websocket_upgrade_over_http_returns_502(self, client):
+        """101 Switching Protocols cannot be forwarded over plain HTTP."""
+        mock_resp = AsyncMock(spec=httpx.Response)
+        mock_resp.status_code = 101
+        mock_resp.headers = {}
+        mock_resp.aclose = AsyncMock()
+
+        with patch.object(
+            sandbox_router.client,
+            "send",
+            new_callable=AsyncMock,
+            return_value=mock_resp,
+        ):
+            resp = client.get(
+                "/kernels",
+                headers={"X-Sandbox-ID": "my-sandbox"},
+            )
+
+        assert resp.status_code == 502
+        assert "WebSocket" in resp.json()["detail"]
+        mock_resp.aclose.assert_awaited_once()
+
+
+class TestWebSocketProxyValidation:
+    def test_missing_sandbox_id_header(self, client):
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/kernels"):
+                pass
+        assert exc_info.value.code == 1008
+        assert exc_info.value.reason == "X-Sandbox-ID header is required."
+
+    def test_invalid_namespace_format(self, client):
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                "/kernels",
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "X-Sandbox-Namespace": "bad namespace!",
+                },
+            ):
+                pass
+        assert exc_info.value.code == 1008
+        assert exc_info.value.reason == "Invalid namespace format."
+
+    def test_missing_auth_token(self):
+        with patch.dict(os.environ, {"ROUTER_AUTH_TOKEN": "secret-token"}, clear=True):
+            importlib.reload(sandbox_router)
+            client = TestClient(sandbox_router.app)
+
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                with client.websocket_connect(
+                    "/kernels",
+                    headers={"X-Sandbox-ID": "my-sandbox"},
+                ):
+                    pass
+            assert exc_info.value.code == 1008
+            assert exc_info.value.reason == "Missing or invalid Authorization header."
+
+    def test_invalid_auth_token(self):
+        with patch.dict(os.environ, {"ROUTER_AUTH_TOKEN": "secret-token"}, clear=True):
+            importlib.reload(sandbox_router)
+            client = TestClient(sandbox_router.app)
+
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                with client.websocket_connect(
+                    "/kernels",
+                    headers={
+                        "X-Sandbox-ID": "my-sandbox",
+                        "Authorization": "Bearer wrong-token",
+                    },
+                ):
+                    pass
+            assert exc_info.value.code == 1008
+            assert exc_info.value.reason == "Invalid token."
+
+    def test_backend_websocket_connect_uses_unlimited_max_frame_size(self):
+        captured_kwargs: dict = {}
+
+        @asynccontextmanager
+        async def capture_connect(*_args, **kwargs):
+            captured_kwargs.update(kwargs)
+            yield SimpleNamespace(subprotocol=None)
+
+        with patch.dict(
+            os.environ,
+            {"ALLOW_UNAUTHENTICATED_ROUTER": "true"},
+            clear=True,
+        ):
+            importlib.reload(sandbox_router)
+            client = TestClient(sandbox_router.app)
+            with patch("sandbox_router.websockets.connect", side_effect=capture_connect):
+                with client.websocket_connect(
+                    "/kernels",
+                    headers={"X-Sandbox-ID": "my-sandbox"},
+                ):
+                    pass
+            assert captured_kwargs.get("max_size") is None
+
+
+class _MockBackendWebSocket:
+    """Minimal async-iterable stand-in for a backend websockets connection."""
+
+    def __init__(self, messages=None) -> None:
+        self.subprotocol = None
+        self._messages = list(messages or [])
+        self._index = 0
+        self.close_code = None
+        self.close_reason = None
+        self.closed_with: tuple[int, str] | None = None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._index < len(self._messages):
+            message = self._messages[self._index]
+            self._index += 1
+            return message
+        await asyncio.sleep(3600)
+        raise StopAsyncIteration
+
+    async def send(self, _message) -> None:
+        return None
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed_with = (code, reason)
+
+
+class TestWebSocketRelayClose:
+    def test_backend_close_code_propagates_to_client(self):
+        from websockets.exceptions import ConnectionClosed
+        from websockets.frames import Close
+
+        class ClosingBackendWebSocket(_MockBackendWebSocket):
+            async def __anext__(self):
+                self.close_code = 1011
+                self.close_reason = "kernel restart"
+                raise ConnectionClosed(Close(1011, "kernel restart"), None)
+
+        client_ws = AsyncMock()
+
+        async def hang_on_receive() -> None:
+            await asyncio.Event().wait()
+
+        client_ws.receive = hang_on_receive
+        backend_ws = ClosingBackendWebSocket()
+
+        async def run_relay() -> None:
+            await sandbox_router._relay_websocket(client_ws, backend_ws)
+
+        asyncio.run(run_relay())
+        client_ws.close.assert_awaited_once_with(
+            code=1011,
+            reason="kernel restart",
+        )
+
+    def test_client_close_code_propagates_to_backend(self):
+        client_ws = AsyncMock()
+        client_ws.receive = AsyncMock(
+            return_value={
+                "type": "websocket.disconnect",
+                "code": 4001,
+                "reason": "auth failed",
+            },
+        )
+        backend_ws = _MockBackendWebSocket()
+
+        async def run_relay() -> None:
+            await sandbox_router._relay_websocket(client_ws, backend_ws)
+
+        asyncio.run(run_relay())
+        assert backend_ws.closed_with == (4001, "auth failed")
 
 
 class TestMaxKeepaliveConnections:

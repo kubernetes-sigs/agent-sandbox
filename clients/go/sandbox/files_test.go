@@ -473,6 +473,10 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 	}
 
 	mu.Lock()
+	if headers == nil {
+		mu.Unlock()
+		t.Fatal("HTTP handler was never invoked (headers is nil)")
+	}
 	capturedHeaders := headers.Clone()
 	mu.Unlock()
 
@@ -515,6 +519,10 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 	}
 
 	mu.Lock()
+	if headers == nil {
+		mu.Unlock()
+		t.Fatal("HTTP handler was never invoked (headers is nil)")
+	}
 	capturedHeaders := headers.Clone()
 	mu.Unlock()
 
@@ -1596,6 +1604,10 @@ func TestHTTPHeaders_DisablePodIPRouting(t *testing.T) {
 	}
 
 	mu.Lock()
+	if headers == nil {
+		mu.Unlock()
+		t.Fatal("HTTP handler was never invoked (headers is nil)")
+	}
 	capturedHeaders := headers.Clone()
 	mu.Unlock()
 

@@ -450,6 +450,15 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
+var (
+	// systemLabelExceptions is a list of system-reserved labels that are allowed
+	// to be set on the Pod.
+	systemLabelExceptions = map[string]struct{}{
+		// Required for the capacity buffer to identify warmpool pods.
+		"agents.x-k8s.io/warm-pool-sandbox": {},
+	}
+)
+
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix
 // reserved for the sandbox system or its extensions.
 func hasSystemReservedPrefix(key string) bool {
@@ -462,6 +471,9 @@ func hasSystemReservedPrefix(key string) bool {
 // tenant could override security-critical labels (e.g. the headless Service selector
 // label) and hijack another Sandbox's network traffic.
 func isSystemLabel(key string) bool {
+	if _, ok := systemLabelExceptions[key]; ok {
+		return false
+	}
 	return hasSystemReservedPrefix(key)
 }
 

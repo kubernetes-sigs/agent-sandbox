@@ -127,6 +127,7 @@ type PersistentVolumeClaimTemplate struct {
 }
 
 // SandboxSpec defines the desired state of Sandbox.
+// +kubebuilder:validation:XValidation:rule="has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates) && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates == oldSelf.volumeClaimTemplates)",message="volumeClaimTemplates is immutable"
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
@@ -137,6 +138,7 @@ type SandboxSpec struct {
 
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// This field is immutable after creation.
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`

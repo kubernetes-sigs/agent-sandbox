@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"net"
 	"strings"
 	"time"
 
@@ -429,29 +428,6 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 	}
 	state.PodIP = selectPodIP(sb.Status.PodIPs)
 	return state
-}
-
-// selectPodIP scans the list of IP addresses, validates them, and returns
-// the prioritized IP address (preferring IPv4 over IPv6).
-// In dual-stack environments, we explicitly prefer IPv4 over IPv6 for the
-// X-Sandbox-Pod-IP header. This is a Go-specific optimization/precedence rule that
-// ensures maximum compatibility with the downstream router's routing handler.
-// If no IPv4 is found, it falls back to the first syntactically valid IP.
-func selectPodIP(ips []string) string {
-	var firstValid string
-	for _, ip := range ips {
-		ip = strings.TrimSpace(ip)
-		parsed := net.ParseIP(ip)
-		if parsed != nil {
-			if firstValid == "" {
-				firstValid = ip
-			}
-			if parsed.To4() != nil {
-				return ip // IPv4 has highest precedence; stop scanning.
-			}
-		}
-	}
-	return firstValid
 }
 
 func formatConditions(conditions []metav1.Condition) string {

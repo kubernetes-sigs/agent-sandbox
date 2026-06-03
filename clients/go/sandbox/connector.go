@@ -61,6 +61,7 @@ type connector struct {
 	namespace  string
 	serverPort int
 	baseURL    string
+	podIP      string
 	lastError  error
 
 	requestTimeout    time.Duration
@@ -125,6 +126,21 @@ func (c *connector) SetIdentity(sandboxName string) {
 	c.sandboxID = sandboxName
 }
 
+// SetPodIP sets the sandbox pod's IP address to be sent as X-Sandbox-Pod-IP.
+// The input is sanitized and validated to prevent net/http header injection errors.
+func (c *connector) SetPodIP(ip string) {
+	validIP := selectPodIP([]string{ip})
+	shouldLog := (validIP == "" && strings.TrimSpace(ip) != "")
+
+	c.mu.Lock()
+	c.podIP = validIP
+	c.mu.Unlock()
+
+	if shouldLog {
+		c.log.V(1).Info("skipping invalid pod IP address", "ip", ip)
+	}
+}
+
 // Connect delegates to the strategy to discover and set the base URL.
 func (c *connector) Connect(ctx context.Context) error {
 	url, err := c.strategy.Connect(ctx)
@@ -153,6 +169,7 @@ func (c *connector) Close() error {
 	c.baseURL = ""
 	c.lastError = nil
 	c.sandboxID = ""
+	c.podIP = ""
 	c.mu.Unlock()
 	err := c.strategy.Close()
 	if c.ownsTransport {
@@ -236,6 +253,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		sandboxID := c.sandboxID
 		namespace := c.namespace
 		port := c.serverPort
+		podIP := c.podIP
 		c.mu.Unlock()
 
 		var bodyReader io.Reader
@@ -266,6 +284,9 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		req.Header.Set(headerSandboxNamespace, namespace)
 		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
 		req.Header.Set(headerRequestID, reqID)
+		if podIP != "" {
+			req.Header.Set(headerSandboxPodIP, podIP)
+		}
 		if contentType != "" {
 			req.Header.Set("Content-Type", contentType)
 		}

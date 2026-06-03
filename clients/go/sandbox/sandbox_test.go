@@ -3036,8 +3036,11 @@ func TestConnector_SetPodIP(t *testing.T) {
 				log: logr.Discard(),
 			}
 			c.SetPodIP(tc.inputIP)
-			if c.podIP != tc.expected {
-				t.Errorf("expected podIP %q, got %q", tc.expected, c.podIP)
+			c.mu.Lock()
+			gotPodIP := c.podIP
+			c.mu.Unlock()
+			if gotPodIP != tc.expected {
+				t.Errorf("expected podIP %q, got %q", tc.expected, gotPodIP)
 			}
 		})
 	}

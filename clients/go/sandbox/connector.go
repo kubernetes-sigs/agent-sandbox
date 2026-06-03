@@ -129,13 +129,16 @@ func (c *connector) SetIdentity(sandboxName string) {
 // SetPodIP sets the sandbox pod's IP address to be sent as X-Sandbox-Pod-IP.
 // The input is sanitized and validated to prevent net/http header injection errors.
 func (c *connector) SetPodIP(ip string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	validIP := selectPodIP([]string{ip})
-	if validIP == "" && strings.TrimSpace(ip) != "" {
+	shouldLog := (validIP == "" && strings.TrimSpace(ip) != "")
+
+	c.mu.Lock()
+	c.podIP = validIP
+	c.mu.Unlock()
+
+	if shouldLog {
 		c.log.V(1).Info("skipping invalid pod IP address", "ip", ip)
 	}
-	c.podIP = validIP
 }
 
 // Connect delegates to the strategy to discover and set the base URL.

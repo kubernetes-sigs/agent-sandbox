@@ -16,6 +16,7 @@
 
 import ipaddress
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
@@ -48,11 +49,16 @@ def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[
     }
 
 
-def select_pod_ip(ips: list[str] | None) -> str | None:
+def select_pod_ip(ips: list[Any] | None) -> str | None:
     """Selects a prioritized and normalized Pod IP address from a list of IPs.
 
-    Scans the list of IP addresses, validates them, and returns the
+    Scans the list of IP entries, validates them, and returns the
     normalized/canonical IP address string (preferring IPv4 over IPv6).
+
+    The elements in the input list can be:
+    - String representation of IP addresses (e.g. "10.0.0.1").
+    - Dictionaries containing an "ip" key (e.g. {"ip": "10.0.0.1"}).
+    - Objects containing an "ip" attribute.
 
     In dual-stack environments, we explicitly prefer IPv4 over IPv6.
     If no IPv4 is found, it falls back to the first syntactically valid IP.

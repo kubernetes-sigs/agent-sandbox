@@ -3068,3 +3068,49 @@ func TestExtractState_PodIPs(t *testing.T) {
 		})
 	}
 }
+
+func TestConnector_SetPodIP(t *testing.T) {
+	cases := []struct {
+		name     string
+		inputIP  string
+		expected string
+	}{
+		{
+			name:     "valid IPv4",
+			inputIP:  "192.168.1.1",
+			expected: "192.168.1.1",
+		},
+		{
+			name:     "valid IPv6",
+			inputIP:  "2001:db8::1",
+			expected: "2001:db8::1",
+		},
+		{
+			name:     "valid IPv4 with whitespace",
+			inputIP:  "  10.0.0.1  ",
+			expected: "10.0.0.1",
+		},
+		{
+			name:     "invalid IP",
+			inputIP:  "invalid-ip",
+			expected: "",
+		},
+		{
+			name:     "empty IP",
+			inputIP:  "",
+			expected: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &connector{
+				log: logr.Discard(),
+			}
+			c.SetPodIP(tc.inputIP)
+			if c.podIP != tc.expected {
+				t.Errorf("expected podIP %q, got %q", tc.expected, c.podIP)
+			}
+		})
+	}
+}

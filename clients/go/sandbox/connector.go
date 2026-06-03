@@ -131,17 +131,11 @@ func (c *connector) SetIdentity(sandboxName string) {
 func (c *connector) SetPodIP(ip string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ip = strings.TrimSpace(ip)
-	if ip == "" {
-		c.podIP = ""
-		return
-	}
-	if net.ParseIP(ip) == nil {
+	validIP := selectPodIP([]string{ip})
+	if validIP == "" && strings.TrimSpace(ip) != "" {
 		c.log.V(1).Info("skipping invalid pod IP address", "ip", ip)
-		c.podIP = ""
-		return
 	}
-	c.podIP = ip
+	c.podIP = validIP
 }
 
 // Connect delegates to the strategy to discover and set the base URL.

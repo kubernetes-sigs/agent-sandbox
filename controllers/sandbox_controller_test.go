@@ -1346,7 +1346,7 @@ func TestReconcilePod(t *testing.T) {
 				Spec: sandboxv1beta1.SandboxSpec{
 					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 						ObjectMeta: sandboxv1beta1.PodMetadata{
 							Labels: map[string]string{
 								"custom-label":                      "label-val",

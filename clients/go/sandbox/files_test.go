@@ -37,8 +37,6 @@ import (
 
 // newReadyTestSandboxWithDirectURL creates a Sandbox with the given options,
 // using DirectStrategy with the mock serverURL (assigned to opts.APIURL).
-// It fills in required defaults (such as WarmPoolName, Namespace, ServerPort,
-// and timeouts) if they are left empty.
 // It also simulates a successful connection.
 func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 	if opts.WarmPoolName == "" {
@@ -47,12 +45,7 @@ func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 	if opts.Namespace == "" {
 		opts.Namespace = "default"
 	}
-	if opts.APIURL == "" {
-		opts.APIURL = serverURL
-	}
-	if opts.ServerPort == 0 {
-		opts.ServerPort = 8888
-	}
+	opts.APIURL = serverURL
 	if opts.RequestTimeout == 0 {
 		opts.RequestTimeout = 5 * time.Second
 	}
@@ -62,14 +55,15 @@ func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 	if opts.Logger.GetSink() == nil {
 		opts.Quiet = true
 	}
-	opts.setDefaults()
 
-	k8s := &K8sHelper{Log: opts.Logger}
+	k8s := &K8sHelper{}
 	opts.K8sHelper = k8s
 	sb, err := New(context.Background(), opts)
 	if err != nil {
 		panic("newReadyTestSandboxWithDirectURL: " + err.Error())
 	}
+	k8s.Log = sb.opts.Logger
+
 	// Simulate being connected
 	sb.connector.mu.Lock()
 	sb.connector.baseURL = serverURL

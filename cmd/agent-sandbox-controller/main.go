@@ -75,7 +75,7 @@ func main() {
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&watchNamespace, "namespace", "",
-		"Namespace to watch. If set, the controller only reconciles resources in this namespace. Empty means all namespaces.")
+		"Namespace(s) to watch. Comma-separated for multiple. Falls back to WATCH_NAMESPACE env var. Empty means all namespaces.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
@@ -108,9 +108,7 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	if watchNamespace == "" {
-		watchNamespace = os.Getenv("WATCH_NAMESPACE")
-	}
+	watchNamespaces := parseWatchNamespaces(watchNamespace)
 
 	if printVersion {
 		fmt.Println(version.Print("agent-sandbox-controller"))
@@ -236,15 +234,18 @@ func main() {
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
 	}
-	if watchNamespace != "" {
-		watchNamespace = strings.TrimSpace(watchNamespace)
+	if len(watchNamespaces) > 0 {
+		defaultNamespaces := make(map[string]cache.Config, len(watchNamespaces))
+		for _, ns := range watchNamespaces {
+			defaultNamespaces[ns] = cache.Config{}
+		}
 		mgrOpts.Cache = cache.Options{
-			DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
+			DefaultNamespaces: defaultNamespaces,
 		}
-		if enableLeaderElection && leaderElectionNamespace == "" {
-			mgrOpts.LeaderElectionNamespace = watchNamespace
+		if enableLeaderElection && leaderElectionNamespace == "" && len(watchNamespaces) == 1 {
+			mgrOpts.LeaderElectionNamespace = watchNamespaces[0]
 		}
-		setupLog.Info("running in namespaced mode", "namespace", watchNamespace)
+		setupLog.Info("running in namespaced mode", "namespaces", watchNamespaces)
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOpts)
@@ -337,4 +338,24 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// parseWatchNamespaces returns the list of namespaces to watch, following the
+// Operator SDK convention: flag value takes precedence, then WATCH_NAMESPACE env var,
+// empty means cluster-scoped. Accepts comma-separated values for multi-namespace mode.
+func parseWatchNamespaces(flagValue string) []string {
+	v := flagValue
+	if v == "" {
+		v = os.Getenv("WATCH_NAMESPACE")
+	}
+	if v == "" {
+		return nil
+	}
+	var result []string
+	for _, ns := range strings.Split(v, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			result = append(result, ns)
+		}
+	}
+	return result
 }

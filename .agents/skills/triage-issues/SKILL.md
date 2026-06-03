@@ -34,14 +34,14 @@ Assign each open issue a tier using, in order:
 3. **Bug severity** — data-integrity / duplicate-resource / resource-leak bugs in the core controller → **P0/P1**. Self-labeled "Critical" → P0.
 4. **Value props** — latency / performance / scale bottlenecks skew **P1** (called out as a primary value proposition).
 5. **Security** — security/dependency issues → **P1** (tied to "Security Fixes" roadmap item).
-6. **Low-signal** — empty bodies, one-line questions, "collecting use cases", pinned/frozen community threads, items marked `triage/not-reproducible`/`needs-information` → **P4**. Nice-to-have features, refactors, cleanups, test scaffolding → **P3**.
+6. **Low-signal** — empty bodies, one-line questions, "collecting use cases", pinned/frozen community threads, items marked `triage/not-reproducible`/`triage/needs-information` → **P4**. Nice-to-have features, refactors, cleanups, test scaffolding → **P3**.
 
 ## Procedure
 
 1. **Verify access**: `gh auth status`; confirm repo `kubernetes-sigs/agent-sandbox`.
 2. **Read the roadmap**: read `roadmap.md`; extract themes, item statuses, and any cited issue numbers.
 3. **Fetch open issues**:
-   `gh issue list --repo kubernetes-sigs/agent-sandbox --state open --limit 200 --json number,title,labels,assignees,createdAt,updatedAt,body`
+   `gh issue list --repo kubernetes-sigs/agent-sandbox --state open --limit 200 --json number,title,labels,assignees,createdAt,updatedAt,body,url`
 4. **Discover board metadata** (IDs change per board, always re-fetch):
    - Project + Priority field/options: `gh project field-list 120 --owner kubernetes-sigs --format json` → grab the `Priority` field id and the P0–P4 option ids; project id via `gh project view 120 --owner kubernetes-sigs --format json`.
    - Item ids: `gh project item-list 120 --owner kubernetes-sigs --limit 400 --format json` → map issue number → project item id. Add any open issue not yet on the board with `gh project item-add 120 --owner kubernetes-sigs --url <issue-url>`.

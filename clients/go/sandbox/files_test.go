@@ -55,9 +55,7 @@ func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 	if opts.PerAttemptTimeout == 0 {
 		opts.PerAttemptTimeout = 2 * time.Second
 	}
-	if opts.Logger.GetSink() == nil {
-		opts.Quiet = true
-	}
+
 
 	k8s := &K8sHelper{}
 	opts.K8sHelper = k8s
@@ -81,7 +79,7 @@ func newReadyTestSandboxWithDirectURL(serverURL string, opts Options) *Sandbox {
 
 // newReadyTestSandbox creates a Sandbox that's already "connected" to the given server URL.
 func newReadyTestSandbox(serverURL string) *Sandbox {
-	return newReadyTestSandboxWithDirectURL(serverURL, Options{})
+	return newReadyTestSandboxWithDirectURL(serverURL, Options{Quiet: true})
 }
 
 // newUnreadyTestSandbox returns a Sandbox that has not been opened.
@@ -459,6 +457,7 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 	opts := Options{
 		Namespace:  "my-ns",
 		ServerPort: 9999,
+		Quiet:      true,
 	}
 	c := newReadyTestSandboxWithDirectURL(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
@@ -505,6 +504,7 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 	opts := Options{
 		Namespace:  "my-ns",
 		ServerPort: 9999,
+		Quiet:      true,
 	}
 	c := newReadyTestSandboxWithDirectURL(server.URL, opts)
 	c.connector.SetIdentity("my-claim")
@@ -1590,6 +1590,7 @@ func TestHTTPHeaders_DisablePodIPRouting(t *testing.T) {
 		DisablePodIPRouting: true,
 		Namespace:           "my-ns",
 		ServerPort:          9999,
+		Quiet:               true,
 	}
 	c := newReadyTestSandboxWithDirectURL(server.URL, opts)
 	c.connector.SetIdentity("my-claim")

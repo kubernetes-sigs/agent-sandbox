@@ -261,7 +261,6 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		namespace := c.namespace
 		port := c.serverPort
 		podIP := c.podIP
-		disableRouting := c.disablePodIPRouting
 		c.mu.Unlock()
 
 		var bodyReader io.Reader
@@ -292,7 +291,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		req.Header.Set(headerSandboxNamespace, namespace)
 		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
 		req.Header.Set(headerRequestID, reqID)
-		if podIP != "" && !disableRouting {
+		if podIP != "" && !c.disablePodIPRouting {
 			req.Header.Set(headerSandboxPodIP, podIP)
 		}
 		if contentType != "" {

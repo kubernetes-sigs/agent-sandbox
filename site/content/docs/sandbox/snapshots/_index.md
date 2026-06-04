@@ -30,7 +30,7 @@ Unlike automatic pausing, snapshots give you granular control over when state is
 
 The following example demonstrates creating a sandbox, modifying its filesystem, taking a snapshot, and suspending/resuming it to restore the state.
 
-> Note: this example uses `simple-sandbox-pool`, which you should create in your GKE cluster first (along with its backing `simple-sandbox-template`). The associated resources can be found [here](https://github.com/volatilemolotov/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source).
+> Note: this example uses `simple-sandbox-pool`, which you should create in your GKE cluster first (along with its backing `simple-sandbox-template`). See the [snapshots example source folder](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source) for the matching `SandboxTemplate` manifest.
 
 > [!NOTE]
 > A sandbox can only be restored from its own previous snapshots (via the `suspend()` and `resume()` lifecycle).

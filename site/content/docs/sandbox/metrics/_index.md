@@ -15,7 +15,7 @@ Using OpenTelemetry's auto-instrumentation tools, you can surface rich metric an
 
 - A running Kubernetes cluster with the [Agent Sandbox controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
-- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
+- A `SandboxWarmPool` named `simple-sandbox-pool` (backed by a `SandboxTemplate` named `simple-sandbox-template`) applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for the template setup, then create a matching `SandboxWarmPool` whose `spec.sandboxTemplateRef.name` is `simple-sandbox-template`.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed with tracing extras and the OpenTelemetry CLI tools: `pip install "k8s-agent-sandbox[tracing]" opentelemetry-distro`.
   > **Note:** The `[tracing]` extra automatically bundles the core `opentelemetry-api` and `opentelemetry-sdk` dependencies needed by the client. For a full list of available extras, see the [SDK dependencies documentation]({{< ref "/docs/python-client#dependencies" >}}).
 

@@ -450,15 +450,6 @@ func NameHash(objectName string) string {
 	return fmt.Sprintf("%08x", GetNumericHash(objectName))
 }
 
-var (
-	// systemLabelExceptions is a list of system-reserved labels that are allowed
-	// to be set on the Pod.
-	systemLabelExceptions = map[string]struct{}{
-		// Required for the capacity buffer to identify warmpool pods.
-		"agents.x-k8s.io/warm-pool-sandbox": {},
-	}
-)
-
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix
 // reserved for the sandbox system or its extensions.
 func hasSystemReservedPrefix(key string) bool {
@@ -471,9 +462,6 @@ func hasSystemReservedPrefix(key string) bool {
 // tenant could override security-critical labels (e.g. the headless Service selector
 // label) and hijack another Sandbox's network traffic.
 func isSystemLabel(key string) bool {
-	if _, ok := systemLabelExceptions[key]; ok {
-		return false
-	}
 	return hasSystemReservedPrefix(key)
 }
 
@@ -855,6 +843,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// Assign system-owned labels after merging user input so they cannot be overridden.
 	podLabels[sandboxLabel] = nameHash
 
+	// Propagate the warm pool label directly from the Sandbox CR labels to the Pod,
+	// provided the Sandbox is actually owned by a Warm Pool.
+	// The warm pool label is required by the capacity buffer to identify the warm pool pods.
+	if ref := metav1.GetControllerOf(sandbox); ref != nil && ref.Kind == "SandboxWarmPool" {
+		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
+			podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+		}
+	}
+
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
@@ -941,6 +938,23 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	if pod.Labels[sandboxLabel] != nameHash {
 		pod.Labels[sandboxLabel] = nameHash
 		updated = true
+	}
+	// Ensure the warm pool label is present if the sandbox is owned by a SandboxWarmPool.
+	var expectedWarmPoolHash string
+	if ref := metav1.GetControllerOf(sandbox); ref != nil && ref.Kind == "SandboxWarmPool" {
+		expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+	}
+	if expectedWarmPoolHash != "" {
+		if pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] != expectedWarmPoolHash {
+			pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] = expectedWarmPoolHash
+			updated = true
+		}
+	} else {
+		// If the Sandbox is no longer owned by a SandboxWarmPool, remove the warm pool label.
+		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
+			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
+			updated = true
+		}
 	}
 	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption),
 	// skipping system-reserved keys so a user-supplied template cannot override them.

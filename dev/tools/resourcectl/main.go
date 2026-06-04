@@ -324,7 +324,7 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 			if killErr := syscall.Kill(pgid, syscall.SIGTERM); killErr != nil {
 				log.Error(killErr, "failed to send SIGTERM to heartbeat process group", "pgid", pgid)
 			}
-			
+
 			done := make(chan error, 1)
 			go func() {
 				done <- cmd.Wait()

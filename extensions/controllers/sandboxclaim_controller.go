@@ -1668,8 +1668,11 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	}
 
 	controllerRef := metav1.GetControllerOf(candidate)
-	if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
-		return fmt.Errorf("sandbox is not managed by warm pool. Controller: %v", controllerRef)
+	if controllerRef == nil {
+		return fmt.Errorf("sandbox %s/%s is unowned and cannot be safely adopted", candidate.Namespace, candidate.Name)
+	}
+	if controllerRef.APIVersion != extensionsv1beta1.GroupVersion.String() || controllerRef.Kind != "SandboxWarmPool" {
+		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil
 }

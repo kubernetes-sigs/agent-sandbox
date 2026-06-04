@@ -2056,6 +2056,20 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectNewSandboxCreated: false,
 		},
+		{
+			name: "rejects unowned sandboxes with mock labels",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("unowned-sb", metav1.Now(), true)
+					sb.OwnerReferences = nil
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -3249,8 +3263,10 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				warmPoolSandboxLabel:   "pool-hash-123",
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				Kind: "SandboxWarmPool",
-				Name: "test-warmpool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       "test-warmpool",
+				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
 	}
@@ -3265,8 +3281,10 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				warmPoolSandboxLabel:   "pool-hash-123",
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				Kind: "SandboxWarmPool",
-				Name: "test-warmpool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       "test-warmpool",
+				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
 	}
@@ -3809,4 +3827,60 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 
 	require.NotContains(t, updatedClaim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
 	require.Equal(t, "adopted-sb-legacy", updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+}
+
+func TestIsAdoptable_RejectsUnowned(t *testing.T) {
+	// 1. Create a warm pool template hash
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	templateHash := sandboxcontrollers.NameHash("test-template")
+
+	// 2. Mock an unowned Sandbox (no OwnerReferences)
+	unownedSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "unowned-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: templateHash,
+			},
+		},
+	}
+
+	// 3. Verify it is rejected
+	err := isAdoptable(unownedSandbox)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unowned")
+
+	// 4. Mock an owned Sandbox (pointing to SandboxWarmPool)
+	ownedSandbox := unownedSandbox.DeepCopy()
+	ownedSandbox.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+			Kind:       "SandboxWarmPool",
+			Name:       "test-pool",
+			UID:        "pool-uid-123",
+			Controller: ptr.To(true), // nolint:modernize
+		},
+	}
+
+	// 5. Verify it is accepted
+	err = isAdoptable(ownedSandbox)
+	require.NoError(t, err)
+
+	// 6. Mock an owned Sandbox pointing to a different kind (e.g. SandboxClaim, which is NOT WarmPool)
+	ownedByClaimSandbox := unownedSandbox.DeepCopy()
+	ownedByClaimSandbox.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+			Kind:       "SandboxClaim",
+			Name:       "test-claim",
+			UID:        "claim-uid-123",
+			Controller: ptr.To(true), // nolint:modernize
+		},
+	}
+
+	// 7. Verify it is rejected
+	err = isAdoptable(ownedByClaimSandbox)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not managed by warm pool")
 }

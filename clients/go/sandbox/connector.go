@@ -59,13 +59,13 @@ type connector struct {
 	strategy   ConnectionStrategy
 	httpClient *http.Client
 
-	sandboxID    string // sandbox name, used as X-Sandbox-ID header
-	namespace    string
-	serverPort   int
-	baseURL      string
-	podIP        string
-	disablePodIP bool
-	lastError    error
+	sandboxID           string // sandbox name, used as X-Sandbox-ID header
+	namespace           string
+	serverPort          int
+	baseURL             string
+	podIP               string
+	disablePodIPRouting bool
+	lastError           error
 
 	// routerHeaders controls whether X-Sandbox-* routing headers are sent.
 	// True for router-based transports (legacy runtime); false for the
@@ -118,14 +118,14 @@ func newConnector(cfg connectorConfig) *connector {
 		}
 	}
 	return &connector{
-		strategy:          cfg.Strategy,
-		namespace:         cfg.Namespace,
-		serverPort:        cfg.ServerPort,
-		routerHeaders:     cfg.RouterHeaders,
-		requestTimeout:    cfg.RequestTimeout,
-		perAttemptTimeout: cfg.PerAttemptTimeout,
-		disablePodIP:      cfg.DisablePodIPRouting,
-		ownsTransport:     cfg.HTTPTransport == nil,
+		strategy:            cfg.Strategy,
+		namespace:           cfg.Namespace,
+		serverPort:          cfg.ServerPort,
+		routerHeaders:       cfg.RouterHeaders,
+		requestTimeout:      cfg.RequestTimeout,
+		perAttemptTimeout:   cfg.PerAttemptTimeout,
+		disablePodIPRouting: cfg.DisablePodIPRouting,
+		ownsTransport:       cfg.HTTPTransport == nil,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -366,7 +366,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 					req.Header.Set(headerSandboxTimeout, strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64))
 				}
 			}
-			if podIP != "" && !c.disablePodIP {
+			if podIP != "" && !c.disablePodIPRouting {
 				req.Header.Set(headerSandboxPodIP, podIP)
 			}
 		}

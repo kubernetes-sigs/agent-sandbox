@@ -200,25 +200,32 @@ def apply_license_header(file_path, header_text, dry_run=False):
 
 
 def _match_path_parts(path_parts, pattern_parts):
-    """Recursively matches path components against pattern components."""
+    """Iteratively matches path components against pattern components."""
     if not pattern_parts:
         return not path_parts
-    if not path_parts:
-        return pattern_parts == ['**'] or all(p == '' for p in pattern_parts)
 
-    p_part = pattern_parts[0]
-    if p_part == '**':
-        if len(pattern_parts) == 1:
-            return True  # `/**` at the end matches everything remaining
-        # `/**/` can match zero or more directories.
-        for i in range(len(path_parts) + 1):
-            if _match_path_parts(path_parts[i:], pattern_parts[1:]):
-                return True
-        return False
-    else:
-        if fnmatch.fnmatch(path_parts[0], p_part):
-            return _match_path_parts(path_parts[1:], pattern_parts[1:])
-        return False
+    n = len(path_parts)
+    m = len(pattern_parts)
+
+    dp = [[False] * (m + 1) for _ in range(n + 1)]
+    dp[0][0] = True
+
+    for j in range(1, m + 1):
+        if pattern_parts[j-1] == '**':
+            dp[0][j] = dp[0][j-1]
+        elif pattern_parts[j-1] == '':
+            dp[0][j] = dp[0][j-1]
+        else:
+            break
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if pattern_parts[j-1] == '**':
+                dp[i][j] = dp[i-1][j] or dp[i][j-1]
+            else:
+                dp[i][j] = dp[i-1][j-1] and fnmatch.fnmatch(path_parts[i-1], pattern_parts[j-1])
+
+    return dp[n][m]
 
 def is_path_excluded(relative_path, exclude_patterns):
     """Checks if a relative path matches any of the .gitignore-style exclude patterns."""

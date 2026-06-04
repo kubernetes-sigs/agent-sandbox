@@ -939,23 +939,6 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		pod.Labels[sandboxLabel] = nameHash
 		updated = true
 	}
-	// Ensure the warm pool label is present if the sandbox is owned by a SandboxWarmPool.
-	var expectedWarmPoolHash string
-	if ref := metav1.GetControllerOf(sandbox); ref != nil && ref.Kind == "SandboxWarmPool" {
-		expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
-	}
-	if expectedWarmPoolHash != "" {
-		if pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] != expectedWarmPoolHash {
-			pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] = expectedWarmPoolHash
-			updated = true
-		}
-	} else {
-		// If the Sandbox is no longer owned by a SandboxWarmPool, remove the warm pool label.
-		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
-			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
-			updated = true
-		}
-	}
 	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption),
 	// skipping system-reserved keys so a user-supplied template cannot override them.
 	var managedLabelKeys []string
@@ -995,6 +978,23 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 				delete(pod.Labels, k)
 				updated = true
 			}
+		}
+	}
+	// Ensure the warm pool label is present if the sandbox is owned by a SandboxWarmPool.
+	var expectedWarmPoolHash string
+	if ref := metav1.GetControllerOf(sandbox); ref != nil && ref.Kind == "SandboxWarmPool" {
+		expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+	}
+	if expectedWarmPoolHash != "" {
+		if pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] != expectedWarmPoolHash {
+			pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] = expectedWarmPoolHash
+			updated = true
+		}
+	} else {
+		// If the Sandbox is no longer owned by a SandboxWarmPool, remove the warm pool label.
+		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
+			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
+			updated = true
 		}
 	}
 	// Propagate pod template annotations to the existing pod

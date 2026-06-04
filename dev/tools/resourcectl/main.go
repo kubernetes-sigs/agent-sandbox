@@ -32,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gofrs/flock"
 	"k8s.io/klog/v2"
 )
 
@@ -160,6 +161,15 @@ func stateFilePath() (string, error) {
 	return filepath.Join(dir, "state.json"), nil
 }
 
+// stateLockFilePath returns the path to the local state lock file.
+func stateLockFilePath() (string, error) {
+	p, err := stateFilePath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(p), "state.lock"), nil
+}
+
 // readState reads the local state file.
 func readState() (*State, error) {
 	p, err := stateFilePath()
@@ -270,6 +280,16 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 		return fmt.Errorf("error starting heartbeat process: %w", err)
 	}
 
+	lockPath, err := stateLockFilePath()
+	if err != nil {
+		return err
+	}
+	fileLock := flock.New(lockPath)
+	if err := fileLock.Lock(); err != nil {
+		return fmt.Errorf("error acquiring lock: %v", err)
+	}
+	defer fileLock.Unlock()
+
 	state, err := readState()
 	if err != nil {
 		return err
@@ -296,6 +316,16 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 // runCleanup releases all resources that this resourcectl instance has
 // acquired from Boskos.
 func runCleanup(ctx context.Context) error {
+	lockPath, err := stateLockFilePath()
+	if err != nil {
+		return err
+	}
+	fileLock := flock.New(lockPath)
+	if err := fileLock.Lock(); err != nil {
+		return fmt.Errorf("error acquiring lock: %v", err)
+	}
+	defer fileLock.Unlock()
+
 	state, err := readState()
 	if err != nil {
 		return err

@@ -299,9 +299,10 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 	// only once we hold the lock so that a process blocked waiting for the lock
 	// never leaves an orphaned heartbeat running if it is interrupted before the
 	// resource is persisted.
+	var cmd *exec.Cmd
 	if err := updateState(func(state *State) error {
 		// Start heartbeat process
-		cmd := exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
+		cmd = exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
 		// TODO: Log stdout/stderr of the heartbeat process
 		if err := cmd.Start(); err != nil {
@@ -318,6 +319,26 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 		})
 		return nil
 	}); err != nil {
+		if cmd != nil && cmd.Process != nil {
+			pgid := -cmd.Process.Pid
+			if killErr := syscall.Kill(pgid, syscall.SIGTERM); killErr != nil {
+				log.Error(killErr, "failed to send SIGTERM to heartbeat process group", "pgid", pgid)
+			}
+			
+			done := make(chan error, 1)
+			go func() {
+				done <- cmd.Wait()
+			}()
+
+			select {
+			case <-time.After(time.Second):
+				if killErr := syscall.Kill(pgid, syscall.SIGKILL); killErr != nil {
+					log.Error(killErr, "failed to send SIGKILL to heartbeat process group", "pgid", pgid)
+				}
+				<-done
+			case <-done:
+			}
+		}
 		return err
 	}
 

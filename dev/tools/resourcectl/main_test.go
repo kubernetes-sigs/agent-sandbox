@@ -129,6 +129,18 @@ func TestConcurrentStateUpdates(t *testing.T) {
 	if len(state.BoskosResources) != n {
 		t.Errorf("expected %d resources after concurrent updates, but got %d", n, len(state.BoskosResources))
 	}
+
+	seen := make(map[string]int, len(state.BoskosResources))
+	for _, resource := range state.BoskosResources {
+		seen[resource.Name]++
+	}
+
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("resource-%d", i)
+		if seen[name] != 1 {
+			t.Fatalf("expected exactly one %q entry, got %d", name, seen[name])
+		}
+	}
 }
 
 func TestRunCleanup(t *testing.T) {

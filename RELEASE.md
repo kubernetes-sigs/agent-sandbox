@@ -11,37 +11,10 @@ Those tags are the source of truth for:
 
 The project is released on an as-needed basis. The current process is:
 
-1. Run `make release-promote TAG=vX.Y.Z` to create the repository tag, wait for the tagged image to be pushed, and generate the image promotion PR. Creating the Git tag also triggers the Python SDK and Go SDK release workflows. 
+1. Run `make release-promote TAG=vX.Y.Z` to create the repository tag, wait for the tagged image to be pushed, and generate the image promotion PR. Creating the Git tag also triggers the Python SDK workflows.
 1. Wait for the image promotion PR to be approved and merged.
 1. Run `make release-publish TAG=vX.Y.Z` to generate the release manifests and publish the GitHub Release as a draft.
 1. Review and edit the draft GitHub Release, then publish it.
 1. Approve the Python publishing workflow manually.
 
-These steps are being automated in [GitHub Actions](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/.github/workflows/release.yml) so that a release only requires adding a repository tag (occurs automatically on a schedule).
-
-## Go SDK Releases
-
-The Go SDK currently lives inside the repository's root Go module, so it does not have an independent module tag.
-To release the Go SDK, push the same repository tag that you want users to install:
-
-```bash
-make release-go-sdk TAG=vX.Y.Z
-```
-
-After the tag is pushed:
-
-1. The `Release Go Client` workflow runs `go test ./clients/go/sandbox/...`.
-1. The workflow builds the example programs under `clients/go/examples/`.
-1. The workflow refreshes the draft GitHub Release for that tag.
-
-Consumers can then install the SDK with:
-
-```bash
-go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@vX.Y.Z
-```
-
-or track the latest repository release with:
-
-```bash
-go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
-```
+These steps are being automated in [GitHub Actions](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/.github/workflows/release.yml) so that a release only requires adding a repository tag.

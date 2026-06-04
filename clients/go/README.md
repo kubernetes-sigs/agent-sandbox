@@ -48,15 +48,6 @@ To follow the most recent repository release, use:
 go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
 ```
 
-For maintainers, releasing the Go SDK means pushing a repository tag:
-
-```bash
-make release-go-sdk TAG=vX.Y.Z
-```
-
-That workflow validates `./clients/go/sandbox/...`, builds the Go examples,
-and refreshes the draft GitHub Release for the tag.
-
 ## Usage Examples
 
 ### 1. Production Mode (Gateway)

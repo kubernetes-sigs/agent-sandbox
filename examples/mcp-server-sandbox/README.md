@@ -78,12 +78,6 @@ rm returned-random.bin
 
 ## Run it against a remote cluster (e.g. GKE)
 
-The only things that change versus the local flow are (a) how the image
-gets to the cluster and (b) which kubeconfig context `kubectl` uses.
-`client.py` doesn't change at all — `kubectl exec` and `kubectl cp` go
-through the kube-apiserver, so they work identically against any cluster
-your kubeconfig points at, with no port-forward and no public ingress.
-
 ### GKE
 
 ```bash

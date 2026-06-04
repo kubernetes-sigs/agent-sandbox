@@ -7,13 +7,8 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
   - pods
-  - secrets
-  - services
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -55,28 +50,6 @@ rules:
 - apiGroups:
   - extensions.agents.x-k8s.io
   resources:
-  - managedsandboxes
-  verbs:
-  - get
-  - list
-  - patch
-  - watch
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - managedsandboxes/status
-  - sandboxclaims/finalizers
-  - sandboxclaims/status
-  - sandboxtemplates/finalizers
-  - sandboxwarmpools/finalizers
-  - sandboxwarmpools/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
   - sandboxclaims
   - sandboxtemplates
   - sandboxwarmpools
@@ -89,16 +62,17 @@ rules:
   - update
   - watch
 - apiGroups:
-  - gateway.networking.k8s.io
+  - extensions.agents.x-k8s.io
   resources:
-  - httproutes
+  - sandboxclaims/finalizers
+  - sandboxclaims/status
+  - sandboxtemplates/finalizers
+  - sandboxwarmpools/finalizers
+  - sandboxwarmpools/status
   verbs:
-  - create
   - get
-  - list
   - patch
   - update
-  - watch
 - apiGroups:
   - networking.k8s.io
   resources:

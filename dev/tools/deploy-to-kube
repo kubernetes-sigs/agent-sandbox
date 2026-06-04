@@ -70,30 +70,6 @@ def append_controller_flags(doc, flags_str):
                         print(f"Appended controller flag: {flag}")
 
 
-def ensure_pool_agent_image_flag(doc, image_prefix, image_tag):
-    """Auto-inject --pool-agent-image so multi-tenant Sandboxes can be served.
-
-    The pod-agent image is built and loaded by `push-images` alongside the
-    controller; the controller needs to be told its address. This function
-    is a no-op if the operator already supplied --pool-agent-image via
-    --controller-args.
-    """
-    if doc.get("kind") != "Deployment":
-        return
-    if doc.get("metadata", {}).get("name") != "agent-sandbox-controller":
-        return
-    containers = doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
-    for container in containers:
-        if container.get("name") != "agent-sandbox-controller":
-            continue
-        args_list = container.setdefault("args", [])
-        if any(a.startswith("--pool-agent-image") for a in args_list):
-            return
-        pool_image = f"{image_prefix}pod-agent:{image_tag}"
-        args_list.append(f"--pool-agent-image={pool_image}")
-        print(f"Auto-injected controller flag: --pool-agent-image={pool_image}")
-
-
 def walk_object(obj, fn, field_path=""):
     """Recursively walks through a nested dictionary or list and applies a function.
 
@@ -218,7 +194,6 @@ def process_manifests(all_docs, args):
 
         find_and_replace_images(doc, image_prefix, image_tag)
         append_controller_flags(doc, getattr(args, "controller_args", ""))
-        ensure_pool_agent_image_flag(doc, image_prefix, image_tag)
 
         if kind in ["CustomResourceDefinition", "Namespace"]:
             prereq_docs.append(doc)

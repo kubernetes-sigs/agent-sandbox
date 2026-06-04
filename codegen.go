@@ -26,6 +26,3 @@ package agentsandbox
 //go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen paths=./controllers/... output:rbac:dir=helm/templates rbac:roleName=agent-sandbox-controller,fileName=rbac.generated.yaml
 //go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen paths=./extensions/controllers/... output:rbac:dir=helm/templates rbac:roleName=agent-sandbox-controller-extensions,fileName=extensions-rbac.generated.yaml
 //go:generate ./dev/tools/client-gen-go.sh
-
-// Generate pod-agent gRPC bindings.
-//go:generate sh -c "cd proto && buf generate"

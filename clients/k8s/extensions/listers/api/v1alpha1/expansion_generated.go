@@ -16,14 +16,6 @@
 
 package v1alpha1
 
-// ManagedSandboxListerExpansion allows custom methods to be added to
-// ManagedSandboxLister.
-type ManagedSandboxListerExpansion interface{}
-
-// ManagedSandboxNamespaceListerExpansion allows custom methods to be added to
-// ManagedSandboxNamespaceLister.
-type ManagedSandboxNamespaceListerExpansion interface{}
-
 // SandboxClaimListerExpansion allows custom methods to be added to
 // SandboxClaimLister.
 type SandboxClaimListerExpansion interface{}

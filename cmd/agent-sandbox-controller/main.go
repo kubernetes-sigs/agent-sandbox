@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -94,23 +93,6 @@ func main() {
 	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 1, "Max concurrent reconciles for the SandboxClaim controller")
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
-
-	// Multi-tenant (pool) configuration. Multi-tenant Sandboxes are those
-	// with spec.image set; they run as bubblewrap tenants on shared pool pods.
-	var poolAgentImage string
-	var gatewayName string
-	var gatewayNamespace string
-	var gatewaySectionName string
-	flag.StringVar(&poolAgentImage, "pool-agent-image", "",
-		"Container image for pool pods (the pod-side sandbox agent). "+
-			"Required to support multi-tenant Sandboxes (spec.image).")
-	flag.StringVar(&gatewayName, "gateway-name", "",
-		"Name of the Gateway resource that owns sandbox HTTPRoutes. "+
-			"Empty disables HTTPRoute generation.")
-	flag.StringVar(&gatewayNamespace, "gateway-namespace", "",
-		"Namespace of the Gateway resource. Empty means same namespace as the Sandbox.")
-	flag.StringVar(&gatewaySectionName, "gateway-section-name", "",
-		"Listener sectionName on the parent Gateway (optional).")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -264,28 +246,6 @@ func main() {
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
-		}
-
-		if poolAgentImage != "" {
-			var gatewayParent *gwv1.ParentReference
-			if gatewayName != "" {
-				gatewayParent = &gwv1.ParentReference{
-					Name:        gwv1.ObjectName(gatewayName),
-					Namespace:   new(gwv1.Namespace(gatewayNamespace)),
-					SectionName: new(gwv1.SectionName(gatewaySectionName)),
-				}
-			}
-
-			if err = (&extensionscontrollers.ManagedSandboxReconciler{
-				Client:        mgr.GetClient(),
-				Scheme:        mgr.GetScheme(),
-				PodAgentImage: poolAgentImage,
-				GatewayParent: gatewayParent,
-				Tracer:        instrumenter,
-			}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
-				setupLog.Error(err, "unable to create controller", "controller", "ManagedSandbox")
-				os.Exit(1)
-			}
 		}
 
 		if err = (&extensionscontrollers.SandboxTemplateReconciler{

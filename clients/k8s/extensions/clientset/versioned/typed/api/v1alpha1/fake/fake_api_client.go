@@ -26,10 +26,6 @@ type FakeExtensionsV1alpha1 struct {
 	*testing.Fake
 }
 
-func (c *FakeExtensionsV1alpha1) ManagedSandboxes(namespace string) v1alpha1.ManagedSandboxInterface {
-	return newFakeManagedSandboxes(c, namespace)
-}
-
 func (c *FakeExtensionsV1alpha1) SandboxClaims(namespace string) v1alpha1.SandboxClaimInterface {
 	return newFakeSandboxClaims(c, namespace)
 }

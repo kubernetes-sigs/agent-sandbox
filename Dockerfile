@@ -18,7 +18,6 @@ RUN go mod download
 
 # Copy the code source needed
 COPY api/ ./api/
-COPY clients/ ./clients/
 COPY cmd/ ./cmd/
 COPY controllers/ ./controllers/
 COPY extensions/ ./extensions/

@@ -16,8 +16,6 @@
 
 package v1alpha1
 
-type ManagedSandboxExpansion interface{}
-
 type SandboxClaimExpansion interface{}
 
 type SandboxTemplateExpansion interface{}

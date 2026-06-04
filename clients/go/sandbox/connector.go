@@ -57,13 +57,13 @@ type connector struct {
 	strategy   ConnectionStrategy
 	httpClient *http.Client
 
-	sandboxID    string // sandbox name, used as X-Sandbox-ID header
-	namespace    string
-	serverPort   int
-	baseURL      string
-	podIP        string
-	disablePodIP bool
-	lastError    error
+	sandboxID           string // sandbox name, used as X-Sandbox-ID header
+	namespace           string
+	serverPort          int
+	baseURL             string
+	podIP               string
+	disablePodIPRouting bool
+	lastError           error
 
 	requestTimeout    time.Duration
 	perAttemptTimeout time.Duration
@@ -106,13 +106,13 @@ func newConnector(cfg connectorConfig) *connector {
 		}
 	}
 	return &connector{
-		strategy:          cfg.Strategy,
-		namespace:         cfg.Namespace,
-		serverPort:        cfg.ServerPort,
-		requestTimeout:    cfg.RequestTimeout,
-		perAttemptTimeout: cfg.PerAttemptTimeout,
-		disablePodIP:      cfg.DisablePodIPRouting,
-		ownsTransport:     cfg.HTTPTransport == nil,
+		strategy:            cfg.Strategy,
+		namespace:           cfg.Namespace,
+		serverPort:          cfg.ServerPort,
+		requestTimeout:      cfg.RequestTimeout,
+		perAttemptTimeout:   cfg.PerAttemptTimeout,
+		disablePodIPRouting: cfg.DisablePodIPRouting,
+		ownsTransport:       cfg.HTTPTransport == nil,
 		httpClient: &http.Client{
 			Transport: transport,
 		},
@@ -287,7 +287,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		req.Header.Set(headerSandboxNamespace, namespace)
 		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
 		req.Header.Set(headerRequestID, reqID)
-		if podIP != "" && !c.disablePodIP {
+		if podIP != "" && !c.disablePodIPRouting {
 			req.Header.Set(headerSandboxPodIP, podIP)
 		}
 		if contentType != "" {

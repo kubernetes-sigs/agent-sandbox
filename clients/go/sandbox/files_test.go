@@ -545,8 +545,7 @@ func TestHTTPHeaders_DisablePodIPRouting(t *testing.T) {
 				Quiet:               true,
 				DisablePodIPRouting: tc.disable,
 			}
-			opts.setDefaults()
-			opts.K8sHelper = &K8sHelper{Log: opts.Logger}
+			opts.K8sHelper = &K8sHelper{}
 			sb, err := New(context.Background(), opts)
 			if err != nil {
 				t.Fatalf("New() error: %v", err)

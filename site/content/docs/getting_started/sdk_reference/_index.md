@@ -58,7 +58,7 @@ Initializes the SandboxClient.
 ##### create\_sandbox
 
 ```python
-def create_sandbox(template: str,
+def create_sandbox(warmpool: str,
                    namespace: str = "default",
                    sandbox_ready_timeout: int = 180,
                    labels: dict[str, str] | None = None,
@@ -71,7 +71,7 @@ the underlying infrastructure.
 
 **Arguments**:
 
-- `template` - Name of the SandboxTemplate to use.
+- `warmpool` - Name of the SandboxWarmPool to use.
 - `namespace` - Kubernetes namespace for the claim.
 - `sandbox_ready_timeout` - Seconds to wait for the sandbox to be ready.
 - `labels` - Optional Kubernetes labels to attach to the claim.
@@ -86,7 +86,7 @@ the underlying infrastructure.
 
   
   >>> client = SandboxClient()
-  >>> sandbox = client.create_sandbox(template="python-sandbox-template")
+  >>> sandbox = client.create_sandbox(warmpool="python-sandbox-pool")
   >>> sandbox.commands.run("echo 'Hello World'")
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_sandbox"></a>
@@ -123,7 +123,7 @@ Returns a list of tuples containing (namespace, claim_name) currently managed by
 
   
   >>> client = SandboxClient()
-  >>> client.create_sandbox("python-sandbox-template")
+  >>> client.create_sandbox("python-sandbox-pool")
   >>> print(client.list_active_sandboxes())
   [('default', 'sandbox-claim-1234abcd')]
 
@@ -159,7 +159,7 @@ Stops the client side connection and deletes the Kubernetes resources.
 
   
   >>> client = SandboxClient()
-  >>> sandbox = client.create_sandbox("python-sandbox-template")
+  >>> sandbox = client.create_sandbox("python-sandbox-pool")
   >>> client.delete_sandbox(sandbox.claim_name)
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.delete_all"></a>
@@ -176,8 +176,8 @@ Cleanup all tracked sandboxes managed by this client.
 
   
   >>> client = SandboxClient()
-  >>> client.create_sandbox("python-sandbox-template")
-  >>> client.create_sandbox("python-sandbox-template")
+  >>> client.create_sandbox("python-sandbox-pool")
+  >>> client.create_sandbox("python-sandbox-pool")
   >>> client.delete_all()
 
 <a id="k8s_agent_sandbox.models"></a>

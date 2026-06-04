@@ -11,7 +11,7 @@ description: >
 - A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. See the [Filesystem prerequisites]({{< ref "/docs/filesystem" >}}#prerequisites) for setup instructions.
+- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See the [Filesystem prerequisites]({{< ref "/docs/filesystem" >}}#prerequisites) for setup instructions.
 
 ## Upload a Local File
 
@@ -21,7 +21,7 @@ Use `sandbox.files.write()` with the contents of a local file to upload it to th
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # Upload a local file to the sandbox
 with open("local_data.csv", "rb") as f:
@@ -43,7 +43,7 @@ Use `sandbox.files.read()` to download a file and write it locally.
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # Generate a file inside the sandbox
 sandbox.commands.run("echo 'analysis complete' > /home/user/results.txt")
@@ -67,7 +67,7 @@ import os
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 local_dir = "./my_project"
 sandbox_dir = "/home/user/project"
@@ -97,7 +97,7 @@ import os
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 sandbox_dir = "/home/user/output"
 local_dir = "./downloaded_output"
@@ -122,7 +122,7 @@ A common pattern is uploading data, processing it inside the sandbox, and downlo
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # 1. Upload input data
 with open("input.csv", "rb") as f:

@@ -11,7 +11,7 @@ description: >
 - A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. See the [Filesystem prerequisites]({{< ref "/docs/filesystem" >}}#prerequisites) for setup instructions.
+- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See the [Filesystem prerequisites]({{< ref "/docs/filesystem" >}}#prerequisites) for setup instructions.
 
 ## List Directory Contents
 
@@ -21,7 +21,7 @@ Use `sandbox.files.list()` to get the contents of a directory inside the sandbox
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # List the root directory
 entries = sandbox.files.list("/")
@@ -55,7 +55,7 @@ Use `sandbox.files.exists()` to check whether a file or directory exists at a gi
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # Check before reading
 if sandbox.files.exists("/home/user/config.json"):
@@ -82,7 +82,7 @@ sandbox.terminate()
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 def print_tree(path, indent=0):
     """Recursively list sandbox directory contents."""

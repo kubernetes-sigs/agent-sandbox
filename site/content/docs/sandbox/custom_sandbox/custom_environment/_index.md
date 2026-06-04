@@ -88,8 +88,8 @@ from k8s_agent_sandbox import SandboxClient
 # 1. Initialize the client
 client = SandboxClient()
 
-# 2. Create the sandbox using your custom runtime template
-sandbox = client.create_sandbox("simple-sandbox-template")
+# 2. Create the sandbox using your custom runtime warm pool
+sandbox = client.create_sandbox("simple-sandbox-pool")
 
 # 3. Run a command and inject environment variables via the payload
 # The FastAPI server parses this into the ExecuteRequest model

@@ -61,7 +61,7 @@ const (
 // If not specified on the claim, the policy is inherited from the underlying SandboxTemplate's pod metadata.
 // If the template also does not specify this annotation, the Sandbox Pod is created without a safe-to-evict
 // annotation, falling back to standard Kubernetes Cluster Autoscaler defaults.
-// +kubebuilder:validation:Enum=on-completion;true;false
+// +kubebuilder:validation:Enum=on-completion;"true";"false"
 type SafeToEvictPolicy string
 
 const (

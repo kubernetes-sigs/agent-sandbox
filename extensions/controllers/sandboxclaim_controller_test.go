@@ -2132,7 +2132,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
-		{
 			name: "rejects unowned sandboxes with mock labels",
 			existingObjects: []client.Object{
 				template,

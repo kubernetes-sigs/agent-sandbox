@@ -74,8 +74,8 @@ spec:
               safeToEvict:
                 enum:
                 - on-completion
-                - true
-                - false
+                - "true"
+                - "false"
                 type: string
               warmPoolRef:
                 properties:

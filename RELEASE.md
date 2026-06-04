@@ -11,7 +11,7 @@ Those tags are the source of truth for:
 
 The project is released on an as-needed basis. The current process is:
 
-1. Run `make release-promote TAG=vX.Y.Z` to create the repository tag, wait for the tagged image to be pushed, and generate the image promotion PR. Creating the Git tag also triggers the Python SDK release workflow.
+1. Run `make release-promote TAG=vX.Y.Z` to create the repository tag, wait for the tagged image to be pushed, and generate the image promotion PR. Creating the Git tag also triggers the Python SDK and Go SDK release workflows. 
 1. Wait for the image promotion PR to be approved and merged.
 1. Run `make release-publish TAG=vX.Y.Z` to generate the release manifests and publish the GitHub Release as a draft.
 1. Review and edit the draft GitHub Release, then publish it.

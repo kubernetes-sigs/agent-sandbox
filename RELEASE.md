@@ -17,7 +17,7 @@ The project is released on an as-needed basis. The current process is:
 1. Review and edit the draft GitHub Release, then publish it.
 1. Approve the Python publishing workflow manually.
 
-These steps are being automated in GitHub Actions so that a release only requires adding a repository tag.
+These steps are being automated in [GitHub Actions](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/.github/workflows/release.yml) so that a release only requires adding a repository tag (occurs automatically on a schedule).
 
 ## Go SDK Releases
 

@@ -1,0 +1,23 @@
+# A user-facing claim that adopts one Kata-isolated Hermes sandbox from the
+# warm pool defined in sandboxwarmpool.yaml. The claim is the only object a
+# regular (non-admin) user is expected to create — they do not need access
+# to the SandboxTemplate or SandboxWarmPool.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: my-aks-agent
+  # Must be the same namespace as the SandboxWarmPool.
+  namespace: sandbox-agent-demo
+spec:
+  # Adopt a pre-warmed sandbox from the named warm pool. The pool's
+  # sandboxTemplateRef determines the pod blueprint; the claim itself
+  # no longer references the SandboxTemplate directly in v1beta1.
+  warmPoolRef:
+    name: kata-aks-warmpool
+
+  # Example lifecycle: auto-shut down 1h after the claim is created and
+  # delete the claim (and its underlying Sandbox/Pod/PVC) on expiry.
+  # Uncomment and adjust the absolute timestamp as needed.
+  # lifecycle:
+  #   shutdownTime: "2026-12-31T23:59:59Z"
+  #   shutdownPolicy: Delete

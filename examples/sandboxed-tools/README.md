@@ -58,6 +58,15 @@ export GEMINI_API_KEY="your-api-key-here"
 go run ./examples/sandboxed-tools/main.go -session myfirstsession
 ```
 
+## Session Persistence & Resuming Sessions
+
+By default, `sandboxed-tools` creates and resumes a session named `default`. You can specify a custom session name with the `-session` flag to run multiple independent sessions.  (Currently the session name is restricted to 40 characters at most, and only alphanumeric characters.)
+
+### How it Works
+1. **Message History**: Chat history (including system prompts, user inputs, assistant replies, and tool calls/results) is saved in real-time to a JSONL file at `~/.local/sandboxed-tools/<session-name>/sessions/latest.jsonl`.
+2. **Resuming Existing Sessions**: When starting `sandboxed-tools` with a specific session name, it automatically loads the message history from the JSONL file, prints a visual summary of your previous conversation, and continues seamlessly from where you left off.
+3. **Filesystem Backups**: Sandbox filesystem states (contents of `/home/clawtainer`) are backed up in the session-specific folder `~/.local/sandboxed-tools/<session-name>/fs`. When a sandbox launches, the latest backup tarball is restored automatically, preserving your files and environment state across tool executions and session restarts!
+
 ## Example Session
 
 ```

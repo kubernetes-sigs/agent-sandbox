@@ -45,6 +45,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	agentsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sessions"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/tools"
 )
 
@@ -411,7 +412,7 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 	backupFilename := filepath.Join(dir, fmt.Sprintf("backup-%s.tar.gz", timestamp))
 	tmpFilename := backupFilename + ".tmp"
 
-	backupFile, err := os.OpenFile(tmpFilename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	backupFile, err := os.OpenFile(tmpFilename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create backup file %s: %w", tmpFilename, err)
 	}
@@ -600,6 +601,11 @@ type RunOptions struct {
 }
 
 func (o *RunOptions) InitDefaults() {
+	o.SessionName = os.Getenv("SESSION_NAME")
+	if o.SessionName == "" {
+		o.SessionName = "default"
+	}
+
 	o.Image = os.Getenv("SANDBOX_IMAGE")
 	if o.Image == "" {
 		o.Image = "debian:bookworm-slim"
@@ -648,15 +654,8 @@ func run(ctx context.Context, opts RunOptions) error {
 		return fmt.Errorf("sessionName is required")
 	}
 
-	// We require the session name to contain only alphanumeric characters.
-	// We could be more liberal, but we want to err on the side of caution for now.
-	if !isAlphaNumeric(opts.SessionName) {
-		return fmt.Errorf("invalid session name %q: must be alphanumeric", opts.SessionName)
-	}
-
-	// Limit length; erring on the side of caution.
-	if len(opts.SessionName) > 40 {
-		return fmt.Errorf("invalid session name %q: must be at most 40 characters", opts.SessionName)
+	if err := sessions.ValidateSessionName(opts.SessionName); err != nil {
+		return fmt.Errorf("invalid sessionName %q: %w", opts.SessionName, err)
 	}
 
 	llmClient, err := llm.NewClient(baseURL, apiKey)
@@ -688,6 +687,13 @@ func run(ctx context.Context, opts RunOptions) error {
 
 	llmTools := toolsRegistry.All()
 
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	sessionsDir := filepath.Join(homeDir, ".local", "sandboxed-tools")
+	sessionStore := sessions.NewFileStore(sessionsDir)
+
 	session := &Session{
 		Name:    opts.SessionName,
 		client:  sandboxClient,
@@ -698,22 +704,38 @@ func run(ctx context.Context, opts RunOptions) error {
 		"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
 		"Always explain what you are doing."
 
-	messages := []llm.Message{
-		{
-			Role:    "system",
-			Content: &systemPrompt,
-		},
+	messages, err := sessionStore.LoadSession(ctx, opts.SessionName)
+	if err != nil {
+		return fmt.Errorf("failed to load session: %w", err)
 	}
 
-	fmt.Println("================================================================================")
-	fmt.Println("Welcome to the Sandboxed Tools example!")
-	fmt.Printf("Session Name: %s (Namespace: %s)\n", opts.SessionName, opts.Namespace)
-	fmt.Printf("Sandbox Image: %s\n", opts.Image)
-	fmt.Printf("Using LLM Base URL: %s (Model: %s)\n", baseURL, modelName)
-	fmt.Println("Key Concept: An Agent Sandbox is launched ONLY when a tool needs to be executed,")
-	fmt.Println("             and is immediately deleted afterward.")
-	fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
-	fmt.Println("================================================================================")
+	if len(messages) == 0 {
+		sysMsg := llm.Message{
+			Role:    "system",
+			Content: &systemPrompt,
+		}
+		messages = []llm.Message{sysMsg}
+		if err := sessionStore.AppendMessages(ctx, opts.SessionName, sysMsg); err != nil {
+			return fmt.Errorf("failed to persist system prompt: %w", err)
+		}
+
+		fmt.Println("================================================================================")
+		fmt.Println("Welcome to the Sandboxed Tools example!")
+		fmt.Printf("Session Name: %s\n", opts.SessionName)
+		fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
+		fmt.Println("================================================================================")
+	} else {
+		fmt.Println("================================================================================")
+		fmt.Printf("Resumed session %q with %d messages in history:\n", opts.SessionName, len(messages))
+		fmt.Println("================================================================================")
+		for _, msg := range messages {
+			if msg.Role == "user" {
+				fmt.Printf("User> %s\n", valueOf(msg.Content))
+			} else if msg.Role == "assistant" && msg.Content != nil && *msg.Content != "" {
+				fmt.Printf("Agent> %s\n", *msg.Content)
+			}
+		}
+	}
 
 	for {
 		fmt.Print("\nUser> ")
@@ -736,7 +758,11 @@ func run(ctx context.Context, opts RunOptions) error {
 			break
 		}
 
-		messages = append(messages, llm.Message{Role: "user", Content: &input})
+		userMsg := llm.Message{Role: "user", Content: &input}
+		messages = append(messages, userMsg)
+		if err := sessionStore.AppendMessages(ctx, opts.SessionName, userMsg); err != nil {
+			return fmt.Errorf("failed to persist user message: %w", err)
+		}
 
 		for {
 			req := llm.ChatCompletionRequest{
@@ -758,6 +784,9 @@ func run(ctx context.Context, opts RunOptions) error {
 
 			msg := resp.Choices[0].Message
 			messages = append(messages, msg)
+			if err := sessionStore.AppendMessages(ctx, opts.SessionName, msg); err != nil {
+				return fmt.Errorf("failed to persist assistant message: %w", err)
+			}
 
 			if len(msg.ToolCalls) == 0 {
 				fmt.Printf("\nAgent> %s\n", valueOf(msg.Content))
@@ -796,16 +825,21 @@ func run(ctx context.Context, opts RunOptions) error {
 					shouldSnapshot = false
 				}
 
+				var toolMsg llm.Message
 				if err != nil {
 					log.Error(err, "error calling tool", "tool", tc.Function.Name)
 					content := fmt.Sprintf("Error calling tool %q: %v", tc.Function.Name, err)
-					messages = append(messages, llm.Message{
+					toolMsg = llm.Message{
 						Role:       "tool",
 						ToolCallID: tc.ID,
 						Content:    &content,
-					})
+					}
 				} else {
-					messages = append(messages, result)
+					toolMsg = result
+				}
+				messages = append(messages, toolMsg)
+				if err := sessionStore.AppendMessages(ctx, opts.SessionName, toolMsg); err != nil {
+					return fmt.Errorf("failed to persist tool response: %w", err)
 				}
 			}
 
@@ -828,23 +862,6 @@ func run(ctx context.Context, opts RunOptions) error {
 	}
 
 	return nil
-}
-
-// isAlphaNumeric returns true if the string is purely alphanumeric.
-func isAlphaNumeric(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // valueOf is a helper that safely gets a value from a pointer,

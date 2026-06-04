@@ -46,7 +46,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Validate KATA_VERSION format to prevent path traversal
-if [[ ! "$KATA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+if [[ ! "$KATA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
     echo "Error: Invalid Kata version format: '${KATA_VERSION}'"
     echo "Kata version must follow semantic versioning (e.g., 3.2.0 or 3.2.0-rc1)."
     exit 1

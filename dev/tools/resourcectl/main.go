@@ -206,6 +206,30 @@ func writeState(state *State) error {
 	return nil
 }
 
+// updateState performs a locked read-modify-write of the state file. The state
+// file lock is held only for the duration of fn, so fn must not perform slow or
+// blocking operations (such as network I/O) while it runs.
+func updateState(fn func(*State) error) error {
+	lockPath, err := stateLockFilePath()
+	if err != nil {
+		return err
+	}
+	fileLock := flock.New(lockPath)
+	if err := fileLock.Lock(); err != nil {
+		return fmt.Errorf("error acquiring lock: %v", err)
+	}
+	defer fileLock.Unlock()
+
+	state, err := readState()
+	if err != nil {
+		return err
+	}
+	if err := fn(state); err != nil {
+		return err
+	}
+	return writeState(state)
+}
+
 // getBoskosHost returns the boskos host from the environment variable BOSKOS_HOST.
 func getBoskosHost() (string, error) {
 	boskosHost := os.Getenv("BOSKOS_HOST")
@@ -271,39 +295,29 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 		return fmt.Errorf("error decoding response: %v", err)
 	}
 
-	// Start heartbeat process
-	cmd := exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
-	// TODO: Log stdout/stderr of the heartbeat process
-	if err := cmd.Start(); err != nil {
-		// We will fail the test here, but we don't want a resource to be reclaimed mid test
-		return fmt.Errorf("error starting heartbeat process: %w", err)
-	}
+	// Record the resource under the state lock. We start the heartbeat process
+	// only once we hold the lock so that a process blocked waiting for the lock
+	// never leaves an orphaned heartbeat running if it is interrupted before the
+	// resource is persisted.
+	if err := updateState(func(state *State) error {
+		// Start heartbeat process
+		cmd := exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+		// TODO: Log stdout/stderr of the heartbeat process
+		if err := cmd.Start(); err != nil {
+			// We will fail the test here, but we don't want a resource to be reclaimed mid test
+			return fmt.Errorf("error starting heartbeat process: %w", err)
+		}
 
-	lockPath, err := stateLockFilePath()
-	if err != nil {
-		return err
-	}
-	fileLock := flock.New(lockPath)
-	if err := fileLock.Lock(); err != nil {
-		return fmt.Errorf("error acquiring lock: %v", err)
-	}
-	defer fileLock.Unlock()
-
-	state, err := readState()
-	if err != nil {
-		return err
-	}
-
-	state.BoskosResources = append(state.BoskosResources, BoskosResource{
-		Name:         resource.Name,
-		Type:         resourceType,
-		HeartbeatPID: cmd.Process.Pid,
-		Owner:        owner,
-		Key:          key,
-	})
-
-	if err := writeState(state); err != nil {
+		state.BoskosResources = append(state.BoskosResources, BoskosResource{
+			Name:         resource.Name,
+			Type:         resourceType,
+			HeartbeatPID: cmd.Process.Pid,
+			Owner:        owner,
+			Key:          key,
+		})
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -316,25 +330,27 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 // runCleanup releases all resources that this resourcectl instance has
 // acquired from Boskos.
 func runCleanup(ctx context.Context) error {
-	lockPath, err := stateLockFilePath()
-	if err != nil {
+	// Phase 1: under the lock, take ownership of the currently tracked resources
+	// and clear them from the state file. We release the lock immediately so the
+	// slow kill/release operations below do not block other resourcectl
+	// invocations from updating the state file.
+	var resources []BoskosResource
+	if err := updateState(func(state *State) error {
+		resources = state.BoskosResources
+		state.BoskosResources = nil
+		return nil
+	}); err != nil {
 		return err
 	}
-	fileLock := flock.New(lockPath)
-	if err := fileLock.Lock(); err != nil {
-		return fmt.Errorf("error acquiring lock: %v", err)
-	}
-	defer fileLock.Unlock()
 
-	state, err := readState()
-	if err != nil {
-		return err
-	}
+	// Phase 2: kill the heartbeat processes and release the resources from
+	// Boskos without holding the lock. Resources we fail to release are retained
+	// so a future cleanup can retry them.
 	var errs []error
 	var remainingResources []BoskosResource
 
-	for i := range state.BoskosResources {
-		r := &state.BoskosResources[i]
+	for i := range resources {
+		r := &resources[i]
 		if err := killHeartbeatProcess(ctx, r); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -347,10 +363,16 @@ func runCleanup(ctx context.Context) error {
 		}
 	}
 
-	state.BoskosResources = remainingResources
-
-	if err := writeState(state); err != nil {
-		return err
+	// Phase 3: re-acquire the lock and put any resources we failed to release
+	// back into the state file. We re-read the state inside updateState so we do
+	// not clobber resources added concurrently while the lock was not held.
+	if len(remainingResources) > 0 {
+		if err := updateState(func(state *State) error {
+			state.BoskosResources = append(state.BoskosResources, remainingResources...)
+			return nil
+		}); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	return errors.Join(errs...)

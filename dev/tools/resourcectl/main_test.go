@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -76,6 +77,57 @@ func TestIsHeartbeatProcess(t *testing.T) {
 
 	if isHeartbeatProcess(dummy.Process.Pid, "test-resource") {
 		t.Errorf("expected isHeartbeatProcess to return false for generic process, but got true")
+	}
+}
+
+func TestConcurrentStateUpdates(t *testing.T) {
+	// Create a temporary home directory to sandbox the state file.
+	tmpHome, err := os.MkdirTemp("", "resourcectl-test-home-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpHome)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Concurrently append a distinct resource from many goroutines. Without the
+	// state file lock these read-modify-write cycles would race and lose
+	// entries; with it, every entry must survive.
+	const n = 20
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errCh <- updateState(func(state *State) error {
+				// Widen the read-modify-write window so a missing lock would
+				// reliably drop entries.
+				time.Sleep(time.Millisecond)
+				state.BoskosResources = append(state.BoskosResources, BoskosResource{
+					Name: fmt.Sprintf("resource-%d", i),
+				})
+				return nil
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("updateState failed: %v", err)
+		}
+	}
+
+	state, err := readState()
+	if err != nil {
+		t.Fatalf("failed to read state file: %v", err)
+	}
+	if len(state.BoskosResources) != n {
+		t.Errorf("expected %d resources after concurrent updates, but got %d", n, len(state.BoskosResources))
 	}
 }
 

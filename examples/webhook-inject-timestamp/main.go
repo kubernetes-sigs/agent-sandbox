@@ -18,17 +18,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
-)
-
-var (
-	universalDeserializer = serializer.NewCodecFactory(runtime.NewScheme()).UniversalDeserializer()
 )
 
 const annotationKey = "agents.x-k8s.io/webhook-first-observed-at"
@@ -59,8 +54,10 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AdmissionReview has standard JSON tags, so json.Unmarshal is sufficient
+	// and avoids needing a runtime scheme with the type registered.
 	ar := admissionv1.AdmissionReview{}
-	if _, _, err := universalDeserializer.Decode(body, nil, &ar); err != nil {
+	if err := json.Unmarshal(body, &ar); err != nil {
 		http.Error(w, fmt.Sprintf("could not decode body: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -149,6 +146,8 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 		arResponse.Response.Patch = patchBytes
 		patchType := admissionv1.PatchTypeJSONPatch
 		arResponse.Response.PatchType = &patchType
+
+		log.Printf("Injected %s timestamp for SandboxClaim %s/%s", annotationKey, ar.Request.Namespace, ar.Request.Name)
 	}
 
 writeResponse:

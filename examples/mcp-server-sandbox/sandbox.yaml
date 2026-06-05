@@ -5,10 +5,16 @@ metadata:
 spec:
   podTemplate:
     spec:
+      securityContext:
+        # Refuse to start if the image tries to run as root.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: mcp
         image: ${IMAGE}
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         # The container itself is idle; each `kubectl exec` spawns a fresh
         # mcp_server.py process for the duration of one MCP stdio session.
         command: ["sleep", "infinity"]

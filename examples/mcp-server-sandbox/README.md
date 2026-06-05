@@ -32,7 +32,7 @@ The example exercises the full create → execute → I/O → return → termina
 loop, and also proves the PVC is doing real work — not just sitting in the
 manifest unused:
 
-1. `envsubst < sandbox.yaml | kubectl apply -f -` creates a `Sandbox` with a 1Gi PVC mounted at `/workspace`. (The manifest references `${IMAGE}`, so a bare `kubectl apply -f sandbox.yaml` would create a broken Sandbox that tries to pull the literal string `${IMAGE}`.)
+1. `envsubst < sandbox.yaml | kubectl apply -f -` creates a `Sandbox` with a 1Gi PVC mounted at `/workspace`.
 2. **Session 1**: `client.py` opens an MCP session and calls `list_blobs` (expects empty) → `write_random_blob` (writes random bytes to the PVC, returns sha256).
 3. **Suspend → Resume**: `client.py` patches `sandbox/mcp-sandbox` with `spec.operatingMode: Suspended` — the controller deletes the pod but keeps the Sandbox object and the PVC. Then it patches back to `Running` and the controller creates a fresh pod with the same PVC reattached.
 4. **Session 2**: `client.py` opens a *second* MCP session against the new pod, calls `list_blobs` (expects `['random.bin']`) and `read_blob` (expects the same sha256). If the sha256 doesn't match, the data didn't persist — i.e. the PVC isn't working. On `emptyDir` or the container overlay this step would fail.

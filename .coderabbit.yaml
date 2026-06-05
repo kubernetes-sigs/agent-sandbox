@@ -1,4 +1,48 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: en-US
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - ".github/copilot-instructions.md"
+      - "AGENTS.md"
+
 reviews:
   request_changes_workflow: true
+
+  path_filters:
+    - "!clients/k8s/**"
+    - "!k8s/crds/**"
+    - "!**/*_generated*.go"
+    - "!**/zz_generated.*.go"
+    - "!vendor/**"
+
+  path_instructions:
+    - path: "api/**/*.go"
+      instructions: |
+        Focus on Kubernetes CRD API conventions, kubebuilder validation markers, and backwards compatibility (v1beta1 contracts). Ensure optional fields use pointers and have clear docstrings.
+
+    - path: "extensions/api/**/*.go"
+      instructions: |
+        Focus on Kubernetes CRD API conventions and extension contract alignment (SandboxClaim, SandboxTemplate, SandboxWarmPool).
+
+    - path: "controllers/**/*.go"
+      instructions: |
+        Enforce controller-runtime best practices. Reconcile loops must be idempotent, respect context cancellation, and never mutate the primary Custom Resource spec. Verify RBAC markers.
+
+    - path: "extensions/controllers/**/*.go"
+      instructions: |
+        Enforce controller-runtime best practices for extension reconcilers. Ensure proper error wrapping and event recording.
+
+    - path: "clients/python/agentic-sandbox-client/**/*.py"
+      instructions: |
+        Review against Python 3.10+ idioms. Enforce Pydantic models for data structures. Maintain architectural parity between sync modules and their async siblings (e.g., sandbox_client.py vs async_sandbox_client.py), avoiding unintended drift. Do not apply Go conventions here.
+
+    - path: "clients/go/**/*.go"
+      instructions: |
+        Focus on idiomatic Go client patterns, API stability, and clear examples. This is a hand-written public SDK wrapping SandboxClaim lifecycle and connectivity features. Ensure error handling is robust and the API surface remains backward-compatible.
+
+    - path: "docs/**/*.md"
+      instructions: |
+        Focus on technical accuracy, clarity, and markdown formatting. Verify that code snippets and configuration examples match current CRD definitions.

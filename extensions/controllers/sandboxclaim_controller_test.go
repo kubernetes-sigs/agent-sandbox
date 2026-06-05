@@ -2008,7 +2008,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				createWarmPoolSandbox("pool-sb-2", metav1.Now(), true),
 			},
 			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "pool-sb-1",
+			expectedAdoptedSandbox:  "pool-sb-2",
 			expectNewSandboxCreated: false,
 			simulateConflicts:       1, // Fail update on the first sandbox, succeed on the second
 		},
@@ -2097,7 +2097,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					// Only add valid, adoptable sandboxes to the queue
 					if isAdoptable(sb) == nil {
 						warmPoolName := getWarmPoolName(sb)
-						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
+						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
 						warmSandboxQueue.Add(warmPoolName, key)
 					}
 				}
@@ -2626,7 +2626,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 		if isAdoptable(warmSandbox) == nil {
 			warmPoolName := getWarmPoolName(warmSandbox)
-			key := queue.SandboxKey{Namespace: warmSandbox.Namespace, Name: warmSandbox.Name}
+			key := queue.SandboxKey{Namespace: warmSandbox.Namespace, Name: warmSandbox.Name, NodeName: warmSandbox.Status.NodeName}
 			warmSandboxQueue.Add(warmPoolName, key)
 		}
 
@@ -3398,7 +3398,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	warmSandboxQueue := queue.NewSimpleSandboxQueue()
 	if isAdoptable(extraSandbox) == nil {
 		hash := extraSandbox.Labels[sandboxTemplateRefHash]
-		key := queue.SandboxKey{Namespace: extraSandbox.Namespace, Name: extraSandbox.Name}
+		key := queue.SandboxKey{Namespace: extraSandbox.Namespace, Name: extraSandbox.Name, NodeName: extraSandbox.Status.NodeName}
 		warmSandboxQueue.Add(hash, key)
 	}
 
@@ -3953,35 +3953,36 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 		existingSandboxes      []*sandboxv1beta1.Sandbox
 		otherObjects           []client.Object
 		expectedAdoptedSandbox string
+		expectedRemainingKeys  []string
 	}{
 		{
-			name: "picks oldest ready sandbox",
+			name: "picks oldest ready sandbox (FIFO queue order)",
 			existingSandboxes: []*sandboxv1beta1.Sandbox{
-				createWarmPoolSandboxWithNode("sb-young-ready", metav1.Now(), true, "node-1"),
 				createWarmPoolSandboxWithNode("sb-old-ready", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true, "node-2"),
+				createWarmPoolSandboxWithNode("sb-young-ready", metav1.Now(), true, "node-1"),
 				createWarmPoolSandboxWithNode("sb-old-not-ready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false, "node-3"),
 			},
 			expectedAdoptedSandbox: "sb-old-ready",
+			expectedRemainingKeys:  []string{"sb-young-ready", "sb-old-not-ready"},
 		},
 		{
-			name: "picks sandbox on the node with fewest active sandboxes",
+			name: "skips unready sandbox to adopt younger ready sandbox",
 			existingSandboxes: []*sandboxv1beta1.Sandbox{
-				createWarmPoolSandboxWithNode("sb-node1-ready", metav1.Now(), true, "node-1"),
-				createWarmPoolSandboxWithNode("sb-node2-ready", metav1.Now(), true, "node-2"),
+				createWarmPoolSandboxWithNode("sb-old-unready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false, "node-3"),
+				createWarmPoolSandboxWithNode("sb-young-ready", metav1.Now(), true, "node-1"),
 			},
-			otherObjects: []client.Object{
-				&sandboxv1beta1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "active-sb-node1",
-						Namespace: "default",
-						Labels:    map[string]string{}, // No warmPoolSandboxLabel -> active
-					},
-					Status: sandboxv1beta1.SandboxStatus{
-						NodeName: "node-1",
-					},
-				},
+			expectedAdoptedSandbox: "sb-young-ready",
+			expectedRemainingKeys:  []string{"sb-old-unready"},
+		},
+		{
+			name: "picks sandbox on the node with most remaining warmpool sandboxes (NodeSpread balancing)",
+			existingSandboxes: []*sandboxv1beta1.Sandbox{
+				createWarmPoolSandboxWithNode("sb-node1-oldest", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, true, "node-1"),
+				createWarmPoolSandboxWithNode("sb-node2-younger-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true, "node-2"),
+				createWarmPoolSandboxWithNode("sb-node2-younger-2", metav1.Now(), true, "node-2"),
 			},
-			expectedAdoptedSandbox: "sb-node2-ready",
+			expectedAdoptedSandbox: "sb-node2-younger-1",
+			expectedRemainingKeys:  []string{"sb-node1-oldest", "sb-node2-younger-2"},
 		},
 	}
 
@@ -4024,7 +4025,7 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 
 			warmSandboxQueue := queue.NewSimpleSandboxQueue()
 			for _, sb := range tc.existingSandboxes {
-				key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
+				key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
 				warmSandboxQueue.Add("test-pool", key)
 			}
 
@@ -4047,108 +4048,17 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			controllerRef := metav1.GetControllerOf(&adoptedSandbox)
 			require.NotNil(t, controllerRef)
 			require.Equal(t, claim.UID, controllerRef.UID)
+
+			// Verify that the expected remaining sandbox keys are still queued properly (regression test)
+			var actualRemaining []string
+			for {
+				key, ok := warmSandboxQueue.Get("test-pool")
+				if !ok {
+					break
+				}
+				actualRemaining = append(actualRemaining, key.Name)
+			}
+			require.Equal(t, tc.expectedRemainingKeys, actualRemaining)
 		})
 	}
-}
-
-func TestSmartSelector(t *testing.T) {
-	claim := &extensionsv1beta1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
-		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
-	}
-
-	createSandbox := func(name, ns, node string, ready bool) *sandboxv1beta1.Sandbox {
-		status := sandboxv1beta1.SandboxStatus{NodeName: node}
-		if ready {
-			status.Conditions = []metav1.Condition{{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
-			}}
-		}
-		return &sandboxv1beta1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: ns,
-				Labels: map[string]string{
-					warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
-				},
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxWarmPool",
-					Name:       "test-pool",
-					UID:        "warmpool-uid",
-					Controller: new(true),
-				}},
-			},
-			Status: status,
-		}
-	}
-
-	t.Run("ignores keys from different namespaces", func(t *testing.T) {
-		selector := &smartSelector{
-			claim:      claim,
-			sbMap:      map[string]*sandboxv1beta1.Sandbox{},
-			nodeCounts: map[string]int{},
-		}
-		keys := []queue.SandboxKey{
-			{Namespace: "other-ns", Name: "sb-1"},
-		}
-		_, ok := selector.pick(keys)
-		require.False(t, ok)
-	})
-
-	t.Run("returns key, true when sandbox does not exist in sbMap to clean queue", func(t *testing.T) {
-		selector := &smartSelector{
-			claim:      claim,
-			sbMap:      map[string]*sandboxv1beta1.Sandbox{}, // Empty map
-			nodeCounts: map[string]int{},
-		}
-		keys := []queue.SandboxKey{
-			{Namespace: "default", Name: "sb-deleted"},
-		}
-		picked, ok := selector.pick(keys)
-		require.True(t, ok)
-		require.Equal(t, "sb-deleted", picked.Name)
-	})
-
-	t.Run("returns key, true when sandbox fails validation to clean queue", func(t *testing.T) {
-		sbInvalid := createSandbox("sb-invalid", "default", "", false)
-		// Make it invalid by removing the warm pool label
-		sbInvalid.Labels = map[string]string{}
-
-		selector := &smartSelector{
-			claim: claim,
-			sbMap: map[string]*sandboxv1beta1.Sandbox{
-				"sb-invalid": sbInvalid,
-			},
-			nodeCounts: map[string]int{},
-		}
-		keys := []queue.SandboxKey{
-			{Namespace: "default", Name: "sb-invalid"},
-		}
-		picked, ok := selector.pick(keys)
-		require.True(t, ok)
-		require.Equal(t, "sb-invalid", picked.Name)
-	})
-
-	t.Run("picks ready sandbox over unready", func(t *testing.T) {
-		sbUnready := createSandbox("sb-unready", "default", "node-1", false)
-		sbReady := createSandbox("sb-ready", "default", "node-2", true)
-
-		selector := &smartSelector{
-			claim: claim,
-			sbMap: map[string]*sandboxv1beta1.Sandbox{
-				"sb-unready": sbUnready,
-				"sb-ready":   sbReady,
-			},
-			nodeCounts: map[string]int{},
-		}
-		keys := []queue.SandboxKey{
-			{Namespace: "default", Name: "sb-unready"},
-			{Namespace: "default", Name: "sb-ready"},
-		}
-		picked, ok := selector.pick(keys)
-		require.True(t, ok)
-		require.Equal(t, "sb-ready", picked.Name)
-	})
 }

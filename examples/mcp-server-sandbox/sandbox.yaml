@@ -14,7 +14,7 @@ spec:
       containers:
       - name: mcp
         image: ${IMAGE}
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         # The container itself is idle; each `kubectl exec` spawns a fresh
         # mcp_server.py process for the duration of one MCP stdio session.
         command: ["sleep", "infinity"]

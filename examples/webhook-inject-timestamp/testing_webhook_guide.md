@@ -74,7 +74,7 @@ You can build the webhook server using the provided `Dockerfile`.
 Navigate to the webhook directory:
 
 ```bash
-cd examples/webhook
+cd examples/webhook-inject-timestamp
 ```
 
 Set the image tag and build the image:

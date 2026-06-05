@@ -35,7 +35,7 @@ Pay special attention to these project-specific rules:
 *   **Error Wrapping**: Always wrap errors with context (`fmt.Errorf("...: %w", err)`). Surface meaningful conditions on the resource status rather than swallowing errors.
 *   **Structured Logging**: Use `logr.Logger` from controller-runtime (`log.FromContext(ctx)`). Always use structured key/value pairs; never use `fmt.Sprintf` for log messages.
 *   **Docs Site Mounts**: Root files like `README.md`, `CONTRIBUTING.md`, and client READMEs are mounted directly to the public Hugo website (`https://agent-sandbox.sigs.k8s.io`). Treat edits to these files as formal public documentation.
-*   **Python SDK (`clients/python`)**: Enforce Python 3.10+ idioms, Pydantic models for data structures, and strict sync/async parity (every sync method must have an `async_*` sibling). Note the three distinct names: directory `agentic-sandbox-client`, package `k8s_agent_sandbox`, PyPI wheel `k8s-agent-sandbox`.
+*   **Python SDK (`clients/python`)**: Enforce Python 3.10+ idioms, Pydantic models for data structures, and strict sync/async parity (every sync method in `SandboxClient` must have an identical async sibling in `AsyncSandboxClient`). Note the three distinct names: directory `agentic-sandbox-client`, package `k8s_agent_sandbox`, PyPI wheel `k8s-agent-sandbox`.
 
 **CLA Reminder:**
 When you provide code suggestions in a review, add a reminder at the end of your comment that the contributor should **not** click the "Commit suggestion" button in the GitHub UI. Explain that doing so adds the AI bot as a co-author, which breaks the Kubernetes CLA check as bots cannot sign it. Advise them to apply the suggestion locally instead.

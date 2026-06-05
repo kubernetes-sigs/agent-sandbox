@@ -2220,8 +2220,9 @@ func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 			Name:      "ghost-pod",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				Kind: "SandboxWarmPool",
-				Name: warmPoolName,
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       warmPoolName,
 			}},
 		},
 	}

@@ -567,15 +567,17 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			return nil, nil
 		}
 		// desired is true + unowned service — adopt
-		if service.Labels == nil || service.Labels[sandboxv1beta1.SandboxAdoptableLabel] != "true" {
-			logger.Info("Refusing to adopt unowned service: missing pool authorization label",
+		isAdoptablePool := service.Labels != nil && service.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
+		hasTrackingLabel := service.Labels != nil && service.Labels[sandboxLabel] == nameHash
+		if !isAdoptablePool && !hasTrackingLabel {
+			logger.V(4).Info("Refusing to adopt unowned service: missing pool authorization label or sandbox tracking label",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
-				"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel)
-			return nil, fmt.Errorf("cannot adopt unowned service %q: missing required %q label with value \"true\"",
-				service.Name, sandboxv1beta1.SandboxAdoptableLabel)
+				"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
+			return nil, fmt.Errorf("cannot adopt unowned service %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
+				service.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
 		}
 		if service.Spec.ClusterIP != corev1.ClusterIPNone && service.Spec.ClusterIP != "" {
-			logger.Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
+			logger.V(4).Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
 				"Service.ClusterIP", service.Spec.ClusterIP)
 			return nil, fmt.Errorf("cannot adopt service %q: ClusterIP is %q (expected %q, field is immutable)",
@@ -778,7 +780,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
 		case resourceOwnedByOther:
-			logger.Info("Refusing to adopt pod: pod is owned by a different controller",
+			logger.V(4).Info("Refusing to adopt pod: pod is owned by a different controller",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
@@ -790,12 +792,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 		case resourceUnowned:
-			if pod.Labels == nil || pod.Labels[sandboxv1beta1.SandboxAdoptableLabel] != "true" {
-				logger.Info("Refusing to adopt unowned pod: missing pool authorization label",
+			isAdoptablePool := pod.Labels != nil && pod.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
+			hasTrackingLabel := pod.Labels != nil && pod.Labels[sandboxLabel] == nameHash
+			if !isAdoptablePool && !hasTrackingLabel {
+				logger.V(4).Info("Refusing to adopt unowned pod: missing pool authorization label or sandbox tracking label",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
-					"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel)
-				return nil, fmt.Errorf("cannot adopt unowned pod %q: missing required %q label with value \"true\"",
-					pod.Name, sandboxv1beta1.SandboxAdoptableLabel)
+					"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
+				return nil, fmt.Errorf("cannot adopt unowned pod %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
+					pod.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
 			}
 
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
@@ -1051,19 +1055,21 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			ownership, controllerRef := checkOwnership(pvc, sandbox)
 			switch ownership {
 			case resourceOwnedByOther:
-				logger.Info("Refusing to use PVC: PVC is owned by a different controller",
+				logger.V(4).Info("Refusing to use PVC: PVC is owned by a different controller",
 					"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
 					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 				return fmt.Errorf("PVC %q is owned by %s/%s (UID: %s), not by sandbox %q",
 					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 			case resourceUnowned:
-				if pvc.Labels == nil || pvc.Labels[sandboxv1beta1.SandboxAdoptableLabel] != "true" {
-					logger.Info("Refusing to adopt unowned PVC: missing pool authorization label",
+				isAdoptablePool := pvc.Labels != nil && pvc.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
+				hasTrackingLabel := pvc.Labels != nil && pvc.Labels[sandboxLabel] == nameHash
+				if !isAdoptablePool && !hasTrackingLabel {
+					logger.V(4).Info("Refusing to adopt unowned PVC: missing pool authorization label or sandbox tracking label",
 						"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
-						"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel)
-					return fmt.Errorf("cannot adopt unowned PVC %q: missing required %q label with value \"true\"",
-						pvcName, sandboxv1beta1.SandboxAdoptableLabel)
+						"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
+					return fmt.Errorf("cannot adopt unowned PVC %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
+						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
 				}
 
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)

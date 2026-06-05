@@ -5,6 +5,12 @@ metadata:
 spec:
   podTemplate:
     spec:
+      securityContext:
+        # Refuse to start if the image tries to run as root.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: mcp
         image: ${IMAGE}

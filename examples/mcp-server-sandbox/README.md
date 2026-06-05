@@ -12,7 +12,7 @@ bidirectional stdio channel — exactly what MCP's stdio transport wants.
 The host-side MCP client uses `kubectl exec` as its "subprocess," and
 kubectl pipes JSON-RPC frames into and out of the pod:
 
-```
+```text
 ┌────────── host ──────────┐                  ┌──────── sandbox pod ────────┐
 │                          │                  │                             │
 │  client.py               │                  │   mcp_server.py             │
@@ -32,7 +32,7 @@ The example exercises the full create → execute → I/O → return → termina
 loop, and also proves the PVC is doing real work — not just sitting in the
 manifest unused:
 
-1. `kubectl apply -f sandbox.yaml` creates a `Sandbox` with a 1Gi PVC mounted at `/workspace`.
+1. `envsubst < sandbox.yaml | kubectl apply -f -` creates a `Sandbox` with a 1Gi PVC mounted at `/workspace`.
 2. **Session 1**: `client.py` opens an MCP session and calls `list_blobs` (expects empty) → `write_random_blob` (writes random bytes to the PVC, returns sha256).
 3. **Suspend → Resume**: `client.py` patches `sandbox/mcp-sandbox` with `spec.operatingMode: Suspended` — the controller deletes the pod but keeps the Sandbox object and the PVC. Then it patches back to `Running` and the controller creates a fresh pod with the same PVC reattached.
 4. **Session 2**: `client.py` opens a *second* MCP session against the new pod, calls `list_blobs` (expects `['random.bin']`) and `read_blob` (expects the same sha256). If the sha256 doesn't match, the data didn't persist — i.e. the PVC isn't working. On `emptyDir` or the container overlay this step would fail.
@@ -46,7 +46,7 @@ manifest unused:
 | [`sandbox.yaml`](sandbox.yaml) | Bare `Sandbox` CRD. One container running `sleep infinity`, one 1Gi PVC mounted at `/workspace`. Uses `${IMAGE}` so you can `envsubst` your registry path. |
 | [`Dockerfile`](Dockerfile) | `python:3.11-slim` + `pip install mcp` + copy `mcp_server.py`. Nothing else. |
 | [`mcp_server.py`](mcp_server.py) | Custom MCP server (FastMCP). Exposes `list_blobs`, `write_random_blob(name, size_bytes)`, `read_blob(name)`. All operate on `/workspace` (override with `MCP_WORKSPACE`). |
-| [`client.py`](client.py) | Host-side MCP client. Uses `kubectl exec -i` as the stdio transport, calls the three tools, then `kubectl cp`s the result file out and verifies its sha256. |
+| [`client.py`](client.py) | Host-side MCP client. Uses `kubectl exec -i` as the stdio transport, runs the Suspend→Resume cycle, then `kubectl cp`s the result file out and verifies its sha256. |
 | [`requirements.txt`](requirements.txt) | `mcp` (Python MCP SDK) for the host. |
 
 ## Prerequisites
@@ -74,6 +74,40 @@ python3 client.py
 # 4. Tear down.
 kubectl delete -f sandbox.yaml
 rm returned-random.bin
+```
+
+Expected `client.py` output, in order:
+
+```text
+============================================================
+Session 1 — write a random blob to the PVC
+============================================================
+[host] tools advertised by server: ['list_blobs', 'write_random_blob', 'read_blob']
+[host] list_blobs (before write) -> []
+[host] write_random_blob('random.bin', 256) -> {'path': '/workspace/random.bin', 'bytes_written': 256, 'sha256': '...'}
+
+============================================================
+Suspend → Resume — the PVC persists, the container fs does not
+============================================================
+[host] patching sandbox/mcp-sandbox operatingMode=Suspended (controller will delete the pod)...
+[host] pod mcp-sandbox is gone (Sandbox is Suspended)
+[host] patching sandbox/mcp-sandbox operatingMode=Running (controller will recreate the pod)...
+[host] waiting up to 180s for pod mcp-sandbox to be Ready again...
+[host] pod mcp-sandbox is Ready again
+
+============================================================
+Session 2 — read the blob back from the PVC
+============================================================
+[host] list_blobs (after restart) -> ['random.bin']
+[host] read_blob('random.bin') -> {'path': '/workspace/random.bin', 'size_bytes': 256, 'sha256': '...'}
+[host] OK — sha256 matches across pod restart: ...
+
+============================================================
+Return the file to the host and re-hash locally
+============================================================
+[host] kubectl cp mcp-sandbox:/workspace/random.bin -> returned-random.bin
+[host] returned 256 bytes; host sha256=...
+[host] OK — PVC contents survived pod restart and round-trip back to the host
 ```
 
 ## Run it against a remote cluster (e.g. GKE)

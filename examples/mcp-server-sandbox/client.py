@@ -55,6 +55,10 @@ BLOB_SIZE = 256
 OUT_PATH = Path("./returned-random.bin")
 POD_READY_TIMEOUT_SEC = 180
 
+# Per-command timeouts on every kubectl call. 
+KUBECTL_TIMEOUT_SEC = 30        # patch, get
+KUBECTL_CP_TIMEOUT_SEC = 120    # cp may take longer for larger files
+
 
 def _result_payload(call_result):
     """Return the tool result as a Python value.
@@ -132,19 +136,25 @@ def _patch_operating_mode(mode: str) -> None:
     subprocess.run(
         ["kubectl", "patch", "sandbox", POD, "--type=merge", "-p", patch],
         check=True,
+        timeout=KUBECTL_TIMEOUT_SEC,
     )
 
 
 def _pod_ready_status() -> str:
-    """Return the pod's Ready condition status: 'True', 'False', or '' if absent."""
-    result = subprocess.run(
-        [
-            "kubectl", "get", "pod", POD,
-            "--ignore-not-found",
-            "-o", "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}",
-        ],
-        capture_output=True, text=True,
-    )
+    """Return the pod's Ready condition status: 'True', 'False', or '' if absent.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "kubectl", "get", "pod", POD,
+                "--ignore-not-found",
+                "-o", "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}",
+            ],
+            capture_output=True, text=True,
+            timeout=KUBECTL_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
@@ -160,10 +170,15 @@ def suspend_then_resume() -> None:
 
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
-        result = subprocess.run(
-            ["kubectl", "get", "pod", POD, "--ignore-not-found", "-o", "name"],
-            capture_output=True, text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["kubectl", "get", "pod", POD, "--ignore-not-found", "-o", "name"],
+                capture_output=True, text=True,
+                timeout=KUBECTL_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            time.sleep(2)
+            continue
         if not result.stdout.strip():
             print(f"[host] pod {POD} is gone (Sandbox is Suspended)")
             break
@@ -221,6 +236,7 @@ async def run() -> int:
     subprocess.run(
         ["kubectl", "cp", f"{POD}:{WORKSPACE}/{BLOB_NAME}", str(OUT_PATH)],
         check=True,
+        timeout=KUBECTL_CP_TIMEOUT_SEC,
     )
     host_sha = hashlib.sha256(OUT_PATH.read_bytes()).hexdigest()
     print(f"[host] returned {OUT_PATH.stat().st_size} bytes; host sha256={host_sha}")

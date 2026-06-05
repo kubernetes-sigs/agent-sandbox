@@ -37,7 +37,7 @@ reviews:
 
     - path: "clients/python/agentic-sandbox-client/**/*.py"
       instructions: |
-        Review against Python 3.10+ idioms. Enforce Pydantic models for data structures. Ensure strict sync and async parity (every sync method in SandboxClient must have an identical async sibling in AsyncSandboxClient). Do not apply Go conventions here.
+        Review against Python 3.10+ idioms. Enforce Pydantic models for data structures. Maintain architectural parity between sync modules and their async siblings (e.g., sandbox_client.py vs async_sandbox_client.py), avoiding unintended drift. Do not apply Go conventions here.
 
     - path: "clients/go/**/*.go"
       instructions: |

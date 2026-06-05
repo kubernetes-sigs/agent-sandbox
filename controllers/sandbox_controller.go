@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -42,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -846,9 +848,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// Propagate the warm pool label directly from the Sandbox CR labels to the Pod,
 	// provided the Sandbox is actually owned by a Warm Pool.
 	// The warm pool label is required by the capacity buffer to identify the warm pool pods.
-	if ref := metav1.GetControllerOf(sandbox); ref != nil && ref.Kind == "SandboxWarmPool" {
-		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
-			podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+	if ref := metav1.GetControllerOf(sandbox); ref != nil {
+		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
+			if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
+				podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+			}
 		}
 	}
 
@@ -982,8 +987,11 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	}
 	// Ensure the warm pool label is present if the sandbox is owned by a SandboxWarmPool.
 	var expectedWarmPoolHash string
-	if ref := metav1.GetControllerOf(sandbox); ref != nil && ref.Kind == "SandboxWarmPool" {
-		expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+	if ref := metav1.GetControllerOf(sandbox); ref != nil {
+		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
+			expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+		}
 	}
 	if expectedWarmPoolHash != "" {
 		if pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] != expectedWarmPoolHash {

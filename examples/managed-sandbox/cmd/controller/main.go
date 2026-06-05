@@ -67,6 +67,10 @@ func main() {
 		setupLog.Error(nil, "--concurrent-workers must be greater than 0")
 		os.Exit(1)
 	}
+	if gatewayName == "" && (gatewayNamespace != "" || gatewaySectionName != "") {
+		setupLog.Error(nil, "--gateway-namespace and --gateway-section-name require --gateway-name")
+		os.Exit(1)
+	}
 
 	scheme := runtimeScheme()
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

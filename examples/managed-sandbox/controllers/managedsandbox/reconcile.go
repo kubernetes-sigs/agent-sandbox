@@ -188,7 +188,7 @@ func (r *ManagedSandboxReconciler) reconcileMultiTenant(ctx context.Context, san
 		})
 		return ctrl.Result{}, nil
 	}
-	agent, err := r.poolAgents.For(ctx, podName, pod.Status.PodIP)
+	agent, err := r.poolAgents.For(ctx, sandbox.Namespace, podName, pod.Status.PodIP)
 	if err != nil {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1alpha1.ManagedSandboxConditionReady),
@@ -334,15 +334,15 @@ func (r *ManagedSandboxReconciler) handleSandboxDelete(obj any) {
 		}
 		if pod == nil || pod.Status.PodIP == "" {
 			log.V(1).Info("pool pod gone; sandbox runtime already gone")
-			r.poolAgents.Forget(podName)
+			r.poolAgents.Forget(namespace, podName)
 			return
 		}
 		if expectedPodUID != "" && string(pod.UID) != expectedPodUID {
 			log.V(1).Info("pool pod UID changed; sandbox runtime already gone")
-			r.poolAgents.Forget(podName)
+			r.poolAgents.Forget(namespace, podName)
 			return
 		}
-		agent, err := r.poolAgents.For(ctx, podName, pod.Status.PodIP)
+		agent, err := r.poolAgents.For(ctx, namespace, podName, pod.Status.PodIP)
 		if err != nil {
 			log.Error(err, "dial pod-agent (GC sweep will retry)")
 			return
@@ -448,6 +448,7 @@ func (r *ManagedSandboxReconciler) clearPoolBinding(sandbox *sandboxv1alpha1.Man
 	sandbox.Status.Host = nil
 	sandbox.Status.SSHHost = ""
 	sandbox.Status.SSHPort = 0
+	sandbox.Status.Endpoints = nil
 	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 		Type:               string(sandboxv1alpha1.ManagedSandboxConditionReady),
 		Status:             metav1.ConditionFalse,

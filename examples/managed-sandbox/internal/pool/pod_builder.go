@@ -186,11 +186,8 @@ func (b *PodBuilder) BuildPod(namespace, name, imageRef string) (*corev1.Pod, er
 				// present) pass. A TCP probe would go ready too early.
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"/usr/local/bin/grpc_health_probe",
-								fmt.Sprintf("-addr=localhost:%d", agentPort),
-							},
+						GRPC: &corev1.GRPCAction{
+							Port: agentPort,
 						},
 					},
 					PeriodSeconds:    5,

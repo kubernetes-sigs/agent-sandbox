@@ -112,11 +112,11 @@ impl WorkerService for Worker {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ExecResponse, Status>>(32);
 
         let tx_out = tx.clone();
-        tokio::spawn(async move {
+        let out_jh = tokio::spawn(async move {
             pump(&mut stdout, &tx_out, true).await;
         });
         let tx_err = tx.clone();
-        tokio::spawn(async move {
+        let err_jh = tokio::spawn(async move {
             pump(&mut stderr, &tx_err, false).await;
         });
         tokio::spawn(async move {
@@ -129,6 +129,8 @@ impl WorkerService for Worker {
                     return;
                 }
             };
+            let _ = out_jh.await;
+            let _ = err_jh.await;
             let exit = ExecExit {
                 exit_code: status.code().unwrap_or(-1),
                 signal: status.signal().unwrap_or(0),
@@ -255,7 +257,7 @@ async fn open_shell_impl(
     // primary → client.stdout
     let tx_out = tx.clone();
     let primary_r = Arc::clone(&primary);
-    tokio::spawn(async move {
+    let out_jh = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         loop {
             // async_io drives WouldBlock retries internally — much
@@ -287,7 +289,7 @@ async fn open_shell_impl(
 
     // client → primary, resize, eof
     let primary_w = Arc::clone(&primary);
-    tokio::spawn(async move {
+    let input_jh = tokio::spawn(async move {
         while let Some(req) = input.next().await {
             let req = match req {
                 Ok(r) => r,
@@ -323,6 +325,9 @@ async fn open_shell_impl(
                 return;
             }
         };
+        input_jh.abort();
+        let _ = input_jh.await;
+        let _ = out_jh.await;
         let exit = ExecExit {
             exit_code: status.code().unwrap_or(-1),
             signal: status.signal().unwrap_or(0),

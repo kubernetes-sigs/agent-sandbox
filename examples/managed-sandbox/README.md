@@ -22,7 +22,6 @@ kind load docker-image kind.local/pod-agent:dev
 Build and load the example controller image:
 
 ```sh
-go test ./...
 docker build -t kind.local/managed-sandbox-controller:dev -f controller.Dockerfile .
 kind load docker-image kind.local/managed-sandbox-controller:dev
 ```
@@ -63,7 +62,8 @@ TOKEN=$(kubectl get secret "$SECRET" -o jsonpath='{.data.token}' | base64 -d)
 kubectl run -it --rm sshtest \
   --image=alpine \
   --restart=Never \
-  -- sh -lc "apk add --no-cache openssh-client sshpass >/dev/null && exec sshpass -p '$TOKEN' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $PORT $SUID@$HOST"
+  --env=SSHPASS="$TOKEN" \
+  -- sh -lc "apk add --no-cache openssh-client sshpass >/dev/null && exec sshpass -e ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $PORT $SUID@$HOST"
 ```
 
 Or run one command inside the sandbox:
@@ -72,5 +72,6 @@ Or run one command inside the sandbox:
 kubectl run -it --rm sshtest \
   --image=alpine \
   --restart=Never \
-  -- sh -lc "apk add --no-cache openssh-client sshpass >/dev/null && sshpass -p '$TOKEN' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $PORT $SUID@$HOST 'pwd && id && ls -la'"
+  --env=SSHPASS="$TOKEN" \
+  -- sh -lc "apk add --no-cache openssh-client sshpass >/dev/null && sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $PORT $SUID@$HOST 'pwd && id && ls -la'"
 ```

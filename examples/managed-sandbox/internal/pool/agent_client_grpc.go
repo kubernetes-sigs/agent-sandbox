@@ -137,13 +137,18 @@ func phaseFromProto(p podagentv1.Phase) Phase {
 	}
 }
 
-// AgentClientPool keeps one GRPCAgentClient per pool pod, keyed by pod
-// name. It is goroutine-safe.
+// AgentClientPool keeps one GRPCAgentClient per pool pod, keyed by
+// namespace/name. It is goroutine-safe.
 type AgentClientPool struct {
 	mu      sync.Mutex
-	clients map[string]*cachedAgent
+	clients map[clientKey]*cachedAgent
 	// Port is the pod-agent gRPC port (default 7443).
 	Port int32
+}
+
+type clientKey struct {
+	namespace string
+	podName   string
 }
 
 type cachedAgent struct {
@@ -160,43 +165,56 @@ type cachedAgent struct {
 // pod's IP is read from the supplied resolver — typically the controller's
 // cached client. If the cached client was for a different IP (pod
 // replaced), we close it and dial the new address.
-func (p *AgentClientPool) For(ctx context.Context, podName, podIP string) (AgentClient, error) {
+func (p *AgentClientPool) For(ctx context.Context, namespace, podName, podIP string) (AgentClient, error) {
 	if podIP == "" {
-		return nil, fmt.Errorf("pool: pod %q has no IP yet", podName)
+		return nil, fmt.Errorf("pool: pod %s/%s has no IP yet", namespace, podName)
 	}
 	port := p.Port
 	if port == 0 {
 		port = 7443
 	}
 	addr := fmt.Sprintf("%s:%d", podIP, port)
+	key := clientKey{namespace: namespace, podName: podName}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.clients == nil {
-		p.clients = map[string]*cachedAgent{}
+		p.clients = map[clientKey]*cachedAgent{}
 	}
-	if existing, ok := p.clients[podName]; ok {
-		if existing.addr == addr {
-			return existing.client, nil
-		}
-		// Pod was replaced under the same name; drop the stale client.
-		_ = existing.client.Close()
-		delete(p.clients, podName)
+	if existing, ok := p.clients[key]; ok && existing.addr == addr {
+		p.mu.Unlock()
+		return existing.client, nil
 	}
+	p.mu.Unlock()
+
 	cli, err := DialAgent(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
-	p.clients[podName] = &cachedAgent{client: cli, addr: addr}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.clients == nil {
+		p.clients = map[clientKey]*cachedAgent{}
+	}
+	if existing, ok := p.clients[key]; ok {
+		if existing.addr == addr {
+			_ = cli.Close()
+			return existing.client, nil
+		}
+		// Pod was replaced under the same name; drop the stale client.
+		_ = existing.client.Close()
+	}
+	p.clients[key] = &cachedAgent{client: cli, addr: addr}
 	return cli, nil
 }
 
 // Forget closes and removes a cached client for the named pod.
-func (p *AgentClientPool) Forget(podName string) {
+func (p *AgentClientPool) Forget(namespace, podName string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if cli, ok := p.clients[podName]; ok {
+	key := clientKey{namespace: namespace, podName: podName}
+	if cli, ok := p.clients[key]; ok {
 		_ = cli.client.Close()
-		delete(p.clients, podName)
+		delete(p.clients, key)
 	}
 }

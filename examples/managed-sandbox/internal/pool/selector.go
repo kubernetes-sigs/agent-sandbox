@@ -81,7 +81,13 @@ func (s *Selector) Choose(ctx context.Context, sandbox *sandboxv1alpha1.ManagedS
 	// the same pod when racing on Choose.
 	sort.Slice(pods.Items, func(i, j int) bool { return pods.Items[i].Name < pods.Items[j].Name })
 
+	tenantCounts, err := s.tenantCounts(ctx, sandbox.Namespace)
+	if err != nil {
+		return "", err
+	}
+
 	hasPending := false
+	readyCount := 0
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if !IsPodReady(p) {
@@ -94,36 +100,31 @@ func (s *Selector) Choose(ctx context.Context, sandbox *sandboxv1alpha1.ManagedS
 			hasPending = true
 			continue
 		}
-		count, err := s.countTenants(ctx, sandbox.Namespace, p.Name)
-		if err != nil {
-			return "", err
-		}
-		if count < capacity {
+		readyCount++
+		if tenantCounts[p.Name] < capacity {
 			return p.Name, nil
 		}
 	}
 
-	if hasPending {
+	if readyCount == 0 && hasPending {
 		return "", ErrWaitingForPoolPod
 	}
 	return "", ErrNoCapacity
 }
 
-func (s *Selector) countTenants(ctx context.Context, namespace, podName string) (int, error) {
+func (s *Selector) tenantCounts(ctx context.Context, namespace string) (map[string]int, error) {
 	list := &sandboxv1alpha1.ManagedSandboxList{}
-	// Cheap O(N) scan; if it becomes a bottleneck, add a field index on
-	// status.host.podName via builder.IndexField in SetupWithManager.
 	if err := s.Client.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return 0, fmt.Errorf("pool: list sandboxes: %w", err)
+		return nil, fmt.Errorf("pool: list sandboxes: %w", err)
 	}
-	n := 0
+	counts := make(map[string]int, len(list.Items))
 	for i := range list.Items {
 		sb := &list.Items[i]
-		if sb.Status.Host != nil && sb.Status.Host.PodName == podName {
-			n++
+		if sb.Status.Host != nil && sb.Status.Host.PodName != "" {
+			counts[sb.Status.Host.PodName]++
 		}
 	}
-	return n, nil
+	return counts, nil
 }
 
 func IsPodReady(p *corev1.Pod) bool {

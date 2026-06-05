@@ -48,20 +48,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
-# grpc_health_probe is invoked by kubelet's readinessProbe to consult
-# our gRPC health endpoint. Pin a known release.
-ARG GRPC_HEALTH_PROBE_VERSION=v0.4.36
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-        amd64) bin="grpc_health_probe-linux-amd64" ;; \
-        arm64) bin="grpc_health_probe-linux-arm64" ;; \
-        *) echo "unsupported arch $arch"; exit 1 ;; \
-    esac; \
-    wget -qO /usr/local/bin/grpc_health_probe \
-        "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/${bin}"; \
-    chmod +x /usr/local/bin/grpc_health_probe
-
 COPY --from=builder /usr/local/bin/pod-agent /usr/local/bin/pod-agent
 COPY --from=builder /usr/local/bin/agent-sandbox-worker /usr/local/bin/agent-sandbox-worker
 

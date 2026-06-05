@@ -14,10 +14,21 @@ spec:
         app.kubernetes.io/name: managed-sandbox-example-controller
     spec:
       serviceAccountName: managed-sandbox-example-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: controller
         image: kind.local/managed-sandbox-controller:dev
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         args:
         - --pool-agent-image=kind.local/pod-agent:dev
         - --metrics-bind-address=:8080

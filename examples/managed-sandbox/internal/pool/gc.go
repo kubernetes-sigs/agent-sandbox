@@ -111,7 +111,7 @@ func (g *GC) SweepOnce(ctx context.Context) error {
 
 func (g *GC) sweepPod(ctx context.Context, pod *corev1.Pod, live map[string]struct{}) error {
 	log := log.FromContext(ctx).WithName("pool-gc").WithValues("Pool.Pod", pod.Name)
-	agent, err := g.Agents.For(ctx, pod.Name, pod.Status.PodIP)
+	agent, err := g.Agents.For(ctx, pod.Namespace, pod.Name, pod.Status.PodIP)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}

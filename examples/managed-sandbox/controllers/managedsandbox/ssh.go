@@ -50,6 +50,9 @@ func (r *ManagedSandboxReconciler) ensureSSHToken(ctx context.Context, sandbox *
 	existing := &corev1.Secret{}
 	err := r.Get(ctx, nsn, existing)
 	if err == nil {
+		if !metav1.IsControlledBy(existing, sandbox) {
+			return "", "", fmt.Errorf("ssh secret %s exists but is not owned by ManagedSandbox %s/%s", name, sandbox.Namespace, sandbox.Name)
+		}
 		token, ok := existing.Data[secretKeyToken]
 		if !ok || len(token) == 0 {
 			return "", "", fmt.Errorf("ssh secret %s exists but has no %q key", name, secretKeyToken)
@@ -85,7 +88,7 @@ func (r *ManagedSandboxReconciler) ensureSSHToken(ctx context.Context, sandbox *
 	if err := r.Create(ctx, secret, client.FieldOwner(managedSandboxControllerFieldOwner)); err != nil {
 		// Race: another reconcile created it between our Get and Create.
 		if k8serrors.IsAlreadyExists(err) {
-			return r.ensureSSHToken(ctx, sandbox)
+			return "", "", fmt.Errorf("ssh secret %s was created concurrently: %w", name, err)
 		}
 		return "", "", fmt.Errorf("create ssh secret: %w", err)
 	}

@@ -604,40 +604,82 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	logger := log.FromContext(ctx)
 
 	var skipped []queue.SandboxKey
-	// Instantly returns unused keys the moment we find a valid candidate!
+	var fallbackSandbox *v1beta1.Sandbox
+	var fallbackKey queue.SandboxKey
+	var adoptingFallback bool
+
+	// Instantly returns unused keys the moment we find a valid/ready candidate!
 	defer func() {
 		for _, key := range skipped {
 			r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, key)
 		}
+		// If we parked a fallback sandbox but never ended up adopting it (due to error or adopting a ready one), requeue it.
+		if fallbackSandbox != nil && !adoptingFallback {
+			r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, fallbackKey)
+		}
 	}()
 
-	var sandboxList v1beta1.SandboxList
-	if err := r.List(ctx, &sandboxList, client.InNamespace(claim.Namespace)); err != nil {
-		logger.Error(err, "Failed to list sandboxes for smart selection node counting")
-		return nil, queue.SandboxKey{}, err
-	}
+	// Strategy helper to pick candidate using in-memory NodeSpread and FIFO tie-breaking
+	pickSmart := func(keys []queue.SandboxKey) (queue.SandboxKey, bool) {
+		namespaceKeys := keys
 
-	nodeCounts := make(map[string]int)
-	sbMap := make(map[string]*v1beta1.Sandbox)
-	for i := range sandboxList.Items {
-		sb := &sandboxList.Items[i]
-		sbMap[sb.Name] = sb
-		if _, isWarm := sb.Labels[warmPoolSandboxLabel]; !isWarm {
-			if sb.Status.NodeName != "" {
-				nodeCounts[sb.Status.NodeName]++
+		if len(namespaceKeys) == 0 {
+			return queue.SandboxKey{}, false
+		}
+		if len(namespaceKeys) == 1 {
+			return namespaceKeys[0], true
+		}
+
+		// Group candidates into scheduled vs unscheduled
+		var scheduledKeys []queue.SandboxKey
+		var unscheduledKeys []queue.SandboxKey
+		for _, key := range namespaceKeys {
+			if key.NodeName != "" {
+				scheduledKeys = append(scheduledKeys, key)
+			} else {
+				unscheduledKeys = append(unscheduledKeys, key)
 			}
 		}
-	}
 
-	selector := &smartSelector{
-		claim:      claim,
-		sbMap:      sbMap,
-		nodeCounts: nodeCounts,
+		// NodeSpread strategy: spread workloads by round-robinning nodes.
+		// We count the remaining warmpool sandboxes per node in the queue.
+		// The node with the most remaining sandboxes has been selected the least.
+		if len(scheduledKeys) > 0 {
+			nodeCounts := make(map[string]int)
+			for _, key := range scheduledKeys {
+				nodeCounts[key.NodeName]++
+			}
+
+			maxCount := 0
+			for _, count := range nodeCounts {
+				if count > maxCount {
+					maxCount = count
+				}
+			}
+
+			var bestCandidates []queue.SandboxKey
+			for _, key := range scheduledKeys {
+				if nodeCounts[key.NodeName] == maxCount {
+					bestCandidates = append(bestCandidates, key)
+				}
+			}
+
+			// Ties (equal counts) are resolved using oldest first (first in the slice)
+			return bestCandidates[0], true
+		}
+
+		// Fall back to oldest first (FIFO) for unscheduled keys
+		return unscheduledKeys[0], true
 	}
 
 	for {
-		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(claim.Spec.WarmPoolRef.Name, selector.pick)
+		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(claim.Spec.WarmPoolRef.Name, pickSmart)
 		if !ok {
+			// No more candidates in our namespace. If we found an unready fallback sandbox, return it.
+			if fallbackSandbox != nil {
+				adoptingFallback = true
+				return fallbackSandbox, fallbackKey, nil
+			}
 			return nil, queue.SandboxKey{}, nil
 		}
 
@@ -656,14 +698,29 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", err.Error())
+			// If it is a good sandbox in the wrong namespace, put it back.
+			// (Though pickSmart makes this impossible, we keep it for safety).
 			if errors.Is(err, ErrCrossNamespaceAdoption) {
 				skipped = append(skipped, adoptedKey)
 			}
 			continue
 		}
 
-		// Valid candidate found
-		return adopted, adoptedKey, nil
+		// Candidate is valid! Now check if it is Ready
+		if isSandboxReady(adopted) {
+			// Found a Ready sandbox! Adopt it immediately.
+			return adopted, adoptedKey, nil
+		}
+
+		// Sandbox is valid but NOT Ready.
+		// Keep the first unready sandbox we found as fallback.
+		if fallbackSandbox == nil {
+			fallbackSandbox = adopted
+			fallbackKey = adoptedKey
+		} else {
+			// Push subsequent unready sandboxes to skipped so they go back to the queue
+			skipped = append(skipped, adoptedKey)
+		}
 	}
 }
 
@@ -1641,14 +1698,16 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 	newWarmPoolName := getWarmPoolName(newSandbox)
 
 	poolChanged := oldWarmPoolName != newWarmPoolName
+	nodeScheduled := oldSandbox.Status.NodeName != newSandbox.Status.NodeName
 
-	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) {
-		// Add sandbox only on transition to adoptable.
+	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) || (newAdoptable && nodeScheduled) {
+		// Add/update sandbox in the queue
 		key := queue.SandboxKey{
 			Namespace: newSandbox.Namespace,
 			Name:      newSandbox.Name,
+			NodeName:  newSandbox.Status.NodeName,
 		}
-		logger.V(1).Info("Adding sandbox to warm pool queue", "warmPool", newWarmPoolName, "sandbox", key)
+		logger.V(1).Info("Adding/updating sandbox in warm pool queue", "warmPool", newWarmPoolName, "sandbox", key)
 		if newWarmPoolName != "" {
 			h.sandboxQueue.Add(newWarmPoolName, key)
 		}
@@ -1751,85 +1810,4 @@ func getWarmPoolName(obj metav1.Object) string {
 		}
 	}
 	return ""
-}
-
-type smartSelector struct {
-	claim      *extensionsv1beta1.SandboxClaim
-	sbMap      map[string]*v1beta1.Sandbox
-	nodeCounts map[string]int
-}
-
-func (s *smartSelector) pick(keys []queue.SandboxKey) (queue.SandboxKey, bool) {
-	var bestKey queue.SandboxKey
-	var bestSandbox *v1beta1.Sandbox
-	found := false
-
-	for _, key := range keys {
-		// Upfront filter mismatching namespaces to avoid map lookup
-		if key.Namespace != s.claim.Namespace {
-			continue
-		}
-
-		sb, exists := s.sbMap[key.Name]
-		if !exists {
-			// The sandbox doesn't exist in cache/cluster or r.List failed.
-			// Pop it to either discard it (if deleted) or perform a direct Get fallback.
-			return key, true
-		}
-
-		if err := verifySandboxCandidate(sb, s.claim); err != nil {
-			// The sandbox is invalid. Pop it to discard it.
-			return key, true
-		}
-
-		if !found {
-			bestKey = key
-			bestSandbox = sb
-			found = true
-			continue
-		}
-
-		sbReady := isSandboxReady(sb)
-		bestReady := isSandboxReady(bestSandbox)
-
-		if sbReady != bestReady {
-			if sbReady {
-				bestKey = key
-				bestSandbox = sb
-			}
-			continue
-		}
-
-		sbNode := sb.Status.NodeName
-		bestNode := bestSandbox.Status.NodeName
-
-		if sbNode == "" && bestNode != "" {
-			continue
-		}
-		if sbNode != "" && bestNode == "" {
-			bestKey = key
-			bestSandbox = sb
-			continue
-		}
-
-		if sbNode != "" && bestNode != "" && sbNode != bestNode {
-			sbCount := s.nodeCounts[sbNode]
-			bestCount := s.nodeCounts[bestNode]
-			if sbCount < bestCount {
-				bestKey = key
-				bestSandbox = sb
-				continue
-			}
-			if sbCount > bestCount {
-				continue
-			}
-		}
-
-		if sb.CreationTimestamp.Before(&bestSandbox.CreationTimestamp) {
-			bestKey = key
-			bestSandbox = sb
-		}
-	}
-
-	return bestKey, found
 }

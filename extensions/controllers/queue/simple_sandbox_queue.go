@@ -16,12 +16,14 @@ package queue
 
 import (
 	"sync"
-
-	"k8s.io/apimachinery/pkg/types"
 )
 
 // SandboxKey uniquely identifies a sandbox in the queue.
-type SandboxKey types.NamespacedName
+type SandboxKey struct {
+	Namespace string
+	Name      string
+	NodeName  string
+}
 
 // SandboxQueue defines the interface for managing a thread-safe,
 // highly concurrent queue of adoptable warm pool sandboxes.
@@ -81,14 +83,15 @@ func (q *synchronizedQueue) Remove(key SandboxKey) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if _, exists := q.set[key]; !exists {
+	uniqueID := key.Namespace + "/" + key.Name
+	if _, exists := q.set[uniqueID]; !exists {
 		return
 	}
 
-	delete(q.set, key)
+	delete(q.set, uniqueID)
 
 	for i, k := range q.items {
-		if k == key {
+		if k.Namespace == key.Namespace && k.Name == key.Name {
 			// Shift left and clear the tail slot so removed keys don't linger.
 			// Same pattern as Pop()
 			last := len(q.items) - 1
@@ -106,13 +109,13 @@ func (q *synchronizedQueue) Remove(key SandboxKey) {
 type synchronizedQueue struct {
 	mu    sync.Mutex
 	items []SandboxKey
-	set   map[SandboxKey]struct{} // Used for O(1) deduplication
+	set   map[string]struct{} // Used for O(1) deduplication by namespace/name
 }
 
 func newSynchronizedQueue() *synchronizedQueue {
 	return &synchronizedQueue{
 		items: make([]SandboxKey, 0),
-		set:   make(map[SandboxKey]struct{}),
+		set:   make(map[string]struct{}),
 	}
 }
 
@@ -120,9 +123,18 @@ func newSynchronizedQueue() *synchronizedQueue {
 func (q *synchronizedQueue) Push(key SandboxKey) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if _, exists := q.set[key]; !exists {
-		q.set[key] = struct{}{}
+	uniqueID := key.Namespace + "/" + key.Name
+	if _, exists := q.set[uniqueID]; !exists {
+		q.set[uniqueID] = struct{}{}
 		q.items = append(q.items, key)
+	} else {
+		// Key already exists. Always update the NodeName to reflect latest placement state.
+		for i := range q.items {
+			if q.items[i].Namespace == key.Namespace && q.items[i].Name == key.Name {
+				q.items[i].NodeName = key.NodeName
+				break
+			}
+		}
 	}
 }
 
@@ -144,7 +156,7 @@ func (q *synchronizedQueue) Pop() (SandboxKey, bool) {
 
 	// Remove it from slice and set
 	q.items = q.items[1:]
-	delete(q.set, item)
+	delete(q.set, item.Namespace+"/"+item.Name)
 
 	return item, true
 }
@@ -170,8 +182,9 @@ func (q *synchronizedQueue) PopWithStrategy(pick func([]SandboxKey) (SandboxKey,
 		}
 
 		q.mu.Lock()
+		uniqueID := key.Namespace + "/" + key.Name
 		// Verify the key is still present in the queue
-		if _, exists := q.set[key]; !exists {
+		if _, exists := q.set[uniqueID]; !exists {
 			// The picked key was concurrently popped by another goroutine.
 			// Unlock and retry snapshot and pick.
 			q.mu.Unlock()
@@ -180,7 +193,7 @@ func (q *synchronizedQueue) PopWithStrategy(pick func([]SandboxKey) (SandboxKey,
 
 		// Find the picked key in q.items and remove it
 		for i, k := range q.items {
-			if k == key {
+			if k.Namespace == key.Namespace && k.Name == key.Name {
 				// Shift left and clear the tail slot
 				last := len(q.items) - 1
 				copy(q.items[i:], q.items[i+1:])
@@ -189,7 +202,7 @@ func (q *synchronizedQueue) PopWithStrategy(pick func([]SandboxKey) (SandboxKey,
 				break
 			}
 		}
-		delete(q.set, key)
+		delete(q.set, uniqueID)
 		q.mu.Unlock()
 
 		return key, true

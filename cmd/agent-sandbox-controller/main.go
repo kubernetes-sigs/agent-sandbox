@@ -242,8 +242,13 @@ func main() {
 		mgrOpts.Cache = cache.Options{
 			DefaultNamespaces: defaultNamespaces,
 		}
-		if enableLeaderElection && leaderElectionNamespace == "" && len(watchNamespaces) == 1 {
-			mgrOpts.LeaderElectionNamespace = watchNamespaces[0]
+		if enableLeaderElection && leaderElectionNamespace == "" {
+			if len(watchNamespaces) == 1 {
+				mgrOpts.LeaderElectionNamespace = watchNamespaces[0]
+			} else {
+				setupLog.Error(nil, "--leader-election-namespace must be set when watching multiple namespaces")
+				os.Exit(1)
+			}
 		}
 		setupLog.Info("running in namespaced mode", "namespaces", watchNamespaces)
 	}

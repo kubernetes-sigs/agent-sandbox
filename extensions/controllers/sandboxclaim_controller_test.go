@@ -2205,35 +2205,79 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	}
 }
 func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
-	q := queue.NewSimpleSandboxQueue()
-	handler := &sandboxEventHandler{sandboxQueue: q}
-
-	warmPoolName := "test-warmpool"
-	key := queue.SandboxKey{Namespace: "default", Name: "ghost-pod"}
-
-	// 1. Add the pod to the queue
-	q.Add(warmPoolName, key)
-
-	// 2. Create the mock Sandbox object that is being deleted
-	sb := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ghost-pod",
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{{
+	tests := []struct {
+		name          string
+		ownerRef      *metav1.OwnerReference
+		expectRemoved bool
+	}{
+		{
+			name: "valid SandboxWarmPool owner",
+			ownerRef: &metav1.OwnerReference{
 				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
 				Kind:       "SandboxWarmPool",
-				Name:       warmPoolName,
-			}},
+				Name:       "test-warmpool",
+			},
+			expectRemoved: true,
+		},
+		{
+			name: "invalid APIVersion group",
+			ownerRef: &metav1.OwnerReference{
+				APIVersion: "other.group.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-warmpool",
+			},
+			expectRemoved: false,
+		},
+		{
+			name: "empty APIVersion",
+			ownerRef: &metav1.OwnerReference{
+				APIVersion: "",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-warmpool",
+			},
+			expectRemoved: false,
+		},
+		{
+			name:          "no owner reference",
+			ownerRef:      nil,
+			expectRemoved: false,
 		},
 	}
 
-	// 3. Fire the Delete event
-	handler.Delete(context.Background(), event.DeleteEvent{Object: sb}, nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			q := queue.NewSimpleSandboxQueue()
+			handler := &sandboxEventHandler{sandboxQueue: q}
 
-	// 4. Verify the Ghost Pod was removed from the queue
-	_, ok := q.Get(warmPoolName)
-	if ok {
-		t.Errorf("Expected the deleted sandbox to be removed from the queue")
+			warmPoolName := "test-warmpool"
+			key := queue.SandboxKey{Namespace: "default", Name: "ghost-pod"}
+
+			// 1. Add the pod to the queue
+			q.Add(warmPoolName, key)
+
+			// 2. Create the mock Sandbox object that is being deleted
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ghost-pod",
+					Namespace: "default",
+				},
+			}
+			if tc.ownerRef != nil {
+				sb.OwnerReferences = []metav1.OwnerReference{*tc.ownerRef}
+			}
+
+			// 3. Fire the Delete event
+			handler.Delete(context.Background(), event.DeleteEvent{Object: sb}, nil)
+
+			// 4. Verify the queue status
+			_, ok := q.Get(warmPoolName)
+			if tc.expectRemoved && ok {
+				t.Errorf("Expected the deleted sandbox to be removed from the queue, but it was found")
+			}
+			if !tc.expectRemoved && !ok {
+				t.Errorf("Expected the deleted sandbox to remain in the queue, but it was removed")
+			}
+		})
 	}
 }
 

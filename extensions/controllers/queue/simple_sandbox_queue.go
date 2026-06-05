@@ -28,6 +28,7 @@ type SandboxKey types.NamespacedName
 type SandboxQueue interface {
 	Add(warmPoolName string, item SandboxKey)
 	Get(warmPoolName string) (SandboxKey, bool)
+	GetWithStrategy(warmPoolName string, pick func([]SandboxKey) (SandboxKey, bool)) (SandboxKey, bool)
 	RemoveQueue(warmPoolName string)
 	RemoveItem(warmPoolName string, item SandboxKey)
 }
@@ -56,6 +57,15 @@ func (s *SimpleSandboxQueue) Get(warmPoolName string) (SandboxKey, bool) {
 		return SandboxKey{}, false
 	}
 	return q.(*synchronizedQueue).Pop()
+}
+
+// GetWithStrategy pops an item from the specific warm pool's queue using a custom strategy.
+func (s *SimpleSandboxQueue) GetWithStrategy(warmPoolName string, pick func([]SandboxKey) (SandboxKey, bool)) (SandboxKey, bool) {
+	q, ok := s.queues.Load(warmPoolName)
+	if !ok {
+		return SandboxKey{}, false
+	}
+	return q.(*synchronizedQueue).PopWithStrategy(pick)
 }
 
 // RemoveItem deletes a specific sandbox from a warm pool's queue.
@@ -139,8 +149,55 @@ func (q *synchronizedQueue) Pop() (SandboxKey, bool) {
 	return item, true
 }
 
+// PopWithStrategy applies the strategy function to pick an item from the queue,
+// removes it thread-safely, and returns it.
+func (q *synchronizedQueue) PopWithStrategy(pick func([]SandboxKey) (SandboxKey, bool)) (SandboxKey, bool) {
+	for {
+		q.mu.Lock()
+		if len(q.items) == 0 {
+			q.mu.Unlock()
+			return SandboxKey{}, false
+		}
+
+		// Snapshot the queue items
+		snapshot := make([]SandboxKey, len(q.items))
+		copy(snapshot, q.items)
+		q.mu.Unlock()
+
+		key, ok := pick(snapshot)
+		if !ok {
+			return SandboxKey{}, false
+		}
+
+		q.mu.Lock()
+		// Verify the key is still present in the queue
+		if _, exists := q.set[key]; !exists {
+			// The picked key was concurrently popped by another goroutine.
+			// Unlock and retry snapshot and pick.
+			q.mu.Unlock()
+			continue
+		}
+
+		// Find the picked key in q.items and remove it
+		for i, k := range q.items {
+			if k == key {
+				// Shift left and clear the tail slot
+				last := len(q.items) - 1
+				copy(q.items[i:], q.items[i+1:])
+				q.items[last] = SandboxKey{}
+				q.items = q.items[:last]
+				break
+			}
+		}
+		delete(q.set, key)
+		q.mu.Unlock()
+
+		return key, true
+	}
+}
+
 // RemoveQueue completely deletes a warm pool's queue from the sync.Map
-// to prevent memory leaks when WarmPools are deleted.
+// to prevent memory leaks when SandboxTemplates or WarmPools are deleted.
 func (s *SimpleSandboxQueue) RemoveQueue(warmPoolName string) {
 	s.queues.Delete(warmPoolName)
 }

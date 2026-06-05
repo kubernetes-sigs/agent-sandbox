@@ -230,6 +230,10 @@ type SandboxStatus struct {
 	// A pod may have multiple IPs in dual-stack clusters.
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
+
+	// nodeName is the name of the node where the underlying pod is scheduled.
+	// +optional
+	NodeName string `json:"nodeName,omitempty"`
 }
 
 // +genclient

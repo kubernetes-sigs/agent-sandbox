@@ -237,9 +237,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
+		sandbox.Status.NodeName = ""
 	} else {
 		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
 		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
+		sandbox.Status.NodeName = pod.Spec.NodeName
 	}
 
 	// Reconcile Service

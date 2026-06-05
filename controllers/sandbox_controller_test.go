@@ -566,6 +566,7 @@ func TestReconcile(t *testing.T) {
 					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container"}},
+						NodeName:   "node-1",
 					},
 					Status: corev1.PodStatus{
 						PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}, {IP: "fd00::5"}},
@@ -589,6 +590,7 @@ func TestReconcile(t *testing.T) {
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				PodIPs:        []string{"10.244.0.5", "fd00::5"},
+				NodeName:      "node-1",
 				Conditions: []metav1.Condition{
 					{
 						Type:               "Ready",
@@ -634,6 +636,7 @@ func TestReconcile(t *testing.T) {
 					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container"}},
+						NodeName:   "node-2",
 					},
 					Status: corev1.PodStatus{
 						PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}},
@@ -654,6 +657,7 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				PodIPs:        []string{"10.244.0.5"},
+				NodeName:      "node-2",
 				Conditions: []metav1.Condition{
 					{
 						Type:               "Ready",

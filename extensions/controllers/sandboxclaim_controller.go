@@ -611,16 +611,37 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 		}
 	}()
 
+	var sandboxList v1beta1.SandboxList
+	if err := r.List(ctx, &sandboxList, client.InNamespace(claim.Namespace)); err != nil {
+		logger.Error(err, "Failed to list sandboxes for smart selection node counting")
+		return nil, queue.SandboxKey{}, err
+	}
+
+	nodeCounts := make(map[string]int)
+	sbMap := make(map[string]*v1beta1.Sandbox)
+	for i := range sandboxList.Items {
+		sb := &sandboxList.Items[i]
+		sbMap[sb.Name] = sb
+		if _, isWarm := sb.Labels[warmPoolSandboxLabel]; !isWarm {
+			if sb.Status.NodeName != "" {
+				nodeCounts[sb.Status.NodeName]++
+			}
+		}
+	}
+
+	selector := &smartSelector{
+		claim:      claim,
+		sbMap:      sbMap,
+		nodeCounts: nodeCounts,
+	}
+
 	for {
-		adoptedKey, ok := r.WarmSandboxQueue.Get(claim.Spec.WarmPoolRef.Name)
+		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(claim.Spec.WarmPoolRef.Name, selector.pick)
 		if !ok {
 			return nil, queue.SandboxKey{}, nil
 		}
 
-		// 1. Hand the Kubernetes client the empty bucket
 		adopted := &v1beta1.Sandbox{}
-
-		// 2. Fetch from the Informer Cache
 		err := r.Get(ctx, client.ObjectKey{Namespace: adoptedKey.Namespace, Name: adoptedKey.Name}, adopted)
 		if err != nil {
 			if k8errors.IsNotFound(err) {
@@ -635,8 +656,6 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", err.Error())
-			// If it's a good sandbox just in the wrong namespace,
-			// add it to the skipped list so the defer block puts it back.
 			if errors.Is(err, ErrCrossNamespaceAdoption) {
 				skipped = append(skipped, adoptedKey)
 			}
@@ -1732,4 +1751,85 @@ func getWarmPoolName(obj metav1.Object) string {
 		}
 	}
 	return ""
+}
+
+type smartSelector struct {
+	claim      *extensionsv1beta1.SandboxClaim
+	sbMap      map[string]*v1beta1.Sandbox
+	nodeCounts map[string]int
+}
+
+func (s *smartSelector) pick(keys []queue.SandboxKey) (queue.SandboxKey, bool) {
+	var bestKey queue.SandboxKey
+	var bestSandbox *v1beta1.Sandbox
+	found := false
+
+	for _, key := range keys {
+		// Upfront filter mismatching namespaces to avoid map lookup
+		if key.Namespace != s.claim.Namespace {
+			continue
+		}
+
+		sb, exists := s.sbMap[key.Name]
+		if !exists {
+			// The sandbox doesn't exist in cache/cluster or r.List failed.
+			// Pop it to either discard it (if deleted) or perform a direct Get fallback.
+			return key, true
+		}
+
+		if err := verifySandboxCandidate(sb, s.claim); err != nil {
+			// The sandbox is invalid. Pop it to discard it.
+			return key, true
+		}
+
+		if !found {
+			bestKey = key
+			bestSandbox = sb
+			found = true
+			continue
+		}
+
+		sbReady := isSandboxReady(sb)
+		bestReady := isSandboxReady(bestSandbox)
+
+		if sbReady != bestReady {
+			if sbReady {
+				bestKey = key
+				bestSandbox = sb
+			}
+			continue
+		}
+
+		sbNode := sb.Status.NodeName
+		bestNode := bestSandbox.Status.NodeName
+
+		if sbNode == "" && bestNode != "" {
+			continue
+		}
+		if sbNode != "" && bestNode == "" {
+			bestKey = key
+			bestSandbox = sb
+			continue
+		}
+
+		if sbNode != "" && bestNode != "" && sbNode != bestNode {
+			sbCount := s.nodeCounts[sbNode]
+			bestCount := s.nodeCounts[bestNode]
+			if sbCount < bestCount {
+				bestKey = key
+				bestSandbox = sb
+				continue
+			}
+			if sbCount > bestCount {
+				continue
+			}
+		}
+
+		if sb.CreationTimestamp.Before(&bestSandbox.CreationTimestamp) {
+			bestKey = key
+			bestSandbox = sb
+		}
+	}
+
+	return bestKey, found
 }

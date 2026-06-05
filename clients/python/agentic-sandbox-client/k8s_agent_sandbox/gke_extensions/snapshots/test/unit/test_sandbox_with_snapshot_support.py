@@ -1458,6 +1458,20 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.assertEqual(result.error_code, INTERNAL_ERROR_CODE)
         self.assertIn("Internal Error: Timed out waiting for sandbox restoration", result.error_reason)
 
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    def test_restore_patch_exception(self, mock_is_suspended):
+        """Test restore returns failure when patch_sandbox_claim raises an exception."""
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {
+            "items": [{"metadata": {"name": "snap-uid-123"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]
+        }
+        self.mock_k8s_helper.patch_sandbox_claim.side_effect = Exception("Patch failed")
+
+        result = self.sandbox.restore(snapshot_uid="snap-uid-123")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, ERROR_CODE)
+        self.assertIn("Unexpected error: Patch failed", result.error_reason)
+
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_sandbox_propagation', return_value=True)
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
     @patch.object(SandboxWithSnapshotSupport, '_restore_internal')

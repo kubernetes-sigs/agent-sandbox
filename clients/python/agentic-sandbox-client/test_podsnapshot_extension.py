@@ -274,7 +274,7 @@ def test_suspend_resume_restore_cycle(sandbox) -> tuple[str, str]:
     assert res_suspend1.success, res_suspend1.error_reason
     snap_a_uid = res_suspend1.snapshot_response.snapshot_uid
     print(f"1st Suspend snapshot: {snap_a_uid}")
-    wait_for_snapshot_ready(sandbox, snap_a_uid)
+    assert wait_for_snapshot_ready(sandbox, snap_a_uid), f"Snapshot '{snap_a_uid}' did not become ready in time."
     
     print("Resuming sandbox (1st time)...")
     res_resume = sandbox.resume()
@@ -287,7 +287,7 @@ def test_suspend_resume_restore_cycle(sandbox) -> tuple[str, str]:
     assert res_suspend2.success, res_suspend2.error_reason
     snap_b_uid = res_suspend2.snapshot_response.snapshot_uid
     print(f"2nd Suspend snapshot: {snap_b_uid}")
-    wait_for_snapshot_ready(sandbox, snap_b_uid)
+    assert wait_for_snapshot_ready(sandbox, snap_b_uid), f"Snapshot '{snap_b_uid}' did not become ready in time."
     
     print(f"Restoring sandbox back to 1st snapshot '{snap_a_uid}'...")
     res_restore = sandbox.restore(snapshot_uid=snap_a_uid)
@@ -300,7 +300,7 @@ def test_suspend_resume_restore_cycle(sandbox) -> tuple[str, str]:
     assert res_suspend3.success, res_suspend3.error_reason
     snap_c_uid = res_suspend3.snapshot_response.snapshot_uid
     print(f"3rd Suspend snapshot: {snap_c_uid}")
-    wait_for_snapshot_ready(sandbox, snap_c_uid)
+    assert wait_for_snapshot_ready(sandbox, snap_c_uid), f"Snapshot '{snap_c_uid}' did not become ready in time."
     
     print("Resuming sandbox (after restoration)...")
     res_resume2 = sandbox.resume()

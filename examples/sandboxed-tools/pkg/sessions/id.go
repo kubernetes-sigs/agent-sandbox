@@ -18,12 +18,10 @@ import "fmt"
 
 // ValidateSessionName validates that the session name is valid.
 // We use session names in kubernetes and in filesystem paths,
-// so we limit the characters allowed (alphanumeric) and the length (max 40 characters).
+// so we limit the characters allowed (lowercase alphanumeric) and the length (max 40 characters).
 func ValidateSessionName(sessionName string) error {
-	// We require the session name to contain only alphanumeric characters.
-	// We could be more liberal, but we want to err on the side of caution for now.
-	if !isAlphaNumeric(sessionName) {
-		return fmt.Errorf("session name must be alphanumeric")
+	if !isLowerAlphaNumeric(sessionName) {
+		return fmt.Errorf("session name must be lowercase alphanumeric")
 	}
 
 	// Limit length; erring on the side of caution.
@@ -34,15 +32,14 @@ func ValidateSessionName(sessionName string) error {
 	return nil
 }
 
-// isAlphaNumeric returns true if the string is purely alphanumeric.
-func isAlphaNumeric(s string) bool {
+// isLowerAlphaNumeric returns true if the string is purely lower-case alphanumeric.
+func isLowerAlphaNumeric(s string) bool {
 	if len(s) == 0 {
 		return false
 	}
 	for _, r := range s {
 		switch {
 		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
 		case r >= '0' && r <= '9':
 		default:
 			return false

@@ -2521,7 +2521,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 				tc.setupReconciler(r)
 			}
 
-			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
+			r.recordReadyTransitionMetrics(ctx, tc.claim, tc.oldStatus, tc.sandbox)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
@@ -2578,7 +2578,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		// Verify metric
-		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeCold, "none", "not_ready"))
+		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, claim.Spec.WarmPoolRef.Name, "not_ready"))
 		if val != 1 {
 			t.Errorf("expected metric count 1, got %v", val)
 		}
@@ -4060,5 +4060,335 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			}
 			require.Equal(t, tc.expectedRemainingKeys, actualRemaining)
 		})
+	}
+}
+
+// Test_RecordSandboxClaimCreation_WarmPath exercises the warm adoption path through
+// reconcileActive->getOrCreateSandbox -> adoptSandboxFromCandidates
+// It verifies the "not_ready" recording first,
+// then after the adopted sandbox is marked Ready, a subsequent full Reconcile triggers
+// for the "ready" recording.
+func Test_RecordSandboxClaimCreation_WarmPath(t *testing.T) {
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+	}
+
+	// Create a warm-pool-owned candidate sandbox (not yet adopted by any claim).
+	// It must pass isAdoptable and be added to the WarmSandboxQueue so that
+	// getOrCreateSandbox -> adoptSandboxFromCandidates is taken, leading to the
+	// record call at 731 (with sandbox==nil, forcing not_ready + LaunchTypeUnknown).
+	poolNameHash := sandboxcontrollers.NameHash("test-warmpool")
+	warmCandidate := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-sb",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxTemplateRefAnnotation: "test-template",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-warmpool",
+				UID:        "pool-uid",
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+			},
+		},
+		// Intentionally not Ready yet; the first recording (via 731) will be not_ready.
+	}
+
+	scheme := newScheme(t)
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, warmPool, claim, warmCandidate).WithStatusSubresource(claim).Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	if isAdoptable(warmCandidate) == nil {
+		warmPoolName := getWarmPoolName(warmCandidate)
+		key := queue.SandboxKey{Namespace: warmCandidate.Namespace, Name: warmCandidate.Name}
+		warmSandboxQueue.Add(warmPoolName, key)
+	}
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		WarmSandboxQueue: warmSandboxQueue,
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+
+	// First Reconcile exercises adoption (731) and records not_ready.
+	asmetrics.SandboxClaimCreationTotal.Reset()
+
+	for range 5 {
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile (warm adopt, not_ready) failed: %v", err)
+		}
+	}
+
+	// Adoption path (nil sandbox) always records with WarmPoolRef.Name in the template slot,
+	// LaunchTypeUnknown, "none" for warm pool name slot, "not_ready".
+	val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues(claim.Namespace, template.Name, asmetrics.LaunchTypeWarm, claim.Spec.WarmPoolRef.Name, "not_ready"))
+	if val != 1 {
+		t.Errorf("expected warm/not_ready count 1 via recordSandboxClaimCreation, got %v", val)
+	}
+	//sandbox is not ready yet so the metric should be false.
+	val = testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues(claim.Namespace, template.Name, asmetrics.LaunchTypeWarm, claim.Spec.WarmPoolRef.Name, "ready"))
+	if val != 0 {
+		t.Errorf("expected warm/ready count 0 (sandbox not ready yet), got %v", val)
+	}
+
+	// Simulate the (adopted) sandbox becoming Ready. The sandbox retains its original name.
+	currentSB := &sandboxv1beta1.Sandbox{}
+	if err := client.Get(ctx, types.NamespacedName{Name: "warm-sb", Namespace: "default"}, currentSB); err != nil {
+		t.Fatalf("get sandbox after first: %v", err)
+	}
+	currentSB.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionTrue,
+		Reason: "Ready",
+	}}
+	if err := client.Update(ctx, currentSB); err != nil {
+		t.Fatalf("update sandbox to ready: %v", err)
+	}
+
+	// Second Reconcile: sandbox is ready, claim status becomes Ready.
+	for range 5 {
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile (warm adopt follow-up, ready) failed: %v", err)
+		}
+	}
+
+	// On ready path we resolve real template + launch type (warm because of adoptedFrom annotation set during adoption).
+	val = testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues(claim.Namespace, "test-template", asmetrics.LaunchTypeWarm, claim.Spec.WarmPoolRef.Name, "ready"))
+	if val != 1 {
+		t.Errorf("expected warm/ready count 1 via recordSandboxClaimCreation, got %v", val)
+	}
+}
+
+// TestRecordSandboxClaimCreation_ColdPath exercises the cold create path through
+// createSandbox (hitting recordSandboxClaimCreation for the initial
+// "not_ready" recording).
+func Test_RecordSandboxClaimCreation_ColdPath(t *testing.T) {
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+	}
+
+	scheme := newScheme(t)
+	// No pre-existing sandbox and an empty warm queue: getOrCreateSandbox returns nil,
+	// cold path is taken, getTemplate succeeds (because warmPool exists), createSandbox
+	// runs and calls recordSandboxClaimCreation (line 1147).
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, warmPool, claim).WithStatusSubresource(claim).Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+
+	// First Reconcile: cold create -> records not_ready (sandbox just created is not ready).
+	asmetrics.SandboxClaimCreationTotal.Reset()
+	for range 5 {
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile (cold, not_ready) failed: %v", err)
+		}
+	}
+
+	// Cold create path resolves template name from the sandbox annotation and uses the
+	// claim's WarmPoolRef.Name for the warm pool dimension.
+	val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeCold, "test-warmpool", "not_ready"))
+	if val != 1 {
+		t.Errorf("expected cold/not_ready count 1 via recordSandboxClaimCreation, got %v", val)
+	}
+
+	// Simulate the sandbox (created with name == claim.Name for cold starts) becoming ready.
+	currentSB := &sandboxv1beta1.Sandbox{}
+	if err := client.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, currentSB); err != nil {
+		t.Fatalf("get sandbox after first: %v", err)
+	}
+	currentSB.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionTrue,
+		Reason: "Ready",
+	}}
+	if err := client.Update(ctx, currentSB); err != nil {
+		t.Fatalf("update sandbox to ready: %v", err)
+	}
+
+	// Second Reconcile: sandbox now ready
+	for range 5 {
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile (cold follow-up, ready) failed: %v", err)
+		}
+	}
+
+	val = testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeCold, "test-warmpool", "ready"))
+	if val != 1 {
+		t.Errorf("expected cold/ready count 1 via recordSandboxClaimCreation, got %v", val)
+	}
+}
+
+// Test_RecordSandboxClaimCreation_WarmPath_AlreadyReadySandbox exercises the warm
+// adoption path when the SandboxWarmPool candidate is *already* Ready=True.
+//
+// In this scenario:
+//   - adoptSandboxFromCandidates calls recordSandboxClaimCreation(...) with a ready sandbox
+//     (records "ready" once).
+//   - Later in the *same* Reconcile, computeAndSetStatus + recordReadyTransitionMetrics
+//     also detects the claim status transition to Ready and calls recordSandboxClaimCreation
+//     again (tries to record "ready" a second time).
+func Test_RecordSandboxClaimCreation_WarmPath_AlreadyReadySandbox(t *testing.T) {
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash("test-warmpool")
+	warmCandidate := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-sb",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxTemplateRefAnnotation: "test-template",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-warmpool",
+				UID:        "pool-uid",
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+			},
+		},
+		// Already Ready → triggers duplicate recording
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "Ready",
+			}},
+		},
+	}
+
+	scheme := newScheme(t)
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, warmCandidate).
+		WithStatusSubresource(claim).
+		Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	if isAdoptable(warmCandidate) == nil {
+		warmPoolName := getWarmPoolName(warmCandidate)
+		key := queue.SandboxKey{Namespace: warmCandidate.Namespace, Name: warmCandidate.Name}
+		warmSandboxQueue.Add(warmPoolName, key)
+	}
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		WarmSandboxQueue: warmSandboxQueue,
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+
+	asmetrics.SandboxClaimCreationTotal.Reset()
+
+	// One reconcile is enough to adopt + transition claim to Ready (we still do a few for stability)
+	for range 5 {
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile (warm adopt already-ready) failed: %v", err)
+		}
+	}
+
+	// Because the adopted sandbox was already Ready, we get:
+	// record from adoptSandboxFromCandidates (inside completeAdoption success path)
+	// record from recordReadyTransitionMetrics (claim status transition in same reconcile)
+	// tests duplication for the exact same label set.
+	val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues(
+		claim.Namespace, "test-template", asmetrics.LaunchTypeWarm, claim.Spec.WarmPoolRef.Name, "ready"))
+	if val != 1 {
+		t.Errorf("expected warm/ready count == 1 , got %v", val)
+	}
+
+	// Should be zero for not_ready in this path
+	val = testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues(
+		claim.Namespace, "test-template", asmetrics.LaunchTypeWarm, claim.Spec.WarmPoolRef.Name, "not_ready"))
+	if val != 0 {
+		t.Errorf("expected warm/not_ready count == 0, got %v", val)
 	}
 }

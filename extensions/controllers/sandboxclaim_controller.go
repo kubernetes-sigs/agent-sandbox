@@ -243,7 +243,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
+	r.recordReadyTransitionMetrics(ctx, claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -780,13 +780,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			if r.Recorder != nil {
 				r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxAdopted", "Adoption", "Adopted warm pool Sandbox %q", adopted.Name)
 			}
-
-			podCondition := "not_ready"
-			if isSandboxReady(adopted) {
-				podCondition = "ready"
-			}
-			templateName := r.resolveTemplateName(adopted)
-			asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition)
+			r.recordSandboxClaimCreation(claim, adopted)
 
 			return true, nil
 		}()
@@ -894,6 +888,9 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 
 // isSandboxReady checks if a sandbox has Ready=True condition.
 func isSandboxReady(sb *v1beta1.Sandbox) bool {
+	if sb == nil {
+		return false
+	}
 	for _, cond := range sb.Status.Conditions {
 		if cond.Type == string(v1beta1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
 			return true
@@ -1193,7 +1190,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxProvisioned", "Provisioning", "Created Sandbox %q", sandbox.Name)
 	}
 
-	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, "none", "not_ready")
+	r.recordSandboxClaimCreation(claim, sandbox)
 
 	return sandbox, nil
 }
@@ -1560,7 +1557,10 @@ func getLaunchType(sandbox *v1beta1.Sandbox) string {
 	if sandbox == nil {
 		return asmetrics.LaunchTypeUnknown
 	}
-	if sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] == v1beta1.SandboxLaunchTypeWarm {
+	if controllerRef := metav1.GetControllerOf(sandbox); controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
+		return asmetrics.LaunchTypeWarm
+	}
+	if sandbox.Labels != nil && sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] == v1beta1.SandboxLaunchTypeWarm {
 		return asmetrics.LaunchTypeWarm
 	}
 	return asmetrics.LaunchTypeCold
@@ -1618,8 +1618,8 @@ func (r *SandboxClaimReconciler) recordSandboxCreationLatency(sandbox *v1beta1.S
 	}
 }
 
-// recordCreationLatencyMetric detects and records transitions to Ready state.
-func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
+// recordReadyTransitionMetrics detects and records the first transition to Ready state per claim.
+func (r *SandboxClaimReconciler) recordReadyTransitionMetrics(
 	ctx context.Context,
 	claim *extensionsv1beta1.SandboxClaim,
 	oldStatus *extensionsv1beta1.SandboxClaimStatus,
@@ -1644,6 +1644,23 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		return
 	}
 
+	// Drain any entry recorded via CreateFunc/UpdateFunc + getOrRecordObservedTime
+	// for this claim's first transition to Ready. This covers the in-memory
+	// "controller first saw this claim" timestamp (used to backfill the
+	// ObservabilityAnnotation and for startup latency tracking). We must drain
+	// here so entries are not leaked for claims that never carried the annotation
+	// or that hit the warm-adoption guard below (which intentionally skips
+	// metric recording to avoid double-counting).
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
+		r.observedTimes.Delete(key)
+	}
+
+	// Avoid double-recording the "ready" metric when we just adopted an already-Ready
+	// sandbox from the warm pool (adoptSandboxFromCandidates already recorded it).
+	if oldStatus.SandboxStatus.Name == "" && isSandboxReady(sandbox) {
+		return
+	}
 	launchType := getLaunchType(sandbox)
 
 	sandboxName := "none"
@@ -1658,6 +1675,25 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
+	r.recordSandboxClaimCreation(claim, sandbox)
+}
+
+// recordSandboxClaimCreation records the claim creation counter using the sandbox's current readiness.
+// Call sites typically emit an initial "not_ready" at creation/adoption and then a "ready" increment
+// on the claim's first transition to Ready (via recordReadyTransitionMetrics).
+func (r *SandboxClaimReconciler) recordSandboxClaimCreation(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox) {
+	if sandbox == nil {
+		asmetrics.RecordSandboxClaimCreation(claim.Namespace, "__unknown__", asmetrics.LaunchTypeUnknown, claim.Spec.WarmPoolRef.Name, "not_ready")
+		return
+	}
+
+	podCondition := "not_ready"
+	if isSandboxReady(sandbox) {
+		podCondition = "ready"
+	}
+	launchType := getLaunchType(sandbox)
+	templateName := r.resolveTemplateName(sandbox)
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, launchType, claim.Spec.WarmPoolRef.Name, podCondition)
 }
 
 func hasSandboxExpiredCondition(conditions []metav1.Condition) bool {

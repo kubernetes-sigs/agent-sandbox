@@ -1,0 +1,50 @@
+apiVersion: networking.gke.io/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: claude-agent-worker-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: claude-agent-worker
+  egress:
+    - matches:
+        - name: api.anthropic.com
+        - name: storage.googleapis.com
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claude-agent-worker-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app: claude-agent-worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: dispatcher
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80

@@ -286,7 +286,11 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining > 0 {
-				req.Header.Set(headerSandboxTimeout, strconv.FormatFloat(remaining.Seconds(), 'f', -1, 64))
+				timeout := remaining
+				if c.perAttemptTimeout > 0 && c.perAttemptTimeout < timeout {
+					timeout = c.perAttemptTimeout
+				}
+				req.Header.Set(headerSandboxTimeout, strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64))
 			}
 		}
 		req.Header.Set(headerRequestID, reqID)

@@ -439,7 +439,14 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
-			validateSandbox: validateSandboxHasDefaultAutomountToken,
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate) {
+				validateSandboxHasDefaultAutomountToken(t, sandbox, template)
+
+				expectedHash := SandboxTemplateRefHash(template.Name)
+				if val := sandbox.Labels[sandboxTemplateRefHash]; val != expectedHash {
+					t.Errorf("expected Sandbox metadata to have label %q=%q, got %q", sandboxTemplateRefHash, expectedHash, val)
+				}
+			},
 		},
 		{
 			name:             "sandbox exists but template is not found",
@@ -491,6 +498,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				Message: "Sandbox is not ready",
 			},
 			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, _ *extensionsv1beta1.SandboxTemplate) {
+				expectedHash := SandboxTemplateRefHash("test-template")
+				if val := sandbox.Labels[sandboxTemplateRefHash]; val != expectedHash {
+					t.Errorf("expected Sandbox metadata to have label %q=%q, got %q", sandboxTemplateRefHash, expectedHash, val)
+				}
+
 				// Verify DNS Bypass is successfully injected
 				if sandbox.Spec.PodTemplate.Spec.DNSPolicy != corev1.DNSNone {
 					t.Errorf("Expected DNSPolicy to be 'None', got %q", sandbox.Spec.PodTemplate.Spec.DNSPolicy)
@@ -2141,8 +2153,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				if _, exists := adoptedSandbox.Labels[warmPoolSandboxLabel]; exists {
 					t.Errorf("expected warm pool label to be removed from adopted sandbox")
 				}
-				if _, exists := adoptedSandbox.Labels[sandboxTemplateRefHash]; exists {
-					t.Errorf("expected template ref label to be removed from adopted sandbox")
+				expectedTemplateHash := SandboxTemplateRefHash(template.Name)
+				if val := adoptedSandbox.Labels[sandboxTemplateRefHash]; val != expectedTemplateHash {
+					t.Errorf("expected adopted sandbox to retain template ref label %q=%q, got %q", sandboxTemplateRefHash, expectedTemplateHash, val)
 				}
 				if val := adoptedSandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel]; val != sandboxv1beta1.SandboxLaunchTypeWarm {
 					t.Errorf("expected adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1beta1.SandboxLaunchTypeWarm, val, adoptedSandbox.Labels)

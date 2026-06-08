@@ -357,14 +357,24 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			if mergedMeta.Labels == nil {
 				mergedMeta.Labels = make(map[string]string)
 			}
+			templateHash := SandboxTemplateRefHash(template.Name)
 			mergedMeta.Labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
-			mergedMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+			mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 
 			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 				return nil, err
 			}
 
-			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
+			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
+			if sandbox.Labels[sandboxTemplateRefHash] != templateHash {
+				if sandbox.Labels == nil {
+					sandbox.Labels = make(map[string]string)
+				}
+				sandbox.Labels[sandboxTemplateRefHash] = templateHash
+				needsUpdate = true
+			}
+
+			if needsUpdate {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
 				if err := r.Update(ctx, sandbox); err != nil {
@@ -808,12 +818,10 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	// Take a snapshot of the sandbox BEFORE we mutate it to generate a clean JSON Patch.
 	originalAdopted := adopted.DeepCopy()
 
-	// Save templateHash before deleting it
 	templateHash := adopted.Labels[sandboxTemplateRefHash]
 
 	// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 	delete(adopted.Labels, warmPoolSandboxLabel)
-	delete(adopted.Labels, sandboxTemplateRefHash)
 	delete(adopted.Labels, v1beta1.SandboxPodTemplateHashLabel)
 	if adopted.Labels == nil {
 		adopted.Labels = make(map[string]string)
@@ -850,10 +858,18 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	adopted.Labels = ensureClaimIdentityLabels(adopted.Labels, claim)
 	adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 
-	// Fetch the template to construct the mergedMeta that reconcileActive will build.
+	// Resolve the template hash and metadata used by reconcileActive.
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateHash == "" && template != nil {
 		templateHash = SandboxTemplateRefHash(template.Name)
+	} else if templateHash == "" && templateErr != nil {
+		log.FromContext(ctx).V(1).Info("Unable to set template ref hash label during adoption because template lookup failed", "sandbox", adopted.Name, "claim", claim.Name, "error", templateErr.Error())
+	}
+
+	// Keep the template ref hash on the adopted sandbox's top-level labels so
+	// discovery by template hash keeps working after adoption.
+	if templateHash != "" {
+		adopted.Labels[sandboxTemplateRefHash] = templateHash
 	}
 
 	if templateErr == nil && template != nil {
@@ -1095,10 +1111,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
 	// (KEP-0174 only propagates to pod template labels; platform's informer reads
 	// Sandbox.metadata.labels).
+	templateHash := SandboxTemplateRefHash(template.Name)
 	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
 	sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] = v1beta1.SandboxLaunchTypeCold
+	sandbox.Labels[sandboxTemplateRefHash] = templateHash
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
 
 	if err := r.mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err

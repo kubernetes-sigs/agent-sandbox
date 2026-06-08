@@ -229,6 +229,9 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_reason=f"Failed to patch operatingMode: {e}",
                 error_code=ERROR_CODE
             )
+            
+        # Explicitly close the container connection since the pod is being terminated.
+        self.connector.close()
 
         if wait_for_pod_termination(self.k8s_helper, self.namespace, pod_name_to_wait, pod_uid_to_wait, wait_timeout):
             logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")

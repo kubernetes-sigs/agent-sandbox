@@ -1142,6 +1142,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 name=self.sandbox.sandbox_id,
                 body={"spec": {"operatingMode": "Suspended"}}
             )
+            self.sandbox.connector.close.assert_called_once()
 
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_termination')
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
@@ -1153,6 +1154,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertIsNone(result.snapshot_response)
         self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_called_once()
+        self.sandbox.connector.close.assert_called_once()
 
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
     def test_suspend_pod_not_there(self, mock_is_suspended):
@@ -1216,6 +1218,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             self.assertEqual(
                 self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.call_count, 1
             )
+            self.sandbox.connector.close.assert_called_once()
 
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_ready')
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended')
@@ -1258,6 +1261,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             result = self.sandbox.suspend()
             self.assertFalse(result.success)
             self.assertIn("Failed", result.error_reason)
+            self.sandbox.connector.close.assert_not_called()
 
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
     def test_resume_api_exception(self, mock_is_suspended):
@@ -1323,6 +1327,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             
             self.assertFalse(result.success)
             self.assertIn("Timed out", result.error_reason)
+            self.sandbox.connector.close.assert_called_once()
 
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
     def test_suspend_missing_name_hash(self, mock_is_suspended):

@@ -20,8 +20,8 @@ if [ -n "$1" ]; then
 fi
 
 # BURST_SIZE * TOTAL_BURSTS = Total sandbox claims created
-BURST_SIZE=1000
-QPS=1000
+BURST_SIZE=400
+QPS=400
 TOTAL_BURSTS=10
 WARMPOOL_SIZE=1000
 RUNTIME_CLASS="" # Change to "gvisor" if your cluster supports it

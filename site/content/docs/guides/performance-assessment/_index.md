@@ -290,7 +290,9 @@ All load test recipes collect the following Prometheus-backed metrics:
 
 ### SandboxClaim startup latency
 
-Measures the end-to-end time from SandboxClaim creation to the underlying pod being ready.
+Measures the end-to-end time from when the kube-apiserver receives the SandboxClaim create request to when the claim is marked as Ready (implying the claim, sandbox, and pod are all ready).
+
+> **Note:** This metric requires a mutating admission webhook to record the start timestamp. The webhook is not yet merged (see PR #761). Because the kube-apiserver and controller may run on different nodes, this metric may include clock skew.
 
 | Metric | Prometheus query | Default threshold |
 |--------|-----------------|-------------------|
@@ -318,6 +320,6 @@ The controller exposes all metrics at its `/metrics` endpoint; a Prometheus `Ser
 
 ## See Also
 
-- [Configuration reference](https://github.com/volatilemolotov/agent-sandbox/blob/main/docs/configuration.md) — full flag reference for the controller
+- [Configuration reference](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md) — full flag reference for the controller
 - [Running tests](../../contribution-guidelines/testing/) — unit, integration and e2e test commands
 - [ClusterLoader2 getting started](https://github.com/kubernetes/perf-tests/blob/master/clusterloader2/docs/GETTING_STARTED.md)

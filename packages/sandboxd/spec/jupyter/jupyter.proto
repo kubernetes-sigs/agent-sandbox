@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package jupyter;
+
+option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/jupyter;jupyter";
+option java_multiple_files = true;
+option java_package = "io.agentsandbox.packages.sandboxd.spec.jupyter";
+
+service Jupyter {
+  rpc CreateSession(CreateJupyterSessionRequest) returns (JupyterSession);
+  rpc ExecuteCode(ExecuteJupyterCodeRequest) returns (stream ExecuteJupyterCodeResponse);
+}
+
+message CreateJupyterSessionRequest {
+  string kernel_name = 1;
+}
+
+message JupyterSession {
+  string session_id = 1;
+  string status = 2;
+}
+
+message ExecuteJupyterCodeRequest {
+  string session_id = 1;
+  string code = 2;
+}
+
+message ExecuteJupyterCodeResponse {
+  string status = 1;
+  string stdout = 2;
+  string stderr = 3;
+  repeated JupyterOutput outputs = 4;
+}
+
+message JupyterOutput {
+  string type = 1;
+  bytes data = 2;
+}

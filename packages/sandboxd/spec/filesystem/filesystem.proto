@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package filesystem;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/filesystem;filesystem";
+option java_multiple_files = true;
+option java_package = "io.agentsandbox.packages.sandboxd.spec.filesystem";
+
+service Filesystem {
+  rpc WriteFile(stream WriteFileRequest) returns (google.protobuf.Empty);
+  rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc StatFile(StatFileRequest) returns (StatFileResponse);
+  rpc MakeDir(MakeDirRequest) returns (google.protobuf.Empty);
+  rpc Remove(RemoveRequest) returns (google.protobuf.Empty);
+}
+
+message FileMetadata {
+  string path = 1;
+  uint32 mode = 2;
+}
+
+message WriteFileRequest {
+  oneof payload {
+    FileMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message ReadFileRequest {
+  string path = 1;
+}
+
+message ReadFileResponse {
+  bytes chunk = 1;
+}
+
+message ListFilesRequest {
+  string path = 1;
+}
+
+message ListFilesResponse {
+  repeated FileEntry entries = 1;
+}
+
+message FileEntry {
+  string name = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  google.protobuf.Timestamp mod_time = 4;
+}
+
+message StatFileRequest {
+  string path = 1;
+}
+
+message StatFileResponse {
+  string path = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  google.protobuf.Timestamp mod_time = 4;
+}
+
+message MakeDirRequest {
+  string path = 1;
+}
+
+message RemoveRequest {
+  string path = 1;
+  bool recursive = 2;
+}

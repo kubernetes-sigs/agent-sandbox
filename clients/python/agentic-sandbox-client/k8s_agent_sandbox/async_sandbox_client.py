@@ -367,10 +367,11 @@ class AsyncSandboxClient(Generic[T]):
         try:
             asyncio.run(_do_cleanup())
         except Exception as e:
-            print(
-                f"[agent-sandbox] Warning: atexit cleanup failed: {e}",
-                file=sys.stderr,
-            )
+            if sys.stderr is not None:
+                print(
+                    f"[agent-sandbox] Warning: atexit cleanup failed: {e}",
+                    file=sys.stderr,
+                )
 
     # --- Label validation (shared with sync client) ---
 

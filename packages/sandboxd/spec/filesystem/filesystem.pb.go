@@ -92,7 +92,7 @@ func (FileType) EnumDescriptor() ([]byte, []int) {
 type FileMetadata struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Mode          uint32                 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
+	Mode          *uint32                `protobuf:"varint,2,opt,name=mode,proto3,oneof" json:"mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -135,8 +135,8 @@ func (x *FileMetadata) GetPath() string {
 }
 
 func (x *FileMetadata) GetMode() uint32 {
-	if x != nil {
-		return x.Mode
+	if x != nil && x.Mode != nil {
+		return *x.Mode
 	}
 	return 0
 }
@@ -679,10 +679,11 @@ var File_filesystem_filesystem_proto protoreflect.FileDescriptor
 
 const file_filesystem_filesystem_proto_rawDesc = "" +
 	"\n" +
-	"\x1bfilesystem/filesystem.proto\x12\x16sandboxd.filesystem.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\"6\n" +
+	"\x1bfilesystem/filesystem.proto\x12\x16sandboxd.filesystem.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\"D\n" +
 	"\fFileMetadata\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
-	"\x04mode\x18\x02 \x01(\rR\x04mode\"y\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x17\n" +
+	"\x04mode\x18\x02 \x01(\rH\x00R\x04mode\x88\x01\x01B\a\n" +
+	"\x05_mode\"y\n" +
 	"\x10WriteFileRequest\x12B\n" +
 	"\bmetadata\x18\x01 \x01(\v2$.sandboxd.filesystem.v1.FileMetadataH\x00R\bmetadata\x12\x16\n" +
 	"\x05chunk\x18\x02 \x01(\fH\x00R\x05chunkB\t\n" +
@@ -788,6 +789,7 @@ func file_filesystem_filesystem_proto_init() {
 	if File_filesystem_filesystem_proto != nil {
 		return
 	}
+	file_filesystem_filesystem_proto_msgTypes[0].OneofWrappers = []any{}
 	file_filesystem_filesystem_proto_msgTypes[1].OneofWrappers = []any{
 		(*WriteFileRequest_Metadata)(nil),
 		(*WriteFileRequest_Chunk)(nil),

@@ -27,7 +27,7 @@ service Filesystem {
 
 message FileMetadata {
   string path = 1;
-  uint32 mode = 2;
+  optional uint32 mode = 2;
 }
 
 message WriteFileRequest {

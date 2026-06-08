@@ -29,7 +29,7 @@ message ExecuteJupyterCodeResponse {
   string status = 1;
   string stdout = 2;
   string stderr = 3;
-  repeated JupyterOutput outputs = 4;
+  JupyterOutput output = 4;
 }
 
 message JupyterOutput {

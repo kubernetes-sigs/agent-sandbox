@@ -370,16 +370,16 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
 			if sandbox.Labels[sandboxTemplateRefHash] != templateHash {
-				if sandbox.Labels == nil {
-					sandbox.Labels = make(map[string]string)
-				}
-				sandbox.Labels[sandboxTemplateRefHash] = templateHash
 				needsUpdate = true
 			}
 
 			if needsUpdate {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
 				originalSandbox := sandbox.DeepCopy()
+				if sandbox.Labels == nil {
+					sandbox.Labels = make(map[string]string)
+				}
+				sandbox.Labels[sandboxTemplateRefHash] = templateHash
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
 				if err := r.Patch(ctx, sandbox, client.MergeFrom(originalSandbox)); err != nil {
 					return nil, err

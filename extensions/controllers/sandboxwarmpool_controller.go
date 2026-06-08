@@ -452,7 +452,7 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 	patch := &extensionsv1beta1.SandboxWarmPool{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: extensionsv1beta1.GroupVersion.String(),
-			Kind:       "SandboxWarmPool",
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      warmPool.Name,

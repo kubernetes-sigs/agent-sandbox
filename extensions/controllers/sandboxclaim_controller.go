@@ -1272,7 +1272,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			controllerRef := metav1.GetControllerOf(sandbox)
 			if controllerRef != nil {
 				gvk := schema.FromAPIVersionAndKind(controllerRef.APIVersion, controllerRef.Kind)
-				if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
+				if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == extensionsv1beta1.SandboxWarmPoolKind {
 					// Still in warm pool. Try to complete adoption!
 					logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
 					if err := verifySandboxCandidate(sandbox, claim); err != nil {
@@ -1539,7 +1539,7 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 		var isControlledByClaim bool
 		if controllerRef != nil && controllerRef.UID == claim.UID {
 			gvk := schema.FromAPIVersionAndKind(controllerRef.APIVersion, controllerRef.Kind)
-			isControlledByClaim = gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxClaim"
+			isControlledByClaim = gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == extensionsv1beta1.SandboxClaimKind
 		}
 
 		if !isControlledByClaim {
@@ -1757,7 +1757,8 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	if controllerRef == nil {
 		return fmt.Errorf("sandbox %s/%s is unowned and cannot be safely adopted", candidate.Namespace, candidate.Name)
 	}
-	if controllerRef.APIVersion != extensionsv1beta1.GroupVersion.String() || controllerRef.Kind != "SandboxWarmPool" {
+	gvk := schema.FromAPIVersionAndKind(controllerRef.APIVersion, controllerRef.Kind)
+	if gvk.Group != extensionsv1beta1.GroupVersion.Group || gvk.Kind != extensionsv1beta1.SandboxWarmPoolKind {
 		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil
@@ -1811,13 +1812,13 @@ func (h *warmPoolEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 func getWarmPoolName(obj metav1.Object) string {
 	if ctrl := metav1.GetControllerOf(obj); ctrl != nil {
 		gvk := schema.FromAPIVersionAndKind(ctrl.APIVersion, ctrl.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == extensionsv1beta1.SandboxWarmPoolKind {
 			return ctrl.Name
 		}
 	}
 	for _, ref := range obj.GetOwnerReferences() {
 		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == extensionsv1beta1.SandboxWarmPoolKind {
 			return ref.Name
 		}
 	}

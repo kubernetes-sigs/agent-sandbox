@@ -52,8 +52,8 @@ const sandboxUID = types.UID("test-sandbox-uid")
 
 func sandboxControllerRef(name string) metav1.OwnerReference {
 	return metav1.OwnerReference{
-		APIVersion:         "agents.x-k8s.io/v1beta1",
-		Kind:               "Sandbox",
+		APIVersion:         sandboxv1beta1.GroupVersion.String(),
+		Kind:               sandboxv1beta1.SandboxKind,
 		Name:               name,
 		UID:                sandboxUID,
 		Controller:         new(true),
@@ -2307,8 +2307,8 @@ func TestCheckOwnership(t *testing.T) {
 	}
 
 	sandboxOwnerRef := metav1.OwnerReference{
-		APIVersion:         "agents.x-k8s.io/v1beta1",
-		Kind:               "Sandbox",
+		APIVersion:         sandboxv1beta1.GroupVersion.String(),
+		Kind:               sandboxv1beta1.SandboxKind,
 		Name:               sandboxName,
 		UID:                sandboxUID,
 		Controller:         new(true),
@@ -2446,8 +2446,8 @@ func TestReconcilePVCs(t *testing.T) {
 						Namespace: sandboxNs,
 						OwnerReferences: []metav1.OwnerReference{
 							{
-								APIVersion:         "agents.x-k8s.io/v1beta1",
-								Kind:               "Sandbox",
+								APIVersion:         sandboxv1beta1.GroupVersion.String(),
+								Kind:               sandboxv1beta1.SandboxKind,
 								Name:               sandboxName,
 								UID:                sandboxUID,
 								Controller:         new(true),

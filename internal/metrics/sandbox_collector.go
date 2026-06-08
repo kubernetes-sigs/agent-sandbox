@@ -138,10 +138,10 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			gvk := schema.FromAPIVersionAndKind(controllerRef.APIVersion, controllerRef.Kind)
 			if gvk.Group == extensionsv1beta1.GroupVersion.Group {
 				switch gvk.Kind {
-				case "SandboxClaim":
-					ownedByStr = "SandboxClaim"
-				case "SandboxWarmPool":
-					ownedByStr = "SandboxWarmPool"
+				case extensionsv1beta1.SandboxClaimKind:
+					ownedByStr = extensionsv1beta1.SandboxClaimKind
+				case extensionsv1beta1.SandboxWarmPoolKind:
+					ownedByStr = extensionsv1beta1.SandboxWarmPoolKind
 				}
 			}
 		}

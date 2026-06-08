@@ -16,6 +16,13 @@ service Process {
   rpc ResizeTTY(ResizeTTYRequest) returns (google.protobuf.Empty);
 }
 
+enum Signal {
+  SIGNAL_UNSPECIFIED = 0;
+  SIGNAL_SIGINT      = 2;
+  SIGNAL_SIGKILL     = 9;
+  SIGNAL_SIGTERM     = 15;
+}
+
 message PTY {
   uint32 cols = 1;
   uint32 rows = 2;
@@ -24,12 +31,12 @@ message PTY {
 message ProcessConfig {
   repeated string command = 1;
   map<string, string> env_vars = 2;
-  string cwd = 3;
-  PTY pty = 4;
+  optional string cwd = 3;
 }
 
 message StartRequest {
   ProcessConfig config = 1;
+  optional PTY pty = 2;
 }
 
 message ProcessInitEvent {
@@ -66,7 +73,7 @@ message WriteStdinRequest {
 
 message SendSignalRequest {
   int32 process_id = 1;
-  int32 signal = 2;
+  Signal signal = 2;
 }
 
 message ResizeTTYRequest {

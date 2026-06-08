@@ -1,12 +1,12 @@
 syntax = "proto3";
 
-package process;
+package sandboxd.process.v1;
 
 import "google/protobuf/empty.proto";
 
 option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process;process";
 option java_multiple_files = true;
-option java_package = "io.agentsandbox.packages.sandboxd.spec.process";
+option java_package = "io.sandboxd.packages.sandboxd.spec.process";
 
 service Process {
   rpc Start(StartRequest) returns (stream StreamOutputResponse);
@@ -16,21 +16,37 @@ service Process {
   rpc ResizeTTY(ResizeTTYRequest) returns (google.protobuf.Empty);
 }
 
+message PTY {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
 message ProcessConfig {
   repeated string command = 1;
   map<string, string> env_vars = 2;
   string cwd = 3;
-  bool tty = 4;
+  PTY pty = 4;
 }
 
 message StartRequest {
   ProcessConfig config = 1;
 }
 
-message StreamOutputResponse {
+message ProcessInitEvent {
   int32 process_id = 1;
-  bytes stdout = 2;
-  bytes stderr = 3;
+}
+
+message ExitEvent {
+  int32 exit_code = 1;
+}
+
+message StreamOutputResponse {
+  oneof event {
+    ProcessInitEvent init = 1;
+    bytes stdout = 2;
+    bytes stderr = 3;
+    ExitEvent exit = 4;
+  }
 }
 
 message ExecuteRequest {

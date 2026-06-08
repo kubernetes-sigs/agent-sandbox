@@ -1,12 +1,12 @@
 syntax = "proto3";
 
-package admin;
+package sandboxd.admin.v1;
 
 import "google/protobuf/empty.proto";
 
 option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/admin;admin";
 option java_multiple_files = true;
-option java_package = "io.agentsandbox.packages.sandboxd.spec.admin";
+option java_package = "io.sandboxd.packages.sandboxd.spec.admin";
 
 service Admin {
   rpc Setup(SetupRequest) returns (google.protobuf.Empty);

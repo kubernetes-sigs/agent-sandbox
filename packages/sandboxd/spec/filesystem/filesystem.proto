@@ -1,13 +1,20 @@
 syntax = "proto3";
 
-package filesystem;
+package sandboxd.filesystem.v1;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 
 option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/filesystem;filesystem";
 option java_multiple_files = true;
-option java_package = "io.agentsandbox.packages.sandboxd.spec.filesystem";
+option java_package = "io.sandboxd.packages.sandboxd.spec.filesystem";
+
+enum FileType {
+  FILE_TYPE_UNSPECIFIED = 0;
+  FILE_TYPE_FILE = 1;
+  FILE_TYPE_DIRECTORY = 2;
+  FILE_TYPE_SYMLINK = 3;
+}
 
 service Filesystem {
   rpc WriteFile(stream WriteFileRequest) returns (google.protobuf.Empty);
@@ -48,7 +55,7 @@ message ListFilesResponse {
 
 message FileEntry {
   string name = 1;
-  bool is_dir = 2;
+  FileType type = 2;
   int64 size = 3;
   google.protobuf.Timestamp mod_time = 4;
 }
@@ -59,7 +66,7 @@ message StatFileRequest {
 
 message StatFileResponse {
   string path = 1;
-  bool is_dir = 2;
+  FileType type = 2;
   int64 size = 3;
   google.protobuf.Timestamp mod_time = 4;
 }

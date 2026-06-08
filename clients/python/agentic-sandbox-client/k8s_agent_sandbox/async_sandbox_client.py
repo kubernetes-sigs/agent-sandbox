@@ -83,7 +83,8 @@ class AsyncSandboxClient(Generic[T]):
                 snapshots the tracked claim names and opens fresh async
                 resources in a new event loop, so it is safe to call after
                 the main event loop has exited. Cleanup is best-effort —
-                errors are silently ignored. Defaults to False.
+                per-claim and top-level failures emit warnings to
+                ``sys.stderr`` rather than raising. Defaults to False.
         """
         if connection_config is None:
             raise ValueError(
@@ -339,8 +340,9 @@ class AsyncSandboxClient(Generic[T]):
 
         Uses a snapshot of the tracked claims and a fresh :class:`AsyncK8sHelper`
         so that no loop-bound objects from the original client are reused across
-        event loop boundaries.  All errors are silently suppressed — atexit
-        cleanup is best-effort.
+        event loop boundaries. Per-claim failures and top-level errors emit
+        warnings to ``sys.stderr`` rather than raising — atexit cleanup is
+        best-effort.
         """
         claims = list(self._active_connection_sandboxes.keys())
         if not claims:

@@ -146,40 +146,8 @@ def get_pr_descriptions(prs_data):
     return pr_descriptions
 
 
-def get_new_authors(prev_tag, current_tag):
-    """Returns the list of Name <email> for verified first-time contributors in this release."""
-    if not prev_tag:
-        return []
-    try:
-        past_emails = set(
-            subprocess.run(
-                ["git", "log", prev_tag, "--pretty=format:%ae"],
-                check=True, text=True, stdout=subprocess.PIPE
-            ).stdout.splitlines()
-        )
-        
-        current_commits = subprocess.run(
-            ["git", "log", f"{prev_tag}..{current_tag}", "--pretty=format:%an <%ae>"],
-            check=True, text=True, stdout=subprocess.PIPE
-        ).stdout.splitlines()
-        
-        new_authors = set()
-        for commit in current_commits:
-            commit = commit.strip()
-            if not commit:
-                continue
-            match = re.search(r'<([^>]+)>$', commit)
-            if match:
-                email = match.group(1)
-                if email not in past_emails:
-                    new_authors.add(commit)
-        return sorted(list(new_authors))
-    except subprocess.CalledProcessError:
-        return []
-
-
-def generate_highlights(commits, breaking_changes, pr_descriptions, contributors, new_authors, tag, model="gemini-2.5-flash"):
-    """Generates release highlights using Gemini via the Vertex AI API platform."""
+def generate_release_notes(commits, breaking_changes, pr_descriptions, contributors, tag, installation_notes, model="gemini-2.5-flash"):
+    """Generates curated release notes using Gemini via the Vertex AI API platform."""
     # Try importing the modern SDK
     try:
         from google import genai
@@ -192,30 +160,72 @@ def generate_highlights(commits, breaking_changes, pr_descriptions, contributors
     location = os.getenv("GCP_LOCATION", "us-central1").strip()
 
     if not project_id:
-        print("⚠️ GCP_PROJECT environment variable not set. Skipping Gemini highlights.")
+        print("⚠️ GCP_PROJECT environment variable not set. Skipping Gemini release notes.")
         return None
 
     commit_titles = "\n".join([c["title"] for c in commits])
     commit_messages = "\n".join([f"- {c['title']}\n  {c['body']}" for c in commits])
     pr_desc_str = "\n".join([f"- {desc}" for desc in pr_descriptions])
     contributors_str = ", ".join(contributors)
-    new_authors_str = "\n".join([f"- {a}" for a in new_authors])
 
-    prompt = f"""**Task:** Generate curated release notes for **Agent Sandbox release draft** {tag} from the provided information, following the structure and tone of the ideal example below.
+    is_pre_release = bool(re.match(r"^v?\d+\.\d+\.\d+(?:\.)?rc\d+$", tag))
+    pre_release_instruction = ""
+    pre_release_example = ""
+    if is_pre_release:
+        pre_release_instruction = """
+- Since this is a pre-release candidate, include a **⚠️ Pre-Release Notice** section immediately following the intro paragraph using GitHub alert syntax `> [!WARNING]`. Clearly state that this is a release candidate intended for testing/validation, not recommended for production, and include a call to action for testing relevant API/architectural changes."""
+        pre_release_example = f"""
+### ⚠️ Pre-Release Notice
+> [!WARNING]
+> This is a Release Candidate (RC) intended for early testing, validation, and feedback by maintainers and early adopters. It is not recommended for production environments.
+> 
+> <!-- Insert specific testing guidance or known pre-release limitations here, synthesized from commit history and PR descriptions -->
+"""
+
+    breaking_instruction = """
+- Inspect the provided Breaking Changes list, Input Full Commit Messages, and Input PR Descriptions for any breaking changes, architectural deprecations, or required user actions (e.g., API group upgrades, field replacements, or modified defaults). If any are found, create a dedicated **⚠️ Breaking Changes / Action Required** section clearly explaining the impact and necessary user actions."""
+
+    pr_number_instruction = """
+- When referencing specific features, bug fixes, or breaking changes in bullet points, include the relevant PR numbers (e.g., `(#123)`) extracted directly from the input commit titles and PR descriptions. Do not invent PR numbers."""
+
+    prompt = f"""**Task:** Generate curated, production-ready release notes for **Agent Sandbox release** {tag} from the provided information, following the structure and tone of the ideal example below.
 
 **Instructions:**
-- Generate only the **Key Highlights**, **Contributors**, and **New Contributors** sections.
-- Summarize the highlights into a few key areas with bold titles describing the feature area (e.g., **Python SDK Advancements**, **Core Stability**).
+- Generate the release notes with the following sections in order:
+  1. Intro paragraph announcing the release.
+  2. Pre-Release Notice (if applicable).
+  3. Breaking Changes / Action Required (if applicable).
+  4. Key Highlights (grouped under bold feature area subheadings like **Core Stability & Lifecycle Management**).
+  5. Installation (insert the exact Installation block provided below).
+  6. Contributors.
 - Synthesize information from full commit messages and PR descriptions to describe changes accurately.
-- List all contributors as @handle from the verified contributors list below.
-- The verified contributors list and the verified first-time authors list use different identifier formats. Do not try to match or convert between them.
-- For the "New Contributors" section, list **only** the @handle from the verified new authors list below, exactly as provided. If the verified new authors list is empty, omit the "New Contributors" section entirely.
+- List all contributors as @handle from the verified contributors list below.{pre_release_instruction}{breaking_instruction}{pr_number_instruction}
+
+**Ideal Example Structure:**
+```markdown
+We're excited to announce the release of Agent Sandbox {tag}! This release introduces...
+{pre_release_example}
+### ⚠️ Breaking Changes / Action Required
+* **API Group Upgrade (`v1beta1`) (#867):** The core and extension APIs have been upgraded...
+
+### Key Highlights
+#### Core Stability & Lifecycle Management
+* **Orphan Adoption Restoration (#944):** Fixed a critical functional regression...
+
+### Installation
+[Insert exact Installation block here]
+
+--------
+### Contributors
+We extend our sincere thanks to all contributors to this release:
+@handle1, @handle2
+```
+
+Exact Installation Block to Insert:
+{installation_notes.strip()}
 
 Verified Contributors:
 {contributors_str}
-
-Verified New Authors (First-Time Contributors):
-{new_authors_str}
 
 Input Commit Titles:
 {commit_titles}
@@ -247,10 +257,10 @@ Breaking Changes:
         return response.text
 
     except errors.APIError as e:
-        print(f"⚠️ Vertex AI API Error calling Gemini ({e.code}: {e.message}). Skipping highlights.")
+        print(f"⚠️ Vertex AI API Error calling Gemini ({e.code}: {e.message}). Skipping release notes.")
         return None
     except Exception as e:
-        print(f"⚠️ Unexpected Error calling Vertex AI ({type(e).__name__}: {e}). Skipping highlights.")
+        print(f"⚠️ Unexpected Error calling Vertex AI ({type(e).__name__}: {e}). Skipping release notes.")
         return None
 
 
@@ -277,20 +287,8 @@ def main():
     pr_numbers = get_pr_numbers(commits)
     prs_data = fetch_prs_data(pr_numbers)
     contributors = get_contributors(prs_data)
-    new_authors = get_new_authors(prev_tag, tag)
     breaking_changes = get_breaking_changes(prs_data)
     pr_descriptions = get_pr_descriptions(prs_data)
-
-    # Generate highlights using breaking changes, PR descriptions, verified contributors, and verified new authors
-    if not commits:
-        print("INFO: No commits found between tags. Skipping highlights generation.")
-        highlights = None
-    else:
-        highlights = generate_highlights(
-            commits, "\n".join(breaking_changes), pr_descriptions, contributors, new_authors, tag, model=args.model
-        )
-        if not highlights:
-            print("⚠️ Warning: Failed to generate release highlights using Gemini. Proceeding best-effort.", file=sys.stderr)
 
     installation_notes = f"""
 ### Installation
@@ -310,12 +308,24 @@ pip install k8s-agent-sandbox=={tag.lstrip('v')}
 ```
 """
 
-    combined_content = f"# 🚀 Announcing Agent Sandbox {tag}!\n"
-    if highlights:
-        combined_content += highlights + "\n\n"
-        combined_content += installation_notes + "\n\n"
+    # Generate release notes using breaking changes, PR descriptions, and verified contributors
+    if not commits:
+        print("INFO: No commits found between tags. Skipping release notes generation.")
+        gemini_notes = None
     else:
-        combined_content += installation_notes + "\n\n"
+        gemini_notes = generate_release_notes(
+            commits, "\n".join(breaking_changes), pr_descriptions, contributors, tag, installation_notes, model=args.model
+        )
+        if not gemini_notes:
+            print("⚠️ Warning: Failed to generate release notes using Gemini. Proceeding best-effort.", file=sys.stderr)
+
+    combined_content = f"# 🚀 Announcing Agent Sandbox {tag}!\n\n"
+    if gemini_notes:
+        combined_content += gemini_notes + "\n"
+        if not re.search(r"^#+\s+Installation", gemini_notes, re.MULTILINE | re.IGNORECASE):
+            combined_content += "\n" + installation_notes + "\n"
+    else:
+        combined_content += installation_notes + "\n"
 
     if combined_content:
         print(f"INFO: Saving release notes to {args.output}...")

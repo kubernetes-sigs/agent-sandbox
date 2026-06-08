@@ -188,7 +188,7 @@ type ExecuteJupyterCodeResponse struct {
 	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
 	Stdout        string                 `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`
 	Stderr        string                 `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`
-	Outputs       []*JupyterOutput       `protobuf:"bytes,4,rep,name=outputs,proto3" json:"outputs,omitempty"`
+	Output        *JupyterOutput         `protobuf:"bytes,4,opt,name=output,proto3" json:"output,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -244,9 +244,9 @@ func (x *ExecuteJupyterCodeResponse) GetStderr() string {
 	return ""
 }
 
-func (x *ExecuteJupyterCodeResponse) GetOutputs() []*JupyterOutput {
+func (x *ExecuteJupyterCodeResponse) GetOutput() *JupyterOutput {
 	if x != nil {
-		return x.Outputs
+		return x.Output
 	}
 	return nil
 }
@@ -318,12 +318,12 @@ const file_jupyter_jupyter_proto_rawDesc = "" +
 	"\x19ExecuteJupyterCodeRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
-	"\x04code\x18\x02 \x01(\tR\x04code\"\xa2\x01\n" +
+	"\x04code\x18\x02 \x01(\tR\x04code\"\xa0\x01\n" +
 	"\x1aExecuteJupyterCodeResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x16\n" +
 	"\x06stdout\x18\x02 \x01(\tR\x06stdout\x12\x16\n" +
-	"\x06stderr\x18\x03 \x01(\tR\x06stderr\x12<\n" +
-	"\aoutputs\x18\x04 \x03(\v2\".sandboxd.jupyter.v1.JupyterOutputR\aoutputs\"7\n" +
+	"\x06stderr\x18\x03 \x01(\tR\x06stderr\x12:\n" +
+	"\x06output\x18\x04 \x01(\v2\".sandboxd.jupyter.v1.JupyterOutputR\x06output\"7\n" +
 	"\rJupyterOutput\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data2\xe3\x01\n" +
@@ -353,7 +353,7 @@ var file_jupyter_jupyter_proto_goTypes = []any{
 	(*JupyterOutput)(nil),               // 4: sandboxd.jupyter.v1.JupyterOutput
 }
 var file_jupyter_jupyter_proto_depIdxs = []int32{
-	4, // 0: sandboxd.jupyter.v1.ExecuteJupyterCodeResponse.outputs:type_name -> sandboxd.jupyter.v1.JupyterOutput
+	4, // 0: sandboxd.jupyter.v1.ExecuteJupyterCodeResponse.output:type_name -> sandboxd.jupyter.v1.JupyterOutput
 	0, // 1: sandboxd.jupyter.v1.Jupyter.CreateSession:input_type -> sandboxd.jupyter.v1.CreateJupyterSessionRequest
 	2, // 2: sandboxd.jupyter.v1.Jupyter.ExecuteCode:input_type -> sandboxd.jupyter.v1.ExecuteJupyterCodeRequest
 	1, // 3: sandboxd.jupyter.v1.Jupyter.CreateSession:output_type -> sandboxd.jupyter.v1.JupyterSession

@@ -36,6 +36,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type Signal int32
+
+const (
+	Signal_SIGNAL_UNSPECIFIED Signal = 0
+	Signal_SIGNAL_SIGINT      Signal = 2
+	Signal_SIGNAL_SIGKILL     Signal = 9
+	Signal_SIGNAL_SIGTERM     Signal = 15
+)
+
+// Enum value maps for Signal.
+var (
+	Signal_name = map[int32]string{
+		0:  "SIGNAL_UNSPECIFIED",
+		2:  "SIGNAL_SIGINT",
+		9:  "SIGNAL_SIGKILL",
+		15: "SIGNAL_SIGTERM",
+	}
+	Signal_value = map[string]int32{
+		"SIGNAL_UNSPECIFIED": 0,
+		"SIGNAL_SIGINT":      2,
+		"SIGNAL_SIGKILL":     9,
+		"SIGNAL_SIGTERM":     15,
+	}
+)
+
+func (x Signal) Enum() *Signal {
+	p := new(Signal)
+	*p = x
+	return p
+}
+
+func (x Signal) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Signal) Descriptor() protoreflect.EnumDescriptor {
+	return file_process_process_proto_enumTypes[0].Descriptor()
+}
+
+func (Signal) Type() protoreflect.EnumType {
+	return &file_process_process_proto_enumTypes[0]
+}
+
+func (x Signal) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Signal.Descriptor instead.
+func (Signal) EnumDescriptor() ([]byte, []int) {
+	return file_process_process_proto_rawDescGZIP(), []int{0}
+}
+
 type PTY struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Cols          uint32                 `protobuf:"varint,1,opt,name=cols,proto3" json:"cols,omitempty"`
@@ -92,8 +144,7 @@ type ProcessConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Command       []string               `protobuf:"bytes,1,rep,name=command,proto3" json:"command,omitempty"`
 	EnvVars       map[string]string      `protobuf:"bytes,2,rep,name=env_vars,json=envVars,proto3" json:"env_vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Cwd           string                 `protobuf:"bytes,3,opt,name=cwd,proto3" json:"cwd,omitempty"`
-	Pty           *PTY                   `protobuf:"bytes,4,opt,name=pty,proto3" json:"pty,omitempty"`
+	Cwd           *string                `protobuf:"bytes,3,opt,name=cwd,proto3,oneof" json:"cwd,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -143,22 +194,16 @@ func (x *ProcessConfig) GetEnvVars() map[string]string {
 }
 
 func (x *ProcessConfig) GetCwd() string {
-	if x != nil {
-		return x.Cwd
+	if x != nil && x.Cwd != nil {
+		return *x.Cwd
 	}
 	return ""
-}
-
-func (x *ProcessConfig) GetPty() *PTY {
-	if x != nil {
-		return x.Pty
-	}
-	return nil
 }
 
 type StartRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Config        *ProcessConfig         `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
+	Pty           *PTY                   `protobuf:"bytes,2,opt,name=pty,proto3,oneof" json:"pty,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -196,6 +241,13 @@ func (*StartRequest) Descriptor() ([]byte, []int) {
 func (x *StartRequest) GetConfig() *ProcessConfig {
 	if x != nil {
 		return x.Config
+	}
+	return nil
+}
+
+func (x *StartRequest) GetPty() *PTY {
+	if x != nil {
+		return x.Pty
 	}
 	return nil
 }
@@ -561,7 +613,7 @@ func (x *WriteStdinRequest) GetInput() []byte {
 type SendSignalRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ProcessId     int32                  `protobuf:"varint,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
-	Signal        int32                  `protobuf:"varint,2,opt,name=signal,proto3" json:"signal,omitempty"`
+	Signal        Signal                 `protobuf:"varint,2,opt,name=signal,proto3,enum=sandboxd.process.v1.Signal" json:"signal,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -603,11 +655,11 @@ func (x *SendSignalRequest) GetProcessId() int32 {
 	return 0
 }
 
-func (x *SendSignalRequest) GetSignal() int32 {
+func (x *SendSignalRequest) GetSignal() Signal {
 	if x != nil {
 		return x.Signal
 	}
-	return 0
+	return Signal_SIGNAL_UNSPECIFIED
 }
 
 type ResizeTTYRequest struct {
@@ -677,17 +729,19 @@ const file_process_process_proto_rawDesc = "" +
 	"\x15process/process.proto\x12\x13sandboxd.process.v1\x1a\x1bgoogle/protobuf/empty.proto\"-\n" +
 	"\x03PTY\x12\x12\n" +
 	"\x04cols\x18\x01 \x01(\rR\x04cols\x12\x12\n" +
-	"\x04rows\x18\x02 \x01(\rR\x04rows\"\xef\x01\n" +
+	"\x04rows\x18\x02 \x01(\rR\x04rows\"\xd0\x01\n" +
 	"\rProcessConfig\x12\x18\n" +
 	"\acommand\x18\x01 \x03(\tR\acommand\x12J\n" +
-	"\benv_vars\x18\x02 \x03(\v2/.sandboxd.process.v1.ProcessConfig.EnvVarsEntryR\aenvVars\x12\x10\n" +
-	"\x03cwd\x18\x03 \x01(\tR\x03cwd\x12*\n" +
-	"\x03pty\x18\x04 \x01(\v2\x18.sandboxd.process.v1.PTYR\x03pty\x1a:\n" +
+	"\benv_vars\x18\x02 \x03(\v2/.sandboxd.process.v1.ProcessConfig.EnvVarsEntryR\aenvVars\x12\x15\n" +
+	"\x03cwd\x18\x03 \x01(\tH\x00R\x03cwd\x88\x01\x01\x1a:\n" +
 	"\fEnvVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"J\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +
+	"\x04_cwd\"\x83\x01\n" +
 	"\fStartRequest\x12:\n" +
-	"\x06config\x18\x01 \x01(\v2\".sandboxd.process.v1.ProcessConfigR\x06config\"1\n" +
+	"\x06config\x18\x01 \x01(\v2\".sandboxd.process.v1.ProcessConfigR\x06config\x12/\n" +
+	"\x03pty\x18\x02 \x01(\v2\x18.sandboxd.process.v1.PTYH\x00R\x03pty\x88\x01\x01B\x06\n" +
+	"\x04_pty\"1\n" +
 	"\x10ProcessInitEvent\x12\x1d\n" +
 	"\n" +
 	"process_id\x18\x01 \x01(\x05R\tprocessId\"(\n" +
@@ -708,16 +762,21 @@ const file_process_process_proto_rawDesc = "" +
 	"\x11WriteStdinRequest\x12\x1d\n" +
 	"\n" +
 	"process_id\x18\x01 \x01(\x05R\tprocessId\x12\x14\n" +
-	"\x05input\x18\x02 \x01(\fR\x05input\"J\n" +
+	"\x05input\x18\x02 \x01(\fR\x05input\"g\n" +
 	"\x11SendSignalRequest\x12\x1d\n" +
 	"\n" +
-	"process_id\x18\x01 \x01(\x05R\tprocessId\x12\x16\n" +
-	"\x06signal\x18\x02 \x01(\x05R\x06signal\"Y\n" +
+	"process_id\x18\x01 \x01(\x05R\tprocessId\x123\n" +
+	"\x06signal\x18\x02 \x01(\x0e2\x1b.sandboxd.process.v1.SignalR\x06signal\"Y\n" +
 	"\x10ResizeTTYRequest\x12\x1d\n" +
 	"\n" +
 	"process_id\x18\x01 \x01(\x05R\tprocessId\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\x12\x12\n" +
-	"\x04rows\x18\x03 \x01(\rR\x04rows2\xa0\x03\n" +
+	"\x04rows\x18\x03 \x01(\rR\x04rows*[\n" +
+	"\x06Signal\x12\x16\n" +
+	"\x12SIGNAL_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rSIGNAL_SIGINT\x10\x02\x12\x12\n" +
+	"\x0eSIGNAL_SIGKILL\x10\t\x12\x12\n" +
+	"\x0eSIGNAL_SIGTERM\x10\x0f2\xa0\x03\n" +
 	"\aProcess\x12W\n" +
 	"\x05Start\x12!.sandboxd.process.v1.StartRequest\x1a).sandboxd.process.v1.StreamOutputResponse0\x01\x12T\n" +
 	"\aExecute\x12#.sandboxd.process.v1.ExecuteRequest\x1a$.sandboxd.process.v1.ExecuteResponse\x12L\n" +
@@ -740,44 +799,47 @@ func file_process_process_proto_rawDescGZIP() []byte {
 	return file_process_process_proto_rawDescData
 }
 
+var file_process_process_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_process_process_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_process_process_proto_goTypes = []any{
-	(*PTY)(nil),                  // 0: sandboxd.process.v1.PTY
-	(*ProcessConfig)(nil),        // 1: sandboxd.process.v1.ProcessConfig
-	(*StartRequest)(nil),         // 2: sandboxd.process.v1.StartRequest
-	(*ProcessInitEvent)(nil),     // 3: sandboxd.process.v1.ProcessInitEvent
-	(*ExitEvent)(nil),            // 4: sandboxd.process.v1.ExitEvent
-	(*StreamOutputResponse)(nil), // 5: sandboxd.process.v1.StreamOutputResponse
-	(*ExecuteRequest)(nil),       // 6: sandboxd.process.v1.ExecuteRequest
-	(*ExecuteResponse)(nil),      // 7: sandboxd.process.v1.ExecuteResponse
-	(*WriteStdinRequest)(nil),    // 8: sandboxd.process.v1.WriteStdinRequest
-	(*SendSignalRequest)(nil),    // 9: sandboxd.process.v1.SendSignalRequest
-	(*ResizeTTYRequest)(nil),     // 10: sandboxd.process.v1.ResizeTTYRequest
-	nil,                          // 11: sandboxd.process.v1.ProcessConfig.EnvVarsEntry
-	(*emptypb.Empty)(nil),        // 12: google.protobuf.Empty
+	(Signal)(0),                  // 0: sandboxd.process.v1.Signal
+	(*PTY)(nil),                  // 1: sandboxd.process.v1.PTY
+	(*ProcessConfig)(nil),        // 2: sandboxd.process.v1.ProcessConfig
+	(*StartRequest)(nil),         // 3: sandboxd.process.v1.StartRequest
+	(*ProcessInitEvent)(nil),     // 4: sandboxd.process.v1.ProcessInitEvent
+	(*ExitEvent)(nil),            // 5: sandboxd.process.v1.ExitEvent
+	(*StreamOutputResponse)(nil), // 6: sandboxd.process.v1.StreamOutputResponse
+	(*ExecuteRequest)(nil),       // 7: sandboxd.process.v1.ExecuteRequest
+	(*ExecuteResponse)(nil),      // 8: sandboxd.process.v1.ExecuteResponse
+	(*WriteStdinRequest)(nil),    // 9: sandboxd.process.v1.WriteStdinRequest
+	(*SendSignalRequest)(nil),    // 10: sandboxd.process.v1.SendSignalRequest
+	(*ResizeTTYRequest)(nil),     // 11: sandboxd.process.v1.ResizeTTYRequest
+	nil,                          // 12: sandboxd.process.v1.ProcessConfig.EnvVarsEntry
+	(*emptypb.Empty)(nil),        // 13: google.protobuf.Empty
 }
 var file_process_process_proto_depIdxs = []int32{
-	11, // 0: sandboxd.process.v1.ProcessConfig.env_vars:type_name -> sandboxd.process.v1.ProcessConfig.EnvVarsEntry
-	0,  // 1: sandboxd.process.v1.ProcessConfig.pty:type_name -> sandboxd.process.v1.PTY
-	1,  // 2: sandboxd.process.v1.StartRequest.config:type_name -> sandboxd.process.v1.ProcessConfig
-	3,  // 3: sandboxd.process.v1.StreamOutputResponse.init:type_name -> sandboxd.process.v1.ProcessInitEvent
-	4,  // 4: sandboxd.process.v1.StreamOutputResponse.exit:type_name -> sandboxd.process.v1.ExitEvent
-	1,  // 5: sandboxd.process.v1.ExecuteRequest.config:type_name -> sandboxd.process.v1.ProcessConfig
-	2,  // 6: sandboxd.process.v1.Process.Start:input_type -> sandboxd.process.v1.StartRequest
-	6,  // 7: sandboxd.process.v1.Process.Execute:input_type -> sandboxd.process.v1.ExecuteRequest
-	8,  // 8: sandboxd.process.v1.Process.WriteStdin:input_type -> sandboxd.process.v1.WriteStdinRequest
-	9,  // 9: sandboxd.process.v1.Process.SendSignal:input_type -> sandboxd.process.v1.SendSignalRequest
-	10, // 10: sandboxd.process.v1.Process.ResizeTTY:input_type -> sandboxd.process.v1.ResizeTTYRequest
-	5,  // 11: sandboxd.process.v1.Process.Start:output_type -> sandboxd.process.v1.StreamOutputResponse
-	7,  // 12: sandboxd.process.v1.Process.Execute:output_type -> sandboxd.process.v1.ExecuteResponse
-	12, // 13: sandboxd.process.v1.Process.WriteStdin:output_type -> google.protobuf.Empty
-	12, // 14: sandboxd.process.v1.Process.SendSignal:output_type -> google.protobuf.Empty
-	12, // 15: sandboxd.process.v1.Process.ResizeTTY:output_type -> google.protobuf.Empty
-	11, // [11:16] is the sub-list for method output_type
-	6,  // [6:11] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	12, // 0: sandboxd.process.v1.ProcessConfig.env_vars:type_name -> sandboxd.process.v1.ProcessConfig.EnvVarsEntry
+	2,  // 1: sandboxd.process.v1.StartRequest.config:type_name -> sandboxd.process.v1.ProcessConfig
+	1,  // 2: sandboxd.process.v1.StartRequest.pty:type_name -> sandboxd.process.v1.PTY
+	4,  // 3: sandboxd.process.v1.StreamOutputResponse.init:type_name -> sandboxd.process.v1.ProcessInitEvent
+	5,  // 4: sandboxd.process.v1.StreamOutputResponse.exit:type_name -> sandboxd.process.v1.ExitEvent
+	2,  // 5: sandboxd.process.v1.ExecuteRequest.config:type_name -> sandboxd.process.v1.ProcessConfig
+	0,  // 6: sandboxd.process.v1.SendSignalRequest.signal:type_name -> sandboxd.process.v1.Signal
+	3,  // 7: sandboxd.process.v1.Process.Start:input_type -> sandboxd.process.v1.StartRequest
+	7,  // 8: sandboxd.process.v1.Process.Execute:input_type -> sandboxd.process.v1.ExecuteRequest
+	9,  // 9: sandboxd.process.v1.Process.WriteStdin:input_type -> sandboxd.process.v1.WriteStdinRequest
+	10, // 10: sandboxd.process.v1.Process.SendSignal:input_type -> sandboxd.process.v1.SendSignalRequest
+	11, // 11: sandboxd.process.v1.Process.ResizeTTY:input_type -> sandboxd.process.v1.ResizeTTYRequest
+	6,  // 12: sandboxd.process.v1.Process.Start:output_type -> sandboxd.process.v1.StreamOutputResponse
+	8,  // 13: sandboxd.process.v1.Process.Execute:output_type -> sandboxd.process.v1.ExecuteResponse
+	13, // 14: sandboxd.process.v1.Process.WriteStdin:output_type -> google.protobuf.Empty
+	13, // 15: sandboxd.process.v1.Process.SendSignal:output_type -> google.protobuf.Empty
+	13, // 16: sandboxd.process.v1.Process.ResizeTTY:output_type -> google.protobuf.Empty
+	12, // [12:17] is the sub-list for method output_type
+	7,  // [7:12] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_process_process_proto_init() }
@@ -785,6 +847,8 @@ func file_process_process_proto_init() {
 	if File_process_process_proto != nil {
 		return
 	}
+	file_process_process_proto_msgTypes[1].OneofWrappers = []any{}
+	file_process_process_proto_msgTypes[2].OneofWrappers = []any{}
 	file_process_process_proto_msgTypes[5].OneofWrappers = []any{
 		(*StreamOutputResponse_Init)(nil),
 		(*StreamOutputResponse_Stdout)(nil),
@@ -796,13 +860,14 @@ func file_process_process_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_process_process_proto_rawDesc), len(file_process_process_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_process_process_proto_goTypes,
 		DependencyIndexes: file_process_process_proto_depIdxs,
+		EnumInfos:         file_process_process_proto_enumTypes,
 		MessageInfos:      file_process_process_proto_msgTypes,
 	}.Build()
 	File_process_process_proto = out.File

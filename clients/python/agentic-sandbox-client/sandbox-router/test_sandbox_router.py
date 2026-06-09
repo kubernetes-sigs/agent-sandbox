@@ -15,9 +15,9 @@
 import asyncio
 import importlib
 import os
+import time
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -42,6 +42,24 @@ def reload_router():
     os.environ.clear()
     os.environ.update(orig_env)
     # Reload the module under the original environment to restore clean baseline
+    importlib.reload(sandbox_router)
+
+
+@pytest.fixture
+def isolated_sandbox_router():
+    """Reload sandbox_router under a patched env and restore module state after."""
+    saved_env = dict(os.environ)
+
+    def _reload(**env_vars):
+        env = {"ALLOW_UNAUTHENTICATED_ROUTER": "true", **env_vars}
+        with patch.dict(os.environ, env, clear=True):
+            importlib.reload(sandbox_router)
+        return sandbox_router
+
+    yield _reload
+
+    os.environ.clear()
+    os.environ.update(saved_env)
     importlib.reload(sandbox_router)
 
 
@@ -769,29 +787,6 @@ class TestWebSocketProxyValidation:
             assert exc_info.value.code == 1008
             assert exc_info.value.reason == "Invalid token."
 
-    def test_backend_websocket_connect_uses_unlimited_max_frame_size(self):
-        captured_kwargs: dict = {}
-
-        @asynccontextmanager
-        async def capture_connect(*_args, **kwargs):
-            captured_kwargs.update(kwargs)
-            yield SimpleNamespace(subprotocol=None)
-
-        with patch.dict(
-            os.environ,
-            {"ALLOW_UNAUTHENTICATED_ROUTER": "true"},
-            clear=True,
-        ):
-            importlib.reload(sandbox_router)
-            client = TestClient(sandbox_router.app)
-            with patch("sandbox_router.websockets.connect", side_effect=capture_connect):
-                with client.websocket_connect(
-                    "/kernels",
-                    headers={"X-Sandbox-ID": "my-sandbox"},
-                ):
-                    pass
-            assert captured_kwargs.get("max_size") is None
-
 
 class _MockBackendWebSocket:
     """Minimal async-iterable stand-in for a backend websockets connection."""
@@ -822,6 +817,134 @@ class _MockBackendWebSocket:
         self.closed_with = (code, reason)
 
 
+def _mock_backend_websocket(messages=None):
+    """Return an async context manager that yields a mock backend WebSocket."""
+    backend_ws = _MockBackendWebSocket(messages)
+
+    @asynccontextmanager
+    async def _connect(*_args, **_kwargs):
+        yield backend_ws
+
+    return _connect, backend_ws
+
+
+class TestWebSocketResourceLimits:
+    def test_default_websocket_limits(self, isolated_sandbox_router):
+        mod = isolated_sandbox_router()
+        assert mod.DEFAULT_WEBSOCKET_IDLE_TIMEOUT == 3600.0
+        assert mod.DEFAULT_WEBSOCKET_MAX_LIFETIME == 86400.0
+        assert mod.DEFAULT_WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT == 64
+        assert mod.websocket_idle_timeout == 3600.0
+        assert mod.websocket_max_lifetime == 86400.0
+        assert mod.websocket_max_connections_per_client == 64
+
+    def test_env_vars_override_websocket_limits(self, isolated_sandbox_router):
+        mod = isolated_sandbox_router(
+            WEBSOCKET_IDLE_TIMEOUT_SECONDS="120",
+            WEBSOCKET_MAX_LIFETIME_SECONDS="600",
+            WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT="8",
+        )
+        assert mod.websocket_idle_timeout == 120.0
+        assert mod.websocket_max_lifetime == 600.0
+        assert mod.websocket_max_connections_per_client == 8
+
+    def test_zero_disables_websocket_limits(self, isolated_sandbox_router):
+        mod = isolated_sandbox_router(
+            WEBSOCKET_IDLE_TIMEOUT_SECONDS="0",
+            WEBSOCKET_MAX_LIFETIME_SECONDS="0",
+            WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT="0",
+        )
+        assert mod.websocket_idle_timeout == 0.0
+        assert mod.websocket_max_lifetime == 0.0
+        assert mod.websocket_max_connections_per_client == 0
+
+    def test_fractional_connection_limit_falls_back_to_default(self, isolated_sandbox_router):
+        mod = isolated_sandbox_router(WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT="0.5")
+        assert mod.websocket_max_connections_per_client == 64
+
+    def test_backend_websocket_connect_uses_unlimited_max_frame_size(self):
+        captured_kwargs: dict = {}
+
+        @asynccontextmanager
+        async def capture_connect(*_args, **kwargs):
+            captured_kwargs.update(kwargs)
+            yield _MockBackendWebSocket()
+
+        with patch.dict(
+            os.environ,
+            {"ALLOW_UNAUTHENTICATED_ROUTER": "true"},
+            clear=True,
+        ):
+            importlib.reload(sandbox_router)
+            client = TestClient(sandbox_router.app)
+            with patch("sandbox_router.websockets.connect", side_effect=capture_connect):
+                with client.websocket_connect(
+                    "/kernels",
+                    headers={"X-Sandbox-ID": "my-sandbox"},
+                ):
+                    pass
+            assert captured_kwargs.get("max_size") is None
+
+    def test_client_connection_key_prefers_forwarded_for(self):
+        websocket = MagicMock()
+        websocket.headers = {"x-forwarded-for": "203.0.113.10, 10.0.0.1"}
+        websocket.client = ("127.0.0.1", 12345)
+        assert sandbox_router._client_connection_key(websocket) == "203.0.113.10"
+
+    def test_connection_limit_rejects_excess_connections(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ALLOW_UNAUTHENTICATED_ROUTER": "true",
+                "WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT": "1",
+            },
+            clear=True,
+        ):
+            importlib.reload(sandbox_router)
+            client = TestClient(sandbox_router.app)
+            connect, _backend_ws = _mock_backend_websocket()
+
+            with patch("sandbox_router.websockets.connect", side_effect=connect):
+                with client.websocket_connect(
+                    "/kernels",
+                    headers={"X-Sandbox-ID": "my-sandbox"},
+                ):
+                    with pytest.raises(WebSocketDisconnect) as exc_info:
+                        with client.websocket_connect(
+                            "/kernels",
+                            headers={"X-Sandbox-ID": "my-sandbox"},
+                        ):
+                            pass
+                    assert exc_info.value.code == 1008
+                    assert "Too many concurrent WebSocket connections" in exc_info.value.reason
+
+    def test_idle_timeout_closes_relay(self):
+        client_ws = AsyncMock()
+
+        async def hang_on_receive() -> None:
+            await asyncio.Event().wait()
+
+        client_ws.receive = hang_on_receive
+        backend_ws = _MockBackendWebSocket()
+
+        async def run_relay() -> None:
+            await sandbox_router._relay_websocket(
+                client_ws,
+                backend_ws,
+                idle_timeout=0.2,
+                max_lifetime=0.0,
+            )
+
+        started_at = time.monotonic()
+        asyncio.run(run_relay())
+        elapsed = time.monotonic() - started_at
+        assert 0.1 <= elapsed < 2.0
+        client_ws.close.assert_awaited_once_with(
+            code=1001,
+            reason="idle timeout exceeded",
+        )
+
+
 class TestWebSocketRelayClose:
     def test_backend_close_code_propagates_to_client(self):
         from websockets.exceptions import ConnectionClosed
@@ -842,7 +965,12 @@ class TestWebSocketRelayClose:
         backend_ws = ClosingBackendWebSocket()
 
         async def run_relay() -> None:
-            await sandbox_router._relay_websocket(client_ws, backend_ws)
+            await sandbox_router._relay_websocket(
+                client_ws,
+                backend_ws,
+                idle_timeout=0.0,
+                max_lifetime=0.0,
+            )
 
         asyncio.run(run_relay())
         client_ws.close.assert_awaited_once_with(
@@ -862,7 +990,12 @@ class TestWebSocketRelayClose:
         backend_ws = _MockBackendWebSocket()
 
         async def run_relay() -> None:
-            await sandbox_router._relay_websocket(client_ws, backend_ws)
+            await sandbox_router._relay_websocket(
+                client_ws,
+                backend_ws,
+                idle_timeout=0.0,
+                max_lifetime=0.0,
+            )
 
         asyncio.run(run_relay())
         assert backend_ws.closed_with == (4001, "auth failed")

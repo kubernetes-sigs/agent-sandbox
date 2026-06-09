@@ -49,7 +49,10 @@ The router can be configured using the following environment variables:
 | Variable | Description | Default |
 |---|---|---|
 | `MAX_KEEPALIVE_CONNECTIONS` | Maximum keep-alive connections in the httpx connection pool. Set to `0` to disable pooling — useful when sandbox pods restart frequently, as it forces DNS re-resolution on every request. | `20` |
-| `PROXY_TIMEOUT_SECONDS` | Timeout in seconds for proxied requests to sandbox pods. Increase this for long-running operations (e.g., code execution, model inference). | `180` (3 minutes) |
+| `PROXY_TIMEOUT_SECONDS` | Timeout in seconds for proxied HTTP requests to sandbox pods and for the WebSocket backend handshake (`open_timeout`). Increase this for long-running operations (e.g., code execution, model inference). | `180` (3 minutes) |
+| `WEBSOCKET_IDLE_TIMEOUT_SECONDS` | Close proxied WebSocket connections after this many seconds without any message in either direction. Set to `0` to disable. | `3600` (1 hour) |
+| `WEBSOCKET_MAX_LIFETIME_SECONDS` | Close proxied WebSocket connections after this many seconds regardless of activity. Set to `0` to disable. | `86400` (24 hours) |
+| `WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT` | Maximum concurrent WebSocket connections allowed per client IP (`X-Forwarded-For` when present, otherwise the direct peer address). Set to `0` to disable. | `64` |
 
 ## Deployment
 
@@ -113,6 +116,13 @@ This file contains unit tests for the Sandbox Router. The tests use `pytest` wit
     * Missing `X-Sandbox-ID` closes the connection with WebSocket status `1008` and an explanatory
       reason.
     * Invalid `X-Sandbox-Namespace` format closes the connection with status `1008`.
+
+* **`TestWebSocketResourceLimits`**: Validates WebSocket resource-exhaustion protections.
+    * Default idle timeout, max lifetime, and per-client connection limits are applied at startup.
+    * Environment variables override the defaults; `0` disables each limit.
+    * `X-Forwarded-For` is preferred when deriving the per-client connection key.
+    * Excess concurrent connections from the same client are rejected with status `1008`.
+    * The relay watchdog closes idle connections after the configured timeout.
 
 #### Prerequisites
 

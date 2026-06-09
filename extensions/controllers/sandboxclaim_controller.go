@@ -357,14 +357,24 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			if mergedMeta.Labels == nil {
 				mergedMeta.Labels = make(map[string]string)
 			}
+			templateHash := SandboxTemplateRefHash(template.Name)
 			mergedMeta.Labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
-			mergedMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+			mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 
 			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 				return nil, err
 			}
 
-			if !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta) {
+			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
+			if sandbox.Labels[sandboxTemplateRefHash] != templateHash {
+				if sandbox.Labels == nil {
+					sandbox.Labels = make(map[string]string)
+				}
+				sandbox.Labels[sandboxTemplateRefHash] = templateHash
+				needsUpdate = true
+			}
+
+			if needsUpdate {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
 				if err := r.Update(ctx, sandbox); err != nil {
@@ -604,23 +614,86 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	logger := log.FromContext(ctx)
 
 	var skipped []queue.SandboxKey
-	// Instantly returns unused keys the moment we find a valid candidate!
+	var fallbackSandbox *v1beta1.Sandbox
+	var fallbackKey queue.SandboxKey
+	var adoptingFallback bool
+
+	// Instantly returns unused keys the moment we find a valid/ready candidate!
 	defer func() {
 		for _, key := range skipped {
 			r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, key)
 		}
+		// If we parked a fallback sandbox but never ended up adopting it (due to error or adopting a ready one), requeue it.
+		if fallbackSandbox != nil && !adoptingFallback {
+			r.WarmSandboxQueue.Add(claim.Spec.WarmPoolRef.Name, fallbackKey)
+		}
 	}()
 
+	// Strategy helper to pick candidate using in-memory NodeSpread and FIFO tie-breaking
+	pickSmart := func(keys []queue.SandboxKey) (queue.SandboxKey, bool) {
+		namespaceKeys := keys
+
+		if len(namespaceKeys) == 0 {
+			return queue.SandboxKey{}, false
+		}
+		if len(namespaceKeys) == 1 {
+			return namespaceKeys[0], true
+		}
+
+		// Group candidates into scheduled vs unscheduled
+		var scheduledKeys []queue.SandboxKey
+		var unscheduledKeys []queue.SandboxKey
+		for _, key := range namespaceKeys {
+			if key.NodeName != "" {
+				scheduledKeys = append(scheduledKeys, key)
+			} else {
+				unscheduledKeys = append(unscheduledKeys, key)
+			}
+		}
+
+		// NodeSpread strategy: spread workloads by round-robinning nodes.
+		// We count the remaining warmpool sandboxes per node in the queue.
+		// The node with the most remaining sandboxes has been selected the least.
+		if len(scheduledKeys) > 0 {
+			nodeCounts := make(map[string]int)
+			for _, key := range scheduledKeys {
+				nodeCounts[key.NodeName]++
+			}
+
+			maxCount := 0
+			for _, count := range nodeCounts {
+				if count > maxCount {
+					maxCount = count
+				}
+			}
+
+			var bestCandidates []queue.SandboxKey
+			for _, key := range scheduledKeys {
+				if nodeCounts[key.NodeName] == maxCount {
+					bestCandidates = append(bestCandidates, key)
+				}
+			}
+
+			// Ties (equal counts) are resolved using oldest first (first in the slice)
+			return bestCandidates[0], true
+		}
+
+		// Fall back to oldest first (FIFO) for unscheduled keys
+		return unscheduledKeys[0], true
+	}
+
 	for {
-		adoptedKey, ok := r.WarmSandboxQueue.Get(claim.Spec.WarmPoolRef.Name)
+		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(claim.Spec.WarmPoolRef.Name, pickSmart)
 		if !ok {
+			// No more candidates in our namespace. If we found an unready fallback sandbox, return it.
+			if fallbackSandbox != nil {
+				adoptingFallback = true
+				return fallbackSandbox, fallbackKey, nil
+			}
 			return nil, queue.SandboxKey{}, nil
 		}
 
-		// 1. Hand the Kubernetes client the empty bucket
 		adopted := &v1beta1.Sandbox{}
-
-		// 2. Fetch from the Informer Cache
 		err := r.Get(ctx, client.ObjectKey{Namespace: adoptedKey.Namespace, Name: adoptedKey.Name}, adopted)
 		if err != nil {
 			if k8errors.IsNotFound(err) {
@@ -635,16 +708,29 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", err.Error())
-			// If it's a good sandbox just in the wrong namespace,
-			// add it to the skipped list so the defer block puts it back.
+			// If it is a good sandbox in the wrong namespace, put it back.
+			// (Though pickSmart makes this impossible, we keep it for safety).
 			if errors.Is(err, ErrCrossNamespaceAdoption) {
 				skipped = append(skipped, adoptedKey)
 			}
 			continue
 		}
 
-		// Valid candidate found
-		return adopted, adoptedKey, nil
+		// Candidate is valid! Now check if it is Ready
+		if isSandboxReady(adopted) {
+			// Found a Ready sandbox! Adopt it immediately.
+			return adopted, adoptedKey, nil
+		}
+
+		// Sandbox is valid but NOT Ready.
+		// Keep the first unready sandbox we found as fallback.
+		if fallbackSandbox == nil {
+			fallbackSandbox = adopted
+			fallbackKey = adoptedKey
+		} else {
+			// Push subsequent unready sandboxes to skipped so they go back to the queue
+			skipped = append(skipped, adoptedKey)
+		}
 	}
 }
 
@@ -732,12 +818,10 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	// Take a snapshot of the sandbox BEFORE we mutate it to generate a clean JSON Patch.
 	originalAdopted := adopted.DeepCopy()
 
-	// Save templateHash before deleting it
 	templateHash := adopted.Labels[sandboxTemplateRefHash]
 
 	// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 	delete(adopted.Labels, warmPoolSandboxLabel)
-	delete(adopted.Labels, sandboxTemplateRefHash)
 	delete(adopted.Labels, v1beta1.SandboxPodTemplateHashLabel)
 	if adopted.Labels == nil {
 		adopted.Labels = make(map[string]string)
@@ -774,10 +858,18 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	adopted.Labels = ensureClaimIdentityLabels(adopted.Labels, claim)
 	adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 
-	// Fetch the template to construct the mergedMeta that reconcileActive will build.
+	// Resolve the template hash and metadata used by reconcileActive.
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateHash == "" && template != nil {
 		templateHash = SandboxTemplateRefHash(template.Name)
+	} else if templateHash == "" && templateErr != nil {
+		log.FromContext(ctx).V(1).Info("Unable to set template ref hash label during adoption because template lookup failed", "sandbox", adopted.Name, "claim", claim.Name, "error", templateErr.Error())
+	}
+
+	// Keep the template ref hash on the adopted sandbox's top-level labels so
+	// discovery by template hash keeps working after adoption.
+	if templateHash != "" {
+		adopted.Labels[sandboxTemplateRefHash] = templateHash
 	}
 
 	if templateErr == nil && template != nil {
@@ -1019,10 +1111,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
 	// (KEP-0174 only propagates to pod template labels; platform's informer reads
 	// Sandbox.metadata.labels).
+	templateHash := SandboxTemplateRefHash(template.Name)
 	sandbox.Labels = ensureClaimIdentityLabels(sandbox.Labels, claim)
 	sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] = v1beta1.SandboxLaunchTypeCold
+	sandbox.Labels[sandboxTemplateRefHash] = templateHash
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(sandbox.Spec.PodTemplate.ObjectMeta.Labels, claim)
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = templateHash
 
 	if err := r.mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
@@ -1622,14 +1716,16 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 	newWarmPoolName := getWarmPoolName(newSandbox)
 
 	poolChanged := oldWarmPoolName != newWarmPoolName
+	nodeScheduled := oldSandbox.Status.NodeName != newSandbox.Status.NodeName
 
-	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) {
-		// Add sandbox only on transition to adoptable.
+	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) || (newAdoptable && nodeScheduled) {
+		// Add/update sandbox in the queue
 		key := queue.SandboxKey{
 			Namespace: newSandbox.Namespace,
 			Name:      newSandbox.Name,
+			NodeName:  newSandbox.Status.NodeName,
 		}
-		logger.V(1).Info("Adding sandbox to warm pool queue", "warmPool", newWarmPoolName, "sandbox", key)
+		logger.V(1).Info("Adding/updating sandbox in warm pool queue", "warmPool", newWarmPoolName, "sandbox", key)
 		if newWarmPoolName != "" {
 			h.sandboxQueue.Add(newWarmPoolName, key)
 		}
@@ -1668,8 +1764,11 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	}
 
 	controllerRef := metav1.GetControllerOf(candidate)
-	if controllerRef != nil && controllerRef.Kind != "SandboxWarmPool" {
-		return fmt.Errorf("sandbox is not managed by warm pool. Controller: %v", controllerRef)
+	if controllerRef == nil {
+		return fmt.Errorf("sandbox %s/%s is unowned and cannot be safely adopted", candidate.Namespace, candidate.Name)
+	}
+	if controllerRef.APIVersion != extensionsv1beta1.GroupVersion.String() || controllerRef.Kind != "SandboxWarmPool" {
+		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil
 }

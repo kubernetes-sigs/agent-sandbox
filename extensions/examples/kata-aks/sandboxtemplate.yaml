@@ -1,0 +1,162 @@
+# SandboxTemplate that runs a small, owner-aware FastAPI agent inside an
+# AKS Pod Sandboxing (Kata Containers on Microsoft Hyper-V) micro-VM for
+# strong, hypervisor-level isolation. This template is the pod blueprint
+# used by both the warm pool (pre-creating pods) and any SandboxClaim that
+# adopts from it.
+#
+# The agent itself is owner-agnostic — each request carries an `X-Owner`
+# header (forwarded by the sandbox-router) that is baked into the system
+# prompt. That is what lets a single warm pool of identical pods serve
+# many users without per-pod customization.
+#
+# The single distinguishing line from a regular Sandbox is
+# `runtimeClassName: kata-vm-isolation`. AKS registers this RuntimeClass
+# automatically on Pod Sandboxing–enabled node pools (older clusters use
+# the same name; newer documentation sometimes calls it
+# `kata-mshv-vm-isolation`, but it is the same feature — use whichever
+# RuntimeClass actually exists on the cluster).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: kata-aks-template
+  namespace: sandbox-agent-demo
+spec:
+  # Allow the SandboxClaim to inject extra env vars (e.g. per-user model
+  # overrides) without letting it overwrite the Azure Foundry env vars
+  # defined below. Set to Disallowed if claims should not touch env at all.
+  envVarsInjectionPolicy: Allowed
+
+  # Have the controller create the per-Sandbox headless Service so the
+  # sandbox-router (or any in-cluster client) can reach the agent via
+  # <sandbox-name>.<namespace>.svc.cluster.local.
+  service: true
+
+  podTemplate:
+    spec:
+      # Run the pod inside the AKS Pod Sandboxing runtime (Kata Containers
+      # on Hyper-V). AKS registers this RuntimeClass on Kata-enabled node
+      # pools. The handler can be either `kata` or `kata-mshv` depending on
+      # the AKS release — the RuntimeClass name is what we pin here.
+      runtimeClassName: kata-vm-isolation
+
+      # Pin scheduling to the Kata-capable node pool. AKS labels every node
+      # in such a pool with `kubernetes.azure.com/kata-vm-isolation: "true"`
+      # and taints them with `kata=enabled:NoSchedule` so general workloads
+      # cannot land on the pool by accident. The toleration below opts this
+      # template into that pool.
+      nodeSelector:
+        kubernetes.azure.com/kata-vm-isolation: "true"
+      tolerations:
+      - key: kata
+        operator: Equal
+        value: enabled
+        effect: NoSchedule
+
+      # Kata pods are full micro-VMs, so the kubelet sizes guest memory from
+      # the sum of container requests/limits. Always set explicit requests
+      # and limits — leaving them unset is a common cause of OOM kills under
+      # Kata.
+      containers:
+      - name: agent
+        # Built from ./agent/ in this directory and pushed to an ACR you
+        # own. The README's Step 1 walks through `az acr build`.
+        # ${AGENT_IMAGE} is substituted by envsubst before kubectl apply.
+        image: ${AGENT_IMAGE}
+        # Mutable tags like :v1 cache aggressively on Kata nodes; force a
+        # pull so a rebuilt-and-repushed image is actually picked up.
+        imagePullPolicy: Always
+        # The agent Dockerfile already creates a non-root user (uid/gid
+        # 1000) and runs uvicorn as it; the securityContext below
+        # enforces that posture at the pod-spec level so the example
+        # stays compliant even if someone later edits the Dockerfile,
+        # and so it satisfies common admission policies (PSA
+        # `restricted`, OPA/Kyverno baselines, etc.) out of the box.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        # Per-request identity comes from the X-Owner header forwarded by
+        # the router; the pod itself is owner-agnostic, which is what lets
+        # a single warm pool serve every user.
+        env:
+        - name: OPENAI_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: azure-foundry
+              key: OPENAI_BASE_URL
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: azure-foundry
+              key: OPENAI_API_KEY
+        - name: LLM_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: azure-foundry
+              key: LLM_MODEL
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+
+  # NetworkPolicy enforced uniformly across every sandbox produced from this
+  # template (the controller renders a single shared NetworkPolicy per
+  # template — see SandboxTemplateSpec.NetworkPolicyManagement).
+  #
+  # Posture:
+  #   * Ingress: only the sandbox-router proxy pods (app=sandbox-router) may
+  #     reach the agent port. Sandbox-to-sandbox traffic is therefore denied
+  #     by default, which matters when many tenants share the same warm pool.
+  #   * Egress: DNS (UDP/TCP 53) is allowed so the agent can resolve
+  #     endpoints, and TCP/443 is allowed to any destination. Because the
+  #     HTTPS rule is not constrained with a `to` selector or `ipBlock`,
+  #     this policy does not by itself block in-cluster or other endpoints
+  #     that listen on 443.
+  #
+  # NOTE: enforcement requires a NetworkPolicy-aware CNI (Azure NPM, Calico,
+  # or Cilium). AKS clusters created with `--network-policy none` will
+  # accept this resource but silently ignore it.
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: sandbox-router
+        ports:
+        - protocol: TCP
+          port: 8080
+    egress:
+      - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+      - ports:
+        - protocol: TCP
+          port: 443

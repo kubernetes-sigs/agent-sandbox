@@ -22,9 +22,11 @@ from k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support im
     SandboxWithSnapshotSupport,
     SUCCESS_CODE,
     ERROR_CODE,
+    INTERNAL_ERROR_CODE,
     SuspendResponse,
-    ResumeResponse,
+    RestorationResponse,
 )
+from k8s_agent_sandbox.exceptions import SnapshotNotFoundError
 from k8s_agent_sandbox.constants import (
     SANDBOX_NAME_HASH_LABEL,
     PODSNAPSHOT_POD_NAME_ANNOTATION,
@@ -36,6 +38,7 @@ from k8s_agent_sandbox.constants import (
     SANDBOX_API_GROUP,
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
+    PODSNAPSHOT_NAME_ANNOTATION,
 )
 from k8s_agent_sandbox.gke_extensions.snapshots.snapshot_engine import (
     ListSnapshotResult,
@@ -1376,6 +1379,176 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
         
         res = self.sandbox.get_sandbox_name_hash()
         self.assertIsNone(res)
+
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
+    def test_restore_fails_when_running(self, mock_is_suspended):
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "snap-uid-123",
+                        "uid": "uid-123",
+                        "creationTimestamp": "2023-01-01T00:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                }
+            ]
+        }
+
+        result = self.sandbox.restore(snapshot_uid="snap-uid-123")
+
+        self.assertFalse(result.success)
+        self.assertIn("Sandbox is currently running and cannot be restored.", result.error_reason)
+
+    @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_sandbox_propagation', return_value=True)
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    @patch.object(SandboxWithSnapshotSupport, '_restore_internal')
+    def test_restore_success_suspended(self, mock_restore_internal, mock_is_suspended, mock_propagate):
+        self.sandbox.connector.close = MagicMock()
+
+        mock_restore_internal.return_value = RestorationResponse(
+            success=True,
+            restored_from_snapshot=True,
+            snapshot_uid="snap-uid-123",
+            error_reason="",
+            error_code=0
+        )
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "snap-uid-123",
+                        "uid": "uid-123",
+                        "creationTimestamp": "2023-01-01T00:00:00Z",
+                    },
+                    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                }
+            ]
+        }
+
+        result = self.sandbox.restore(snapshot_uid="snap-uid-123")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.snapshot_uid, "snap-uid-123")
+        self.mock_k8s_helper.patch_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-ns",
+            {
+                "spec": {
+                    "additionalPodMetadata": {
+                        "annotations": {
+                            PODSNAPSHOT_NAME_ANNOTATION: "snap-uid-123"
+                        }
+                    }
+                }
+            }
+        )
+        mock_restore_internal.assert_called_once_with("snap-uid-123", 180)
+
+    @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_sandbox_propagation', return_value=False)
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    def test_restore_propagation_timeout(self, mock_is_suspended, mock_propagate):
+        """Test restore returns failure when propagation times out."""
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {
+            "items": [{"metadata": {"name": "snap-uid-123"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]
+        }
+
+        result = self.sandbox.restore(snapshot_uid="snap-uid-123")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, INTERNAL_ERROR_CODE)
+        self.assertIn("Internal Error: Timed out waiting for sandbox restoration", result.error_reason)
+
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    def test_restore_patch_exception(self, mock_is_suspended):
+        """Test restore returns failure when patch_sandbox_claim raises an exception."""
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {
+            "items": [{"metadata": {"name": "snap-uid-123"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]
+        }
+        self.mock_k8s_helper.patch_sandbox_claim.side_effect = Exception("Patch failed")
+
+        result = self.sandbox.restore(snapshot_uid="snap-uid-123")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, ERROR_CODE)
+        self.assertIn("Unexpected error: Patch failed", result.error_reason)
+
+    @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_sandbox_propagation', return_value=True)
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    @patch.object(SandboxWithSnapshotSupport, '_restore_internal')
+    def test_resume_success_with_propagation(self, mock_restore_internal, mock_is_suspended, mock_propagate):
+        """Test resume successfully patches SandboxClaim and waits for propagation."""
+        self.sandbox.connector.close = MagicMock()
+        mock_restore_internal.return_value = RestorationResponse(
+            success=True,
+            restored_from_snapshot=True,
+            snapshot_uid="snap-uid-123",
+            error_reason="",
+            error_code=0
+        )
+        with patch.object(self.sandbox, '_get_latest_snapshot_uid', return_value='snap-uid-123'):
+            result = self.sandbox.resume()
+
+            self.assertTrue(result.success)
+            self.mock_k8s_helper.patch_sandbox_claim.assert_called_once_with(
+                "test-claim", "test-ns",
+                {
+                    "spec": {
+                        "additionalPodMetadata": {
+                            "annotations": {
+                                PODSNAPSHOT_NAME_ANNOTATION: None
+                            }
+                        }
+                    }
+                }
+            )
+            mock_propagate.assert_called_once_with(self.mock_k8s_helper, "test-ns", "test-id", None)
+            mock_restore_internal.assert_called_once_with("snap-uid-123", 180)
+
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    def test_resume_patch_exception(self, mock_is_suspended):
+        """Test resume returns failure when patch_sandbox_claim raises an exception."""
+        self.mock_k8s_helper.patch_sandbox_claim.side_effect = Exception("Patch failed")
+        with patch.object(self.sandbox, '_get_latest_snapshot_uid', return_value='snap-uid-123'):
+            result = self.sandbox.resume()
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error_code, ERROR_CODE)
+            self.assertIn("Failed to clean up restore annotation before resuming: Patch failed", result.error_reason)
+            self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_not_called()
+
+    @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_sandbox_propagation', return_value=False)
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    def test_resume_propagation_timeout(self, mock_is_suspended, mock_propagate):
+        """Test resume returns failure when propagation times out."""
+        with patch.object(self.sandbox, '_get_latest_snapshot_uid', return_value='snap-uid-123'):
+            result = self.sandbox.resume()
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error_code, INTERNAL_ERROR_CODE)
+            self.assertIn("Internal Error: Timed out waiting for restore annotation cleanup", result.error_reason)
+            self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_not_called()
+
+    def test_restore_fails_when_snapshot_does_not_exist(self):
+        """Test restore returns failure cleanly when snapshot does not exist."""
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {
+            "items": []
+        }
+
+        result = self.sandbox.restore(snapshot_uid="non-existent-snap")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, ERROR_CODE)
+        self.assertIn("Snapshot 'non-existent-snap' does not exist for this sandbox.", result.error_reason)
+        self.mock_k8s_helper.patch_sandbox_claim.assert_not_called()
+
+    def test_verify_snapshot_exists_raises_exception(self):
+        """Test _verify_snapshot_exists raises SnapshotNotFoundError when snapshot does not exist."""
+        self.mock_k8s_helper.custom_objects_api.list_namespaced_custom_object.return_value = {
+            "items": []
+        }
+        with self.assertRaises(SnapshotNotFoundError) as context:
+            self.sandbox._verify_snapshot_exists("non-existent-snap")
+        self.assertIn("Snapshot 'non-existent-snap' does not exist for this sandbox.", str(context.exception))
 
 if __name__ == "__main__":
     unittest.main()

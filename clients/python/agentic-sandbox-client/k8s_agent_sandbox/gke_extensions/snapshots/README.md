@@ -64,7 +64,19 @@ try:
     print("Resuming sandbox...")
     resume_response = sandbox.resume()
     if resume_response.success:
-        print(f"Sandbox resumed! Restored from snapshot: {resume_response.restored_from_snapshot}")
+        print(f"Sandbox resumed! Restored from snapshot: {resume_response.snapshot_uid}")
+
+    # Suspend the sandbox before performing a dedicated restore
+    print("Suspending sandbox...")
+    suspend_response = sandbox.suspend(snapshot_before_suspend=False)
+    if suspend_response.success:
+        print("Sandbox suspended successfully.")
+
+    # Restore the sandbox to a specific previous snapshot
+    print("Restoring sandbox to a specific snapshot...")
+    restore_response = sandbox.restore(snapshot_uid=response.snapshot_uid)
+    if restore_response.success:
+        print(f"Sandbox restored! Restored from snapshot: {restore_response.snapshot_uid}")
 finally:
     sandbox.terminate()
 ```
@@ -130,8 +142,9 @@ This file, located in the parent directory (`clients/python/agentic-sandbox-clie
           groupRetentionPolicy:
             maxSnapshotCountPerGroup: 3
     ```
+4.  **Sandbox Template**: A `SandboxTemplate` (e.g., `python-counter-template`) referencing a template with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
 
-5.  **Sandbox WarmPool**: A `SandboxWarmPool` (e.g., `python-counter-pool`) referencing a template with runtime gVisor, appropriate KSA and label that matches that selector label in `PodSnapshotPolicy` must be available in the cluster.
+5.  **Sandbox WarmPool**: A `SandboxWarmPool` (e.g., `python-counter-pool`) with appropriate replica count that references the `SandboxTemplate` must be available in the cluster.
 
 ### Running Tests:
 

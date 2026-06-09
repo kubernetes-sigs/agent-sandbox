@@ -131,3 +131,50 @@ func TestSimpleSandboxQueue_RemoveQueue_MemoryLeakFix(t *testing.T) {
 		t.Errorf("Expected queue to be completely removed, but it still existed")
 	}
 }
+
+func TestSimpleSandboxQueue_GetWithStrategy(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	hash := "template-hash-1"
+
+	key1 := SandboxKey{Namespace: "default", Name: "sb-1"}
+	key2 := SandboxKey{Namespace: "default", Name: "sb-2"}
+	key3 := SandboxKey{Namespace: "default", Name: "sb-3"}
+
+	q.Add(hash, key1)
+	q.Add(hash, key2)
+	q.Add(hash, key3)
+
+	// Custom strategy to pick key2 specifically
+	pickKey2 := func(items []SandboxKey) (SandboxKey, bool) {
+		for _, item := range items {
+			if item.Name == "sb-2" {
+				return item, true
+			}
+		}
+		return SandboxKey{}, false
+	}
+
+	// Pop with strategy
+	got, ok := q.GetWithStrategy(hash, pickKey2)
+	if !ok || got != key2 {
+		t.Errorf("Expected to pick %v, got %v (ok: %v)", key2, got, ok)
+	}
+
+	// First standard pop should be key1 (since key2 was removed)
+	got1, _ := q.Get(hash)
+	if got1 != key1 {
+		t.Errorf("Expected first remaining item to be %v, got %v", key1, got1)
+	}
+
+	// Second standard pop should be key3
+	got3, _ := q.Get(hash)
+	if got3 != key3 {
+		t.Errorf("Expected second remaining item to be %v, got %v", key3, got3)
+	}
+
+	// Queue should now be empty
+	_, ok3 := q.Get(hash)
+	if ok3 {
+		t.Errorf("Expected queue to be empty, but got an item")
+	}
+}

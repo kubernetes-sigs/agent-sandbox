@@ -19,6 +19,7 @@ import os
 import ipaddress
 import re
 import secrets
+import time
 
 import httpx
 import websockets
@@ -36,6 +37,9 @@ MAX_TCP_PORT = 65535
 DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
 DEFAULT_PROXY_TIMEOUT = 180.0
+DEFAULT_WEBSOCKET_IDLE_TIMEOUT = 3600.0
+DEFAULT_WEBSOCKET_MAX_LIFETIME = 86400.0
+DEFAULT_WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT = 64
 DEFAULT_CLUSTER_DOMAIN = "cluster.local"
 
 ROUTER_HEADER_NAMES = frozenset({
@@ -69,21 +73,89 @@ class RoutingError(Exception):
     """Invalid sandbox routing headers."""
 
 
-def _get_proxy_timeout() -> float:
-    raw = os.environ.get("PROXY_TIMEOUT_SECONDS")
+class ConnectionLimitExceeded(Exception):
+    """A client has exceeded the allowed number of concurrent WebSocket connections."""
+
+
+class WebSocketConnectionTracker:
+    """Track concurrent WebSocket connections per client to limit resource exhaustion."""
+
+    def __init__(self, max_per_client: int) -> None:
+        self._max_per_client = max_per_client
+        self._counts: dict[str, int] = {}
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, client_key: str) -> None:
+        if self._max_per_client <= 0:
+            return
+        async with self._lock:
+            count = self._counts.get(client_key, 0)
+            if count >= self._max_per_client:
+                raise ConnectionLimitExceeded(
+                    f"Too many concurrent WebSocket connections "
+                    f"(limit: {self._max_per_client})."
+                )
+            self._counts[client_key] = count + 1
+
+    async def release(self, client_key: str) -> None:
+        if self._max_per_client <= 0:
+            return
+        async with self._lock:
+            count = self._counts.get(client_key, 0)
+            if count <= 1:
+                self._counts.pop(client_key, None)
+            else:
+                self._counts[client_key] = count - 1
+
+
+def _get_positive_float_env(
+    name: str,
+    default: float,
+    *,
+    allow_zero: bool = False,
+) -> float:
+    """Read a positive float from the environment, falling back to default."""
+    raw = os.environ.get(name)
     if raw is None:
-        return DEFAULT_PROXY_TIMEOUT
+        return default
     try:
         value = float(raw)
     except (ValueError, TypeError):
-        print(f"WARNING: Invalid PROXY_TIMEOUT_SECONDS='{raw}', "
-              f"falling back to {DEFAULT_PROXY_TIMEOUT}s")
-        return DEFAULT_PROXY_TIMEOUT
-    if value <= 0:
-        print(f"WARNING: PROXY_TIMEOUT_SECONDS must be positive, got {value}, "
-              f"falling back to {DEFAULT_PROXY_TIMEOUT}s")
-        return DEFAULT_PROXY_TIMEOUT
+        print(f"WARNING: Invalid {name}='{raw}', falling back to {default}s")
+        return default
+    if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+        constraint = "non-negative" if allow_zero else "positive"
+        print(f"WARNING: {name} must be {constraint}, got {value}, "
+              f"falling back to {default}s")
+        return default
     return value
+
+
+def _get_non_negative_int_env(
+    name: str,
+    default: int,
+    *,
+    allow_zero: bool = False,
+) -> int:
+    """Read a non-negative integer from the environment, falling back to default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        print(f"WARNING: Invalid {name}='{raw}', falling back to {default}")
+        return default
+    if value < 0 or (value == 0 and not allow_zero):
+        constraint = "non-negative" if allow_zero else "positive"
+        print(f"WARNING: {name} must be {constraint}, got {value}, "
+              f"falling back to {default}")
+        return default
+    return value
+
+
+def _get_proxy_timeout() -> float:
+    return _get_positive_float_env("PROXY_TIMEOUT_SECONDS", DEFAULT_PROXY_TIMEOUT)
 
 
 def _get_cluster_domain() -> str:
@@ -219,6 +291,16 @@ def _url_for_log(target_url: str) -> str:
     return target_url.split("?", 1)[0]
 
 
+def _client_connection_key(websocket: WebSocket) -> str:
+    """Return a stable key for per-client WebSocket connection accounting."""
+    forwarded_for = websocket.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    if websocket.client:
+        return websocket.client.host
+    return "unknown"
+
+
 def _log_proxy_target(sandbox_id: str, target_url: str, *, protocol: str) -> None:
     print(
         f"Proxying {protocol} for sandbox '{sandbox_id}' "
@@ -254,13 +336,44 @@ def _check_router_auth(headers) -> None:
 
 
 proxy_timeout = _get_proxy_timeout()
+websocket_idle_timeout = _get_positive_float_env(
+    "WEBSOCKET_IDLE_TIMEOUT_SECONDS",
+    DEFAULT_WEBSOCKET_IDLE_TIMEOUT,
+    allow_zero=True,
+)
+websocket_max_lifetime = _get_positive_float_env(
+    "WEBSOCKET_MAX_LIFETIME_SECONDS",
+    DEFAULT_WEBSOCKET_MAX_LIFETIME,
+    allow_zero=True,
+)
+websocket_max_connections_per_client = _get_non_negative_int_env(
+    "WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT",
+    DEFAULT_WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT,
+    allow_zero=True,
+)
 client = httpx.AsyncClient(timeout=proxy_timeout)
+ws_connection_tracker = WebSocketConnectionTracker(websocket_max_connections_per_client)
 
 ROUTER_AUTH_TOKEN = os.environ.get("ROUTER_AUTH_TOKEN", "").strip() or None
 ALLOW_UNAUTHENTICATED_ROUTER = _env_var_is_truthy("ALLOW_UNAUTHENTICATED_ROUTER")
 
 print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")
 print(f"Sandbox router configured with cluster_domain: {cluster_domain}")
+if websocket_idle_timeout:
+    print(f"Sandbox router WebSocket idle timeout: {websocket_idle_timeout}s")
+else:
+    print("Sandbox router WebSocket idle timeout: disabled")
+if websocket_max_lifetime:
+    print(f"Sandbox router WebSocket max lifetime: {websocket_max_lifetime}s")
+else:
+    print("Sandbox router WebSocket max lifetime: disabled")
+if websocket_max_connections_per_client:
+    print(
+        "Sandbox router WebSocket max connections per client: "
+        f"{websocket_max_connections_per_client}"
+    )
+else:
+    print("Sandbox router WebSocket max connections per client: disabled")
 if ROUTER_AUTH_TOKEN:
     print("Authentication enabled: requests must include valid Bearer token.")
 elif ALLOW_UNAUTHENTICATED_ROUTER:
@@ -280,8 +393,20 @@ async def health_check():
     return {"status": "ok"}
 
 
-async def _relay_websocket(client_ws: WebSocket, backend_ws) -> None:
+async def _relay_websocket(
+    client_ws: WebSocket,
+    backend_ws,
+    *,
+    idle_timeout: float,
+    max_lifetime: float,
+) -> None:
     """Bidirectionally relay messages between client and backend WebSockets."""
+    started_at = time.monotonic()
+    last_activity = started_at
+
+    def touch() -> None:
+        nonlocal last_activity
+        last_activity = time.monotonic()
 
     async def client_to_backend() -> None:
         try:
@@ -289,6 +414,7 @@ async def _relay_websocket(client_ws: WebSocket, backend_ws) -> None:
                 message = await client_ws.receive()
                 if message["type"] == "websocket.disconnect":
                     break
+                touch()
                 if "text" in message:
                     await backend_ws.send(message["text"])
                 elif "bytes" in message:
@@ -299,6 +425,7 @@ async def _relay_websocket(client_ws: WebSocket, backend_ws) -> None:
     async def backend_to_client() -> None:
         try:
             async for message in backend_ws:
+                touch()
                 if isinstance(message, str):
                     await client_ws.send_text(message)
                 else:
@@ -306,10 +433,24 @@ async def _relay_websocket(client_ws: WebSocket, backend_ws) -> None:
         except ConnectionClosed:
             pass
 
-    client_task = asyncio.create_task(client_to_backend())
-    backend_task = asyncio.create_task(backend_to_client())
+    async def watchdog() -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            now = time.monotonic()
+            if idle_timeout and (now - last_activity) >= idle_timeout:
+                return
+            if max_lifetime and (now - started_at) >= max_lifetime:
+                return
+
+    tasks = [
+        asyncio.create_task(client_to_backend()),
+        asyncio.create_task(backend_to_client()),
+    ]
+    if idle_timeout or max_lifetime:
+        tasks.append(asyncio.create_task(watchdog()))
+
     done, pending = await asyncio.wait(
-        [client_task, backend_task],
+        tasks,
         return_when=asyncio.FIRST_COMPLETED,
     )
     for task in pending:
@@ -351,6 +492,13 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
 
     _log_proxy_target(sandbox_id, target_url, protocol="WebSocket")
 
+    client_key = _client_connection_key(websocket)
+    try:
+        await ws_connection_tracker.acquire(client_key)
+    except ConnectionLimitExceeded as exc:
+        await websocket.close(code=1008, reason=str(exc))
+        return
+
     subprotocol_header = websocket.headers.get("sec-websocket-protocol")
     subprotocols = None
     if subprotocol_header:
@@ -365,7 +513,12 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
         ) as backend_ws:
             selected_subprotocol = backend_ws.subprotocol
             await websocket.accept(subprotocol=selected_subprotocol)
-            await _relay_websocket(websocket, backend_ws)
+            await _relay_websocket(
+                websocket,
+                backend_ws,
+                idle_timeout=websocket_idle_timeout,
+                max_lifetime=websocket_max_lifetime,
+            )
     except websockets.InvalidStatus as exc:
         print(
             f"ERROR: WebSocket handshake to sandbox at {_url_for_log(target_url)} failed. "
@@ -384,6 +537,8 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
     except Exception as exc:
         print(f"An unexpected WebSocket error occurred: {exc}")
         await websocket.close(code=1011, reason="An internal error occurred in the proxy.")
+    finally:
+        await ws_connection_tracker.release(client_key)
 
 
 @app.api_route("/{full_path:path}", methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
@@ -456,7 +611,9 @@ async def proxy_request(request: Request, full_path: str):
         raise
     except httpx.TimeoutException as e:
         print(
-            f"ERROR: Request to sandbox at {target_url} timed out. Error: {e}")
+            f"ERROR: Request to sandbox at {_url_for_log(target_url)} timed out. "
+            f"Error: {e}"
+        )
         raise HTTPException(
             status_code=504,
             detail=f"Timed out waiting for the backend sandbox: {sandbox_id}",

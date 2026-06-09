@@ -339,6 +339,16 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 			case <-done:
 			}
 		}
+
+		// Local state persistence failed, so this resource is not recorded and
+		// runCleanup will never release it. Network connectivity to Boskos is
+		// likely still functional, so best-effort release it now rather than
+		// tying it up for 10-15 minutes until the reaper reclaims it.
+		br := BoskosResource{Name: resource.Name, Owner: owner}
+		if relErr := br.ReleaseFromBoskos(ctx); relErr != nil {
+			log.Error(relErr, "failed to release resource from boskos after state update failure", "name", resource.Name)
+		}
+
 		return err
 	}
 

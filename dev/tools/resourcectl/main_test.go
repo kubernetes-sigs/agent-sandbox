@@ -88,9 +88,7 @@ func TestConcurrentStateUpdates(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpHome)
 
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	t.Setenv("HOME", tmpHome)
 
 	// Concurrently append a distinct resource from many goroutines. Without the
 	// state file lock these read-modify-write cycles would race and lose
@@ -152,9 +150,7 @@ func TestRunCleanup(t *testing.T) {
 	defer os.RemoveAll(tmpHome)
 
 	// Override HOME
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	t.Setenv("HOME", tmpHome)
 
 	// Start a mock Boskos server
 	mockBoskos := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

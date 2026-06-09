@@ -8277,3 +8277,15 @@ spec:
         type: object
     served: true
     storage: false
+  conversion:
+    strategy: Webhook
+    webhook:
+      conversionReviewVersions:
+      - v1
+      - v1beta1
+      clientConfig:
+        service:
+          name: agent-sandbox-webhook-service
+          namespace: agent-sandbox-system
+          path: /convert
+        caBundle: Cg==

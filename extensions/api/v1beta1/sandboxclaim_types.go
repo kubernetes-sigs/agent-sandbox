@@ -154,6 +154,7 @@ type SandboxStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim
 // +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`

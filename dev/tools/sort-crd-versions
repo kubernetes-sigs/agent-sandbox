@@ -16,7 +16,13 @@
 import os
 import re
 import sys
-import yaml
+
+try:
+    import yaml
+except ImportError:
+    print("Error: The 'PyYAML' package is required to sort and patch CRDs, but it is not installed.", file=sys.stderr)
+    print("Please install it by running: pip install PyYAML", file=sys.stderr)
+    sys.exit(1)
 
 def parse_k8s_version(version_str):
     # Matches v<major>[{alpha,beta}<minor>]
@@ -65,11 +71,26 @@ def sort_crd_versions(file_path):
             spec = doc.get('spec', {})
             versions = spec.get('versions', [])
             if len(versions) > 1:
+                # Force conversion strategy to Webhook and populate webhook configuration
+                spec['conversion'] = {
+                    'strategy': 'Webhook',
+                    'webhook': {
+                        'conversionReviewVersions': ['v1', 'v1beta1'],
+                        'clientConfig': {
+                            'service': {
+                                'name': 'agent-sandbox-webhook-service',
+                                'namespace': 'agent-sandbox-system',
+                                'path': '/convert'
+                            },
+                            'caBundle': 'Cg=='
+                        }
+                    }
+                }
                 # Sort versions descending by Kubernetes version priority
                 sorted_versions = sorted(versions, key=lambda v: parse_k8s_version(v.get('name', '')), reverse=True)
                 if sorted_versions != versions:
                     spec['versions'] = sorted_versions
-                    modified = True
+                modified = True
         new_docs.append(doc)
 
     if modified:

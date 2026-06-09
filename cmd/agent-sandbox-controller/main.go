@@ -25,11 +25,14 @@ import (
 	"strings"
 	"time"
 
+	"crypto/tls"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -39,9 +42,11 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -70,7 +75,16 @@ func main() {
 	var sandboxWarmPoolMaxBatchSize int
 	var enableWarmPoolEviction bool
 	var printVersion bool
+	var webhookPort int
+	var webhookCertDir string
+	var webhookServiceName string
+	var webhookNamespace string
+
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
+	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "The directory that contains the certificates.")
+	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
+	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -176,6 +190,7 @@ func main() {
 	http.DefaultServeMux = http.NewServeMux()
 
 	scheme := controllers.Scheme
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	if extensions {
 		utilruntime.Must(extensionsv1alpha1.AddToScheme(scheme))
 		utilruntime.Must(extensionsv1beta1.AddToScheme(scheme))
@@ -222,6 +237,27 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
+	// Create a temporary client to patch the CRDs and access Secrets
+	tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create temporary client")
+		os.Exit(1)
+	}
+
+	// Generate or load self-signed TLS certificates for the webhook server
+	setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
+	caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
+	if err != nil {
+		setupLog.Error(err, "unable to prepare webhook certificates")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Patching CRDs with generated CA bundle")
+	if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
+		setupLog.Error(err, "failed to patch CRDs with CA bundle")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsOpts,
@@ -229,6 +265,15 @@ func main() {
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Port:    webhookPort,
+			CertDir: webhookCertDir,
+			TLSOpts: []func(*tls.Config){
+				func(cfg *tls.Config) {
+					cfg.ClientAuth = tls.NoClientCert
+				},
+			},
+		}),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

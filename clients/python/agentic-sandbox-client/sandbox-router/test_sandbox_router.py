@@ -333,7 +333,7 @@ class TestProxyTimeout:
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout["connect"] == 60.0
+        assert capture_send.timeout["connect"] == 5.0
         assert capture_send.timeout["read"] == 60.0
 
     def test_invalid_request_header_falls_back_to_default_timeout(self, client):
@@ -352,7 +352,7 @@ class TestProxyTimeout:
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["connect"] == min(sandbox_router.proxy_timeout, 5.0)
         assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
 
     def test_non_finite_request_header_falls_back_to_default_timeout(self, client):
@@ -371,7 +371,7 @@ class TestProxyTimeout:
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["connect"] == min(sandbox_router.proxy_timeout, 5.0)
         assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
 
     @pytest.mark.parametrize("timeout_value", ["0", "-1"])
@@ -393,7 +393,7 @@ class TestProxyTimeout:
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["connect"] == min(sandbox_router.proxy_timeout, 5.0)
         assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
 
     def test_request_header_above_proxy_timeout_is_capped(self, client):
@@ -412,7 +412,7 @@ class TestProxyTimeout:
             )
 
         assert resp.status_code == 502
-        assert capture_send.timeout["connect"] == sandbox_router.proxy_timeout
+        assert capture_send.timeout["connect"] == min(sandbox_router.proxy_timeout, 5.0)
         assert capture_send.timeout["read"] == sandbox_router.proxy_timeout
 
 

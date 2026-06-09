@@ -216,7 +216,7 @@ async def proxy_request(request: Request, full_path: str):
             url=target_url,
             headers=headers,
             content=request.stream(),
-            timeout=timeout,
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
         )
 
         resp = await client.send(req, stream=True)

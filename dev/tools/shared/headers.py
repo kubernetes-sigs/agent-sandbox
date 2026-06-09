@@ -200,32 +200,46 @@ def apply_license_header(file_path, header_text, dry_run=False):
 
 
 def _match_path_parts(path_parts, pattern_parts):
-    """Iteratively matches path components against pattern components."""
+    """Matches path components against pattern components.
+
+    Uses dynamic programming in O(N*M) time and O(M) space, where ``**``
+    matches zero or more path components and an empty pattern component
+    (produced by leading/trailing/duplicate slashes, e.g. ``foo/``) matches
+    zero path components.
+    """
     if not pattern_parts:
         return not path_parts
 
     n = len(path_parts)
     m = len(pattern_parts)
 
-    dp = [[False] * (m + 1) for _ in range(n + 1)]
-    dp[0][0] = True
-
+    # prev[j] is True iff the first (i-1) path parts match the first j pattern
+    # parts. Only one row is kept at a time since row i depends only on row i-1.
+    # Initialize for i == 0 (no path parts consumed): a pattern can match zero
+    # path parts only while every component so far is '**' or empty.
+    prev = [False] * (m + 1)
+    prev[0] = True
     for j in range(1, m + 1):
-        if pattern_parts[j-1] == '**':
-            dp[0][j] = dp[0][j-1]
-        elif pattern_parts[j-1] == '':
-            dp[0][j] = dp[0][j-1]
+        if pattern_parts[j-1] in ('**', ''):
+            prev[j] = prev[j-1]
         else:
             break
 
     for i in range(1, n + 1):
+        # curr[0] stays False: a non-empty path can't match an empty pattern.
+        curr = [False] * (m + 1)
         for j in range(1, m + 1):
             if pattern_parts[j-1] == '**':
-                dp[i][j] = dp[i-1][j] or dp[i][j-1]
+                # '**' matches this path part (prev[j]) or zero parts (curr[j-1]).
+                curr[j] = prev[j] or curr[j-1]
+            elif pattern_parts[j-1] == '':
+                # Empty component is an epsilon transition (matches zero parts).
+                curr[j] = curr[j-1]
             else:
-                dp[i][j] = dp[i-1][j-1] and fnmatch.fnmatch(path_parts[i-1], pattern_parts[j-1])
+                curr[j] = prev[j-1] and fnmatch.fnmatch(path_parts[i-1], pattern_parts[j-1])
+        prev = curr
 
-    return dp[n][m]
+    return prev[m]
 
 def is_path_excluded(relative_path, exclude_patterns):
     """Checks if a relative path matches any of the .gitignore-style exclude patterns."""

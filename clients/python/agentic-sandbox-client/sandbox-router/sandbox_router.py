@@ -232,6 +232,18 @@ def _response_headers(headers) -> dict[str, str]:
     }
 
 
+def _url_for_log(target_url: str) -> str:
+    """Return target_url without the query string; queries may carry secrets."""
+    return target_url.split("?", 1)[0]
+
+
+def _log_proxy_target(sandbox_id: str, target_url: str, *, protocol: str) -> None:
+    print(
+        f"Proxying {protocol} for sandbox '{sandbox_id}' "
+        f"to URL: {_url_for_log(target_url)}"
+    )
+
+
 def _check_router_auth(headers) -> None:
     """Raise HTTPException when authentication is enabled and the token is invalid.
 
@@ -380,7 +392,7 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
         await websocket.close(code=1008, reason=str(exc))
         return
 
-    print(f"Proxying WebSocket for sandbox '{sandbox_id}' to URL: {target_url}")
+    _log_proxy_target(sandbox_id, target_url, protocol="WebSocket")
 
     subprotocol_header = websocket.headers.get("sec-websocket-protocol")
     subprotocols = None
@@ -400,13 +412,14 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
             await _relay_websocket(websocket, backend_ws)
     except websockets.InvalidStatus as exc:
         print(
-            f"ERROR: WebSocket handshake to sandbox at {target_url} failed. "
+            f"ERROR: WebSocket handshake to sandbox at {_url_for_log(target_url)} failed. "
             f"Error: {exc}"
         )
         await websocket.close(code=1011, reason="Backend WebSocket handshake failed.")
     except OSError as exc:
         print(
-            f"ERROR: Connection to sandbox at {target_url} failed. Error: {exc}"
+            f"ERROR: Connection to sandbox at {_url_for_log(target_url)} failed. "
+            f"Error: {exc}"
         )
         await websocket.close(
             code=1011,
@@ -434,7 +447,7 @@ async def proxy_request(request: Request, full_path: str):
     except RoutingError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    print(f"Proxying request for sandbox '{sandbox_id}' to URL: {target_url}")
+    _log_proxy_target(sandbox_id, target_url, protocol="request")
 
     try:
         timeout = _get_request_timeout(request)
@@ -476,7 +489,9 @@ async def proxy_request(request: Request, full_path: str):
         )
     except httpx.ConnectError as e:
         print(
-            f"ERROR: Connection to sandbox at {target_url} failed. Error: {e}")
+            f"ERROR: Connection to sandbox at {_url_for_log(target_url)} failed. "
+            f"Error: {e}"
+        )
         raise HTTPException(
             status_code=502,
             detail=f"Could not connect to the backend sandbox: {sandbox_id}",

@@ -73,6 +73,12 @@ var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
 var ErrCrossNamespaceAdoption = errors.New("cross-namespace adoption forbidden")
 
+// ErrVolumeClaimTemplatesDisallowed is a sentinel error indicating that volumeClaimTemplates are disallowed by the template.
+var ErrVolumeClaimTemplatesDisallowed = errors.New("volume claim templates are disallowed by the template")
+
+// ErrVolumeClaimTemplatesOverrideForbidden is a sentinel error indicating that overriding volume claim templates by name is forbidden.
+var ErrVolumeClaimTemplatesOverrideForbidden = errors.New("overriding volume claim templates is forbidden by the template")
+
 // observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
 // We store the UID to protect against stale data when a claim is deleted and a new one
 // is created with the same name.
@@ -1007,10 +1013,18 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
 	sandbox.Spec.Service = template.Spec.Service
-	// Copy volumeClaimTemplates from template to sandbox
-	if len(template.Spec.VolumeClaimTemplates) > 0 {
-		sandbox.Spec.VolumeClaimTemplates = make([]v1beta1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
-		for i, vct := range template.Spec.VolumeClaimTemplates {
+	// Merge volumeClaimTemplates from template and claim according to the template policy
+	resolvedVCTs, err := mergeVolumeClaimTemplates(
+		template.Spec.VolumeClaimTemplates,
+		claim.Spec.VolumeClaimTemplates,
+		template.Spec.VolumeClaimTemplatesPolicy,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge volume claim templates: %w", err)
+	}
+	if len(resolvedVCTs) > 0 {
+		sandbox.Spec.VolumeClaimTemplates = make([]v1beta1.PersistentVolumeClaimTemplate, len(resolvedVCTs))
+		for i, vct := range resolvedVCTs {
 			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
 		}
 	}
@@ -1120,6 +1134,68 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, "none", "not_ready")
 
 	return sandbox, nil
+}
+
+func mergeVolumeClaimTemplates(
+	templateVCTs []v1beta1.PersistentVolumeClaimTemplate,
+	claimVCTs []v1beta1.PersistentVolumeClaimTemplate,
+	policy extensionsv1beta1.VolumeClaimTemplatesPolicy,
+) ([]v1beta1.PersistentVolumeClaimTemplate, error) {
+	if len(claimVCTs) == 0 {
+		return templateVCTs, nil
+	}
+
+	switch policy {
+	case extensionsv1beta1.VolumeClaimTemplatesPolicyDisallowed, "":
+		return nil, ErrVolumeClaimTemplatesDisallowed
+
+	case extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed:
+		// Check for any overrides (name match)
+		templateMap := make(map[string]struct{}, len(templateVCTs))
+		for _, vct := range templateVCTs {
+			templateMap[vct.Name] = struct{}{}
+		}
+		for _, vct := range claimVCTs {
+			if _, exists := templateMap[vct.Name]; exists {
+				return nil, fmt.Errorf("%w: cannot override template volume %q", ErrVolumeClaimTemplatesOverrideForbidden, vct.Name)
+			}
+		}
+		// Simply append claim VCTs to template VCTs
+		merged := make([]v1beta1.PersistentVolumeClaimTemplate, 0, len(templateVCTs)+len(claimVCTs))
+		merged = append(merged, templateVCTs...)
+		merged = append(merged, claimVCTs...)
+		return merged, nil
+
+	case extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides:
+		// Merge by Name: claim VCT replaces template VCT by name if they match, and new ones are appended.
+		merged := make([]v1beta1.PersistentVolumeClaimTemplate, 0, len(templateVCTs)+len(claimVCTs))
+		claimMap := make(map[string]v1beta1.PersistentVolumeClaimTemplate, len(claimVCTs))
+		for _, vct := range claimVCTs {
+			claimMap[vct.Name] = vct
+		}
+
+		// Keep template templates unless overridden by name
+		for _, vct := range templateVCTs {
+			if override, ok := claimMap[vct.Name]; ok {
+				merged = append(merged, override)
+				delete(claimMap, vct.Name)
+			} else {
+				merged = append(merged, vct)
+			}
+		}
+
+		// Append any new volume templates introduced by the claim
+		for _, vct := range claimVCTs {
+			if _, exists := claimMap[vct.Name]; exists {
+				merged = append(merged, vct)
+				delete(claimMap, vct.Name) // Dedup check
+			}
+		}
+		return merged, nil
+
+	default:
+		return nil, fmt.Errorf("unknown volume claim templates policy %q", policy)
+	}
 }
 
 // migrateLegacyAssignedSandboxLabel migrates legacy assigned Sandbox name from label to annotation.
@@ -1275,9 +1351,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Implicit Cold Start Detection (Bypassing the Queue):
-	// If len(claim.Spec.Env) > 0, the controller immediately bypasses the warm pool queue.
-	if len(claim.Spec.Env) > 0 {
-		logger.Info("Bypassing warm pool adoption because custom environment variables are provided", "claim", claim.Name)
+	// If len(claim.Spec.Env) > 0 or len(claim.Spec.VolumeClaimTemplates) > 0, the controller immediately bypasses the warm pool queue.
+	if len(claim.Spec.Env) > 0 || len(claim.Spec.VolumeClaimTemplates) > 0 {
+		logger.Info("Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)", "claim", claim.Name)
 		return nil, nil
 	}
 

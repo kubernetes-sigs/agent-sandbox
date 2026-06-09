@@ -33,8 +33,8 @@ spec:
   - sandbox
   - kubernetes
   links:
-  - name: Agent Sandbox Operator
-    url: https://agent-sandbox-operator.domain
+  - name: Agent Sandbox
+    url: https://agent-sandbox.sigs.k8s.io/
   maintainers:
   - email: eesposit@redhat.com
     name: Emanuele Giuseppe Esposito

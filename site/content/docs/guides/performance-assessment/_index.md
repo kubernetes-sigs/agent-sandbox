@@ -238,7 +238,7 @@ go build -o clusterloader2 ./cmd/clusterloader.go
 | Recipe | File | Purpose |
 |--------|------|---------|
 | Rapid burst | `rapid-burst-test.yaml` | Creates SandboxClaims in discrete high-rate bursts |
-| High volume ramp | `high-volume-test.yaml` | Ramps creation rate up then back down |
+| High-volume ramp | `high-volume-test.yaml` | Ramps creation rate up then back down |
 | Steady-state churn | `medium-scale-concurrent-load-test.yaml` | Measures sustained concurrent churn |
 | Throughput | `throughput-test.yaml` | Measures raw creation throughput |
 | Warm pool burst | `warmpool-burst-test.yaml` | Tests warm pool performance under burst load |

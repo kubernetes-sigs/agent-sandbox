@@ -23,5 +23,5 @@ spec:
           matchLabels:
             metrics: enabled  # Only from namespaces with this label
       ports:
-        - port: 8443
+        - port: 8080
           protocol: TCP

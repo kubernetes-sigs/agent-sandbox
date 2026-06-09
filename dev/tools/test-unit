@@ -77,7 +77,8 @@ def run_python_tests(repo_root):
         subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
 
         env = os.environ.copy()
-        env["PIP_EXTRA_INDEX_URL"] = os.environ.get("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+        if not os.environ.get("PIP_EXTRA_INDEX_URL"):
+            env.pop("PIP_EXTRA_INDEX_URL", None)
 
         req_file = os.path.join(test_dir, suite["requirements"])
         if os.path.isfile(req_file):

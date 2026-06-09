@@ -283,12 +283,51 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
             break
     print("--- Sandbox 2 Retrieval Failure Verified ---")
 
+def test_volume_claim_templates(client: SandboxClient, warmpool_name: str, namespace: str):
+    print("\n--- Testing Custom Volume Claim Templates on SandboxClaim ---")
+    
+    custom_vcts = [
+        {
+            "metadata": {
+                "name": "custom-workspace"
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "storageClassName": "dynamic-rwo",
+                "resources": {
+                    "requests": {
+                        "storage": "4Gi"
+                    }
+                }
+            }
+        }
+    ]
+    
+    print("Creating sandbox with custom volume claim templates...")
+    sandbox = client.create_sandbox(
+        warmpool_name,
+        namespace=namespace,
+        volume_claim_templates=custom_vcts
+    )
+    print(f"Sandbox created with claim name: {sandbox.claim_name}")
+    
+    print("Running command to verify sandbox is operational...")
+    res = sandbox.commands.run("df -h")
+    print(f"Disk space output:\n{res.stdout}")
+    
+    print("Cleaning up sandbox...")
+    sandbox.terminate()
+    print("--- Volume Claim Templates Test Passed (Sandbox Persisted)! ---")
+
 def run_client_tests(client: SandboxClient, warmpool_name: str, namespace: str):
     # Test Create, Get and List sandboxes
     sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, warmpool_name, namespace)
 
     # Test wrong warmpool name
     test_wrong_warmpool_name(client, namespace)
+
+    # Test custom volume claim templates
+    test_volume_claim_templates(client, warmpool_name, namespace)
 
     # Run Sandbox Tests
     run_sandbox_tests(sandbox)

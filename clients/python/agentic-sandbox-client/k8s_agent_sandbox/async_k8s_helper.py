@@ -65,6 +65,7 @@ class AsyncK8sHelper:
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
+        volume_claim_templates: list[dict] | None = None,
     ):
         """Creates a SandboxClaim custom resource."""
         await self._ensure_initialized()
@@ -83,6 +84,9 @@ class AsyncK8sHelper:
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
+        if volume_claim_templates:
+            spec["volumeClaimTemplates"] = volume_claim_templates
+
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",

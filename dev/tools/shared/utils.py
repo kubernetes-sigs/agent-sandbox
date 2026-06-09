@@ -30,7 +30,8 @@ _SAFE_VERSION_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 def _validate_version_string(value, source):
     """Ensures a git-derived version string is safe to interpolate into a shell
-    command, raising ValueError if it contains unexpected characters."""
+    command, raising ValueError if it contains unexpected characters.
+    """
     if not value or not _SAFE_VERSION_RE.match(value):
         raise ValueError(
             f"refusing to use unsafe {source} value {value!r}: only "
@@ -40,18 +41,18 @@ def _validate_version_string(value, source):
 
 def git_describe():
     """Gets the git describe output for HEAD."""
-    return _validate_version_string(
-        subprocess.check_output(
-            ["git", "describe", "--always", "--dirty"], text=True).strip(),
-        "git describe")
+    raw_version = subprocess.check_output(
+        ["git", "describe", "--always", "--dirty"], text=True
+    ).strip()
+    return _validate_version_string(raw_version, "git describe")
 
 
 def git_sha():
     """Gets the short git SHA for HEAD."""
-    return _validate_version_string(
-        subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True).strip(),
-        "git sha")
+    raw_sha = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], text=True
+    ).strip()
+    return _validate_version_string(raw_sha, "git sha")
 
 
 def get_image_tag():

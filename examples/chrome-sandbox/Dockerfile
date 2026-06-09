@@ -1,15 +1,12 @@
 # Compile our golang binaries in a separate stage to keep the final image small.
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
-
-# Declare TARGETARCH to make it available in this build stage
-ARG TARGETARCH
+FROM golang:1.26.4 AS builder
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
 COPY cmd ./cmd
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o /chrome-sandbox-entrypoint ./cmd/chrome-sandbox-entrypoint
+RUN CGO_ENABLED=0 go build -o /chrome-sandbox-entrypoint ./cmd/chrome-sandbox-entrypoint
 
 #----------------------
 # Use a base image with a minimal set of packages.

@@ -271,7 +271,7 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
-	shutdownTime := metav1.NewTime(time.Now().Add(60 * time.Second)).Rfc3339Copy()
+	shutdownTime := metav1.NewTime(time.Now().Add(30 * time.Second)).Rfc3339Copy()
 	ttlAfterFinished := int32(120)
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{

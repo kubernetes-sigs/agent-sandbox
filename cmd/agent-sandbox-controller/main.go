@@ -40,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	//+kubebuilder:scaffold:imports
 )
@@ -235,6 +236,9 @@ func main() {
 
 	// Register the custom Sandbox metric collector globally.
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
+
+	// Register client-go metrics for API server interaction observability.
+	asmetrics.MustRegisterClientGoMetrics(crmetrics.Registry)
 
 	if err = (&controllers.SandboxReconciler{
 		Client:        mgr.GetClient(),

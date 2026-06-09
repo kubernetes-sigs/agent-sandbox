@@ -34,8 +34,10 @@ func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}
-	// Just sleep forever (or until killed)
-	select {}
+	// Sleep until the parent kills us. We use a long sleep rather than an empty
+	// `select{}` because the latter trips Go's deadlock detector (exit code 2),
+	// which races the kill and makes the kill-signal assertion flaky.
+	time.Sleep(time.Hour)
 }
 
 func TestIsHeartbeatProcess(t *testing.T) {

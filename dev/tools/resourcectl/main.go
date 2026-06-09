@@ -435,7 +435,10 @@ func killHeartbeatProcess(ctx context.Context, r *BoskosResource) error {
 	}
 
 	if err := process.Kill(); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+		// The heartbeat process is already gone (ESRCH on Unix, or ErrProcessDone
+		// from os.Process on Go's newer process-handle implementations); that's
+		// the desired end state, so treat it as success.
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
 			return nil
 		}
 		return fmt.Errorf("error killing heartbeat process: %w", err)

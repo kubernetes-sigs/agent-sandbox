@@ -44,11 +44,11 @@ Assign each open issue a tier using, in order:
    `gh issue list --repo kubernetes-sigs/agent-sandbox --state open --limit 500 --json number,title,labels,assignees,createdAt,updatedAt,body,url > open_issues.json`
 4. **Discover board metadata** (IDs change per board, always re-fetch):
    - Project + Priority field/options: `gh project field-list 120 --owner kubernetes-sigs --format json` → grab the `Priority` field id and the P0–P4 option ids; project id via `gh project view 120 --owner kubernetes-sigs --format json`.
-   - Item ids: `gh project item-list 120 --owner kubernetes-sigs --limit 1000 --query "is:open" --format json` → map issue number → project item id. Add any open issue not yet on the board with `gh project item-add 120 --owner kubernetes-sigs --url <issue-url>`.
+   - Item ids: `gh project item-list 120 --owner kubernetes-sigs --limit 1000 --query "is:open" --format json` → map issue number → project item id. Add any open issue not yet on the board with `gh project item-add 120 --owner kubernetes-sigs --url <issue-url> --format json`.
 5. **Triage**: assign every open issue exactly one tier using the heuristics. Sanity-check that the assigned set equals the open-issue set (no missing, no extras).
 6. **Report first**: write a markdown report (`issue-triage-report.md`) grouping issues by priority with roadmap mapping + one-line rationale, and a "second look" section for judgment calls. **In an interactive run, stop and wait for the user to review before changing anything on GitHub.** In an automated/scheduled run, see below.
-7. **Apply** (after approval / or directly in scheduled mode):
-   - Label: `gh issue edit <#> --repo kubernetes-sigs/agent-sandbox --add-label "<priority/...>"`. Remove any conflicting `priority/*` label if the tier changed.
+7. **Apply** (after approval in interactive mode, or filtered by untriaged issues in scheduled mode):
+   - Label: `gh issue edit <#> --repo kubernetes-sigs/agent-sandbox --add-label "<priority/...>" --remove-label "<priority/...>"` (if the tier changed).
    - Board field: `gh project item-edit --id <itemId> --project-id <projectId> --field-id <fieldId> --single-select-option-id <optionId>`.
    - Drive the apply loop from a small script so all issues are processed in one pass (adding a `sleep 1` delay between API calls to respect GitHub's 900 points/min secondary rate limit); collect per-issue ok/err and print a final `total / errors` summary.
 8. **Confirm**: report the final distribution (count per tier) and any errors.

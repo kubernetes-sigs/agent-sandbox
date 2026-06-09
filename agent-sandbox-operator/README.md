@@ -190,7 +190,7 @@ operator-sdk run bundle ${BUNDLE_IMG}
 `operator-sdk run bundle` installs the bundle into the cluster’s OLM namespace so you can subscribe and verify the operator before publishing. Use the same `VERSION`, `IMG`, and `BUNDLE_IMG` you intend to ship.
 
 ## Contributing
-Please read our [Contributing Guidelines](CONTRIBUTING.md) for our full code review and PR policies.
+Please read our [Contributing Guidelines](../CONTRIBUTING.md) for our full code review and PR policies.
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 

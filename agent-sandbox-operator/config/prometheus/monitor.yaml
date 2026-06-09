@@ -18,7 +18,7 @@ spec:
         # TODO(user): The option insecureSkipVerify: true is not recommended for production since it disables
         # certificate verification, exposing the system to potential man-in-the-middle attacks.
         # For production environments, it is recommended to use cert-manager for automatic TLS certificate management.
-        # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/servicemonitor_tls_patch.yaml,
+        # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/monitor_tls_patch.yaml,
         # which securely references the certificate from the 'metrics-server-cert' secret.
         insecureSkipVerify: true
   selector:

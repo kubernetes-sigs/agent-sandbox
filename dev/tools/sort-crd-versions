@@ -53,7 +53,7 @@ def sort_crd_versions(file_path):
             docs = list(yaml.safe_load_all(f))
         except Exception as e:
             print(f"Error parsing {file_path}: {e}", file=sys.stderr)
-            return
+            raise RuntimeError(f"failed to parse YAML in {file_path}: {e}") from e
 
     modified = False
     new_docs = []

@@ -400,7 +400,7 @@ _Appears in:_
 
 Package v1alpha1 contains API Schema definitions for the extensions v1alpha1 API group
 
-Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API group.
+Package v1alpha1 contains API Schema definitions for the extensions.agents v1alpha1 API group.
 
 ### Resource Types
 - [SandboxClaim](#sandboxclaim)
@@ -768,7 +768,7 @@ _Appears in:_
 
 Package v1beta1 contains API Schema definitions for the extensions v1beta1 API group
 
-Package v1beta1 contains API Schema definitions for the agents v1beta1 API group.
+Package v1beta1 contains API Schema definitions for the extensions.agents v1beta1 API group.
 
 ### Resource Types
 - [SandboxClaim](#sandboxclaim)

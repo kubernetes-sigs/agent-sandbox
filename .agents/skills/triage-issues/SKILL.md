@@ -64,5 +64,6 @@ In that mode:
 
 ## Notes
 
+- **Roadmap priority changes** are reconciled only via interactive runs, not scheduled mode. When `roadmap.md` changes the priority of a theme, an interactive run re-triages every open issue against the current roadmap and surfaces the resulting diffs for a human to approve. Scheduled mode deliberately leaves already-triaged issues untouched (see above), so it never silently re-prioritizes existing issues based on a roadmap edit. To propagate a roadmap change to issues that already have a `priority/*` label, run the skill interactively and apply the proposed changes.
 - All `priority/*` labels and the P0–P4 options already exist on the repo/board; no need to create them.
 - `gh project` GraphQL IDs (project, field, options, items) are not stable across boards — always re-discover them at runtime; never hardcode.

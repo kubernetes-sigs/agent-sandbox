@@ -202,6 +202,57 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             AsyncSandboxClient(connection_config=None)
         self.assertIn("connection_config is required", str(ctx.exception))
 
+    def test_cleanup_true_registers_atexit(self):
+        """cleanup=True should register the _atexit_cleanup method as an atexit handler."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            client = AsyncSandboxClient(connection_config=self.config, cleanup=True)
+            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+
+    def test_cleanup_false_does_not_register_atexit(self):
+        """cleanup=False (default) should not register any atexit handler."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            AsyncSandboxClient(connection_config=self.config, cleanup=False)
+            mock_atexit.register.assert_not_called()
+
+    def test_atexit_cleanup_deletes_tracked_claims(self):
+        """_atexit_cleanup should open a fresh AsyncK8sHelper and delete all tracked claims."""
+        self.client._active_connection_sandboxes = {
+            ("default", "claim-abc"): MagicMock(),
+            ("other-ns", "claim-xyz"): MagicMock(),
+        }
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = AsyncMock()
+        mock_helper_instance.close = AsyncMock()
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+            self.client._atexit_cleanup()
+
+        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-abc", "default")
+        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-xyz", "other-ns")
+        mock_helper_instance.close.assert_called_once()
+
+    def test_atexit_cleanup_skips_when_no_sandboxes(self):
+        """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
+        self.client._active_connection_sandboxes = {}
+        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper") as MockHelper:
+            self.client._atexit_cleanup()
+            MockHelper.assert_not_called()
+
+    def test_atexit_cleanup_suppresses_errors(self):
+        """_atexit_cleanup should not propagate exceptions — cleanup is best-effort.
+        A warning is printed to stderr so the user knows a sandbox was orphaned."""
+        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = AsyncMock(side_effect=Exception("network error"))
+        mock_helper_instance.close = AsyncMock()
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+            with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
+                # Should not raise
+                self.client._atexit_cleanup()
+                # Should have printed a warning
+                mock_stderr.write.assert_called()
+
     async def test_validate_labels_rejects_invalid_value(self):
         with self.assertRaises(ValueError):
             await self.client.create_sandbox("t", labels={"agent": "invalid value!"})

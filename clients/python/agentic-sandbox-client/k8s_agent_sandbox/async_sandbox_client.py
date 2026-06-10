@@ -19,9 +19,11 @@ Requires the ``async`` optional dependencies::
     pip install k8s-agent-sandbox[async]
 """
 
+import atexit
 import asyncio
 import logging
 import re
+import sys
 import time
 import uuid
 from typing import Generic, TypeVar
@@ -51,10 +53,14 @@ class AsyncSandboxClient(Generic[T]):
     ``connection_config`` is required — the async client does not support
     ``SandboxLocalTunnelConnectionConfig``.
 
-    Unlike the sync ``SandboxClient``, there is no ``atexit`` fallback because
-    async cleanup cannot run in an atexit handler. Use the ``async with``
-    context manager or explicitly call ``await client.delete_all()`` followed
-    by ``await client.close()`` to avoid orphaned claims.
+    Pass ``cleanup=True`` to register an atexit hook that deletes all tracked
+    sandboxes on program termination::
+
+        client = AsyncSandboxClient(connection_config=config, cleanup=True)
+
+    Alternatively, use the ``async with`` context manager or explicitly call
+    ``await client.delete_all()`` followed by ``await client.close()`` to
+    avoid orphaned claims.
     """
 
     sandbox_class: type[T] = AsyncSandbox  # type: ignore
@@ -63,7 +69,23 @@ class AsyncSandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
+        cleanup: bool = False,
     ):
+        """
+        Args:
+            connection_config: Configuration for connecting to the sandboxes.
+                Required — the async client does not support
+                ``SandboxLocalTunnelConnectionConfig``.
+            tracer_config: Configuration for OpenTelemetry tracing.
+                Defaults to an empty SandboxTracerConfig (tracing disabled).
+            cleanup: If True, registers an atexit hook to automatically delete
+                all tracked sandboxes when the program terminates. The hook
+                snapshots the tracked claim names and opens fresh async
+                resources in a new event loop, so it is safe to call after
+                the main event loop has exited. Cleanup is best-effort —
+                per-claim and top-level failures emit warnings to
+                ``sys.stderr`` rather than raising. Defaults to False.
+        """
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
@@ -83,6 +105,9 @@ class AsyncSandboxClient(Generic[T]):
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
+
+        if cleanup:
+            atexit.register(self._atexit_cleanup)
 
     async def __aenter__(self) -> "AsyncSandboxClient[T]":
         return self
@@ -309,6 +334,46 @@ class AsyncSandboxClient(Generic[T]):
                 await self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
                 logger.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
+
+    def _atexit_cleanup(self):
+        """Best-effort atexit handler that deletes all tracked sandbox claims.
+
+        Uses a snapshot of the tracked claims and a fresh :class:`AsyncK8sHelper`
+        so that no loop-bound objects from the original client are reused across
+        event loop boundaries. Per-claim failures and top-level errors emit
+        warnings to ``sys.stderr`` rather than raising — atexit cleanup is
+        best-effort.
+        """
+        claims = list(self._active_connection_sandboxes.keys())
+        if not claims:
+            return
+
+        async def _do_cleanup():
+            helper = AsyncK8sHelper()
+            try:
+                async def _delete_one(ns, claim_name):
+                    try:
+                        await helper.delete_sandbox_claim(claim_name, ns)
+                    except Exception as e:
+                        if sys.stderr is not None:
+                            print(
+                                f"[agent-sandbox] Warning: failed to delete sandbox claim "
+                                f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
+                                file=sys.stderr,
+                            )
+
+                await asyncio.gather(*(_delete_one(ns, claim_name) for ns, claim_name in claims))
+            finally:
+                await helper.close()
+
+        try:
+            asyncio.run(_do_cleanup())
+        except Exception as e:
+            if sys.stderr is not None:
+                print(
+                    f"[agent-sandbox] Warning: atexit cleanup failed: {e}",
+                    file=sys.stderr,
+                )
 
     # --- Label validation (shared with sync client) ---
 

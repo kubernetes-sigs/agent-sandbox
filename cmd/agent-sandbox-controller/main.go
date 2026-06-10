@@ -34,6 +34,7 @@ import (
 	"github.com/felixge/fgprof"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -293,6 +294,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = ctrl.NewWebhookManagedBy(mgr, &sandboxv1beta1.Sandbox{}).
+		Complete(); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
+		os.Exit(1)
+	}
+
 	if extensions {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
@@ -344,6 +351,24 @@ func main() {
 			EnableWarmPoolEviction: enableWarmPoolEviction,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
+			os.Exit(1)
+		}
+
+		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxClaim{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxClaim")
+			os.Exit(1)
+		}
+
+		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxTemplate{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxTemplate")
+			os.Exit(1)
+		}
+
+		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxWarmPool{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxWarmPool")
 			os.Exit(1)
 		}
 	}

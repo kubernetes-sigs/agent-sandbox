@@ -79,3 +79,23 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        - name: webhook
+          containerPort: 9443
+          protocol: TCP
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: agent-sandbox-webhook-service
+  namespace: agent-sandbox-system
+spec:
+  selector:
+    app: agent-sandbox-controller
+  ports:
+  - name: webhook
+    port: 443
+    targetPort: 9443
+    protocol: TCP
+

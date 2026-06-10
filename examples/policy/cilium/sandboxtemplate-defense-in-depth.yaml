@@ -1,0 +1,174 @@
+# Defense-in-depth mode: the agent-sandbox controller generates a TIGHT
+# Kubernetes NetworkPolicy that allows only the bare-minimum egress every
+# sandbox needs (cluster DNS, the forward-proxy service). The Cilium /
+# FQDN / additional NetworkPolicy resources in this directory layer
+# specific allows on top for destinations sandboxes actually need direct
+# access to.
+#
+# Why this shape and not the more obvious "permissive built-in + restrictive
+# overlay" pattern:
+#   Kubernetes NetworkPolicy and CiliumNetworkPolicy are ADDITIVE — allows
+#   stack with union semantics, not intersection. There is no DENY rule in
+#   vanilla NetworkPolicy. So if the built-in policy already allows wide
+#   egress (e.g., 0.0.0.0/0 except RFC1918), a "more restrictive" Cilium
+#   policy on top doesn't restrict anything — it adds (or is redundant if
+#   subset). For real defense-in-depth, the BUILT-IN must be the tight
+#   floor and overlays must ADD specific allows. That's what this file
+#   does. See README §4 for the full explanation.
+#
+# In v1beta1 the resource model is Template <- WarmPool <- Claim. All three
+# are bundled here so the example applies in one shot.
+
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: my-agent-sandbox
+  namespace: agent-sandbox-demo
+spec:
+  # Default mode, shown explicitly. The controller generates
+  # `my-agent-sandbox-network-policy` in this namespace.
+  networkPolicyManagement: Managed
+  # The tight built-in NetworkPolicy. Allows only:
+  #   - egress to cluster DNS (kube-dns) — required for any name resolution
+  #   - egress to the forward proxy (egress-gateway:3128) — sandboxes route
+  #     all HTTP(S) traffic through this via HTTPS_PROXY
+  #   - ingress from the agent-sandbox sandbox-router (the user-facing
+  #     entry point for interacting with sandboxes)
+  #
+  # Notably ABSENT: any 0.0.0.0/0 egress allow. Sandboxes cannot reach the
+  # public internet directly under this policy. To allow specific external
+  # destinations, layer them ADDITIVELY via:
+  #   - allowlist-fqdn.yaml          (FQDNNetworkPolicy for hostnames)
+  #   - allowlist-cidr.yaml          (NetworkPolicy for internal IPs/ports)
+  #   - HTTPS_PROXY env (already wired below) → routes through Squid, which
+  #     enforces its own destination allowlist
+  networkPolicy:
+    egress:
+      # Allow cluster DNS so name resolution works for everything else.
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+      # GKE NodeLocal DNSCache: per-node DNS proxy at a link-local address
+      # that fronts kube-dns. Default-on for Autopilot, opt-in via
+      # --addons NodeLocalDNS on Standard. When the sandbox's resolv.conf
+      # nameserver is 169.254.20.10 (check inside the pod), the kube-dns
+      # podSelector rule above is NOT enough — traffic to the link-local IP
+      # needs its own ipBlock allow. Harmless on clusters not using
+      # NodeLocal DNS.
+      - to:
+          - ipBlock:
+              cidr: 169.254.20.10/32
+        ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+      # Allow egress to the forward proxy service. All sandbox HTTP(S)
+      # traffic flows through here (see HTTPS_PROXY env below).
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: agent-sandbox-egress
+            podSelector:
+              matchLabels:
+                app: egress-gateway
+        ports:
+          - protocol: TCP
+            port: 3128
+    ingress:
+      # Keep the default sandbox-router ingress — agents reach this pod via
+      # the router.
+      - from:
+          - podSelector:
+              matchLabels:
+                app: sandbox-router
+  podTemplate:
+    metadata:
+      labels:
+        app: my-agent-sandbox
+    spec:
+      automountServiceAccountToken: false
+      # See sandboxtemplate-cilium-only.yaml for the rationale on the
+      # build-ca-bundle initContainer: combines the system trust store with
+      # the gateway's CA so sandboxes can validate ssl_bump'd destinations
+      # without breaking trust to non-bumped (spliced) destinations like
+      # api.openai.com.
+      initContainers:
+        - name: build-ca-bundle
+          image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              cat /etc/ssl/certs/ca-certificates.crt /gateway-ca/ca.crt \
+                > /shared/ca-bundle.pem
+          volumeMounts:
+            - name: gateway-ca
+              mountPath: /gateway-ca
+              readOnly: true
+            - name: ca-bundle
+              mountPath: /shared
+      containers:
+        - name: agent
+          image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+          command: ["/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"]
+          env:
+            - name: HTTPS_PROXY
+              value: "http://egress-gateway.agent-sandbox-egress.svc:3128"
+            - name: HTTP_PROXY
+              value: "http://egress-gateway.agent-sandbox-egress.svc:3128"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+            - name: CURL_CA_BUNDLE
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+          volumeMounts:
+            - name: ca-bundle
+              mountPath: /etc/ssl/certs/ca-bundle-with-gateway.pem
+              subPath: ca-bundle.pem
+              readOnly: true
+      volumes:
+        - name: gateway-ca
+          configMap:
+            name: gateway-ca-bundle
+        - name: ca-bundle
+          emptyDir: {}
+
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: my-agent-sandbox-pool
+  namespace: agent-sandbox-demo
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: my-agent-sandbox
+  updateStrategy:
+    type: OnReplenish
+
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: demo-claim
+  namespace: agent-sandbox-demo
+spec:
+  warmPoolRef:
+    name: my-agent-sandbox-pool

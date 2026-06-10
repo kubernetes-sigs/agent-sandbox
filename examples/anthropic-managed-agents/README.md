@@ -63,7 +63,7 @@ way they are.
 
 ## Prerequisites
 
-Here the prerequisites to run this example:
+Here are the prerequisites to run this example:
 
 - A GKE Autopilot cluster, version `1.35.2-gke.1269000` or later, with the
   Agent Sandbox add-on enabled:
@@ -132,9 +132,11 @@ Two things to call out:
 - **`runAsUser: 1000` is required alongside `runAsNonRoot: true`.** With only
   `runAsNonRoot` and a _named_ `USER worker` in the Dockerfile, kubelet can't
   verify the user is non-root and the pod fails `CreateContainerConfigError`.
-- **`automountServiceAccountToken: false`** means the LLM-driven `bash` tool
-  has no path to the Kubernetes API or the GCP metadata server. The only
-  credential inside the pod is the narrowly-scoped Anthropic environment key.
+- **`automountServiceAccountToken: false`** keeps the Kubernetes service-account
+  token out of the pod, so the `bash` tool has no in-cluster API credentials.
+  The metadata server is reachable only if an egress rule allows it; this
+  example opens it for the GCS FUSE sidecar, so the bucket's IAM is scoped to one
+  bucket. The only Anthropic credential in the pod is the environment key.
 
 The admission webhook enforces these. Try deleting `runAsNonRoot` and applying:
 

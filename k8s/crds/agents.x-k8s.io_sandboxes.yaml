@@ -8023,3 +8023,15 @@ spec:
         specReplicasPath: .spec.replicas
         statusReplicasPath: .status.replicas
       status: {}
+  conversion:
+    strategy: Webhook
+    webhook:
+      conversionReviewVersions:
+      - v1
+      - v1beta1
+      clientConfig:
+        service:
+          name: agent-sandbox-webhook-service
+          namespace: agent-sandbox-system
+          path: /convert
+        caBundle: Cg==

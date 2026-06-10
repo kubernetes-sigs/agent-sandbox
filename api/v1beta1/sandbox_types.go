@@ -243,6 +243,7 @@ type SandboxStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
 // +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

@@ -19,6 +19,7 @@ retries, and argparse wiring) lives in
 GoogleCloudPlatform/kubernetes-engine-samples/ai-ml/anthropic-agent-sandbox.
 """
 import json
+import logging
 import os
 import urllib.request
 
@@ -43,20 +44,29 @@ while True:
         continue
     session_id, work_id = item.data.id, item.id
 
-    sb = sbx.create_sandbox(
-        warmpool="claude-agent-worker",
-        namespace=NAMESPACE,
-        labels={"anthropic.com/session-id": session_id},
-        sandbox_ready_timeout=120,
-    )
-    # On GKE the per-claim Service DNS is too fresh to resolve and
-    # sb.get_pod_ip() returns None; read the bound pod's IP directly.
-    pod = sb.k8s_helper.core_v1_api.read_namespaced_pod(sb.get_pod_name(), sb.namespace)
-    urllib.request.urlopen(
-        urllib.request.Request(
+    sb = None
+    try:
+        sb = sbx.create_sandbox(
+            warmpool="claude-agent-worker",
+            namespace=NAMESPACE,
+            labels={"anthropic.com/session-id": session_id},
+            sandbox_ready_timeout=120,
+        )
+        # On GKE the per-claim Service DNS is too fresh to resolve and
+        # sb.get_pod_ip() returns None; read the bound pod's IP directly.
+        pod = sb.k8s_helper.core_v1_api.read_namespaced_pod(sb.get_pod_name(), sb.namespace)
+        req = urllib.request.Request(
             f"http://{pod.status.pod_ip}:{DISPATCH_PORT}/",
             data=json.dumps({"session_id": session_id, "work_id": work_id}).encode(),
             headers={"Content-Type": "application/json"},
-        ),
-        timeout=10,
-    )
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception:
+        # Don't let one bad item kill the loop; drop the claim so it isn't stranded.
+        logging.exception("dispatch failed for session %s", session_id)
+        if sb is not None:
+            try:
+                sb.terminate()
+            except Exception:
+                logging.exception("cleanup failed for session %s", session_id)

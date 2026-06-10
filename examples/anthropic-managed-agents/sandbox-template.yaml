@@ -23,7 +23,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          # ant CLI + bash/tar/unzip/node22 + a :8080 listener that exec's `ant beta:worker run` after dispatch.
+          # ant CLI + bash/tar/unzip/node22 + a :8080 listener that execs `ant beta:worker run` after dispatch.
           image: REGION-docker.pkg.dev/PROJECT_ID/anthropic-agents/claude-agent-worker:TAG
           ports:
             - name: dispatch

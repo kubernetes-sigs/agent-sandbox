@@ -42,6 +42,8 @@ spec:
       ports:
         - protocol: UDP
           port: 53
+        - protocol: TCP
+          port: 53
     - to:
         - ipBlock:
             cidr: 169.254.169.254/32

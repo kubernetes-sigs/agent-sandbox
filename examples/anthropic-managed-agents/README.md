@@ -148,7 +148,7 @@ spec.podTemplate.spec.securityContext.runAsNonRoot: Required value
 A pre-warmed pod is already running before the dispatcher knows which session
 it will serve, so we can't pass `ANTHROPIC_SESSION_ID` as a container env var.
 Instead the worker image starts a tiny HTTP listener on `:8080` and blocks
-until the dispatcher POSTs `{session_id, work_id}`. Then it exec's:
+until the dispatcher POSTs `{session_id, work_id}`. Then it execs:
 
 ```bash
 ant beta:worker run --workdir /workspace --max-idle 60s --log-format json
@@ -176,9 +176,8 @@ while True:
         continue
 
     sb = sbx.create_sandbox(
-        template="claude-agent-worker",
-        namespace=NAMESPACE,
         warmpool="claude-agent-worker",
+        namespace=NAMESPACE,
         labels={"anthropic.com/session-id": item.data.id},
     )
     pod = sb.k8s_helper.core_v1_api.read_namespaced_pod(sb.get_pod_name(), sb.namespace)

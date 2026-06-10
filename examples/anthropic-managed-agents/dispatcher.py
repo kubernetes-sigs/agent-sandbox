@@ -21,6 +21,7 @@ GoogleCloudPlatform/kubernetes-engine-samples/ai-ml/anthropic-agent-sandbox.
 import json
 import logging
 import os
+import time
 import urllib.request
 
 import anthropic
@@ -70,3 +71,5 @@ while True:
                 sb.terminate()
             except Exception:
                 logging.exception("cleanup failed for session %s", session_id)
+        # Back off so repeated failures don't hot-loop on sandbox create/terminate.
+        time.sleep(5)

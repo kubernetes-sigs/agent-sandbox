@@ -44,9 +44,8 @@ while True:
     session_id, work_id = item.data.id, item.id
 
     sb = sbx.create_sandbox(
-        template="claude-agent-worker",
-        namespace=NAMESPACE,
         warmpool="claude-agent-worker",
+        namespace=NAMESPACE,
         labels={"anthropic.com/session-id": session_id},
         sandbox_ready_timeout=120,
     )

@@ -35,7 +35,9 @@ spec:
           port: 8080
   egress:
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
           podSelector:
             matchLabels:
               k8s-app: kube-dns
@@ -44,6 +46,7 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Metadata server for the GCS FUSE sidecar. WI token is pod-wide, so scope the GSA to one bucket.
     - to:
         - ipBlock:
             cidr: 169.254.169.254/32

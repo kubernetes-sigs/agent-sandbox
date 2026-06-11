@@ -8,66 +8,139 @@ If you install the chart fresh with the v1beta1-storage version, there is nothin
 
 Most CRDs are schema-compatible across the two versions; the migration matters mainly for **two reasons**:
 
-1. **`SandboxClaim` is not field-compatible.** v1alpha1 has `spec.sandboxTemplateRef` plus an optional `spec.warmpool` string policy (`"none"` / `"default"` / a specific pool name). v1beta1 requires `spec.warmPoolRef.name`. The conversion webhook handles the field rename automatically, but claims that used `warmpool: "none" / "default" / unset` have no obvious target pool — bootstrap creates per-claim shadow pools to fill the gap.
+1. **`SandboxClaim` is not field-compatible.** v1alpha1 has `spec.sandboxTemplateRef` plus an optional `spec.warmpool` string policy (`"none"` / `"default"` / a specific pool name). v1beta1 requires `spec.warmPoolRef.name`. The conversion webhook (in `extensions/api/v1alpha1/sandboxclaim_conversion.go`) handles the rewrite via three branches:
+   - **Specific pool name** (`warmpool: my-pool`) → webhook uses that name verbatim. If the pool doesn't exist, the converted claim points at a missing pool — operator must create it.
+   - **`""` / `"none"` / `"default"`, warm-started** (claim has a bound `Sandbox` whose name differs from the claim's name) → webhook derives the pool name from the existing `Sandbox` via `stripRandomSuffix(sandboxName)`. The source pool already exists; nothing to do at migration time.
+   - **`""` / `"none"` / `"default"`, cold-start** (no bound `Sandbox`, or `Sandbox.name == claim.name`) → webhook redirects to `shadow-pool-<template-name>`. The bootstrap phase ensures one such shadow pool exists per `(namespace, template)` combination.
 2. **`Sandbox.spec.replicas` becomes `Sandbox.spec.operatingMode`.** `replicas: 0` → `Suspended`, `replicas: 1` (or unset) → `Running`. The webhook handles this automatically.
 
 The other two CRDs (`SandboxTemplate`, `SandboxWarmPool`) are structurally identical between versions but still need a storage rewrite so etcd holds them in v1beta1 form.
 
-## What runs automatically
+## Two phases
 
-`helm upgrade agent-sandbox ./helm/ ...` triggers two Jobs via Helm hook annotations:
+The migration script has two phases, run in this order:
 
-| Phase | Job name | Hook | Does what |
-|---|---|---|---|
-| Pre-upgrade | `agent-sandbox-migration-bootstrap` | `pre-upgrade` | Scans every existing `SandboxClaim`. For each one whose `spec.warmpool` is `"none"`, `"default"`, unset, or names a pool that doesn't exist, creates a shadow `SandboxWarmPool` named `<claim>-shadow-pool` (replicas=0, references the claim's existing template). This gives the conversion webhook a valid `warmPoolRef` target. |
-| Post-upgrade | `agent-sandbox-migration-rewrite` | `post-upgrade` | Patches every existing `Sandbox`, `SandboxClaim`, `SandboxTemplate`, and `SandboxWarmPool` with a `agents.x-k8s.io/storage-migrated-at` annotation. The patch round-trips the resource through the conversion webhook, which causes the API server to rewrite the etcd record in v1beta1 format. |
+- **`--phase=bootstrap`** — must run **before** the v1beta1 CRDs/controller are applied. Pre-creates any `shadow-pool-<template>` pools needed by the conversion webhook so cold-start claims have a valid `warmPoolRef` target. Operates on the v1alpha1 API.
+- **`--phase=migrate`** — must run **after** the v1beta1 CRDs and conversion webhook are live. Patches every existing resource with a benign annotation, forcing the API server to read it through the conversion webhook and rewrite it to etcd in v1beta1 storage format.
 
-Both Jobs are **idempotent**. Helm will retry on failure (`backoffLimit: 2`); operators can also `kubectl delete job <name>` and `helm upgrade --no-hooks=false` to re-trigger.
+Both phases are idempotent — safe to re-run.
 
-## What runs manually
+## Migration flows
 
-The same script the Jobs use is exposed at `dev/tools/migrate.sh` for operators who want finer control:
+Pick one of three flows depending on how you manage installs.
+
+### Flow A — Helm-managed, automatic (default)
+
+The chart ships two Helm hook Jobs that run the bootstrap and rewrite phases automatically as part of `helm upgrade`:
 
 ```bash
-# Dry-run the bootstrap phase against the cluster your kubeconfig points at.
-bash dev/tools/migrate.sh --phase=bootstrap --dry-run
+helm upgrade agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system \
+  --reuse-values \
+  --set image.tag=<new-version>
+```
 
-# Actually create shadow pools.
+| Phase | Job name | Hook | What it does |
+|---|---|---|---|
+| Pre-upgrade | `agent-sandbox-migration-bootstrap` | `pre-upgrade` | Runs `migrate.sh --phase=bootstrap` against the existing v1alpha1 state. |
+| Post-upgrade | `agent-sandbox-migration-rewrite` | `post-upgrade` | Runs `migrate.sh --phase=migrate` after the new controller + webhook are running. The Job has a `wait-for-webhook` initContainer that polls the webhook Service endpoints for up to 120s. |
+
+Both Jobs run `helm/files/migrate.sh` from a ConfigMap (defaultMode 0755) mounted in the pod. Helm retries on failure (`backoffLimit: 2`); operators can also `kubectl delete job <name>` and re-run `helm upgrade` to re-trigger.
+
+### Flow B — Manual via kubectl (Helm-free install)
+
+For clusters that install the controller via `kubectl apply -f` (not Helm), run the script directly. The script is at `dev/tools/migrate.sh` (a thin wrapper around `helm/files/migrate.sh`).
+
+```bash
+# 1. Pre-create the shadow pools BEFORE applying the new CRDs.
+#    Operates on v1alpha1 - this is the last step that does.
 bash dev/tools/migrate.sh --phase=bootstrap
 
-# Trigger the storage rewrite for everything.
-bash dev/tools/migrate.sh --phase=migrate
+# 2. Install the new controller + CRDs (which include the conversion webhook).
+#    Wait until the controller pod is Ready and the webhook Service has
+#    endpoints before proceeding.
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.0/manifest.yaml
+kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
+kubectl wait --for=condition=Ready pods -l app=agent-sandbox-controller -n agent-sandbox-system
 
-# Scope to one namespace.
+# 3. Force-rewrite every resource in v1beta1 storage format.
+bash dev/tools/migrate.sh --phase=migrate
+```
+
+If the cluster is large, scope the rewrite to one namespace at a time:
+
+```bash
 bash dev/tools/migrate.sh --phase=migrate --namespace=team-alpha
 ```
 
-The script uses `kubectl` and respects the active kubeconfig. It exits non-zero if any resource fails to migrate (per-resource errors don't abort the run, but the final exit reflects total failures).
+### Flow C — Helm-managed, manual script (hooks disabled)
 
-## Opting out of the automated Jobs
+If you want Helm to manage the chart but want to run the migration script yourself (e.g., to scope to specific namespaces, dry-run first, or run between specific cluster events), disable the hooks:
 
 ```bash
-helm upgrade agent-sandbox ./helm/ ... --set migration.enabled=false
+# 1. Pre-create shadow pools while v1alpha1 is still the storage version.
+bash dev/tools/migrate.sh --phase=bootstrap --dry-run   # inspect first
+bash dev/tools/migrate.sh --phase=bootstrap
+
+# 2. Upgrade the chart WITHOUT the migration Jobs.
+helm upgrade agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system \
+  --reuse-values \
+  --set image.tag=<new-version> \
+  --set migration.enabled=false
+
+# 3. Wait for the new controller + webhook to be Ready, then rewrite storage.
+bash dev/tools/migrate.sh --phase=migrate
 ```
 
-Then run `dev/tools/migrate.sh` manually in whatever order and scope you want. Useful when:
+## Dry-runs
 
-- The cluster is large enough that the default Job resource limits aren't appropriate (override `--set migration.resources....` or run manually).
-- You want to migrate one namespace at a time as part of a phased rollout.
-- The cluster has CRDs from a custom build of agent-sandbox and you need to validate behavior before letting the automated Job touch everything.
+Both phases support `--dry-run`. The script prints what it would do without writing anything:
+
+```bash
+bash dev/tools/migrate.sh --phase=bootstrap --dry-run
+bash dev/tools/migrate.sh --phase=migrate --dry-run
+```
+
+The `bootstrap` dry-run also prints the "operator action required" summary (claims referencing missing specific pools), which is useful to inspect even when you intend to apply.
 
 ## After migration completes
 
-The shadow `SandboxWarmPool`s created by the bootstrap phase remain in the cluster — the conversion webhook depends on them being valid `warmPoolRef` targets for the converted v1beta1 `SandboxClaim`s. They are marked with two annotations so you can find them later:
+### Shadow pools
+
+The bootstrap phase creates one `shadow-pool-<template>` per `(namespace, template)` combination referenced by cold-start v1alpha1 claims. They're marked with two annotations:
+
+- `agents.x-k8s.io/migration-shadow: "true"`
+- `agents.x-k8s.io/migration-source-template: <template-name>`
+
+List them:
 
 ```bash
 kubectl get sandboxwarmpools -A -o json \
   | jq -r '.items[]
       | select(.metadata.annotations["agents.x-k8s.io/migration-shadow"]=="true")
-      | "\(.metadata.namespace)/\(.metadata.name) (for claim: \(.metadata.annotations["agents.x-k8s.io/migration-source-claim"]))"'
+      | "\(.metadata.namespace)/\(.metadata.name) (for template: \(.metadata.annotations["agents.x-k8s.io/migration-source-template"]))"'
 ```
 
-Do **not** delete these pools while the corresponding `SandboxClaim`s still reference them via `warmPoolRef`. Once v1alpha1 is fully removed from the codebase (a future release) and you've manually re-pointed any remaining claims to real warm pools, the shadow pools can be cleaned up.
+Do **not** delete these pools while any v1beta1 `SandboxClaim` still references them via `warmPoolRef`. Once v1alpha1 is fully removed from the codebase (a future release) and you've manually re-pointed any remaining claims to real warm pools, the shadow pools can be cleaned up.
+
+### Re-pointing warm-started claims
+
+The bootstrap phase intentionally **skips** warm-started v1alpha1 claims (those with `warmpool: ""`/`"none"`/`"default"` AND a bound `Sandbox` whose name differs from the claim's). The webhook redirects those claims' `warmPoolRef` to the pool that produced their current `Sandbox` (via `stripRandomSuffix(sandboxName)`), so they end up pointing at a real, existing pool — no shadow needed.
+
+That said, after migration completes you may want to re-point such claims at a different pool (e.g., consolidate, or move to a shadow). The `warmPoolRef.name` is editable on the v1beta1 claim:
+
+```bash
+kubectl patch sandboxclaim <name> -n <ns> --type=merge \
+  -p '{"spec":{"warmPoolRef":{"name":"my-preferred-pool"}}}'
+```
+
+### Operator-action items from the bootstrap summary
+
+If `bootstrap` printed an `OPERATOR ACTION REQUIRED` section listing claims that reference specific pools which don't currently exist, the conversion webhook will still rewrite those claims to point at those exact (missing) pool names. To make those claims work, either:
+
+1. Create the missing pools manually, OR
+2. Re-point the claims to existing pools via the `kubectl patch` above.
 
 ## Verifying the migration worked
 
@@ -110,6 +183,12 @@ Only do this after you've confirmed every existing record carries `agents.x-k8s.
 
 **Pre-upgrade Job fails with "failed to list SandboxClaims"**: the script's ServiceAccount RBAC isn't applied yet. The bootstrap ClusterRole + ClusterRoleBinding should land in the same Helm hook batch. If you're testing manually, apply `helm/templates/migration-rbac.yaml` first.
 
-**Post-upgrade Job's init container `wait-for-webhook` times out**: the conversion webhook isn't reachable. Check that the `agent-sandbox-webhook-service` Service exists in the controller's namespace and that its endpoints are populated (`kubectl get endpoints agent-sandbox-webhook-service -n agent-sandbox-system`). If the Service is missing entirely, that's a chart issue separate from this migration — track it upstream.
+**Post-upgrade Job's init container `wait-for-webhook` times out**: the conversion webhook isn't reachable. Check that the Service named by `migration.webhookServiceName` (default `agent-sandbox-webhook-service`) exists in the controller's namespace and that its endpoints are populated:
+
+```bash
+kubectl get endpoints agent-sandbox-webhook-service -n agent-sandbox-system
+```
 
 **Migrate phase reports failures on specific resources**: re-run the script (`bash dev/tools/migrate.sh --phase=migrate`). It's idempotent — already-migrated resources just get the annotation timestamp updated. If a specific resource keeps failing, fetch it (`kubectl get -o yaml`) and inspect what's wrong — usually it's a conversion-webhook error tied to a bad field combination that needs manual cleanup.
+
+**Bootstrap printed `OPERATOR ACTION REQUIRED` for some claims**: those claims reference specific pool names that don't currently exist. The conversion webhook will still rewrite them to point at those names — you must create the pools manually post-migration, or re-point the claims (see "Re-pointing warm-started claims" above).

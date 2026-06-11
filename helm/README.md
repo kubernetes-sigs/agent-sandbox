@@ -55,7 +55,7 @@ helm upgrade agent-sandbox ./helm/ \
 
 Upgrades to chart versions that move CRDs from `v1alpha1` to `v1beta1` ship two automated Helm hook Jobs that handle the migration end-to-end:
 
-- **Pre-upgrade** Job (`agent-sandbox-migration-bootstrap`) scans every existing `SandboxClaim` and creates a per-claim shadow `SandboxWarmPool` (replicas=0) when needed, so the conversion webhook has a valid `warmPoolRef` target for the v1beta1 schema.
+- **Pre-upgrade** Job (`agent-sandbox-migration-bootstrap`) scans every existing `SandboxClaim` and, for each unique template referenced by a cold-start claim, creates a `shadow-pool-<template>` `SandboxWarmPool` (replicas=0) in that claim's namespace. Warm-started claims are left alone (the conversion webhook derives their `warmPoolRef` from the bound `Sandbox`).
 - **Post-upgrade** Job (`agent-sandbox-migration-rewrite`) patches every existing `Sandbox`, `SandboxClaim`, `SandboxTemplate`, and `SandboxWarmPool` to force the API server to rewrite each resource in v1beta1 storage format, eliminating stale v1alpha1 records from etcd.
 
 Both Jobs run the same idempotent script bundled in the chart's ConfigMap. The same script is exposed at `dev/tools/migrate.sh` (a wrapper) for manual operator use. See [`docs/api-migration-guide.md`](../docs/api-migration-guide.md) for full operational details, including how to opt out of the automated Jobs (`--set migration.enabled=false`) and run the script manually.

@@ -80,3 +80,31 @@ podSecurityContext: null
 #   seccompProfile:
 #     type: RuntimeDefault
 containerSecurityContext: null
+
+# migration controls the v1alpha1 -> v1beta1 upgrade hooks (bootstrap +
+# storage rewrite). Set enabled: false on fresh installs and clusters that
+# have already been migrated, to skip the Jobs entirely.
+#
+# The Jobs run only at `helm upgrade` time (NOT on initial install), so a
+# `helm install` of this chart never triggers migration regardless of this
+# setting. The setting exists so operators can also opt out of migration
+# during an upgrade (e.g., to run dev/tools/migrate.sh manually instead).
+migration:
+  enabled: true
+
+  # Container image used by both the bootstrap and rewrite Jobs. Needs
+  # bash + kubectl. bitnami/kubectl bundles both. If your registry policy
+  # forbids docker.io / Bitnami images, override to a mirror or a locally
+  # built image with the same packages.
+  image: bitnami/kubectl:1.30
+
+  # Resource requests/limits for the migration Job pods. Defaults are
+  # conservative; bump if you have very large clusters (thousands of
+  # SandboxClaims) and the script needs more memory.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

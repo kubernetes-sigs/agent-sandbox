@@ -1,0 +1,84 @@
+{{/*
+  Post-upgrade Job that forces a storage rewrite of every Sandbox /
+  SandboxClaim / SandboxTemplate / SandboxWarmPool resource through the
+  conversion webhook, so etcd ends up holding only v1beta1-serialized
+  records. Without this, resources created under v1alpha1 would remain
+  serialized as v1alpha1 in etcd and become unreadable when v1alpha1 is
+  eventually removed from the codebase.
+
+  Runs AFTER the new controller and webhook are live. The script is
+  idempotent: it just patches each resource with a timestamp annotation,
+  which round-trips through the conversion webhook.
+
+  initContainer waits up to ~120s for the conversion webhook endpoint to
+  be Ready before letting the patch script run. If the webhook isn't
+  reachable, every patch would fail; better to fail fast at init with a
+  clear error than spam the API server with failing patches.
+*/}}
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-sandbox-migration-rewrite
+  namespace: {{ include "agent-sandbox.namespace" . }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "agent-sandbox.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: agent-sandbox-migration
+      restartPolicy: OnFailure
+      initContainers:
+        # Block until the conversion webhook is reachable. Without a
+        # working webhook, patch operations fail with conversion errors,
+        # so it's cheaper to wait up front than to retry per-resource.
+        - name: wait-for-webhook
+          image: {{ .Values.migration.image | quote }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              SVC=agent-sandbox-webhook-service
+              NS={{ include "agent-sandbox.namespace" . }}
+              echo "Waiting for ${SVC} endpoints in ${NS}..."
+              for i in $(seq 1 24); do
+                if kubectl get endpoints "${SVC}" -n "${NS}" \
+                    -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null \
+                    | grep -qE '^[0-9]+\.'; then
+                  echo "Webhook endpoint ready."
+                  exit 0
+                fi
+                echo "  not ready yet (attempt ${i}/24); sleeping 5s..."
+                sleep 5
+              done
+              echo "ERROR: webhook endpoint did not become ready in 120s" >&2
+              exit 1
+      containers:
+        - name: migrate
+          image: {{ .Values.migration.image | quote }}
+          command:
+            - /bin/bash
+            - /scripts/migrate.sh
+            - --phase=migrate
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: agent-sandbox-migration
+            defaultMode: 0755
+{{- end }}

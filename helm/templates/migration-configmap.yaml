@@ -1,0 +1,30 @@
+{{/*
+  ConfigMap embedding the v1alpha1 -> v1beta1 migration script that the
+  pre- and post-upgrade Helm hook Jobs mount and execute. The same script
+  is exposed at dev/tools/migrate.sh (as a wrapper) so operators can run
+  it manually with the same arguments.
+
+  Marked as both pre-upgrade AND post-upgrade so the ConfigMap exists when
+  EITHER hook Job runs. before-hook-creation as the sole delete policy
+  means it persists between the two phases (and across upgrades) without
+  ever lingering as a stale duplicate.
+
+  No hook annotation on install — fresh installs have no v1alpha1
+  resources to migrate, so skipping the Jobs entirely is correct.
+*/}}
+{{- if .Values.migration.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-sandbox-migration
+  namespace: {{ include "agent-sandbox.namespace" . }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  migrate.sh: |-
+{{ .Files.Get "files/migrate.sh" | indent 4 }}
+{{- end }}

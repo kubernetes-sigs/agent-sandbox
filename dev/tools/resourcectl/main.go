@@ -216,7 +216,7 @@ func updateState(fn func(*State) error) error {
 	}
 	fileLock := flock.New(lockPath)
 	if err := fileLock.Lock(); err != nil {
-		return fmt.Errorf("error acquiring lock: %v", err)
+		return fmt.Errorf("error acquiring lock: %w", err)
 	}
 	defer fileLock.Unlock()
 

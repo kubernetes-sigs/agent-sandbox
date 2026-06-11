@@ -310,6 +310,28 @@ _Appears in:_
 | `egress` _[NetworkPolicyEgressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#networkpolicyegressrule-v1-networking) array_ | egress is a list of egress rules to be applied to the sandbox.<br />Traffic is allowed out of the sandbox if it matches at least one rule.<br />If this list is empty, all egress traffic is blocked (Default Deny). |  | Optional: \{\} <br /> |
 
 
+#### SafeToEvictPolicy
+
+_Underlying type:_ _string_
+
+SafeToEvictPolicy describes the policy for cluster-autoscaler.kubernetes.io/safe-to-evict annotation.
+If not specified on the claim, the policy is inherited from the underlying SandboxTemplate's pod metadata.
+If the template also does not specify this annotation, the Sandbox Pod is created without a safe-to-evict
+annotation, falling back to standard Kubernetes Cluster Autoscaler defaults.
+
+_Validation:_
+- Enum: [on-completion true false]
+
+_Appears in:_
+- [SandboxClaimSpec](#sandboxclaimspec)
+
+| Field | Description |
+| --- | --- |
+| `on-completion` | SafeToEvictPolicyOnCompletion indicates that the pod should be safe to evict only on completion.<br /> |
+| `true` | SafeToEvictPolicyTrue indicates that the pod should be safe to evict always.<br /> |
+| `false` | SafeToEvictPolicyFalse indicates that the pod should not be safe to evict.<br /> |
+
+
 #### SandboxClaim
 
 
@@ -347,6 +369,7 @@ _Appears in:_
 | `warmPoolRef` _[SandboxWarmPoolRef](#sandboxwarmpoolref)_ | warmPoolRef targets the specific pre-warmed infrastructure pool to check out from. |  | Required: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
+| `safeToEvict` _[SafeToEvictPolicy](#safetoevictpolicy)_ | safeToEvict specifies the policy for cluster-autoscaler.kubernetes.io/safe-to-evict annotation.<br />If this field is omitted or nil, the safe-to-evict annotation value is inherited from the<br />underlying SandboxTemplate. If the template also does not specify this annotation, the final<br />Sandbox Pod will not possess any safe-to-evict annotation, falling back to Cluster Autoscaler defaults.<br />If specified on the claim, the claim value overrides the template default.<br />Note that if "true" or "false" values are desired, they must be quoted in the YAML manifest (e.g., safeToEvict: "false")<br />because unquoted true/false values are parsed as booleans by YAML and will fail CRD string enum validation. |  | Enum: [on-completion true false] <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 
 

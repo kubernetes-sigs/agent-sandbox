@@ -56,6 +56,7 @@ import (
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
+const PodSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -365,19 +366,31 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 				return nil, err
 			}
 
+			_ = ensureSafeToEvictAnnotation(ctx, claim, &mergedMeta)
+
 			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
 			if sandbox.Labels[sandboxTemplateRefHash] != templateHash {
-				if sandbox.Labels == nil {
-					sandbox.Labels = make(map[string]string)
-				}
-				sandbox.Labels[sandboxTemplateRefHash] = templateHash
 				needsUpdate = true
 			}
 
 			if needsUpdate {
 				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
+				originalSandbox := sandbox.DeepCopy()
+				if sandbox.Labels == nil {
+					sandbox.Labels = make(map[string]string)
+				}
+				sandbox.Labels[sandboxTemplateRefHash] = templateHash
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
-				if err := r.Update(ctx, sandbox); err != nil {
+				if err := r.Patch(ctx, sandbox, client.MergeFrom(originalSandbox)); err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			// If template lookup failed, still ensure the annotation is applied if specified on the claim.
+			originalSandbox := sandbox.DeepCopy()
+			modified := ensureSafeToEvictAnnotation(ctx, claim, &sandbox.Spec.PodTemplate.ObjectMeta)
+			if modified {
+				if err := r.Patch(ctx, sandbox, client.MergeFrom(originalSandbox)); err != nil {
 					return nil, err
 				}
 			}
@@ -901,6 +914,8 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		}
 	}
 
+	_ = ensureSafeToEvictAnnotation(ctx, claim, &adopted.Spec.PodTemplate.ObjectMeta)
+
 	if err := r.Patch(ctx, adopted, client.MergeFrom(originalAdopted)); err != nil {
 		return err
 	}
@@ -1121,6 +1136,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	if err := r.mergePodMetadata(&sandbox.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 		return nil, err
 	}
+
+	_ = ensureSafeToEvictAnnotation(ctx, claim, &sandbox.Spec.PodTemplate.ObjectMeta)
 
 	// Inject environment variables from the SandboxClaim
 	if len(claim.Spec.Env) > 0 {
@@ -1401,6 +1418,26 @@ func (r *SandboxClaimReconciler) initializeSandboxLaunchTypeLabel(ctx context.Co
 	}
 	sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] = launchType
 	return r.Patch(ctx, sandbox, patch)
+}
+
+func ensureSafeToEvictAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, meta *v1beta1.PodMetadata) bool {
+	if claim.Spec.SafeToEvict == nil {
+		return false
+	}
+	logger := log.FromContext(ctx)
+	policy := string(*claim.Spec.SafeToEvict)
+	if meta.Annotations == nil {
+		meta.Annotations = make(map[string]string)
+	}
+	val, ok := meta.Annotations[PodSafeToEvictAnnotation]
+	if !ok || val != policy {
+		if ok {
+			logger.Info("Overriding safe-to-evict annotation", "claim", claim.Name, "oldValue", val, "newValue", policy)
+		}
+		meta.Annotations[PodSafeToEvictAnnotation] = policy
+		return true
+	}
+	return false
 }
 
 func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*extensionsv1beta1.SandboxTemplate, error) {

@@ -113,9 +113,20 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template-with-np"}},
 	}
 
+	onCompletion := extensionsv1beta1.SafeToEvictPolicyOnCompletion
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
-		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+			SafeToEvict: &onCompletion,
+		},
+	}
+
+	claimWithoutEvict := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-no-evict", Namespace: "default", UID: "claim-no-evict-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+		},
 	}
 
 	uncontrolledSandbox := &sandboxv1beta1.Sandbox{
@@ -389,7 +400,27 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
-			validateSandbox: validateSandboxHasDefaultAutomountToken,
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate) {
+				validateSandboxHasDefaultAutomountToken(t, sandbox, template)
+				if sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] != "on-completion" {
+					t.Errorf("expected safe-to-evict annotation to be 'on-completion', got %q", sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation])
+				}
+			},
+		},
+		{
+			name:             "sandbox is created without safe-to-evict when not requested",
+			claimToReconcile: claimWithoutEvict,
+			existingObjects:  []client.Object{template, warmPool},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate) {
+				validateSandboxHasDefaultAutomountToken(t, sandbox, template)
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; ok {
+					t.Errorf("expected safe-to-evict annotation to be absent, got %q", val)
+				}
+			},
 		},
 		{
 			name:             "sandbox is created with automount token enabled",
@@ -446,6 +477,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 				if val := sandbox.Labels[sandboxTemplateRefHash]; val != expectedHash {
 					t.Errorf("expected Sandbox metadata to have label %q=%q, got %q", sandboxTemplateRefHash, expectedHash, val)
 				}
+				if sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] != "on-completion" {
+					t.Errorf("expected safe-to-evict annotation to be 'on-completion', got %q", sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation])
+				}
 			},
 		},
 		{
@@ -458,6 +492,34 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 			expectedPodIPs:  []string{"10.244.0.6"},
 			validateSandbox: validateSandboxHasDefaultAutomountToken,
+		},
+		{
+			name:             "sandbox exists with safe-to-evict, claim is silent on evict, and template lookup fails",
+			claimToReconcile: claimWithoutEvict,
+			existingObjects: []client.Object{
+				func() client.Object {
+					sb := readySandbox.DeepCopy()
+					if sb.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+						sb.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+					}
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] = "on-completion"
+					sb.Name = claimWithoutEvict.Name
+					sb.OwnerReferences = []metav1.OwnerReference{{
+						APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claimWithoutEvict.Name, UID: claimWithoutEvict.UID, Controller: new(true),
+					}}
+					return sb
+				}(),
+			},
+			expectSandbox: true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
+			},
+			expectedPodIPs: []string{"10.244.0.6"},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, _ *extensionsv1beta1.SandboxTemplate) {
+				if val := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; val != "on-completion" {
+					t.Errorf("expected safe-to-evict annotation to remain intact ('on-completion'), but got %q", val)
+				}
+			},
 		},
 		{
 			name:             "sandbox is ready",
@@ -1880,14 +1942,15 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name                    string
-		existingObjects         []client.Object
-		expectSandboxAdoption   bool
-		expectedAdoptedSandbox  string
-		expectedAnnotations     map[string]string
-		expectedPodAnnotations  map[string]string
-		expectNewSandboxCreated bool
-		simulateConflicts       int
+		name                     string
+		existingObjects          []client.Object
+		expectSandboxAdoption    bool
+		expectedAdoptedSandbox   string
+		expectedAnnotations      map[string]string
+		expectedPodAnnotations   map[string]string
+		expectedSafeToEvictValue string
+		expectNewSandboxCreated  bool
+		simulateConflicts        int
 	}{
 		{
 			name: "adopts oldest ready sandbox from warm pool",
@@ -2082,6 +2145,52 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectSandboxAdoption:   false,
 			expectNewSandboxCreated: true,
 		},
+		{
+			name: "adopts sandbox from warm pool and sets safe-to-evict to false according to claim",
+			existingObjects: []client.Object{
+				template,
+				&extensionsv1beta1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+					Spec: extensionsv1beta1.SandboxClaimSpec{
+						WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+						SafeToEvict: func() *extensionsv1beta1.SafeToEvictPolicy {
+							p := extensionsv1beta1.SafeToEvictPolicyFalse
+							return &p
+						}(),
+					},
+				},
+				createWarmPoolSandbox("pool-sb-1", metav1.Now(), true),
+			},
+			expectSandboxAdoption:    true,
+			expectedAdoptedSandbox:   "pool-sb-1",
+			expectedSafeToEvictValue: "false",
+			expectNewSandboxCreated:  false,
+		},
+		{
+			name: "adopts sandbox from warm pool and removes warm pool safe-to-evict annotation if claim SafeToEvict is nil",
+			existingObjects: []client.Object{
+				template,
+				&extensionsv1beta1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+					Spec: extensionsv1beta1.SandboxClaimSpec{
+						WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+						SafeToEvict: nil,
+					},
+				},
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Now(), true)
+					if sb.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+						sb.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+					}
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation] = "on-completion"
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:    true,
+			expectedAdoptedSandbox:   "pool-sb-1",
+			expectedSafeToEvictValue: "REMOVE",
+			expectNewSandboxCreated:  false,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2172,8 +2281,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						}
 					}
 				} else {
-					if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
-						t.Errorf("expected eviction annotation to be removed from adopted sandbox")
+					if tc.expectedSafeToEvictValue == "REMOVE" || tc.expectedSafeToEvictValue == "" {
+						if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
+							t.Errorf("expected eviction annotation to be removed from adopted sandbox, expectedSafeToEvictValue=%q, actual=%q", tc.expectedSafeToEvictValue, adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation])
+						}
 					}
 				}
 
@@ -2203,6 +2314,18 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				}
 				require.Equal(t, tc.expectedAdoptedSandbox, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
 
+				// 6. Verify safe-to-evict annotation if expectedSafeToEvictValue is set
+				if tc.expectedSafeToEvictValue != "" {
+					if tc.expectedSafeToEvictValue == "REMOVE" {
+						if val, ok := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; ok {
+							t.Errorf("expected pod template to NOT have annotation %q, but got %q", PodSafeToEvictAnnotation, val)
+						}
+					} else {
+						if val := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[PodSafeToEvictAnnotation]; val != tc.expectedSafeToEvictValue {
+							t.Errorf("expected pod template to have annotation %q with value %q, got %q", PodSafeToEvictAnnotation, tc.expectedSafeToEvictValue, val)
+						}
+					}
+				}
 			} else if tc.expectNewSandboxCreated {
 				// Verify a new sandbox was created with the claim's name
 				var sandbox sandboxv1beta1.Sandbox

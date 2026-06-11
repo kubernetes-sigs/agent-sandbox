@@ -48,7 +48,7 @@ spec:
             - -c
             - |
               set -euo pipefail
-              SVC=agent-sandbox-webhook-service
+              SVC={{ .Values.migration.webhookServiceName | quote }}
               NS={{ include "agent-sandbox.namespace" . }}
               echo "Waiting for ${SVC} endpoints in ${NS}..."
               for i in $(seq 1 24); do

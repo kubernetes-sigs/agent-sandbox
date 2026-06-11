@@ -21,7 +21,7 @@
 #
 #   bash dev/tools/migrate.sh --phase=bootstrap [--dry-run]
 #
-# See docs/api-migration.md for full usage.
+# See docs/api-migration-guide.md for full usage.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

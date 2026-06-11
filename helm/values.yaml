@@ -108,3 +108,9 @@ migration:
     limits:
       cpu: 500m
       memory: 256Mi
+
+  # Name of the conversion webhook Service the post-upgrade Job waits for
+  # before starting the storage rewrite. Override if your install uses a
+  # non-default webhook Service name (e.g. a multi-tenant install with a
+  # renamed webhook).
+  webhookServiceName: agent-sandbox-webhook-service

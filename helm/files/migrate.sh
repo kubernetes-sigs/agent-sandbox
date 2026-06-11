@@ -44,7 +44,7 @@
 #   KUBECTL                 Path to kubectl binary. Default: kubectl.
 #   MIGRATE_DRY_RUN         If "true", same effect as --dry-run.
 #
-# Documented entry point for operators: docs/api-migration.md.
+# Documented entry point for operators: docs/api-migration-guide.md.
 
 set -euo pipefail
 
@@ -83,7 +83,7 @@ Usage: $0 --phase=bootstrap|migrate [--dry-run] [--namespace=<ns>] [--kubectl=<p
   --kubectl=PATH    Override kubectl binary path. Default: kubectl (or \$KUBECTL).
   -h, --help        Show this help.
 
-See docs/api-migration.md for full operator documentation.
+See docs/api-migration-guide.md for full operator documentation.
 EOF
 }
 
@@ -162,11 +162,18 @@ bootstrap_phase() {
   # SandboxClaim in one shot. jsonpath keeps us jq-free so the container
   # image can be any minimal kubectl image. Trailing blank fields are
   # preserved as empty strings between tabs.
+  # Listing failures must abort the phase. Suppressing them silently would
+  # make a missing-RBAC or transient API error look like "no claims found"
+  # and exit 0, skipping the bootstrap entirely.
   local items
   # shellcheck disable=SC2046
-  items="$(kctl get sandboxclaims.extensions.agents.x-k8s.io $(ns_args) \
-    -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.sandboxTemplateRef.name}{"\t"}{.spec.warmpool}{"\n"}{end}' \
-    2>/dev/null || true)"
+  if ! items="$(kctl get sandboxclaims.extensions.agents.x-k8s.io $(ns_args) \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.sandboxTemplateRef.name}{"\t"}{.spec.warmpool}{"\n"}{end}' \
+      2>&1)"; then
+    errlog "failed to list SandboxClaims: $items"
+    errlog "check RBAC: ServiceAccount needs get/list on sandboxclaims.extensions.agents.x-k8s.io"
+    return 1
+  fi
 
   if [[ -z "$items" ]]; then
     log "Bootstrap: no SandboxClaims found. Nothing to do."
@@ -184,18 +191,30 @@ bootstrap_phase() {
         target_pool="${claim_name}${SHADOW_POOL_SUFFIX}"
         ;;
       *)
-        # User specified a specific pool name. If it actually exists in the
-        # claim's namespace, no shadow needed. If it doesn't exist (typo,
-        # deleted, etc.), fall back to a shadow pool so the claim still has
-        # a valid target post-conversion.
-        if resource_exists sandboxwarmpools.extensions.agents.x-k8s.io "$claim_ns" "$warmpool"; then
-          log "claim $claim_ns/$claim_name: existing pool '$warmpool' found, no shadow needed"
-          skipped_user_pool=$((skipped_user_pool + 1))
-          continue
-        else
-          warn "claim $claim_ns/$claim_name references non-existent pool '$warmpool'; minting shadow pool"
-          target_pool="${claim_name}${SHADOW_POOL_SUFFIX}"
-        fi
+        # User specified a specific pool name. resource_exists returns:
+        #   0 = pool exists -> nothing to do
+        #   1 = NotFound    -> mint a shadow (typo, deleted, etc.)
+        #   2 = transient   -> log and skip (will retry on next run; do
+        #                      NOT mint a shadow, because the pool may
+        #                      actually exist and we just couldn't tell)
+        local rc=0
+        resource_exists sandboxwarmpools.extensions.agents.x-k8s.io "$claim_ns" "$warmpool" || rc=$?
+        case "$rc" in
+          0)
+            log "claim $claim_ns/$claim_name: existing pool '$warmpool' found, no shadow needed"
+            skipped_user_pool=$((skipped_user_pool + 1))
+            continue
+            ;;
+          1)
+            warn "claim $claim_ns/$claim_name references non-existent pool '$warmpool'; minting shadow pool"
+            target_pool="${claim_name}${SHADOW_POOL_SUFFIX}"
+            ;;
+          *)
+            errlog "claim $claim_ns/$claim_name: transient error checking pool '$warmpool'; skipping (re-run to retry)"
+            errors=$((errors + 1))
+            continue
+            ;;
+        esac
         ;;
     esac
 
@@ -210,9 +229,14 @@ bootstrap_phase() {
       0)
         # Exists. Verify it's actually our shadow and not a user pool with the
         # same name (which could happen if the user named one *-shadow-pool).
+        # kubectl jsonpath does not reliably traverse annotation keys
+        # containing "/" via dot-notation escaping, so we use go-template
+        # with `index` which handles arbitrary keys correctly. Missing
+        # annotation prints "<no value>", which is != "true" - safe default.
         local existing_shadow
         existing_shadow="$(kctl get sandboxwarmpool -n "$claim_ns" "$target_pool" \
-          -o jsonpath="{.metadata.annotations.${SHADOW_ANNOTATION_KEY//./\\.}}" 2>/dev/null || true)"
+          -o go-template="{{ index .metadata.annotations \"${SHADOW_ANNOTATION_KEY}\" }}" \
+          2>/dev/null || true)"
         if [[ "$existing_shadow" == "true" ]]; then
           skipped_existing_shadow=$((skipped_existing_shadow + 1))
         else
@@ -282,9 +306,14 @@ migrate_phase() {
 
     local items
     # shellcheck disable=SC2046
-    items="$(kctl get "$kind" $(ns_args) \
-      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' \
-      2>/dev/null || true)"
+    if ! items="$(kctl get "$kind" $(ns_args) \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' \
+        2>&1)"; then
+      errlog "  failed to list $kind: $items"
+      errlog "  treating as failure for this CRD; continuing with other CRDs"
+      total_failure=$((total_failure + 1))
+      continue
+    fi
 
     if [[ -z "$items" ]]; then
       log "  no resources found"

@@ -75,13 +75,36 @@ After the post-upgrade Job completes:
 
 ```bash
 # Every resource should now have the storage-migrated-at annotation.
-kubectl get sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools -A \
-  -o jsonpath='{range .items[*]}{.kind}{" "}{.metadata.namespace}/{.metadata.name}{" -> "}{.metadata.annotations.agents\.x-k8s\.io/storage-migrated-at}{"\n"}{end}'
-
-# Check the actual etcd storage version (requires cluster-admin):
-kubectl get --raw '/apis/extensions.agents.x-k8s.io/v1beta1/sandboxclaims' \
-  | jq '.items[0].apiVersion'   # expect "extensions.agents.x-k8s.io/v1beta1"
+# jq handles annotation keys with "." and "/" correctly; kubectl jsonpath
+# dot-escaping cannot reliably read keys containing "/".
+kubectl get sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools -A -o json \
+  | jq -r '.items[]
+      | "\(.kind) \(.metadata.namespace)/\(.metadata.name) -> \(.metadata.annotations["agents.x-k8s.io/storage-migrated-at"] // "<missing>")"'
 ```
+
+To verify the actual etcd storage version, check each CRD's `status.storedVersions`. The kube-apiserver records every version that has ever been used to write any record there; after the rewrite Job touches every resource, you can manually prune `v1alpha1` from the list to confirm nothing v1alpha1 is left:
+
+```bash
+for crd in \
+    sandboxes.agents.x-k8s.io \
+    sandboxclaims.extensions.agents.x-k8s.io \
+    sandboxtemplates.extensions.agents.x-k8s.io \
+    sandboxwarmpools.extensions.agents.x-k8s.io; do
+  printf '%s: ' "${crd}"
+  kubectl get crd "${crd}" -o jsonpath='{.status.storedVersions}'
+  printf '\n'
+done
+```
+
+If a CRD still lists `["v1alpha1","v1beta1"]` after the rewrite Job succeeded, every existing record has been rewritten in v1beta1 form, but the `storedVersions` array is not auto-pruned. To finalize:
+
+```bash
+# Confirm no v1alpha1-only records remain, then prune storedVersions.
+kubectl patch crd <crd-name> --subresource=status --type=merge \
+  -p '{"status":{"storedVersions":["v1beta1"]}}'
+```
+
+Only do this after you've confirmed every existing record carries `agents.x-k8s.io/storage-migrated-at` from the rewrite Job's run.
 
 ## Troubleshooting
 

@@ -20,7 +20,6 @@ when creating a SandboxClaim.
 
 from kubernetes import client, config
 import random
-import subprocess
 import sys
 
 def get_routing_config():

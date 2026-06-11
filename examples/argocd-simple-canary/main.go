@@ -83,12 +83,22 @@ func main() {
 		canaryPool = "python-pool-v2"
 	}
 	canaryPercentage := 0
-	if _, err := fmt.Sscanf(cm.Data["canary_percentage"], "%d", &canaryPercentage); err != nil {
-		log.Fatalf("Failed to parse canary_percentage: %v", err)
+	if val, ok := cm.Data["canary_percentage"]; ok && val != "" {
+		if _, err := fmt.Sscanf(val, "%d", &canaryPercentage); err != nil {
+			log.Printf("Warning: Failed to parse canary_percentage %q, falling back to 0. Error: %v", val, err)
+			canaryPercentage = 0
+		}
+	} else {
+		log.Println("canary_percentage not specified in ConfigMap, defaulting to 0")
 	}
 
 	if canaryPercentage < 0 || canaryPercentage > 100 {
-		log.Fatalf("Invalid canary percentage: %d. Must be between 0 and 100.", canaryPercentage)
+		log.Printf("Warning: Invalid canary percentage %d. Must be between 0 and 100. Bounding to closest limit.", canaryPercentage)
+		if canaryPercentage < 0 {
+			canaryPercentage = 0
+		} else {
+			canaryPercentage = 100
+		}
 	}
 
 	fmt.Printf("Routing Config: Primary=%s, Canary=%s, Percentage=%d%%\n", primaryPool, canaryPool, canaryPercentage)
@@ -98,6 +108,7 @@ func main() {
 
 	// Generate a random number between 0 and 99.
 	// If it's less than the canary percentage, we route to the canary pool.
+	// Note: Since Go 1.20, the math/rand package automatically seeds the global RNG at startup.
 	if rand.Intn(100) < canaryPercentage {
 		selectedPool = canaryPool
 		fmt.Println("[CANARY] Routing to Canary pool")

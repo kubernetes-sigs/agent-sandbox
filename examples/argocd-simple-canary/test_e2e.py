@@ -51,7 +51,7 @@ def get_assigned_sandbox(claim_name):
         time.sleep(1)
     return None
 
-def simulate_traffic(expected_percentage, count=5, use_go=False):
+def simulate_traffic(expected_percentage, count=5, use_go=False, suffix=""):
     """Creates 'count' claims and measures distribution based on actual assignment"""
     print(f"\n--- Creating {count} claims with target {expected_percentage}% Canary (Using {'Go' if use_go else 'Python'}) ---")
     
@@ -63,7 +63,7 @@ def simulate_traffic(expected_percentage, count=5, use_go=False):
     claims = []
     
     for i in range(count):
-        claim_name = f"argocd-test-claim-{expected_percentage}-{i}"
+        claim_name = f"argocd-test-claim-{expected_percentage}{suffix}-{i}"
         if use_go:
             print(f"[Exec] go run main.go {claim_name}")
             process = subprocess.run(["go", "run", "main.go", claim_name], capture_output=True, text=True)
@@ -111,6 +111,12 @@ def simulate_traffic(expected_percentage, count=5, use_go=False):
 def main():
     print("Starting E2E SDK Routing Canary Simulation...\n")
 
+    # Clean up stale resources from previous run failures to avoid adopting completed pods
+    print("Cleaning up stale resources...")
+    run_command("kubectl delete sandboxclaim -l app=argocd-sdk-test -n default", allow_fail=True)
+    run_command("kubectl delete sandboxwarmpool python-pool-v1 python-pool-v2 -n default", allow_fail=True)
+    time.sleep(2)
+
     # 1. Apply prerequisites
     image = os.getenv("IMAGE", "python:3.11-slim")
     with open("templates.yaml", "r") as f:
@@ -122,13 +128,16 @@ def main():
         text=True,
         check=True
     )
-    run_command("kubectl apply -f pools.yaml")
-    run_command("kubectl apply -f canary-config.yaml")
-    time.sleep(2)
+    run_command("kubectl apply -f pools.yaml -n default")
+    run_command("kubectl apply -f canary-config.yaml -n default")
+    
+    # Wait for the warm pool to populate with new running pods
+    print("Waiting for warm pools to populate...")
+    time.sleep(10)
 
     try:
         # 2. Test Phase 1: Set to 20%
-        run_command("kubectl patch configmap canary-routing-config --type=merge -p '{\"data\":{\"canary_percentage\":\"20\"}}'")
+        run_command("kubectl patch configmap canary-routing-config -n default --type=merge -p '{\"data\":{\"canary_percentage\":\"20\"}}'")
         time.sleep(2)
         v2_pct_20 = simulate_traffic(20, count=5)
 
@@ -141,29 +150,29 @@ def main():
             print("Analysis Result: FAILED")
 
         # 3. Test Phase 2: Set to 80%
-        run_command("kubectl patch configmap canary-routing-config --type=merge -p '{\"data\":{\"canary_percentage\":\"80\"}}'")
+        run_command("kubectl patch configmap canary-routing-config -n default --type=merge -p '{\"data\":{\"canary_percentage\":\"80\"}}'")
         time.sleep(2)
         v2_pct_80 = simulate_traffic(80, count=5)
 
         # Test Go version at 50%
         print("\n--- Testing Go Version at 50% Canary ---")
-        run_command("kubectl patch configmap canary-routing-config --type=merge -p '{\"data\":{\"canary_percentage\":\"50\"}}'")
+        run_command("kubectl patch configmap canary-routing-config -n default --type=merge -p '{\"data\":{\"canary_percentage\":\"50\"}}'")
         time.sleep(2)
         v2_pct_50_go = simulate_traffic(50, count=5, use_go=True)
 
         # 4. Test Phase 3: Set to 100% (Full Rollout)
         print("\n--- Phase 3: Advancing to 100% Canary (Full Rollout) ---")
-        run_command("kubectl patch configmap canary-routing-config --type=merge -p '{\"data\":{\"canary_percentage\":\"100\"}}'")
+        run_command("kubectl patch configmap canary-routing-config -n default --type=merge -p '{\"data\":{\"canary_percentage\":\"100\"}}'")
         time.sleep(2)
         v2_pct_100 = simulate_traffic(100, count=5)
 
         # 5. Cleanup v1 Pool (Simulating post-rollout cleanup)
         print("\n--- Phase 4: Rollout Complete. Removing Old WarmPool (v1) ---")
         print("Simulating Argo CD removing the old pool from Git...")
-        run_command("kubectl delete sandboxwarmpool python-pool-v1")
+        run_command("kubectl delete sandboxwarmpool python-pool-v1 -n default")
         
         print("Verifying that claims now only go to v2...")
-        v2_pct_post_cleanup = simulate_traffic(100, count=5)
+        v2_pct_post_cleanup = simulate_traffic(100, count=5, suffix="-post")
 
         print("\n================ E2E TEST SUMMARY ================")
         print(f"Config @ 20%  -> Measured Canary Traffic: {v2_pct_20}%")
@@ -184,15 +193,15 @@ def main():
     finally:
         # Cleanup test claims
         print("\nCleaning up test claims...")
-        run_command("kubectl delete sandboxclaim -l app=argocd-sdk-test", allow_fail=True)
+        run_command("kubectl delete sandboxclaim -l app=argocd-sdk-test -n default", allow_fail=True)
         
         # Restore ConfigMap to default for future runs
         print("Restoring ConfigMap to default (20%)...")
-        run_command("kubectl patch configmap canary-routing-config --type=merge -p '{\"data\":{\"canary_percentage\":\"20\"}}'", allow_fail=True)
+        run_command("kubectl patch configmap canary-routing-config -n default --type=merge -p '{\"data\":{\"canary_percentage\":\"20\"}}'", allow_fail=True)
         
         # Re-apply pools.yaml to restore v1 pool for future runs
         print("Restoring WarmPools...")
-        run_command("kubectl apply -f pools.yaml", allow_fail=True)
+        run_command("kubectl apply -f pools.yaml -n default", allow_fail=True)
 
 if __name__ == "__main__":
     sys.exit(main())

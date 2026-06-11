@@ -10,6 +10,7 @@ spec:
       containers:
       - name: python-runtime
         image: ${IMAGE}
+        command: ["python3", "-m", "http.server", "8888"]
         ports:
         - containerPort: 8888
         resources:
@@ -28,6 +29,7 @@ spec:
       containers:
       - name: python-runtime
         image: ${IMAGE}
+        command: ["python3", "-m", "http.server", "8888"]
         ports:
         - containerPort: 8888
         resources:

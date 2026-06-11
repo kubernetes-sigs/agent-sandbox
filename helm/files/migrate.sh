@@ -161,10 +161,12 @@ resource_exists() {
 #       still rewrite the claim to point at the missing pool, and the
 #       operator must create it manually).
 #
-#   (B) spec.warmpool in {"", "none", "default"} AND the claim was warm-
-#       started (status.sandboxStatus.name is non-empty and != claim name)
-#       -> webhook uses stripRandomSuffix(sandboxName). The source pool
+#   (B) spec.warmpool in {"", "default"} AND the claim was warm-started
+#       (status.sandboxStatus.name is non-empty and != claim name) ->
+#       webhook uses stripRandomSuffix(sandboxName). The source pool
 #       already exists (the sandbox came from it); no shadow needed.
+#       ("none" never reaches this branch: claims with warmpool="none"
+#       always cold-start, so they fall through to (C).)
 #
 #   (C) spec.warmpool in {"", "none", "default"} AND the claim is cold-
 #       start (no sandbox, or sandbox.name == claim.name) -> webhook uses

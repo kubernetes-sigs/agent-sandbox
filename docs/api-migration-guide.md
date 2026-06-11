@@ -10,7 +10,7 @@ Most CRDs are schema-compatible across the two versions; the migration matters m
 
 1. **`SandboxClaim` is not field-compatible.** v1alpha1 has `spec.sandboxTemplateRef` plus an optional `spec.warmpool` string policy (`"none"` / `"default"` / a specific pool name). v1beta1 requires `spec.warmPoolRef.name`. The conversion webhook (in `extensions/api/v1alpha1/sandboxclaim_conversion.go`) handles the rewrite via three branches:
    - **Specific pool name** (`warmpool: my-pool`) → webhook uses that name verbatim. If the pool doesn't exist, the converted claim points at a missing pool — operator must create it.
-   - **`""` / `"none"` / `"default"`, warm-started** (claim has a bound `Sandbox` whose name differs from the claim's name) → webhook derives the pool name from the existing `Sandbox` via `stripRandomSuffix(sandboxName)`. The source pool already exists; nothing to do at migration time.
+   - **`""` / `"default"`, warm-started** (claim has a bound `Sandbox` whose name differs from the claim's name) → webhook derives the pool name from the existing `Sandbox` via `stripRandomSuffix(sandboxName)`. The source pool already exists; nothing to do at migration time. (`"none"` never falls into this branch — `"none"` always cold-starts.)
    - **`""` / `"none"` / `"default"`, cold-start** (no bound `Sandbox`, or `Sandbox.name == claim.name`) → webhook redirects to `shadow-pool-<template-name>`. The bootstrap phase ensures one such shadow pool exists per `(namespace, template)` combination.
 2. **`Sandbox.spec.replicas` becomes `Sandbox.spec.operatingMode`.** `replicas: 0` → `Suspended`, `replicas: 1` (or unset) → `Running`. The webhook handles this automatically.
 
@@ -57,9 +57,13 @@ For clusters that install the controller via `kubectl apply -f` (not Helm), run 
 bash dev/tools/migrate.sh --phase=bootstrap
 
 # 2. Install the new controller + CRDs (which include the conversion webhook).
+#    The release ships two manifests: manifest.yaml (core controller + base
+#    CRDs + webhook Service) and extensions.yaml (the extensions API group
+#    CRDs: SandboxClaim, SandboxTemplate, SandboxWarmPool). Apply both.
 #    Wait until the controller pod is Ready and the webhook Service has
 #    endpoints before proceeding.
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.0/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.0/extensions.yaml
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
 kubectl wait --for=condition=Ready pods -l app=agent-sandbox-controller -n agent-sandbox-system
 

@@ -63,8 +63,8 @@ _Appears in:_
 
 
 _Appears in:_
+- [SandboxClaimSpec](#sandboxclaimspec)
 - [SandboxSpec](#sandboxspec)
-- [SandboxTemplateSpec](#sandboxtemplatespec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -100,7 +100,6 @@ _Appears in:_
 
 _Appears in:_
 - [SandboxSpec](#sandboxspec)
-- [SandboxTemplateSpec](#sandboxtemplatespec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -156,6 +155,7 @@ SandboxSpec defines the desired state of Sandbox.
 
 _Appears in:_
 - [Sandbox](#sandbox)
+- [SandboxTemplateSpec](#sandboxtemplatespec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -348,6 +348,8 @@ _Appears in:_
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
+| `service` _boolean_ | service overrides the template's service setting for the Sandbox created<br />from this claim. When set, it takes precedence over the template's value.<br />Because a pre-warmed Sandbox has already materialized its Service, setting<br />this field means the Sandbox will always be cold-started from the template<br />of the warmpool (same as env). |  | Optional: \{\} <br /> |
+| `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates overrides the template's volumeClaimTemplates for the<br />Sandbox created from this claim. When non-empty, it replaces the template's<br />list entirely. Every claim in this list must have at least one matching<br />access mode with a provisioner volume.<br />Because a pre-warmed Sandbox has already materialized its PVCs, setting this<br />field means the Sandbox will always be cold-started from the template of the<br />warmpool (same as env).<br />NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -433,12 +435,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `podTemplate` _[PodTemplate](#podtemplate)_ | podTemplate defines the object template that describes the pod spec that will be used to create<br />an agent sandbox.<br />If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false<br />to ensure a secure-by-default environment. |  | Required: \{\} <br /> |
-| `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of claims that pods created from this template<br />are allowed to reference. When a SandboxClaim or SandboxWarmPool creates a sandbox<br />from this template, PVCs will be created from these templates.<br />Every claim in this list must have at least one matching access mode with a provisioner volume.<br />NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries. |  | Optional: \{\} <br /> |
+| `sandboxSpec` _[SandboxSpec](#sandboxspec)_ | sandboxSpec defines the spec of the Sandboxes created from this template.<br />It is the single source of truth for what a Sandbox looks like: any field<br />of SandboxSpec (podTemplate, volumeClaimTemplates, service, lifecycle,<br />operatingMode, and future fields) is configurable here and flows through to<br />the Sandboxes a SandboxWarmPool or SandboxClaim creates from this template.<br />This is analogous to how Deployment.spec.template embeds a Pod template.<br />The controller deep-copies this spec and overlays only controller-managed<br />fields (identity labels, secure defaults, and the warm-pool eviction<br />annotation); everything else is taken verbatim.<br />If AutomountServiceAccountToken is not specified in the PodSpec, it defaults<br />to false to ensure a secure-by-default environment. |  | Required: \{\} <br /> |
 | `networkPolicy` _[NetworkPolicySpec](#networkpolicyspec)_ | networkPolicy defines the network policy to be applied to the sandboxes<br />created from this template. A single shared NetworkPolicy is created per Template.<br />Behavior is dictated by the NetworkPolicyManagement field:<br />- If Management is "Unmanaged": This field is completely ignored.<br />- If Management is "Managed" (default) and this field is omitted (nil): The controller<br />  automatically applies a strict Secure Default policy:<br />    * Ingress: Allow traffic only from the Sandbox Router.<br />    * Egress: Allow Public Internet only. Blocks internal IPs (RFC1918), Metadata Server, etc.<br />- If Management is "Managed" and this field is provided: The controller applies your custom rules.<br />Update Behavior:<br />Because the NetworkPolicy is shared at the template level, any updates to these rules<br />will be applied to the single shared policy object. The underlying Kubernetes CNI will then<br />dynamically enforce the updated rules across all existing and future sandboxes<br />referencing this template.<br />NOTE: This is a restricted subset of the standard Kubernetes NetworkPolicySpec.<br />Fields like 'PodSelector' and 'PolicyTypes' are intentionally excluded because<br />they are managed by the controller to ensure strict isolation and default-deny posture.<br />WARNING: This policy enforces a strict "Default Deny" ingress posture.<br />If your Pod uses sidecars (e.g., Istio proxy, monitoring agents) that listen<br />on their own ports, the NetworkPolicy will BLOCK traffic to them by default.<br />You MUST explicitly allow traffic to these sidecar ports using 'Ingress',<br />otherwise the sidecars may fail health checks. |  | Optional: \{\} <br /> |
 | `networkPolicyManagement` _[NetworkPolicyManagement](#networkpolicymanagement)_ | networkPolicyManagement defines whether the controller manages the NetworkPolicy.<br />Valid values are "Managed" (default) or "Unmanaged". | Managed | Enum: [Managed Unmanaged] <br />Optional: \{\} <br /> |
 | `envVarsInjectionPolicy` _[EnvVarsInjectionPolicy](#envvarsinjectionpolicy)_ | envVarsInjectionPolicy allows a SandboxClaim to inject or override environment variables defined in the template.<br />If set to Disallowed, the SandboxClaim will be rejected if it specifies any environment variables. | Disallowed | Enum: [Allowed Overrides Disallowed] <br />Optional: \{\} <br /> |
-| `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for Sandboxes created from this template.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 
 
 #### SandboxWarmPool

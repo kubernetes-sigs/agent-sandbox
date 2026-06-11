@@ -15,6 +15,7 @@
 
 import argparse
 import glob
+import json
 import os
 import re
 import subprocess
@@ -30,9 +31,13 @@ def run_command(cmd):
         sys.exit(1)
 
 
-def release_exists(tag):
-    """Returns true when the GitHub release already exists."""
-    cmd = ["gh", "release", "view", tag, "--repo", "kubernetes-sigs/agent-sandbox"]
+def get_release_info(tag):
+    """Returns (exists, is_draft) for the GitHub release."""
+    cmd = [
+        "gh", "release", "view", tag,
+        "--repo", "kubernetes-sigs/agent-sandbox",
+        "--json", "isDraft",
+    ]
 
     try:
         result = subprocess.run(
@@ -47,17 +52,29 @@ def release_exists(tag):
         sys.exit(1)
 
     if result.returncode == 0:
-        return True
+        try:
+            release_info = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            print(
+                "Error parsing GitHub release info for "
+                f"{tag}: {' '.join(cmd)} returned invalid JSON."
+            )
+            stdout = (result.stdout or "").strip()
+            if stdout:
+                print(stdout)
+            sys.exit(1)
+
+        return True, bool(release_info.get("isDraft"))
 
     stderr = (result.stderr or "").strip()
     stdout = (result.stdout or "").strip()
     combined_output = "\n".join(part for part in [stderr, stdout] if part)
     normalized_output = combined_output.lower()
     if "release not found" in normalized_output or "http 404" in normalized_output:
-        return False
+        return False, False
 
     print(
-        "Error checking whether GitHub release exists for "
+        "Error checking GitHub release info for "
         f"{tag}: {' '.join(cmd)} failed with exit code {result.returncode}."
     )
     if combined_output:
@@ -141,8 +158,17 @@ def main():
             print("❌ Release assets missing. Cannot publish.")
             sys.exit(1)
 
-        if release_exists(tag):
-            print(f"INFO: Release {tag} already exists; updating assets...")
+        release_exists, is_draft = get_release_info(tag)
+
+        if release_exists:
+            if not is_draft:
+                print(
+                    f"❌ Release {tag} already exists and is published. "
+                    "Refusing to update assets."
+                )
+                sys.exit(1)
+
+            print(f"INFO: Draft release {tag} already exists; updating assets...")
             run_command([
                 "gh", "release", "upload", tag,
                 manifest_path,

@@ -63,6 +63,20 @@ rules:
   - apiGroups: ["extensions.agents.x-k8s.io"]
     resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
     verbs: ["get", "list", "patch"]
+  # The post-upgrade rewrite Job's wait-for-webhook initContainer reads
+  # the conversion webhook's Endpoints object to know when the webhook
+  # is reachable. Without this, kubectl get endpoints is RBAC-forbidden,
+  # the readiness loop never succeeds, and the rewrite Job times out
+  # on every Helm upgrade.
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get"]
+  # endpoints is being deprecated in favor of endpointslices; granting
+  # both lets us switch the readiness check to endpointslices later
+  # without another RBAC change.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -93,9 +93,14 @@ migration:
   enabled: true
 
   # Container image used by both the bootstrap and rewrite Jobs. Needs
-  # bash + kubectl. bitnami/kubectl bundles both. If your registry policy
-  # forbids docker.io / Bitnami images, override to a mirror or a locally
-  # built image with the same packages.
+  # bash + kubectl. bitnami/kubectl bundles both, but note Bitnami
+  # restricted their public Docker Hub catalog in 2025 - if your registry
+  # policy or rate-limiting blocks docker.io, mirror this image into a
+  # registry you control, or substitute a minimal kubectl+bash image of
+  # your own (registry.k8s.io/kubectl is distroless and lacks bash, so
+  # cannot be used as a drop-in). For reproducibility under upgrades,
+  # pin by digest:
+  #   image: bitnami/kubectl@sha256:<digest>
   image: bitnami/kubectl:1.30
 
   # Resource requests/limits for the migration Job pods. Defaults are

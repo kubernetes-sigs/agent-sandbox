@@ -117,7 +117,6 @@ release-python-sdk:
 	./dev/tools/release-python --tag=${TAG} --remote=${REMOTE_UPSTREAM}
 
 .PHONY: toc-update
-
 toc-update:
 	./dev/tools/update-toc
 

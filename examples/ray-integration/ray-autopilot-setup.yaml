@@ -3,19 +3,20 @@ kind: SandboxTemplate
 metadata:
   name: ray-python-template
 spec:
-  podTemplate:
-    spec:
-      runtimeClassName: gvisor
-      containers:
-      - name: runtime
-        image: # REPLACE_WITH_YOUR_IMAGE
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 8888
-        resources:
-          requests:
-            cpu: "250m"
-            memory: "512Mi"
+  sandboxSpec:
+    podTemplate:
+      spec:
+        runtimeClassName: gvisor
+        containers:
+        - name: runtime
+          image: # REPLACE_WITH_YOUR_IMAGE
+          imagePullPolicy: Always
+          ports:
+          - containerPort: 8888
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
 ---
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool

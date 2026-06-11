@@ -32,16 +32,17 @@ metadata:
   namespace: default
 spec:
   networkPolicyManagement: Managed
-  podTemplate:
-    metadata:
-      labels:
-        sandbox-type: debug-dns
-    spec:
-      runtimeClassName: gvisor
-      containers:
-      - name: debug-container
-        image: alpine:3.20
-        command: ["/bin/sh", "-c", "sleep 3600"]
+  sandboxSpec:
+    podTemplate:
+      metadata:
+        labels:
+          sandbox-type: debug-dns
+      spec:
+        runtimeClassName: gvisor
+        containers:
+        - name: debug-container
+          image: alpine:3.20
+          command: ["/bin/sh", "-c", "sleep 3600"]
 ```
 
 `dns-poc-warmpool.yaml`:
@@ -159,16 +160,17 @@ spec:
             port: 53
           - protocol: TCP
             port: 53
-  podTemplate:
-    metadata:
-      labels:
-        sandbox-type: autopilot-dns
-    spec:
-      runtimeClassName: gvisor
-      containers:
-      - name: debug-container
-        image: alpine:3.20
-        command: ["/bin/sh", "-c", "sleep 3600"]
+  sandboxSpec:
+    podTemplate:
+      metadata:
+        labels:
+          sandbox-type: autopilot-dns
+      spec:
+        runtimeClassName: gvisor
+        containers:
+        - name: debug-container
+          image: alpine:3.20
+          command: ["/bin/sh", "-c", "sleep 3600"]
 ```
 `dns-autopilot-warmpool.yaml`: 
 ```yaml 

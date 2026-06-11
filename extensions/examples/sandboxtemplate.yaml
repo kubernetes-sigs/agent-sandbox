@@ -6,34 +6,35 @@ metadata:
 spec:
   #enableDisruptionControl: true
   #shutdownTime: "2025-12-31T23:59:59Z"
-  podTemplate:
-    spec:
-      # This pod uses a non-root user and gVisor for runtime sandboxing.
-      #runtimeClassName: gvisor
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 3000
-        fsGroup: 2000
-        runAsNonRoot: true
-      containers:
-      - name: my-container
-        image: busybox
-        command: ["/bin/sh", "-c", "sleep 36000"]
-        ports:
-        - containerPort: 8888
-          protocol: TCP
-        volumeMounts:
-        - name: workspace
-          mountPath: /workspace
-  # volumeClaimTemplates creates persistent storage for each sandbox.
-  # When used with SandboxWarmPool, PVCs are pre-provisioned with warm pods.
-  volumeClaimTemplates:
-  - metadata:
-      name: workspace
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      resources:
-        requests:
-          storage: 1Gi
-      # Uncomment to specify a StorageClass:
-      # storageClassName: standard
+  sandboxSpec:
+    podTemplate:
+      spec:
+        # This pod uses a non-root user and gVisor for runtime sandboxing.
+        #runtimeClassName: gvisor
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 3000
+          fsGroup: 2000
+          runAsNonRoot: true
+        containers:
+        - name: my-container
+          image: busybox
+          command: ["/bin/sh", "-c", "sleep 36000"]
+          ports:
+          - containerPort: 8888
+            protocol: TCP
+          volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+    # volumeClaimTemplates creates persistent storage for each sandbox.
+    # When used with SandboxWarmPool, PVCs are pre-provisioned with warm pods.
+    volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+        # Uncomment to specify a StorageClass:
+        # storageClassName: standard

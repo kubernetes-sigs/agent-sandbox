@@ -30,31 +30,32 @@ To use a volume, you need to add the `volumeClaimTemplates` array to your `Sandb
 Create a file named `sandbox-template-with-volume.yaml`:
 
 ```yaml
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: stateful-sandbox-template
 spec:
-  podTemplate:
-    spec:
-      containers:
-      - name: sandbox-agent
-        image: ubuntu:latest
-        command: ["sleep", "infinity"]
-        # 2. Reference the exact name of the volume claim here
-        volumeMounts:
-        - name: agent-data
-          mountPath: /data
-  # 1. Define the dynamic volume configuration here
-  volumeClaimTemplates:
-  - metadata:
-      name: agent-data
-    spec:
-      accessModes: 
-        - ReadWriteOnce
-      resources:
-        requests:
-          storage: 1Gi
+  sandboxSpec:
+    podTemplate:
+      spec:
+        containers:
+        - name: sandbox-agent
+          image: ubuntu:latest
+          command: ["sleep", "infinity"]
+          # 2. Reference the exact name of the volume claim here
+          volumeMounts:
+          - name: agent-data
+            mountPath: /data
+    # 1. Define the dynamic volume configuration here
+    volumeClaimTemplates:
+    - metadata:
+        name: agent-data
+      spec:
+        accessModes: 
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
 ```
 
 ### Apply the Template

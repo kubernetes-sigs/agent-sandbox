@@ -67,20 +67,21 @@ kind: SandboxTemplate
 metadata:
   name: ray-python-template
 spec:
-  podTemplate:
-    spec:
-      runtimeClassName: gvisor
-      containers:
-      - name: runtime
-        # UPDATE THIS TO YOUR ACTUAL PYTHON RUNTIME IMAGE URL
-        image: us-central1-docker.pkg.dev/your-project-id/agent-sandbox-repo/python-runtime-sandbox:latest
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 8888
-        resources:
-          requests:
-            cpu: "250m"
-            memory: "512Mi"
+  sandboxSpec:
+    podTemplate:
+      spec:
+        runtimeClassName: gvisor
+        containers:
+        - name: runtime
+          # UPDATE THIS TO YOUR ACTUAL PYTHON RUNTIME IMAGE URL
+          image: us-central1-docker.pkg.dev/your-project-id/agent-sandbox-repo/python-runtime-sandbox:latest
+          imagePullPolicy: Always
+          ports:
+          - containerPort: 8888
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
 ---
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool

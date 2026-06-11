@@ -41,8 +41,10 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	templateDefault := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
+				},
 			},
 		},
 	}

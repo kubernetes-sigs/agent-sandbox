@@ -433,8 +433,10 @@ func createTemplate(t *testing.T, tc *framework.TestContext, namespace, name str
 			Namespace: namespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{Spec: podSpec},
+			},
 			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
-			PodTemplate:             sandboxv1beta1.PodTemplate{Spec: podSpec},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))

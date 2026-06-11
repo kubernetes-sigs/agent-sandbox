@@ -125,6 +125,28 @@ type SandboxClaimSpec struct {
 	// +listType=atomic
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
+
+	// service overrides the template's service setting for the Sandbox created
+	// from this claim. When set, it takes precedence over the template's value.
+	// Because a pre-warmed Sandbox has already materialized its Service, setting
+	// this field means the Sandbox will always be cold-started from the template
+	// of the warmpool (same as env).
+	//nolint:kubeapilinter
+	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	// +optional
+	Service *bool `json:"service,omitempty"`
+
+	// volumeClaimTemplates overrides the template's volumeClaimTemplates for the
+	// Sandbox created from this claim. When non-empty, it replaces the template's
+	// list entirely. Every claim in this list must have at least one matching
+	// access mode with a provisioner volume.
+	// Because a pre-warmed Sandbox has already materialized its PVCs, setting this
+	// field means the Sandbox will always be cold-started from the template of the
+	// warmpool (same as env).
+	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
+	// +listType=atomic
+	// +optional
+	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

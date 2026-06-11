@@ -223,17 +223,18 @@ spec:
           - protocol: TCP
             port: 80
 
-  podTemplate:
-    spec:
-      # Custom networkPolicies disable the automatic "Secure-by-Default" DNS override.
-      # Since private subnets are blocked above, we must configure external public resolvers
-      # here so that the sandbox can resolve public Google API domains.
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-          - 8.8.8.8
-          - 1.1.1.1
-      # ... rest of the pod template spec (containers, volumes, etc.)
+  sandboxSpec:
+    podTemplate:
+      spec:
+        # Custom networkPolicies disable the automatic "Secure-by-Default" DNS override.
+        # Since private subnets are blocked above, we must configure external public resolvers
+        # here so that the sandbox can resolve public Google API domains.
+        dnsPolicy: None
+        dnsConfig:
+          nameservers:
+            - 8.8.8.8
+            - 1.1.1.1
+        # ... rest of the pod template spec (containers, volumes, etc.)
 ```
 
 

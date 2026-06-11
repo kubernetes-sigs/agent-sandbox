@@ -5,32 +5,33 @@ metadata:
   name: ${SANDBOX_TEMPLATE_NAME}
   namespace: ${SANDBOX_NAMESPACE}
 spec:
-  podTemplate:
-    spec:
-      # Optional: uncomment one of the lines below to enable sandbox isolation.
-      # runtimeClassName: gvisor      # gVisor (see examples/quickstart/gvisor.md)
-      # runtimeClassName: kata-qemu   # Kata Containers (see examples/quickstart/kata-containers.md)
-      containers:
-      - name: python-runtime
-        # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox
-        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
-        ports:
-        - containerPort: 8888
-        readinessProbe:
-          httpGet:
-            path: "/"
-            port: 8888
-          initialDelaySeconds: 0
-          periodSeconds: 1
-        livenessProbe:
-          httpGet:
-            path: "/"
-            port: 8888
-          initialDelaySeconds: 2
-          periodSeconds: 10
-        resources:
-          requests:
-            cpu: "250m"
-            memory: "512Mi"
-            ephemeral-storage: "512Mi"
-      restartPolicy: "OnFailure"
+  sandboxSpec:
+    podTemplate:
+      spec:
+        # Optional: uncomment one of the lines below to enable sandbox isolation.
+        # runtimeClassName: gvisor      # gVisor (see examples/quickstart/gvisor.md)
+        # runtimeClassName: kata-qemu   # Kata Containers (see examples/quickstart/kata-containers.md)
+        containers:
+        - name: python-runtime
+          # The test_client.py expects the image to be agent-sandbox/examples/python-runtime-sandbox
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+          ports:
+          - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: "/"
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 1
+          livenessProbe:
+            httpGet:
+              path: "/"
+              port: 8888
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"
+        restartPolicy: "OnFailure"

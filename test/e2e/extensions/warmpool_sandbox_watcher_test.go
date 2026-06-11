@@ -37,7 +37,7 @@ func newWarmPoolTemplate(namespace string) *extensionsv1beta1.SandboxTemplate {
 	template := &extensionsv1beta1.SandboxTemplate{}
 	template.Name = "test-template"
 	template.Namespace = namespace
-	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
+	template.Spec.SandboxSpec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{

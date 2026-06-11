@@ -155,7 +155,7 @@ func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolS
 	template := &extensionsv1beta1.SandboxTemplate{}
 	template.Name = "test-template"
 	template.Namespace = ns.Name
-	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
+	template.Spec.SandboxSpec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{Name: "pause", Image: "registry.k8s.io/pause:3.10"},

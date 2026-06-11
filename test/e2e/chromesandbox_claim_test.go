@@ -65,7 +65,7 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	template.Name = "chrome-template"
 	template.Namespace = ns.Name
 	imageName := chromeSandboxImageName()
-	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
+	template.Spec.SandboxSpec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{

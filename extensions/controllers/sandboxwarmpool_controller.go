@@ -322,9 +322,11 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 	return activeSandboxes, allErrors
 }
 
-// computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
+// computePodTemplateHash computes a hash of the sandbox template's embedded pod template.
+// Only the pod template participates in the warm-pool staleness check; changes to other
+// SandboxSpec fields (service, volumeClaimTemplates, lifecycle, ...) do not trigger a refresh.
 func computePodTemplateHash(template *extensionsv1beta1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.PodTemplate)
+	specJSON, err := json.Marshal(template.Spec.SandboxSpec.PodTemplate)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
 	}
@@ -362,23 +364,27 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 
 	// Copy template pod labels into sandbox pod template
 	podLabels := make(map[string]string)
-	maps.Copy(podLabels, template.Spec.PodTemplate.ObjectMeta.Labels)
+	maps.Copy(podLabels, template.Spec.SandboxSpec.PodTemplate.ObjectMeta.Labels)
 	// Propagate pool and template labels to pod template for consistency and targeting
 	podLabels[warmPoolSandboxLabel] = poolNameHash
 	podLabels[sandboxTemplateRefHash] = SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name)
 	podLabels[sandboxv1beta1.SandboxPodTemplateHashLabel] = currentPodTemplateHash
 
 	podAnnotations := make(map[string]string)
-	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
+	maps.Copy(podAnnotations, template.Spec.SandboxSpec.PodTemplate.ObjectMeta.Annotations)
 
 	// Respect the template's custom eviction annotation if explicitly specified.
 	// Only apply the default eviction behavior if the annotation is not defined.
-	if _, exists := template.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
+	if _, exists := template.Spec.SandboxSpec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
 		if r.EnableWarmPoolEviction {
 			podAnnotations[warmPoolEvictionAnnotation] = "true"
 		}
 	}
 
+	// Deep-copy the entire embedded SandboxSpec so every field (service,
+	// volumeClaimTemplates, lifecycle, operatingMode, and future fields) flows
+	// through automatically. We then overlay only the controller-managed pod
+	// metadata below.
 	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-", warmPool.Name),
@@ -386,24 +392,11 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 			Labels:       sandboxLabels,
 			Annotations:  sandboxAnnotations,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			Service: template.Spec.Service,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
-				ObjectMeta: sandboxv1beta1.PodMetadata{
-					Labels:      podLabels,
-					Annotations: podAnnotations,
-				},
-			},
-		},
+		Spec: *template.Spec.SandboxSpec.DeepCopy(),
 	}
-
-	// Copy volumeClaimTemplates from template to sandbox
-	if len(template.Spec.VolumeClaimTemplates) > 0 {
-		sandbox.Spec.VolumeClaimTemplates = make([]sandboxv1beta1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
-		for i, vct := range template.Spec.VolumeClaimTemplates {
-			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
-		}
+	sandbox.Spec.PodTemplate.ObjectMeta = sandboxv1beta1.PodMetadata{
+		Labels:      podLabels,
+		Annotations: podAnnotations,
 	}
 
 	// Apply secure defaults to the sandbox pod spec
@@ -549,7 +542,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 // normalizing for fields that the controller populates by default.
 func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *corev1.PodSpec) bool {
 	// Create what the sandbox SHOULD look like if it were created from the current template.
-	expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+	expectedSpec := template.Spec.SandboxSpec.PodTemplate.Spec.DeepCopy()
 	ApplySandboxSecureDefaults(template, expectedSpec)
 
 	// Compare the actual sandbox spec to the expected "perfect" spec.

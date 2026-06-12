@@ -164,6 +164,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   private readonly apiUrl: string | undefined;
   private readonly gatewayName: string | undefined;
   private readonly gatewayNamespace: string;
+  private readonly routerNamespace: string;
   private readonly serverPort: number;
   private readonly defaultSandboxReadyTimeout: number;
   private readonly gatewayReadyTimeout: number;
@@ -207,6 +208,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     for (const [key, value] of [
       ["namespace", options.namespace],
       ["gatewayNamespace", options.gatewayNamespace],
+      ["routerNamespace", options.routerNamespace],
     ] as [string, string | undefined][]) {
       if (value !== undefined && value.length === 0) {
         throw new SandboxError(`${key} must be a non-empty string`);
@@ -235,10 +237,11 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       }
     }
 
-    // DNS label validation for namespace and gatewayNamespace
+    // DNS label validation for namespace, gatewayNamespace, and routerNamespace
     for (const [key, value] of [
       ["namespace", options.namespace],
       ["gatewayNamespace", options.gatewayNamespace],
+      ["routerNamespace", options.routerNamespace],
     ] as [string, string | undefined][]) {
       if (value !== undefined && value.length > 0 && !isValidDNSLabel(value)) {
         throw new SandboxError(
@@ -263,6 +266,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     this.apiUrl = options.apiUrl;
     this.gatewayName = options.gatewayName;
     this.gatewayNamespace = options.gatewayNamespace ?? "default";
+    this.routerNamespace = options.routerNamespace ?? "agent-sandbox-system";
     this.serverPort = options.serverPort ?? 8888;
     this.defaultSandboxReadyTimeout = options.sandboxReadyTimeout ?? 180;
     this.gatewayReadyTimeout = options.gatewayReadyTimeout ?? 180;
@@ -382,6 +386,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       apiUrl: this.apiUrl,
       gatewayName: this.gatewayName,
       gatewayNamespace: this.gatewayNamespace,
+      routerNamespace: this.routerNamespace,
       gatewayReadyTimeout: this.gatewayReadyTimeout,
       portForwardReadyTimeout: this.portForwardReadyTimeout,
       perAttemptTimeoutMs: this.perAttemptTimeoutMs,
@@ -557,6 +562,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       apiUrl: this.apiUrl,
       gatewayName: this.gatewayName,
       gatewayNamespace: this.gatewayNamespace,
+      routerNamespace: this.routerNamespace,
       gatewayReadyTimeout: this.gatewayReadyTimeout,
       portForwardReadyTimeout: this.portForwardReadyTimeout,
       perAttemptTimeoutMs: this.perAttemptTimeoutMs,

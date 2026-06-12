@@ -1073,6 +1073,37 @@ describe("SandboxClient (registry)", () => {
     });
   });
 
+  describe("routerNamespace DNS label validation", () => {
+    it("throws SandboxError for routerNamespace with uppercase letters", () => {
+      expect(() => new SandboxClient({ routerNamespace: "Foo_bar" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for empty routerNamespace", () => {
+      expect(() => new SandboxClient({ routerNamespace: "" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("throws SandboxError for routerNamespace starting with hyphen", () => {
+      expect(() => new SandboxClient({ routerNamespace: "-bad-ns" })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it("accepts valid routerNamespace", () => {
+      expect(
+        () => new SandboxClient({ routerNamespace: "my-router-ns" }),
+      ).not.toThrow();
+    });
+
+    it("defaults to agent-sandbox-system when not specified", () => {
+      // Verify the default does not throw and the client is constructable
+      expect(() => new SandboxClient()).not.toThrow();
+    });
+  });
+
   describe("gatewayName DNS subdomain validation", () => {
     it("throws SandboxError for gatewayName with uppercase letters", () => {
       expect(() => new SandboxClient({ gatewayName: "MyGateway" })).toThrow(

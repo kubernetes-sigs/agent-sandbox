@@ -317,6 +317,7 @@ export interface SandboxInit {
   apiUrl?: string;
   gatewayName?: string;
   gatewayNamespace?: string;
+  routerNamespace?: string;
   gatewayReadyTimeout?: number;
   portForwardReadyTimeout?: number;
   perAttemptTimeoutMs?: number;
@@ -348,6 +349,7 @@ export class Sandbox {
   private readonly apiUrl: string | undefined;
   private readonly gatewayName: string | undefined;
   private readonly gatewayNamespace: string;
+  private readonly routerNamespace: string;
   private readonly gatewayReadyTimeout: number;
   private readonly portForwardReadyTimeout: number;
   private readonly perAttemptTimeoutMs: number;
@@ -370,6 +372,7 @@ export class Sandbox {
     this.apiUrl = init.apiUrl;
     this.gatewayName = init.gatewayName;
     this.gatewayNamespace = init.gatewayNamespace ?? "default";
+    this.routerNamespace = init.routerNamespace ?? "agent-sandbox-system";
     this.gatewayReadyTimeout = init.gatewayReadyTimeout ?? 180;
     this.portForwardReadyTimeout = init.portForwardReadyTimeout ?? 30;
     this.perAttemptTimeoutMs =
@@ -811,7 +814,13 @@ export class Sandbox {
 
       this.portForwardProcess = spawn(
         "kubectl",
-        ["port-forward", routerSvc, `${localPort}:8080`, "-n", this.namespace],
+        [
+          "port-forward",
+          routerSvc,
+          `${localPort}:8080`,
+          "-n",
+          this.routerNamespace,
+        ],
         { stdio: ["ignore", "pipe", "pipe"] },
       );
 

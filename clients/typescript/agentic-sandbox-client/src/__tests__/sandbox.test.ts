@@ -349,6 +349,56 @@ describe("Sandbox", () => {
       );
     });
 
+    it("tunnel mode: uses agent-sandbox-system as default routerNamespace", async () => {
+      const fakeProcess = {
+        exitCode: 1 as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn(),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProcess);
+
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 1 }),
+      );
+      await sandbox.connect().catch(() => {});
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        "kubectl",
+        expect.arrayContaining(["-n", "agent-sandbox-system"]),
+        expect.any(Object),
+      );
+    });
+
+    it("tunnel mode: uses specified routerNamespace in spawn args", async () => {
+      const fakeProcess = {
+        exitCode: 1 as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn(),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(fakeProcess);
+
+      const sandbox = new TestableSandbox(
+        createTestInit({
+          apiUrl: undefined,
+          portForwardReadyTimeout: 1,
+          routerNamespace: "my-router-ns",
+        }),
+      );
+      await sandbox.connect().catch(() => {});
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        "kubectl",
+        expect.arrayContaining(["-n", "my-router-ns"]),
+        expect.any(Object),
+      );
+    });
+
     it("gateway mode: wraps IPv6 address in brackets for baseUrl", async () => {
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         body: { status: { addresses: [{ value: "2001:db8::1" }] } },

@@ -30,6 +30,12 @@ export interface SandboxClientOptions {
    * the Go client's defaultPerAttemptTimeout.
    */
   perAttemptTimeoutMs?: number;
+  /**
+   * Namespace where the sandbox Router service (svc/sandbox-router-svc) is
+   * deployed. Used only in port-forward (local tunnel) mode.
+   * Defaults to "agent-sandbox-system".
+   */
+  routerNamespace?: string;
 }
 
 /**

@@ -40,6 +40,10 @@ const WARMPOOL_YAML_PATH = path.join(
   TEST_MANIFESTS_DIR,
   "sandbox-warmpool.yaml",
 );
+const COLDPOOL_YAML_PATH = path.join(
+  TEST_MANIFESTS_DIR,
+  "sandbox-coldpool.yaml",
+);
 
 // Project root is 4 levels up from test/e2e/clients/typescript/
 const PROJECT_ROOT = path.resolve(__dirname, "../../../..");
@@ -54,8 +58,8 @@ const GATEWAY_YAML_PATH = path.join(
 
 const GATEWAY_NAME = "kind-gateway";
 
-const TEMPLATE_NAME = "ts-sdk-test-template";
 const WARMPOOL_NAME = "ts-sdk-warmpool";
+const COLDPOOL_NAME = "ts-sdk-coldpool";
 
 function getImageTag(): string {
   return process.env["IMAGE_TAG"] ?? "latest";
@@ -133,6 +137,18 @@ async function deployWarmPool(
 }
 
 /**
+ * Deploys the cold pool (replicas: 0) for tests that provision sandboxes without pre-warmed slots.
+ */
+async function deployColdPool(
+  tc: TestContext,
+  namespace: string,
+): Promise<void> {
+  const manifest = fs.readFileSync(COLDPOOL_YAML_PATH, "utf-8");
+  tc.applyManifestText(manifest, namespace);
+  console.log("Coldpool manifest applied.");
+}
+
+/**
  * Runs basic SDK operations to validate functionality.
  */
 async function runSdkTests(sandbox: Sandbox): Promise<void> {
@@ -189,9 +205,10 @@ describe("TypeScript SDK E2E", () => {
   test("router mode (without warmpool)", async () => {
     deploySandboxTemplate(tc, namespace);
     await deployRouter(tc, namespace);
+    await deployColdPool(tc, namespace);
 
-    const client = new SandboxClient({ namespace });
-    const sandbox = await client.createSandbox(TEMPLATE_NAME);
+    const client = new SandboxClient({ namespace, routerNamespace: namespace });
+    const sandbox = await client.createSandbox(COLDPOOL_NAME);
 
     try {
       console.log("\n--- Running SDK tests without warmpool ---");
@@ -207,8 +224,8 @@ describe("TypeScript SDK E2E", () => {
     await deployRouter(tc, namespace);
     await deployWarmPool(tc, namespace);
 
-    const client = new SandboxClient({ namespace });
-    const sandbox = await client.createSandbox(TEMPLATE_NAME);
+    const client = new SandboxClient({ namespace, routerNamespace: namespace });
+    const sandbox = await client.createSandbox(WARMPOOL_NAME);
 
     try {
       console.log("\n--- Running SDK tests with warmpool ---");
@@ -222,6 +239,7 @@ describe("TypeScript SDK E2E", () => {
   test("gateway mode (without warmpool)", async () => {
     deploySandboxTemplate(tc, namespace);
     await deployRouter(tc, namespace);
+    await deployColdPool(tc, namespace);
     await deployGateway(tc, namespace);
 
     const client = new SandboxClient({
@@ -229,7 +247,7 @@ describe("TypeScript SDK E2E", () => {
       gatewayName: GATEWAY_NAME,
       gatewayNamespace: namespace,
     });
-    const sandbox = await client.createSandbox(TEMPLATE_NAME);
+    const sandbox = await client.createSandbox(COLDPOOL_NAME);
 
     try {
       console.log("\n--- Running SDK tests without warmpool ---");
@@ -251,7 +269,7 @@ describe("TypeScript SDK E2E", () => {
       gatewayName: GATEWAY_NAME,
       gatewayNamespace: namespace,
     });
-    const sandbox = await client.createSandbox(TEMPLATE_NAME);
+    const sandbox = await client.createSandbox(WARMPOOL_NAME);
 
     try {
       console.log("\n--- Running SDK tests with warmpool ---");

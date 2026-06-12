@@ -43,6 +43,7 @@ spec:
                 secretKeyRef:
                   name: coding-agent-hf-token
                   key: token
+                  optional: true
           volumeMounts:
             - name: models-cache
               mountPath: /models
@@ -58,11 +59,6 @@ spec:
           image: coding-agent:latest
           imagePullPolicy: Never # Comment this line out if using some container registry. This is intended for local run on Kind.
           env:
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: coding-agent-hf-token
-                  key: token
             - name: TRANSFORMERS_CACHE
               value: "/models"
             - name: HF_HOME

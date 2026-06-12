@@ -11,7 +11,10 @@ tool (
 	sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter
 )
 
-require k8s.io/klog/v2 v2.140.0
+require (
+	github.com/gofrs/flock v0.13.0
+	k8s.io/klog/v2 v2.140.0
+)
 
 require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect
@@ -90,7 +93,6 @@ require (
 	github.com/go-xmlfmt/xmlfmt v1.1.3 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/godoc-lint/godoc-lint v0.11.2 // indirect
-	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/golangci/asciicheck v0.5.0 // indirect
 	github.com/golangci/dupl v0.0.0-20250308024227-f665c8d69b32 // indirect
 	github.com/golangci/go-printf-func-name v0.1.1 // indirect

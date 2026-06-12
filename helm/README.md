@@ -51,6 +51,17 @@ helm upgrade agent-sandbox ./helm/ \
 > kubectl apply -f helm/crds/
 > ```
 
+### v1alpha1 → v1beta1 storage migration
+
+Upgrades to chart versions that move CRDs from `v1alpha1` to `v1beta1` ship two automated Helm hook Jobs that handle the migration end-to-end:
+
+- **Pre-upgrade** Job (`agent-sandbox-migration-bootstrap`) scans every existing `SandboxClaim` and, for each unique template referenced by a cold-start claim, creates a `shadow-pool-<template>` `SandboxWarmPool` (replicas=0) in that claim's namespace. Warm-started claims are left alone (the conversion webhook derives their `warmPoolRef` from the bound `Sandbox`).
+- **Post-upgrade** Job (`agent-sandbox-migration-rewrite`) patches every existing `Sandbox`, `SandboxClaim`, `SandboxTemplate`, and `SandboxWarmPool` to force the API server to rewrite each resource in v1beta1 storage format, eliminating stale v1alpha1 records from etcd.
+
+Both Jobs run the same idempotent script bundled in the chart's ConfigMap. The same script is exposed at `dev/tools/migrate.sh` (a wrapper) for manual operator use. See [`docs/api-migration-guide.md`](../docs/api-migration-guide.md) for full operational details, including how to opt out of the automated Jobs (`--set migration.enabled=false`) and run the script manually.
+
+Fresh `helm install` runs never trigger migration — there is no v1alpha1 data to convert.
+
 ## Uninstallation
 
 ```bash
@@ -101,3 +112,7 @@ The following table lists the configurable parameters and their defaults.
 | `containerSecurityContext` | Container `securityContext` for the controller; only rendered when set | `null` |
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
 | `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
+| `migration.enabled` | Run v1alpha1 → v1beta1 pre/post-upgrade Jobs. See [v1alpha1 → v1beta1 storage migration](#v1alpha1--v1beta1-storage-migration). Set false to opt out and run `dev/tools/migrate.sh` manually | `true` |
+| `migration.image` | Image used by the migration Jobs. Must have `bash` + `kubectl` available | `bitnami/kubectl:1.30` |
+| `migration.resources` | CPU/memory requests and limits for the migration Job pods | `{requests: {cpu: 100m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}` |
+| `migration.webhookServiceName` | Name of the conversion webhook Service the post-upgrade Job waits for before starting the storage rewrite | `agent-sandbox-webhook-service` |

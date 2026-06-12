@@ -1,0 +1,64 @@
+{{/*
+  Pre-upgrade Job that scans v1alpha1 SandboxClaims and creates per-claim
+  shadow SandboxWarmPools (replicas=0) so the conversion webhook has a
+  valid warmPoolRef target when it converts each claim to v1beta1.
+
+  Runs BEFORE the new CRDs and controller are applied, so it operates on
+  the previous-version v1alpha1 API. Script is idempotent — safe to retry
+  on failure (Helm will, up to backoffLimit).
+*/}}
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-sandbox-migration-bootstrap
+  namespace: {{ include "agent-sandbox.namespace" . }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "agent-sandbox.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: agent-sandbox-migration
+      restartPolicy: OnFailure
+      # Restricted Pod Security Admission requires runAsNonRoot and a
+      # non-Unconfined seccompProfile at pod-level (or via every container);
+      # set both here so Jobs are accepted under "restricted" out of the box.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: {{ .Values.migration.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - /bin/bash
+            - /scripts/migrate.sh
+            - --phase=bootstrap
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: agent-sandbox-migration
+            defaultMode: 0755
+{{- end }}

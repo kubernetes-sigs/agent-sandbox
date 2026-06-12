@@ -1,0 +1,118 @@
+{{/*
+  RBAC for the v1alpha1 -> v1beta1 migration Jobs.
+
+  One ServiceAccount used by both Jobs (bootstrap + rewrite), two
+  cluster-scoped Roles with the minimum permissions each phase needs:
+
+    bootstrap: read SandboxClaims (to discover what shadow pools are
+               needed) and create SandboxWarmPools (to mint them). Does
+               not need delete/patch.
+
+    rewrite:   read + patch all four migrated CRDs. Patch is the operation
+               that forces the API server to rewrite each resource in the
+               v1beta1 storage format.
+
+  Same hook annotations as the ConfigMap so the SA/Roles/Bindings exist
+  whenever either phase Job runs.
+*/}}
+{{- if .Values.migration.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-sandbox-migration
+  namespace: {{ include "agent-sandbox.namespace" . }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-sandbox-migration-bootstrap
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-sandbox-migration-rewrite
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["get", "list", "patch"]
+  # The post-upgrade rewrite Job's wait-for-webhook initContainer reads
+  # the conversion webhook's Endpoints object to know when the webhook
+  # is reachable. Without this, kubectl get endpoints is RBAC-forbidden,
+  # the readiness loop never succeeds, and the rewrite Job times out
+  # on every Helm upgrade.
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get"]
+  # endpoints is being deprecated in favor of endpointslices; granting
+  # both lets us switch the readiness check to endpointslices later
+  # without another RBAC change.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-sandbox-migration-bootstrap
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: agent-sandbox-migration
+    namespace: {{ include "agent-sandbox.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-sandbox-migration-bootstrap
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-sandbox-migration-rewrite
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: agent-sandbox-migration
+    namespace: {{ include "agent-sandbox.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-sandbox-migration-rewrite
+{{- end }}

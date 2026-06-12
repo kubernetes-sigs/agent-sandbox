@@ -80,3 +80,42 @@ podSecurityContext: null
 #   seccompProfile:
 #     type: RuntimeDefault
 containerSecurityContext: null
+
+# migration controls the v1alpha1 -> v1beta1 upgrade hooks (bootstrap +
+# storage rewrite). Set enabled: false on fresh installs and clusters that
+# have already been migrated, to skip the Jobs entirely.
+#
+# The Jobs run only at `helm upgrade` time (NOT on initial install), so a
+# `helm install` of this chart never triggers migration regardless of this
+# setting. The setting exists so operators can also opt out of migration
+# during an upgrade (e.g., to run dev/tools/migrate.sh manually instead).
+migration:
+  enabled: true
+
+  # Container image used by both the bootstrap and rewrite Jobs. Needs
+  # bash + kubectl. bitnami/kubectl bundles both, but note Bitnami
+  # restricted their public Docker Hub catalog in 2025 - if your registry
+  # policy or rate-limiting blocks docker.io, mirror this image into a
+  # registry you control, or substitute a minimal kubectl+bash image of
+  # your own (registry.k8s.io/kubectl is distroless and lacks bash, so
+  # cannot be used as a drop-in). For reproducibility under upgrades,
+  # pin by digest:
+  #   image: bitnami/kubectl@sha256:<digest>
+  image: bitnami/kubectl:1.30
+
+  # Resource requests/limits for the migration Job pods. Defaults are
+  # conservative; bump if you have very large clusters (thousands of
+  # SandboxClaims) and the script needs more memory.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Name of the conversion webhook Service the post-upgrade Job waits for
+  # before starting the storage rewrite. Override if your install uses a
+  # non-default webhook Service name (e.g. a multi-tenant install with a
+  # renamed webhook).
+  webhookServiceName: agent-sandbox-webhook-service

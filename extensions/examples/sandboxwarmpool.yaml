@@ -5,7 +5,7 @@ metadata:
 spec:
   updateStrategy:
     type: Recreate
-  replicas: 1
+  # replicas is optional; defaults to 1 when omitted. Set explicitly to 0 for an empty pool.
   sandboxTemplateRef:
     # This name must exactly match the 'metadata.name' of your SandboxTemplate.
     name: secure-datascience-template

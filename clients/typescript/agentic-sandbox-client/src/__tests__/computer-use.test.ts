@@ -30,21 +30,23 @@ const {
 // ---------- mock: @kubernetes/client-node ----------
 
 vi.mock("@kubernetes/client-node", () => {
-  const KubeConfig = vi.fn().mockImplementation(() => ({
-    loadFromDefault: vi.fn(),
-    clusters: [{ name: "test-cluster" }],
-    makeApiClient: vi.fn().mockReturnValue({
-      createNamespacedCustomObject: mockCreateNamespacedCustomObject,
-      deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
-      listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
-    }),
-  }));
+  const KubeConfig = vi.fn().mockImplementation(function () {
+    return {
+      loadFromDefault: vi.fn(),
+      clusters: [{ name: "test-cluster" }],
+      makeApiClient: vi.fn().mockReturnValue({
+        createNamespacedCustomObject: mockCreateNamespacedCustomObject,
+        deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+        listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
+      }),
+    };
+  });
 
   const CustomObjectsApi = vi.fn();
 
-  const Watch = vi.fn().mockImplementation(() => ({
-    watch: mockWatchFn,
-  }));
+  const Watch = vi.fn().mockImplementation(function () {
+    return { watch: mockWatchFn };
+  });
 
   return { KubeConfig, CustomObjectsApi, Watch };
 });

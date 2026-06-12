@@ -36,22 +36,24 @@ const {
 
 vi.mock("@kubernetes/client-node", () => {
   // Set the default implementation on MockKubeConfig (exposed via hoisted for per-test override)
-  MockKubeConfig.mockImplementation(() => ({
-    loadFromDefault: vi.fn(),
-    clusters: [{ name: "test-cluster" }],
-    makeApiClient: vi.fn().mockReturnValue({
-      createNamespacedCustomObject: mockCreateNamespacedCustomObject,
-      deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
-      getNamespacedCustomObject: mockGetNamespacedCustomObject,
-      listNamespacedCustomObject: mockListNamespacedCustomObject,
-    }),
-  }));
+  MockKubeConfig.mockImplementation(function () {
+    return {
+      loadFromDefault: vi.fn(),
+      clusters: [{ name: "test-cluster" }],
+      makeApiClient: vi.fn().mockReturnValue({
+        createNamespacedCustomObject: mockCreateNamespacedCustomObject,
+        deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+        getNamespacedCustomObject: mockGetNamespacedCustomObject,
+        listNamespacedCustomObject: mockListNamespacedCustomObject,
+      }),
+    };
+  });
 
   const CustomObjectsApi = vi.fn();
 
-  const Watch = vi.fn().mockImplementation(() => ({
-    watch: mockWatchFn,
-  }));
+  const Watch = vi.fn().mockImplementation(function () {
+    return { watch: mockWatchFn };
+  });
 
   return { KubeConfig: MockKubeConfig, CustomObjectsApi, Watch };
 });
@@ -992,29 +994,35 @@ describe("SandboxClient (registry)", () => {
 
   describe("KubeConfig validation", () => {
     it("throws SandboxError when clusters array is empty", () => {
-      MockKubeConfig.mockImplementationOnce(() => ({
-        loadFromDefault: vi.fn(),
-        clusters: [], // empty → no kubeconfig configured
-        makeApiClient: vi.fn(),
-      }));
+      MockKubeConfig.mockImplementationOnce(function () {
+        return {
+          loadFromDefault: vi.fn(),
+          clusters: [], // empty → no kubeconfig configured
+          makeApiClient: vi.fn(),
+        };
+      });
       expect(() => new SandboxClient()).toThrow(SandboxError);
     });
 
     it("throws SandboxError when clusters is undefined", () => {
-      MockKubeConfig.mockImplementationOnce(() => ({
-        loadFromDefault: vi.fn(),
-        clusters: undefined, // undefined → no kubeconfig configured
-        makeApiClient: vi.fn(),
-      }));
+      MockKubeConfig.mockImplementationOnce(function () {
+        return {
+          loadFromDefault: vi.fn(),
+          clusters: undefined, // undefined → no kubeconfig configured
+          makeApiClient: vi.fn(),
+        };
+      });
       expect(() => new SandboxClient()).toThrow(SandboxError);
     });
 
     it("throws SandboxError when only cluster is localhost:8080 (loadFromDefault fallback)", () => {
-      MockKubeConfig.mockImplementationOnce(() => ({
-        loadFromDefault: vi.fn(),
-        clusters: [{ name: "in-cluster", server: "http://localhost:8080" }],
-        makeApiClient: vi.fn(),
-      }));
+      MockKubeConfig.mockImplementationOnce(function () {
+        return {
+          loadFromDefault: vi.fn(),
+          clusters: [{ name: "in-cluster", server: "http://localhost:8080" }],
+          makeApiClient: vi.fn(),
+        };
+      });
       expect(() => new SandboxClient()).toThrow(SandboxError);
     });
   });

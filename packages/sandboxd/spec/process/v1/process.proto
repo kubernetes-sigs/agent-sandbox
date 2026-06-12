@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package sandboxd.process.v1;
+package process.v1;
 
 import "google/protobuf/empty.proto";
 
@@ -68,7 +68,10 @@ message ExecuteResponse {
 
 message WriteStdinRequest {
   int32 process_id = 1;
-  bytes input = 2;
+  oneof payload {
+    bytes input = 2;
+    google.protobuf.Empty eof = 3;
+  }
 }
 
 message SendSignalRequest {

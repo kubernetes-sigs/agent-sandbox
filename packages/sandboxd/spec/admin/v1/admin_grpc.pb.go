@@ -16,7 +16,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v3.21.12
-// source: admin/admin.proto
+// source: admin/v1/admin.proto
 
 package admin
 
@@ -34,8 +34,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Admin_Setup_FullMethodName = "/sandboxd.admin.v1.Admin/Setup"
-	Admin_Clean_FullMethodName = "/sandboxd.admin.v1.Admin/Clean"
+	Admin_Setup_FullMethodName = "/admin.v1.Admin/Setup"
+	Admin_Clean_FullMethodName = "/admin.v1.Admin/Clean"
 )
 
 // AdminClient is the client API for Admin service.
@@ -157,7 +157,7 @@ func _Admin_Clean_Handler(srv interface{}, ctx context.Context, dec func(interfa
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Admin_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "sandboxd.admin.v1.Admin",
+	ServiceName: "admin.v1.Admin",
 	HandlerType: (*AdminServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -170,5 +170,5 @@ var Admin_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "admin/admin.proto",
+	Metadata: "admin/v1/admin.proto",
 }

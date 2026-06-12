@@ -43,6 +43,12 @@ spec:
         env:
         - name: PROXY_TIMEOUT_SECONDS
           value: "180"
+        - name: WEBSOCKET_IDLE_TIMEOUT_SECONDS
+          value: "3600"
+        - name: WEBSOCKET_MAX_LIFETIME_SECONDS
+          value: "86400"
+        - name: WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT
+          value: "64"
         - name: ALLOW_UNAUTHENTICATED_ROUTER
           value: "false"
         # - name: ROUTER_AUTH_TOKEN

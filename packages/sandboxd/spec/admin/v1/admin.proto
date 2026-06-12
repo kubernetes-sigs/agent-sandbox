@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package admin.v1;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/admin;admin";
+option java_multiple_files = true;
+option java_package = "io.sandboxd.packages.sandboxd.spec.admin";
+
+service Admin {
+  rpc Setup(SetupRequest) returns (google.protobuf.Empty);
+  rpc Clean(CleanRequest) returns (google.protobuf.Empty);
+}
+
+message SetupRequest {
+  string rootfs_url = 1;
+}
+
+message CleanRequest {
+}

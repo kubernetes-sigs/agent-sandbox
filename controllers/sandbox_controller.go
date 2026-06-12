@@ -205,6 +205,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
 	} else {
 		err = r.reconcileChildResources(ctx, sandbox)
+		if k8serrors.IsInvalid(err) {
+			logger.Info("Suppressing invalid spec error, sandbox status reflects the failure", "error", err.Error())
+			err = nil
+		}
 		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
 		result.RequeueAfter = requeueAfter
 		if expiredAfterReconcile {

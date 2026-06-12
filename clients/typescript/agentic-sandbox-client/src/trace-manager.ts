@@ -1,0 +1,246 @@
+// Copyright 2025 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+interface Span {
+  isRecording(): boolean;
+  setAttribute(key: string, value: string | number | boolean): void;
+  recordException(exception: unknown): void;
+  setStatus(status: { code: number; message?: string }): void;
+  end(): void;
+}
+
+interface Tracer {
+  startSpan(name: string): Span;
+  startActiveSpan<T>(name: string, fn: (span: Span) => T): T;
+}
+
+interface OtelApi {
+  SpanStatusCode: { ERROR: number };
+  trace: {
+    getTracer(name: string): Tracer;
+    setSpanInContext(span: Span, ctx: unknown): unknown;
+    getSpan(ctx: unknown): Span | undefined;
+  };
+  context: {
+    active(): unknown;
+    with<T>(ctx: unknown, fn: () => T): T;
+    bind<T extends (...args: unknown[]) => unknown>(ctx: unknown, fn: T): T;
+  };
+  propagation: {
+    inject(ctx: unknown, carrier: Record<string, string>): void;
+  };
+}
+
+class NoOpSpan implements Span {
+  isRecording(): boolean {
+    return false;
+  }
+  setAttribute(_key: string, _value: string | number | boolean): void {}
+  recordException(_exception: unknown): void {}
+  setStatus(_status: { code: number; message?: string }): void {}
+  end(): void {}
+}
+
+class NoOpTracer implements Tracer {
+  startSpan(_name: string): Span {
+    return new NoOpSpan();
+  }
+  startActiveSpan<T>(_name: string, fn: (span: Span) => T): T {
+    return fn(new NoOpSpan());
+  }
+}
+
+let otelApi: OtelApi | null = null;
+let otelLoaded = false;
+
+async function loadOtel(): Promise<OtelApi | null> {
+  if (otelLoaded) return otelApi;
+  otelLoaded = true;
+  try {
+    const api = await import("@opentelemetry/api");
+    otelApi = {
+      SpanStatusCode:
+        api.SpanStatusCode as unknown as OtelApi["SpanStatusCode"],
+      trace: api.trace as unknown as OtelApi["trace"],
+      context: api.context as unknown as OtelApi["context"],
+      propagation: api.propagation as unknown as OtelApi["propagation"],
+    };
+    return otelApi;
+  } catch {
+    return null;
+  }
+}
+
+let tracerProviderInitialized = false;
+let tracerProviderServiceName: string | null = null;
+
+export async function initializeTracer(serviceName: string): Promise<void> {
+  const api = await loadOtel();
+  if (!api) {
+    console.error(
+      "OpenTelemetry not installed; skipping tracer initialization.",
+    );
+    return;
+  }
+
+  if (tracerProviderInitialized) {
+    if (
+      tracerProviderServiceName &&
+      tracerProviderServiceName !== serviceName
+    ) {
+      console.warn(
+        `Global TracerProvider already initialized with service name '${tracerProviderServiceName}'. ` +
+          `Ignoring request to initialize with '${serviceName}'.`,
+      );
+    }
+    return;
+  }
+
+  try {
+    // @ts-expect-error -- optional peer dependency resolved at runtime
+    const sdkTraceNode = await import("@opentelemetry/sdk-trace-node");
+    // @ts-expect-error -- optional peer dependency resolved at runtime
+    const resources = await import("@opentelemetry/resources");
+    // @ts-expect-error -- optional peer dependency resolved at runtime
+    const sdkTraceBase = await import("@opentelemetry/sdk-trace-base");
+    const exporterOtlpGrpc = await import(
+      // @ts-expect-error -- optional peer dependency resolved at runtime
+      "@opentelemetry/exporter-trace-otlp-grpc"
+    );
+
+    const Resource = resources.Resource as new (
+      attrs: Record<string, string>,
+    ) => unknown;
+    const NodeTracerProvider = sdkTraceNode.NodeTracerProvider as new (opts: {
+      resource: unknown;
+    }) => {
+      addSpanProcessor(processor: unknown): void;
+      register(): void;
+      shutdown(): Promise<void>;
+    };
+    const BatchSpanProcessor = sdkTraceBase.BatchSpanProcessor as new (
+      exporter: unknown,
+    ) => unknown;
+    const OTLPTraceExporter =
+      exporterOtlpGrpc.OTLPTraceExporter as new () => unknown;
+
+    const resource = new Resource({ "service.name": serviceName });
+    const provider = new NodeTracerProvider({ resource });
+    provider.addSpanProcessor(new BatchSpanProcessor(new OTLPTraceExporter()));
+    provider.register();
+
+    // Register shutdown hook to flush BatchSpanProcessor on process exit.
+    // Analogous to Python's atexit.register(_TRACER_PROVIDER.shutdown).
+    process.once("beforeExit", async () => {
+      await provider.shutdown();
+    });
+
+    tracerProviderInitialized = true;
+    tracerProviderServiceName = serviceName;
+    console.info(
+      `Global OpenTelemetry TracerProvider configured for service '${serviceName}'.`,
+    );
+  } catch {
+    console.warn(
+      "OpenTelemetry SDK packages not installed; tracer provider not configured. " +
+        "Tracing spans will use the default no-op provider.",
+    );
+  }
+}
+
+function recordSpanError(span: Span, err: unknown): void {
+  span.recordException(err);
+  const message = err instanceof Error ? err.message : String(err);
+  span.setStatus({ code: otelApi?.SpanStatusCode.ERROR ?? 2, message });
+}
+
+export async function withSpan<T>(
+  tracer: Tracer | null,
+  serviceName: string,
+  spanSuffix: string,
+  fn: (span: Span) => T | Promise<T>,
+  parentContext?: unknown,
+): Promise<T> {
+  if (!tracer) {
+    return fn(new NoOpSpan());
+  }
+  const spanName = `${serviceName}.${spanSuffix}`;
+  const startSpan = () =>
+    tracer.startActiveSpan(spanName, async (span) => {
+      try {
+        return await fn(span);
+      } catch (err) {
+        recordSpanError(span, err);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
+
+  if (otelApi && parentContext != null) {
+    return await otelApi.context.with(parentContext, startSpan);
+  }
+  return startSpan();
+}
+
+export function getCurrentSpan(): Span {
+  if (!otelApi) return new NoOpSpan();
+  const span = otelApi.trace.getSpan(otelApi.context.active());
+  return span ?? new NoOpSpan();
+}
+
+export class TracerManager {
+  public tracer: Tracer;
+  public parentContext: unknown = null;
+  private lifecycleSpanName: string;
+  private parentSpan: Span | null = null;
+
+  constructor(serviceName: string) {
+    const scopeName = serviceName.replace(/-/g, "_");
+    if (otelApi) {
+      this.tracer = otelApi.trace.getTracer(scopeName);
+    } else {
+      this.tracer = new NoOpTracer();
+    }
+    this.lifecycleSpanName = `${serviceName}.lifecycle`;
+  }
+
+  startLifecycleSpan(): void {
+    this.parentSpan = this.tracer.startSpan(this.lifecycleSpanName);
+    if (otelApi && this.parentSpan) {
+      this.parentContext = otelApi.trace.setSpanInContext(
+        this.parentSpan,
+        otelApi.context.active(),
+      );
+    }
+  }
+
+  endLifecycleSpan(): void {
+    if (this.parentSpan) {
+      this.parentSpan.end();
+      this.parentSpan = null;
+    }
+    this.parentContext = null;
+  }
+
+  getTraceContextJson(): string {
+    if (!otelApi || !this.parentContext) return "";
+    const carrier: Record<string, string> = {};
+    otelApi.propagation.inject(this.parentContext, carrier);
+    return Object.keys(carrier).length > 0 ? JSON.stringify(carrier) : "";
+  }
+}
+
+export type { Span, Tracer };
+export { NoOpSpan, NoOpTracer };

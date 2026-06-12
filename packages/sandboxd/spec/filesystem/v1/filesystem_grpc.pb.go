@@ -16,7 +16,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v3.21.12
-// source: filesystem/filesystem.proto
+// source: filesystem/v1/filesystem.proto
 
 package filesystem
 
@@ -34,12 +34,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Filesystem_WriteFile_FullMethodName = "/sandboxd.filesystem.v1.Filesystem/WriteFile"
-	Filesystem_ReadFile_FullMethodName  = "/sandboxd.filesystem.v1.Filesystem/ReadFile"
-	Filesystem_ListFiles_FullMethodName = "/sandboxd.filesystem.v1.Filesystem/ListFiles"
-	Filesystem_StatFile_FullMethodName  = "/sandboxd.filesystem.v1.Filesystem/StatFile"
-	Filesystem_MakeDir_FullMethodName   = "/sandboxd.filesystem.v1.Filesystem/MakeDir"
-	Filesystem_Remove_FullMethodName    = "/sandboxd.filesystem.v1.Filesystem/Remove"
+	Filesystem_WriteFile_FullMethodName = "/filesystem.v1.Filesystem/WriteFile"
+	Filesystem_ReadFile_FullMethodName  = "/filesystem.v1.Filesystem/ReadFile"
+	Filesystem_ListFiles_FullMethodName = "/filesystem.v1.Filesystem/ListFiles"
+	Filesystem_StatFile_FullMethodName  = "/filesystem.v1.Filesystem/StatFile"
+	Filesystem_MakeDir_FullMethodName   = "/filesystem.v1.Filesystem/MakeDir"
+	Filesystem_Remove_FullMethodName    = "/filesystem.v1.Filesystem/Remove"
 )
 
 // FilesystemClient is the client API for Filesystem service.
@@ -287,7 +287,7 @@ func _Filesystem_Remove_Handler(srv interface{}, ctx context.Context, dec func(i
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Filesystem_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "sandboxd.filesystem.v1.Filesystem",
+	ServiceName: "filesystem.v1.Filesystem",
 	HandlerType: (*FilesystemServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -319,5 +319,5 @@ var Filesystem_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "filesystem/filesystem.proto",
+	Metadata: "filesystem/v1/filesystem.proto",
 }

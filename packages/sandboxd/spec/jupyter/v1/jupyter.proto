@@ -1,10 +1,18 @@
 syntax = "proto3";
 
-package sandboxd.jupyter.v1;
+package jupyter.v1;
 
 option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/jupyter;jupyter";
 option java_multiple_files = true;
 option java_package = "io.sandboxd.packages.sandboxd.spec.jupyter";
+
+enum KernelStatus {
+  KERNEL_STATUS_UNSPECIFIED = 0;
+  KERNEL_STATUS_STARTING = 1;
+  KERNEL_STATUS_IDLE = 2;
+  KERNEL_STATUS_BUSY = 3;
+  KERNEL_STATUS_ERROR = 4;
+}
 
 service Jupyter {
   rpc CreateSession(CreateJupyterSessionRequest) returns (JupyterSession);
@@ -17,7 +25,7 @@ message CreateJupyterSessionRequest {
 
 message JupyterSession {
   string session_id = 1;
-  string status = 2;
+  KernelStatus status = 2;
 }
 
 message ExecuteJupyterCodeRequest {
@@ -25,11 +33,21 @@ message ExecuteJupyterCodeRequest {
   string code = 2;
 }
 
-message ExecuteJupyterCodeResponse {
+message StreamEvent {
+  string stdout = 1;
+  string stderr = 2;
+}
+
+message StatusEvent {
   string status = 1;
-  string stdout = 2;
-  string stderr = 3;
-  JupyterOutput output = 4;
+}
+
+message ExecuteJupyterCodeResponse {
+  oneof event {
+    StreamEvent stream = 1;
+    JupyterOutput output = 2;
+    StatusEvent status = 3;
+  }
 }
 
 message JupyterOutput {

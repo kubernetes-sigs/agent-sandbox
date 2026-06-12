@@ -16,7 +16,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v3.21.12
-// source: jupyter/jupyter.proto
+// source: jupyter/v1/jupyter.proto
 
 package jupyter
 
@@ -33,8 +33,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Jupyter_CreateSession_FullMethodName = "/sandboxd.jupyter.v1.Jupyter/CreateSession"
-	Jupyter_ExecuteCode_FullMethodName   = "/sandboxd.jupyter.v1.Jupyter/ExecuteCode"
+	Jupyter_CreateSession_FullMethodName = "/jupyter.v1.Jupyter/CreateSession"
+	Jupyter_ExecuteCode_FullMethodName   = "/jupyter.v1.Jupyter/ExecuteCode"
 )
 
 // JupyterClient is the client API for Jupyter service.
@@ -158,7 +158,7 @@ type Jupyter_ExecuteCodeServer = grpc.ServerStreamingServer[ExecuteJupyterCodeRe
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Jupyter_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "sandboxd.jupyter.v1.Jupyter",
+	ServiceName: "jupyter.v1.Jupyter",
 	HandlerType: (*JupyterServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -173,5 +173,5 @@ var Jupyter_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "jupyter/jupyter.proto",
+	Metadata: "jupyter/v1/jupyter.proto",
 }

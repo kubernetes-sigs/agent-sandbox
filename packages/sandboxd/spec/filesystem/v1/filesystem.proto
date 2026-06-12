@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package sandboxd.filesystem.v1;
+package filesystem.v1;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";

@@ -16,7 +16,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v3.21.12
-// source: admin/admin.proto
+// source: admin/v1/admin.proto
 
 package admin
 
@@ -45,7 +45,7 @@ type SetupRequest struct {
 
 func (x *SetupRequest) Reset() {
 	*x = SetupRequest{}
-	mi := &file_admin_admin_proto_msgTypes[0]
+	mi := &file_admin_v1_admin_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -57,7 +57,7 @@ func (x *SetupRequest) String() string {
 func (*SetupRequest) ProtoMessage() {}
 
 func (x *SetupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_admin_admin_proto_msgTypes[0]
+	mi := &file_admin_v1_admin_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -70,7 +70,7 @@ func (x *SetupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetupRequest.ProtoReflect.Descriptor instead.
 func (*SetupRequest) Descriptor() ([]byte, []int) {
-	return file_admin_admin_proto_rawDescGZIP(), []int{0}
+	return file_admin_v1_admin_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *SetupRequest) GetRootfsUrl() string {
@@ -88,7 +88,7 @@ type CleanRequest struct {
 
 func (x *CleanRequest) Reset() {
 	*x = CleanRequest{}
-	mi := &file_admin_admin_proto_msgTypes[1]
+	mi := &file_admin_v1_admin_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -100,7 +100,7 @@ func (x *CleanRequest) String() string {
 func (*CleanRequest) ProtoMessage() {}
 
 func (x *CleanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_admin_admin_proto_msgTypes[1]
+	mi := &file_admin_v1_admin_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -113,46 +113,46 @@ func (x *CleanRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanRequest.ProtoReflect.Descriptor instead.
 func (*CleanRequest) Descriptor() ([]byte, []int) {
-	return file_admin_admin_proto_rawDescGZIP(), []int{1}
+	return file_admin_v1_admin_proto_rawDescGZIP(), []int{1}
 }
 
-var File_admin_admin_proto protoreflect.FileDescriptor
+var File_admin_v1_admin_proto protoreflect.FileDescriptor
 
-const file_admin_admin_proto_rawDesc = "" +
+const file_admin_v1_admin_proto_rawDesc = "" +
 	"\n" +
-	"\x11admin/admin.proto\x12\x11sandboxd.admin.v1\x1a\x1bgoogle/protobuf/empty.proto\"-\n" +
+	"\x14admin/v1/admin.proto\x12\badmin.v1\x1a\x1bgoogle/protobuf/empty.proto\"-\n" +
 	"\fSetupRequest\x12\x1d\n" +
 	"\n" +
 	"rootfs_url\x18\x01 \x01(\tR\trootfsUrl\"\x0e\n" +
-	"\fCleanRequest2\x8b\x01\n" +
-	"\x05Admin\x12@\n" +
-	"\x05Setup\x12\x1f.sandboxd.admin.v1.SetupRequest\x1a\x16.google.protobuf.Empty\x12@\n" +
-	"\x05Clean\x12\x1f.sandboxd.admin.v1.CleanRequest\x1a\x16.google.protobuf.EmptyBj\n" +
+	"\fCleanRequest2y\n" +
+	"\x05Admin\x127\n" +
+	"\x05Setup\x12\x16.admin.v1.SetupRequest\x1a\x16.google.protobuf.Empty\x127\n" +
+	"\x05Clean\x12\x16.admin.v1.CleanRequest\x1a\x16.google.protobuf.EmptyBj\n" +
 	"(io.sandboxd.packages.sandboxd.spec.adminP\x01Z<sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/admin;adminb\x06proto3"
 
 var (
-	file_admin_admin_proto_rawDescOnce sync.Once
-	file_admin_admin_proto_rawDescData []byte
+	file_admin_v1_admin_proto_rawDescOnce sync.Once
+	file_admin_v1_admin_proto_rawDescData []byte
 )
 
-func file_admin_admin_proto_rawDescGZIP() []byte {
-	file_admin_admin_proto_rawDescOnce.Do(func() {
-		file_admin_admin_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_admin_admin_proto_rawDesc), len(file_admin_admin_proto_rawDesc)))
+func file_admin_v1_admin_proto_rawDescGZIP() []byte {
+	file_admin_v1_admin_proto_rawDescOnce.Do(func() {
+		file_admin_v1_admin_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_admin_v1_admin_proto_rawDesc), len(file_admin_v1_admin_proto_rawDesc)))
 	})
-	return file_admin_admin_proto_rawDescData
+	return file_admin_v1_admin_proto_rawDescData
 }
 
-var file_admin_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
-var file_admin_admin_proto_goTypes = []any{
-	(*SetupRequest)(nil),  // 0: sandboxd.admin.v1.SetupRequest
-	(*CleanRequest)(nil),  // 1: sandboxd.admin.v1.CleanRequest
+var file_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_admin_v1_admin_proto_goTypes = []any{
+	(*SetupRequest)(nil),  // 0: admin.v1.SetupRequest
+	(*CleanRequest)(nil),  // 1: admin.v1.CleanRequest
 	(*emptypb.Empty)(nil), // 2: google.protobuf.Empty
 }
-var file_admin_admin_proto_depIdxs = []int32{
-	0, // 0: sandboxd.admin.v1.Admin.Setup:input_type -> sandboxd.admin.v1.SetupRequest
-	1, // 1: sandboxd.admin.v1.Admin.Clean:input_type -> sandboxd.admin.v1.CleanRequest
-	2, // 2: sandboxd.admin.v1.Admin.Setup:output_type -> google.protobuf.Empty
-	2, // 3: sandboxd.admin.v1.Admin.Clean:output_type -> google.protobuf.Empty
+var file_admin_v1_admin_proto_depIdxs = []int32{
+	0, // 0: admin.v1.Admin.Setup:input_type -> admin.v1.SetupRequest
+	1, // 1: admin.v1.Admin.Clean:input_type -> admin.v1.CleanRequest
+	2, // 2: admin.v1.Admin.Setup:output_type -> google.protobuf.Empty
+	2, // 3: admin.v1.Admin.Clean:output_type -> google.protobuf.Empty
 	2, // [2:4] is the sub-list for method output_type
 	0, // [0:2] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
@@ -160,26 +160,26 @@ var file_admin_admin_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for field type_name
 }
 
-func init() { file_admin_admin_proto_init() }
-func file_admin_admin_proto_init() {
-	if File_admin_admin_proto != nil {
+func init() { file_admin_v1_admin_proto_init() }
+func file_admin_v1_admin_proto_init() {
+	if File_admin_v1_admin_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_admin_admin_proto_rawDesc), len(file_admin_admin_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_admin_v1_admin_proto_rawDesc), len(file_admin_v1_admin_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_admin_admin_proto_goTypes,
-		DependencyIndexes: file_admin_admin_proto_depIdxs,
-		MessageInfos:      file_admin_admin_proto_msgTypes,
+		GoTypes:           file_admin_v1_admin_proto_goTypes,
+		DependencyIndexes: file_admin_v1_admin_proto_depIdxs,
+		MessageInfos:      file_admin_v1_admin_proto_msgTypes,
 	}.Build()
-	File_admin_admin_proto = out.File
-	file_admin_admin_proto_goTypes = nil
-	file_admin_admin_proto_depIdxs = nil
+	File_admin_v1_admin_proto = out.File
+	file_admin_v1_admin_proto_goTypes = nil
+	file_admin_v1_admin_proto_depIdxs = nil
 }

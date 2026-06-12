@@ -16,7 +16,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v3.21.12
-// source: filesystem/filesystem.proto
+// source: filesystem/v1/filesystem.proto
 
 package filesystem
 
@@ -73,11 +73,11 @@ func (x FileType) String() string {
 }
 
 func (FileType) Descriptor() protoreflect.EnumDescriptor {
-	return file_filesystem_filesystem_proto_enumTypes[0].Descriptor()
+	return file_filesystem_v1_filesystem_proto_enumTypes[0].Descriptor()
 }
 
 func (FileType) Type() protoreflect.EnumType {
-	return &file_filesystem_filesystem_proto_enumTypes[0]
+	return &file_filesystem_v1_filesystem_proto_enumTypes[0]
 }
 
 func (x FileType) Number() protoreflect.EnumNumber {
@@ -86,7 +86,7 @@ func (x FileType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FileType.Descriptor instead.
 func (FileType) EnumDescriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{0}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{0}
 }
 
 type FileMetadata struct {
@@ -99,7 +99,7 @@ type FileMetadata struct {
 
 func (x *FileMetadata) Reset() {
 	*x = FileMetadata{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[0]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -111,7 +111,7 @@ func (x *FileMetadata) String() string {
 func (*FileMetadata) ProtoMessage() {}
 
 func (x *FileMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[0]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -124,7 +124,7 @@ func (x *FileMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileMetadata.ProtoReflect.Descriptor instead.
 func (*FileMetadata) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{0}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *FileMetadata) GetPath() string {
@@ -154,7 +154,7 @@ type WriteFileRequest struct {
 
 func (x *WriteFileRequest) Reset() {
 	*x = WriteFileRequest{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[1]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -166,7 +166,7 @@ func (x *WriteFileRequest) String() string {
 func (*WriteFileRequest) ProtoMessage() {}
 
 func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[1]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -179,7 +179,7 @@ func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteFileRequest.ProtoReflect.Descriptor instead.
 func (*WriteFileRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{1}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *WriteFileRequest) GetPayload() isWriteFileRequest_Payload {
@@ -232,7 +232,7 @@ type ReadFileRequest struct {
 
 func (x *ReadFileRequest) Reset() {
 	*x = ReadFileRequest{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[2]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -244,7 +244,7 @@ func (x *ReadFileRequest) String() string {
 func (*ReadFileRequest) ProtoMessage() {}
 
 func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[2]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -257,7 +257,7 @@ func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFileRequest.ProtoReflect.Descriptor instead.
 func (*ReadFileRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{2}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ReadFileRequest) GetPath() string {
@@ -276,7 +276,7 @@ type ReadFileResponse struct {
 
 func (x *ReadFileResponse) Reset() {
 	*x = ReadFileResponse{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[3]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -288,7 +288,7 @@ func (x *ReadFileResponse) String() string {
 func (*ReadFileResponse) ProtoMessage() {}
 
 func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[3]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -301,7 +301,7 @@ func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFileResponse.ProtoReflect.Descriptor instead.
 func (*ReadFileResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{3}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ReadFileResponse) GetChunk() []byte {
@@ -320,7 +320,7 @@ type ListFilesRequest struct {
 
 func (x *ListFilesRequest) Reset() {
 	*x = ListFilesRequest{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[4]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -332,7 +332,7 @@ func (x *ListFilesRequest) String() string {
 func (*ListFilesRequest) ProtoMessage() {}
 
 func (x *ListFilesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[4]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -345,7 +345,7 @@ func (x *ListFilesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListFilesRequest.ProtoReflect.Descriptor instead.
 func (*ListFilesRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{4}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ListFilesRequest) GetPath() string {
@@ -364,7 +364,7 @@ type ListFilesResponse struct {
 
 func (x *ListFilesResponse) Reset() {
 	*x = ListFilesResponse{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[5]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -376,7 +376,7 @@ func (x *ListFilesResponse) String() string {
 func (*ListFilesResponse) ProtoMessage() {}
 
 func (x *ListFilesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[5]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -389,7 +389,7 @@ func (x *ListFilesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListFilesResponse.ProtoReflect.Descriptor instead.
 func (*ListFilesResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{5}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ListFilesResponse) GetEntries() []*FileEntry {
@@ -402,7 +402,7 @@ func (x *ListFilesResponse) GetEntries() []*FileEntry {
 type FileEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Type          FileType               `protobuf:"varint,2,opt,name=type,proto3,enum=sandboxd.filesystem.v1.FileType" json:"type,omitempty"`
+	Type          FileType               `protobuf:"varint,2,opt,name=type,proto3,enum=filesystem.v1.FileType" json:"type,omitempty"`
 	Size          int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
 	ModTime       *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=mod_time,json=modTime,proto3" json:"mod_time,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -411,7 +411,7 @@ type FileEntry struct {
 
 func (x *FileEntry) Reset() {
 	*x = FileEntry{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[6]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -423,7 +423,7 @@ func (x *FileEntry) String() string {
 func (*FileEntry) ProtoMessage() {}
 
 func (x *FileEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[6]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -436,7 +436,7 @@ func (x *FileEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileEntry.ProtoReflect.Descriptor instead.
 func (*FileEntry) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{6}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FileEntry) GetName() string {
@@ -476,7 +476,7 @@ type StatFileRequest struct {
 
 func (x *StatFileRequest) Reset() {
 	*x = StatFileRequest{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[7]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -488,7 +488,7 @@ func (x *StatFileRequest) String() string {
 func (*StatFileRequest) ProtoMessage() {}
 
 func (x *StatFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[7]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -501,7 +501,7 @@ func (x *StatFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatFileRequest.ProtoReflect.Descriptor instead.
 func (*StatFileRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{7}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StatFileRequest) GetPath() string {
@@ -514,7 +514,7 @@ func (x *StatFileRequest) GetPath() string {
 type StatFileResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Type          FileType               `protobuf:"varint,2,opt,name=type,proto3,enum=sandboxd.filesystem.v1.FileType" json:"type,omitempty"`
+	Type          FileType               `protobuf:"varint,2,opt,name=type,proto3,enum=filesystem.v1.FileType" json:"type,omitempty"`
 	Size          int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
 	ModTime       *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=mod_time,json=modTime,proto3" json:"mod_time,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -523,7 +523,7 @@ type StatFileResponse struct {
 
 func (x *StatFileResponse) Reset() {
 	*x = StatFileResponse{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[8]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -535,7 +535,7 @@ func (x *StatFileResponse) String() string {
 func (*StatFileResponse) ProtoMessage() {}
 
 func (x *StatFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[8]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -548,7 +548,7 @@ func (x *StatFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatFileResponse.ProtoReflect.Descriptor instead.
 func (*StatFileResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{8}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *StatFileResponse) GetPath() string {
@@ -588,7 +588,7 @@ type MakeDirRequest struct {
 
 func (x *MakeDirRequest) Reset() {
 	*x = MakeDirRequest{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[9]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -600,7 +600,7 @@ func (x *MakeDirRequest) String() string {
 func (*MakeDirRequest) ProtoMessage() {}
 
 func (x *MakeDirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[9]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -613,7 +613,7 @@ func (x *MakeDirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakeDirRequest.ProtoReflect.Descriptor instead.
 func (*MakeDirRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{9}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *MakeDirRequest) GetPath() string {
@@ -633,7 +633,7 @@ type RemoveRequest struct {
 
 func (x *RemoveRequest) Reset() {
 	*x = RemoveRequest{}
-	mi := &file_filesystem_filesystem_proto_msgTypes[10]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -645,7 +645,7 @@ func (x *RemoveRequest) String() string {
 func (*RemoveRequest) ProtoMessage() {}
 
 func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_filesystem_proto_msgTypes[10]
+	mi := &file_filesystem_v1_filesystem_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -658,7 +658,7 @@ func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveRequest.ProtoReflect.Descriptor instead.
 func (*RemoveRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_filesystem_proto_rawDescGZIP(), []int{10}
+	return file_filesystem_v1_filesystem_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RemoveRequest) GetPath() string {
@@ -675,17 +675,17 @@ func (x *RemoveRequest) GetRecursive() bool {
 	return false
 }
 
-var File_filesystem_filesystem_proto protoreflect.FileDescriptor
+var File_filesystem_v1_filesystem_proto protoreflect.FileDescriptor
 
-const file_filesystem_filesystem_proto_rawDesc = "" +
+const file_filesystem_v1_filesystem_proto_rawDesc = "" +
 	"\n" +
-	"\x1bfilesystem/filesystem.proto\x12\x16sandboxd.filesystem.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\"D\n" +
+	"\x1efilesystem/v1/filesystem.proto\x12\rfilesystem.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\"D\n" +
 	"\fFileMetadata\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x17\n" +
 	"\x04mode\x18\x02 \x01(\rH\x00R\x04mode\x88\x01\x01B\a\n" +
-	"\x05_mode\"y\n" +
-	"\x10WriteFileRequest\x12B\n" +
-	"\bmetadata\x18\x01 \x01(\v2$.sandboxd.filesystem.v1.FileMetadataH\x00R\bmetadata\x12\x16\n" +
+	"\x05_mode\"p\n" +
+	"\x10WriteFileRequest\x129\n" +
+	"\bmetadata\x18\x01 \x01(\v2\x1b.filesystem.v1.FileMetadataH\x00R\bmetadata\x12\x16\n" +
 	"\x05chunk\x18\x02 \x01(\fH\x00R\x05chunkB\t\n" +
 	"\apayload\"%\n" +
 	"\x0fReadFileRequest\x12\x12\n" +
@@ -693,19 +693,19 @@ const file_filesystem_filesystem_proto_rawDesc = "" +
 	"\x10ReadFileResponse\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"&\n" +
 	"\x10ListFilesRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"P\n" +
-	"\x11ListFilesResponse\x12;\n" +
-	"\aentries\x18\x01 \x03(\v2!.sandboxd.filesystem.v1.FileEntryR\aentries\"\xa0\x01\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"G\n" +
+	"\x11ListFilesResponse\x122\n" +
+	"\aentries\x18\x01 \x03(\v2\x18.filesystem.v1.FileEntryR\aentries\"\x97\x01\n" +
 	"\tFileEntry\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x124\n" +
-	"\x04type\x18\x02 \x01(\x0e2 .sandboxd.filesystem.v1.FileTypeR\x04type\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12+\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x17.filesystem.v1.FileTypeR\x04type\x12\x12\n" +
 	"\x04size\x18\x03 \x01(\x03R\x04size\x125\n" +
 	"\bmod_time\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\amodTime\"%\n" +
 	"\x0fStatFileRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xa7\x01\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x9e\x01\n" +
 	"\x10StatFileResponse\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x124\n" +
-	"\x04type\x18\x02 \x01(\x0e2 .sandboxd.filesystem.v1.FileTypeR\x04type\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12+\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x17.filesystem.v1.FileTypeR\x04type\x12\x12\n" +
 	"\x04size\x18\x03 \x01(\x03R\x04size\x125\n" +
 	"\bmod_time\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\amodTime\"$\n" +
 	"\x0eMakeDirRequest\x12\x12\n" +
@@ -717,66 +717,66 @@ const file_filesystem_filesystem_proto_rawDesc = "" +
 	"\x15FILE_TYPE_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eFILE_TYPE_FILE\x10\x01\x12\x17\n" +
 	"\x13FILE_TYPE_DIRECTORY\x10\x02\x12\x15\n" +
-	"\x11FILE_TYPE_SYMLINK\x10\x032\x93\x04\n" +
+	"\x11FILE_TYPE_SYMLINK\x10\x032\xc2\x03\n" +
 	"\n" +
-	"Filesystem\x12O\n" +
-	"\tWriteFile\x12(.sandboxd.filesystem.v1.WriteFileRequest\x1a\x16.google.protobuf.Empty(\x01\x12_\n" +
-	"\bReadFile\x12'.sandboxd.filesystem.v1.ReadFileRequest\x1a(.sandboxd.filesystem.v1.ReadFileResponse0\x01\x12`\n" +
-	"\tListFiles\x12(.sandboxd.filesystem.v1.ListFilesRequest\x1a).sandboxd.filesystem.v1.ListFilesResponse\x12]\n" +
-	"\bStatFile\x12'.sandboxd.filesystem.v1.StatFileRequest\x1a(.sandboxd.filesystem.v1.StatFileResponse\x12I\n" +
-	"\aMakeDir\x12&.sandboxd.filesystem.v1.MakeDirRequest\x1a\x16.google.protobuf.Empty\x12G\n" +
-	"\x06Remove\x12%.sandboxd.filesystem.v1.RemoveRequest\x1a\x16.google.protobuf.EmptyBy\n" +
+	"Filesystem\x12F\n" +
+	"\tWriteFile\x12\x1f.filesystem.v1.WriteFileRequest\x1a\x16.google.protobuf.Empty(\x01\x12M\n" +
+	"\bReadFile\x12\x1e.filesystem.v1.ReadFileRequest\x1a\x1f.filesystem.v1.ReadFileResponse0\x01\x12N\n" +
+	"\tListFiles\x12\x1f.filesystem.v1.ListFilesRequest\x1a .filesystem.v1.ListFilesResponse\x12K\n" +
+	"\bStatFile\x12\x1e.filesystem.v1.StatFileRequest\x1a\x1f.filesystem.v1.StatFileResponse\x12@\n" +
+	"\aMakeDir\x12\x1d.filesystem.v1.MakeDirRequest\x1a\x16.google.protobuf.Empty\x12>\n" +
+	"\x06Remove\x12\x1c.filesystem.v1.RemoveRequest\x1a\x16.google.protobuf.EmptyBy\n" +
 	"-io.sandboxd.packages.sandboxd.spec.filesystemP\x01ZFsigs.k8s.io/agent-sandbox/packages/sandboxd/spec/filesystem;filesystemb\x06proto3"
 
 var (
-	file_filesystem_filesystem_proto_rawDescOnce sync.Once
-	file_filesystem_filesystem_proto_rawDescData []byte
+	file_filesystem_v1_filesystem_proto_rawDescOnce sync.Once
+	file_filesystem_v1_filesystem_proto_rawDescData []byte
 )
 
-func file_filesystem_filesystem_proto_rawDescGZIP() []byte {
-	file_filesystem_filesystem_proto_rawDescOnce.Do(func() {
-		file_filesystem_filesystem_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_filesystem_filesystem_proto_rawDesc), len(file_filesystem_filesystem_proto_rawDesc)))
+func file_filesystem_v1_filesystem_proto_rawDescGZIP() []byte {
+	file_filesystem_v1_filesystem_proto_rawDescOnce.Do(func() {
+		file_filesystem_v1_filesystem_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_filesystem_v1_filesystem_proto_rawDesc), len(file_filesystem_v1_filesystem_proto_rawDesc)))
 	})
-	return file_filesystem_filesystem_proto_rawDescData
+	return file_filesystem_v1_filesystem_proto_rawDescData
 }
 
-var file_filesystem_filesystem_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_filesystem_filesystem_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
-var file_filesystem_filesystem_proto_goTypes = []any{
-	(FileType)(0),                 // 0: sandboxd.filesystem.v1.FileType
-	(*FileMetadata)(nil),          // 1: sandboxd.filesystem.v1.FileMetadata
-	(*WriteFileRequest)(nil),      // 2: sandboxd.filesystem.v1.WriteFileRequest
-	(*ReadFileRequest)(nil),       // 3: sandboxd.filesystem.v1.ReadFileRequest
-	(*ReadFileResponse)(nil),      // 4: sandboxd.filesystem.v1.ReadFileResponse
-	(*ListFilesRequest)(nil),      // 5: sandboxd.filesystem.v1.ListFilesRequest
-	(*ListFilesResponse)(nil),     // 6: sandboxd.filesystem.v1.ListFilesResponse
-	(*FileEntry)(nil),             // 7: sandboxd.filesystem.v1.FileEntry
-	(*StatFileRequest)(nil),       // 8: sandboxd.filesystem.v1.StatFileRequest
-	(*StatFileResponse)(nil),      // 9: sandboxd.filesystem.v1.StatFileResponse
-	(*MakeDirRequest)(nil),        // 10: sandboxd.filesystem.v1.MakeDirRequest
-	(*RemoveRequest)(nil),         // 11: sandboxd.filesystem.v1.RemoveRequest
+var file_filesystem_v1_filesystem_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_filesystem_v1_filesystem_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_filesystem_v1_filesystem_proto_goTypes = []any{
+	(FileType)(0),                 // 0: filesystem.v1.FileType
+	(*FileMetadata)(nil),          // 1: filesystem.v1.FileMetadata
+	(*WriteFileRequest)(nil),      // 2: filesystem.v1.WriteFileRequest
+	(*ReadFileRequest)(nil),       // 3: filesystem.v1.ReadFileRequest
+	(*ReadFileResponse)(nil),      // 4: filesystem.v1.ReadFileResponse
+	(*ListFilesRequest)(nil),      // 5: filesystem.v1.ListFilesRequest
+	(*ListFilesResponse)(nil),     // 6: filesystem.v1.ListFilesResponse
+	(*FileEntry)(nil),             // 7: filesystem.v1.FileEntry
+	(*StatFileRequest)(nil),       // 8: filesystem.v1.StatFileRequest
+	(*StatFileResponse)(nil),      // 9: filesystem.v1.StatFileResponse
+	(*MakeDirRequest)(nil),        // 10: filesystem.v1.MakeDirRequest
+	(*RemoveRequest)(nil),         // 11: filesystem.v1.RemoveRequest
 	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 	(*emptypb.Empty)(nil),         // 13: google.protobuf.Empty
 }
-var file_filesystem_filesystem_proto_depIdxs = []int32{
-	1,  // 0: sandboxd.filesystem.v1.WriteFileRequest.metadata:type_name -> sandboxd.filesystem.v1.FileMetadata
-	7,  // 1: sandboxd.filesystem.v1.ListFilesResponse.entries:type_name -> sandboxd.filesystem.v1.FileEntry
-	0,  // 2: sandboxd.filesystem.v1.FileEntry.type:type_name -> sandboxd.filesystem.v1.FileType
-	12, // 3: sandboxd.filesystem.v1.FileEntry.mod_time:type_name -> google.protobuf.Timestamp
-	0,  // 4: sandboxd.filesystem.v1.StatFileResponse.type:type_name -> sandboxd.filesystem.v1.FileType
-	12, // 5: sandboxd.filesystem.v1.StatFileResponse.mod_time:type_name -> google.protobuf.Timestamp
-	2,  // 6: sandboxd.filesystem.v1.Filesystem.WriteFile:input_type -> sandboxd.filesystem.v1.WriteFileRequest
-	3,  // 7: sandboxd.filesystem.v1.Filesystem.ReadFile:input_type -> sandboxd.filesystem.v1.ReadFileRequest
-	5,  // 8: sandboxd.filesystem.v1.Filesystem.ListFiles:input_type -> sandboxd.filesystem.v1.ListFilesRequest
-	8,  // 9: sandboxd.filesystem.v1.Filesystem.StatFile:input_type -> sandboxd.filesystem.v1.StatFileRequest
-	10, // 10: sandboxd.filesystem.v1.Filesystem.MakeDir:input_type -> sandboxd.filesystem.v1.MakeDirRequest
-	11, // 11: sandboxd.filesystem.v1.Filesystem.Remove:input_type -> sandboxd.filesystem.v1.RemoveRequest
-	13, // 12: sandboxd.filesystem.v1.Filesystem.WriteFile:output_type -> google.protobuf.Empty
-	4,  // 13: sandboxd.filesystem.v1.Filesystem.ReadFile:output_type -> sandboxd.filesystem.v1.ReadFileResponse
-	6,  // 14: sandboxd.filesystem.v1.Filesystem.ListFiles:output_type -> sandboxd.filesystem.v1.ListFilesResponse
-	9,  // 15: sandboxd.filesystem.v1.Filesystem.StatFile:output_type -> sandboxd.filesystem.v1.StatFileResponse
-	13, // 16: sandboxd.filesystem.v1.Filesystem.MakeDir:output_type -> google.protobuf.Empty
-	13, // 17: sandboxd.filesystem.v1.Filesystem.Remove:output_type -> google.protobuf.Empty
+var file_filesystem_v1_filesystem_proto_depIdxs = []int32{
+	1,  // 0: filesystem.v1.WriteFileRequest.metadata:type_name -> filesystem.v1.FileMetadata
+	7,  // 1: filesystem.v1.ListFilesResponse.entries:type_name -> filesystem.v1.FileEntry
+	0,  // 2: filesystem.v1.FileEntry.type:type_name -> filesystem.v1.FileType
+	12, // 3: filesystem.v1.FileEntry.mod_time:type_name -> google.protobuf.Timestamp
+	0,  // 4: filesystem.v1.StatFileResponse.type:type_name -> filesystem.v1.FileType
+	12, // 5: filesystem.v1.StatFileResponse.mod_time:type_name -> google.protobuf.Timestamp
+	2,  // 6: filesystem.v1.Filesystem.WriteFile:input_type -> filesystem.v1.WriteFileRequest
+	3,  // 7: filesystem.v1.Filesystem.ReadFile:input_type -> filesystem.v1.ReadFileRequest
+	5,  // 8: filesystem.v1.Filesystem.ListFiles:input_type -> filesystem.v1.ListFilesRequest
+	8,  // 9: filesystem.v1.Filesystem.StatFile:input_type -> filesystem.v1.StatFileRequest
+	10, // 10: filesystem.v1.Filesystem.MakeDir:input_type -> filesystem.v1.MakeDirRequest
+	11, // 11: filesystem.v1.Filesystem.Remove:input_type -> filesystem.v1.RemoveRequest
+	13, // 12: filesystem.v1.Filesystem.WriteFile:output_type -> google.protobuf.Empty
+	4,  // 13: filesystem.v1.Filesystem.ReadFile:output_type -> filesystem.v1.ReadFileResponse
+	6,  // 14: filesystem.v1.Filesystem.ListFiles:output_type -> filesystem.v1.ListFilesResponse
+	9,  // 15: filesystem.v1.Filesystem.StatFile:output_type -> filesystem.v1.StatFileResponse
+	13, // 16: filesystem.v1.Filesystem.MakeDir:output_type -> google.protobuf.Empty
+	13, // 17: filesystem.v1.Filesystem.Remove:output_type -> google.protobuf.Empty
 	12, // [12:18] is the sub-list for method output_type
 	6,  // [6:12] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
@@ -784,13 +784,13 @@ var file_filesystem_filesystem_proto_depIdxs = []int32{
 	0,  // [0:6] is the sub-list for field type_name
 }
 
-func init() { file_filesystem_filesystem_proto_init() }
-func file_filesystem_filesystem_proto_init() {
-	if File_filesystem_filesystem_proto != nil {
+func init() { file_filesystem_v1_filesystem_proto_init() }
+func file_filesystem_v1_filesystem_proto_init() {
+	if File_filesystem_v1_filesystem_proto != nil {
 		return
 	}
-	file_filesystem_filesystem_proto_msgTypes[0].OneofWrappers = []any{}
-	file_filesystem_filesystem_proto_msgTypes[1].OneofWrappers = []any{
+	file_filesystem_v1_filesystem_proto_msgTypes[0].OneofWrappers = []any{}
+	file_filesystem_v1_filesystem_proto_msgTypes[1].OneofWrappers = []any{
 		(*WriteFileRequest_Metadata)(nil),
 		(*WriteFileRequest_Chunk)(nil),
 	}
@@ -798,18 +798,18 @@ func file_filesystem_filesystem_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_filesystem_filesystem_proto_rawDesc), len(file_filesystem_filesystem_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_filesystem_v1_filesystem_proto_rawDesc), len(file_filesystem_v1_filesystem_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_filesystem_filesystem_proto_goTypes,
-		DependencyIndexes: file_filesystem_filesystem_proto_depIdxs,
-		EnumInfos:         file_filesystem_filesystem_proto_enumTypes,
-		MessageInfos:      file_filesystem_filesystem_proto_msgTypes,
+		GoTypes:           file_filesystem_v1_filesystem_proto_goTypes,
+		DependencyIndexes: file_filesystem_v1_filesystem_proto_depIdxs,
+		EnumInfos:         file_filesystem_v1_filesystem_proto_enumTypes,
+		MessageInfos:      file_filesystem_v1_filesystem_proto_msgTypes,
 	}.Build()
-	File_filesystem_filesystem_proto = out.File
-	file_filesystem_filesystem_proto_goTypes = nil
-	file_filesystem_filesystem_proto_depIdxs = nil
+	File_filesystem_v1_filesystem_proto = out.File
+	file_filesystem_v1_filesystem_proto_goTypes = nil
+	file_filesystem_v1_filesystem_proto_depIdxs = nil
 }

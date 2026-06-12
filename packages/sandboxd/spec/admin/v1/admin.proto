@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package sandboxd.admin.v1;
+package admin.v1;
 
 import "google/protobuf/empty.proto";
 

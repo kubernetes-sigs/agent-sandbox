@@ -16,7 +16,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v3.21.12
-// source: process/process.proto
+// source: process/v1/process.proto
 
 package process
 
@@ -34,11 +34,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Process_Start_FullMethodName      = "/sandboxd.process.v1.Process/Start"
-	Process_Execute_FullMethodName    = "/sandboxd.process.v1.Process/Execute"
-	Process_WriteStdin_FullMethodName = "/sandboxd.process.v1.Process/WriteStdin"
-	Process_SendSignal_FullMethodName = "/sandboxd.process.v1.Process/SendSignal"
-	Process_ResizeTTY_FullMethodName  = "/sandboxd.process.v1.Process/ResizeTTY"
+	Process_Start_FullMethodName      = "/process.v1.Process/Start"
+	Process_Execute_FullMethodName    = "/process.v1.Process/Execute"
+	Process_WriteStdin_FullMethodName = "/process.v1.Process/WriteStdin"
+	Process_SendSignal_FullMethodName = "/process.v1.Process/SendSignal"
+	Process_ResizeTTY_FullMethodName  = "/process.v1.Process/ResizeTTY"
 )
 
 // ProcessClient is the client API for Process service.
@@ -261,7 +261,7 @@ func _Process_ResizeTTY_Handler(srv interface{}, ctx context.Context, dec func(i
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Process_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "sandboxd.process.v1.Process",
+	ServiceName: "process.v1.Process",
 	HandlerType: (*ProcessServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -288,5 +288,5 @@ var Process_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "process/process.proto",
+	Metadata: "process/v1/process.proto",
 }

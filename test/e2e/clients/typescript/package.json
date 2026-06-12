@@ -8,12 +8,15 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "vitest": "^3.0.0",
     "@kubernetes/client-node": "^1.0.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^4.1.8"
   },
   "dependencies": {
     "agentic-sandbox-client": "file:../../../../clients/typescript/agentic-sandbox-client"
+  },
+  "allowScripts": {
+    "file:../../../../../clients/typescript/agentic-sandbox-client": true
   }
 }

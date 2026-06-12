@@ -3,23 +3,24 @@ kind: SandboxTemplate
 metadata:
   name: internal-llm-template
 spec:
-  podTemplate:
-    spec:
-      # Use hostAliases to natively configure /etc/hosts for the local LLM.
-      # This completely avoids the need for internal DNS resolution!
-      hostAliases:
-      - ip: "10.50.0.100"
-        hostnames:
-        - "llm.internal"
-        - "ollama.local"
+  sandboxSpec:
+    podTemplate:
+      spec:
+        # Use hostAliases to natively configure /etc/hosts for the local LLM.
+        # This completely avoids the need for internal DNS resolution!
+        hostAliases:
+        - ip: "10.50.0.100"
+          hostnames:
+          - "llm.internal"
+          - "ollama.local"
       
-      containers:
-      - name: agent
-        image: python:3.11-slim
-        env:
-        # The agent can now safely call this hostname
-        - name: LLM_API_BASE
-          value: "http://llm.internal:8000"
+        containers:
+        - name: agent
+          image: python:3.11-slim
+          env:
+          # The agent can now safely call this hostname
+          - name: LLM_API_BASE
+            value: "http://llm.internal:8000"
 
   # Custom Network Policy
   networkPolicy:

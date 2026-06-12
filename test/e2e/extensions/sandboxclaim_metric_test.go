@@ -45,12 +45,14 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "pause",
-							Image: "registry.k8s.io/pause:3.10",
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "pause",
+								Image: "registry.k8s.io/pause:3.10",
+							},
 						},
 					},
 				},

@@ -53,13 +53,13 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 
 	if template != nil {
 		templateRefHash = sandboxcontrollers.NameHash(template.Name)
-		podSpec = *template.Spec.PodTemplate.Spec.DeepCopy()
+		podSpec = *template.Spec.SandboxSpec.PodTemplate.Spec.DeepCopy()
 		ApplySandboxSecureDefaults(template, &podSpec)
 		// If template has a version label, we could use it as part of the hash placeholder
-		if v, ok := template.Spec.PodTemplate.ObjectMeta.Labels["version"]; ok {
+		if v, ok := template.Spec.SandboxSpec.PodTemplate.ObjectMeta.Labels["version"]; ok {
 			podTemplateHash = "pod-hash-" + v
 		} else {
-			specJSON, _ := json.Marshal(template.Spec.PodTemplate)
+			specJSON, _ := json.Marshal(template.Spec.SandboxSpec.PodTemplate)
 			podTemplateHash = sandboxcontrollers.NameHash(string(specJSON))
 		}
 	} else {
@@ -110,12 +110,14 @@ func createTemplate(namespace string) *extensionsv1beta1.SandboxTemplate {
 			Namespace: namespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "test-image",
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "test-image",
+							},
 						},
 					},
 				},
@@ -386,21 +388,23 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				Namespace: poolNamespace,
 			},
 			Spec: extensionsv1beta1.SandboxTemplateSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					ObjectMeta: sandboxv1beta1.PodMetadata{
-						Labels: map[string]string{
-							"pod-label": "from-podtemplate",
-							"version":   "2.0",
+				SandboxSpec: sandboxv1beta1.SandboxSpec{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						ObjectMeta: sandboxv1beta1.PodMetadata{
+							Labels: map[string]string{
+								"pod-label": "from-podtemplate",
+								"version":   "2.0",
+							},
+							Annotations: map[string]string{
+								"pod-annotation": "from-podtemplate",
+							},
 						},
-						Annotations: map[string]string{
-							"pod-annotation": "from-podtemplate",
-						},
-					},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: "test-image:latest",
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "test-image:latest",
+								},
 							},
 						},
 					},
@@ -475,32 +479,34 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "app", Image: "test-image"},
-					},
-				},
-			},
-			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
-				{
-					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("1Gi"),
-							},
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "app", Image: "test-image"},
 						},
 					},
 				},
-				{
-					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "cache"},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("500Mi"),
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+					{
+						EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "cache"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("500Mi"),
+								},
 							},
 						},
 					},
@@ -546,6 +552,78 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	require.Equal(t, "cache", sb.Spec.VolumeClaimTemplates[1].Name)
 	require.Equal(t, templateName, sb.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation],
 		"sandbox should have template ref annotation for metrics")
+}
+
+// TestCreatePoolSandboxPropagatesSandboxSpecFields verifies that non-pod fields of
+// the embedded SandboxSpec (service, operatingMode, lifecycle) flow through to the
+// Sandboxes the warm pool creates, since the controller deep-copies the whole spec.
+func TestCreatePoolSandboxPropagatesSandboxSpecFields(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	serviceEnabled := true
+	retain := sandboxv1beta1.ShutdownPolicyRetain
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "app", Image: "test-image"},
+						},
+					},
+				},
+				Service:       &serviceEnabled,
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownPolicy: &retain,
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-spec",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    1,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(template).
+			Build(),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+
+	require.NoError(t, r.reconcilePool(ctx, warmPool))
+
+	list := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace}))
+	require.Len(t, list.Items, 1)
+
+	sb := list.Items[0]
+	require.NotNil(t, sb.Spec.Service, "service setting should propagate from template")
+	require.True(t, *sb.Spec.Service)
+	require.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, sb.Spec.OperatingMode,
+		"operatingMode should propagate from template")
+	require.NotNil(t, sb.Spec.Lifecycle.ShutdownPolicy, "lifecycle should propagate from template")
+	require.Equal(t, sandboxv1beta1.ShutdownPolicyRetain, *sb.Spec.Lifecycle.ShutdownPolicy)
 }
 
 func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
@@ -602,11 +680,13 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 					Namespace: poolNamespace,
 				},
 				Spec: extensionsv1beta1.SandboxTemplateSpec{
+					SandboxSpec: sandboxv1beta1.SandboxSpec{
+						PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: tt.templateSpec,
+						},
+					},
 					NetworkPolicyManagement: tt.management,
 					NetworkPolicy:           tt.networkPolicy,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: tt.templateSpec,
-					},
 				},
 			}
 
@@ -901,12 +981,14 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					Namespace: poolNamespace,
 				},
 				Spec: extensionsv1beta1.SandboxTemplateSpec{
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "image-v1",
+					SandboxSpec: sandboxv1beta1.SandboxSpec{
+						PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "image-v1",
+									},
 								},
 							},
 						},
@@ -963,7 +1045,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 
 			// Update the SandboxTemplate content
 			updatedTemplate := template.DeepCopy()
-			updatedTemplate.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+			updatedTemplate.Spec.SandboxSpec.PodTemplate.Spec.Containers[0].Image = "image-v2"
 			err = r.Update(ctx, updatedTemplate)
 			require.NoError(t, err)
 
@@ -1047,12 +1129,14 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "image-v1",
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "image-v1",
+							},
 						},
 					},
 				},
@@ -1273,8 +1357,10 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			template := &extensionsv1beta1.SandboxTemplate{
 				Spec: extensionsv1beta1.SandboxTemplateSpec{
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: tt.templateSpec,
+					SandboxSpec: sandboxv1beta1.SandboxSpec{
+						PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: tt.templateSpec,
+						},
 					},
 				},
 			}
@@ -1316,15 +1402,17 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "test", Image: "img"},
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "test", Image: "img"},
+						},
+						DNSPolicy: corev1.DNSDefault,
 					},
-					DNSPolicy: corev1.DNSDefault,
 				},
 			},
+			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
 		},
 	}
 
@@ -1369,7 +1457,7 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 
 	// Update SandboxTemplate to change DNSPolicy
 	updatedTemplate := template.DeepCopy()
-	updatedTemplate.Spec.PodTemplate.Spec.DNSPolicy = corev1.DNSClusterFirst
+	updatedTemplate.Spec.SandboxSpec.PodTemplate.Spec.DNSPolicy = corev1.DNSClusterFirst
 	err = r.Update(ctx, updatedTemplate)
 	require.NoError(t, err)
 
@@ -1399,10 +1487,12 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "app", Image: "genuine-image"},
+			SandboxSpec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "app", Image: "genuine-image"},
+						},
 					},
 				},
 			},
@@ -1418,7 +1508,7 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 
 	// Case 1: Orphaned sandbox with matching hash label but modified PodSpec (Spoofed).
 	// Should be detected as stale because unowned sandboxes must undergo full vetting.
-	spoofedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+	spoofedSpec := template.Spec.SandboxSpec.PodTemplate.Spec.DeepCopy()
 	spoofedSpec.Containers[0].Image = "malicious-image"
 
 	spoofedOrphan := &sandboxv1beta1.Sandbox{
@@ -1441,7 +1531,7 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 
 	// Case 2: Orphaned sandbox with matching hash label and genuine/fully vetted PodSpec.
 	// Should be evaluated as fresh (not stale) after passing full semantic comparison.
-	genuineSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+	genuineSpec := template.Spec.SandboxSpec.PodTemplate.Spec.DeepCopy()
 	ApplySandboxSecureDefaults(template, genuineSpec)
 
 	genuineOrphan := &sandboxv1beta1.Sandbox{
@@ -1618,7 +1708,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 
 			testTemplate := createTemplate(poolNamespace)
 			if tc.templateAnnotations != nil {
-				testTemplate.Spec.PodTemplate.ObjectMeta.Annotations = tc.templateAnnotations
+				testTemplate.Spec.SandboxSpec.PodTemplate.ObjectMeta.Annotations = tc.templateAnnotations
 			}
 
 			r := SandboxWarmPoolReconciler{

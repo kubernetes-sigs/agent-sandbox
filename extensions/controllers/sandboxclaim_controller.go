@@ -351,7 +351,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 			// Check if metadata needs update
 			var mergedMeta v1beta1.PodMetadata
-			template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
+			template.Spec.SandboxSpec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
 
 			// Preserve system-injected labels
 			if mergedMeta.Labels == nil {
@@ -874,7 +874,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 
 	if templateErr == nil && template != nil {
 		var mergedMeta v1beta1.PodMetadata
-		template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
+		template.Spec.SandboxSpec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
 
 		if mergedMeta.Labels == nil {
 			mergedMeta.Labels = make(map[string]string)
@@ -1097,12 +1097,18 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Track the sandbox template ref to be used by metrics collector
 	sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] = template.Name
 
-	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	sandbox.Spec.Service = template.Spec.Service
-	// Copy volumeClaimTemplates from template to sandbox
-	if len(template.Spec.VolumeClaimTemplates) > 0 {
-		sandbox.Spec.VolumeClaimTemplates = make([]v1beta1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
-		for i, vct := range template.Spec.VolumeClaimTemplates {
+	// Deep-copy the entire embedded SandboxSpec so every field (podTemplate,
+	// service, volumeClaimTemplates, lifecycle, operatingMode, and future fields)
+	// flows through automatically.
+	sandbox.Spec = *template.Spec.SandboxSpec.DeepCopy()
+
+	// Apply claim-level overrides on top of the template spec.
+	if claim.Spec.Service != nil {
+		sandbox.Spec.Service = claim.Spec.Service
+	}
+	if len(claim.Spec.VolumeClaimTemplates) > 0 {
+		sandbox.Spec.VolumeClaimTemplates = make([]v1beta1.PersistentVolumeClaimTemplate, len(claim.Spec.VolumeClaimTemplates))
+		for i, vct := range claim.Spec.VolumeClaimTemplates {
 			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
 		}
 	}
@@ -1369,9 +1375,11 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Implicit Cold Start Detection (Bypassing the Queue):
-	// If len(claim.Spec.Env) > 0, the controller immediately bypasses the warm pool queue.
-	if len(claim.Spec.Env) > 0 {
-		logger.Info("Bypassing warm pool adoption because custom environment variables are provided", "claim", claim.Name)
+	// Custom env vars, a service override, or volumeClaimTemplates overrides cannot
+	// be applied to an already-materialized warm Sandbox, so the controller
+	// immediately bypasses the warm pool queue and cold-starts from the template.
+	if len(claim.Spec.Env) > 0 || claim.Spec.Service != nil || len(claim.Spec.VolumeClaimTemplates) > 0 {
+		logger.Info("Bypassing warm pool adoption because claim specifies cold-start-only overrides (env, service, or volumeClaimTemplates)", "claim", claim.Name)
 		return nil, nil
 	}
 

@@ -4,14 +4,15 @@ metadata:
   name: secure-template
   namespace: default
 spec:
-  podTemplate:
-    metadata:
-      annotations:
-        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
-      labels:
-        sandbox-disruption-policy: "manual-protection"
-        app: my-sandbox-app
-    spec:
-      containers:
-      - name: debug-container
-        image: nginx:alpine
+  sandboxSpec:
+    podTemplate:
+      metadata:
+        annotations:
+          cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        labels:
+          sandbox-disruption-policy: "manual-protection"
+          app: my-sandbox-app
+      spec:
+        containers:
+        - name: debug-container
+          image: nginx:alpine

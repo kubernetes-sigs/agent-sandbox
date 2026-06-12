@@ -21,22 +21,23 @@ Apply this minimal template once per namespace:
 
 ```bash
 kubectl apply -n default -f - <<'EOF'
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: python-sandbox-template
 spec:
-  podTemplate:
-    spec:
-      containers:
-      - name: python-runtime
-        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
-        ports:
-        - containerPort: 8888
-        readinessProbe:
-          httpGet: { path: "/", port: 8888 }
-          periodSeconds: 1
-      restartPolicy: OnFailure
+  sandboxSpec:
+    podTemplate:
+      spec:
+        containers:
+        - name: python-runtime
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+          ports:
+          - containerPort: 8888
+          readinessProbe:
+            httpGet: { path: "/", port: 8888 }
+            periodSeconds: 1
+        restartPolicy: OnFailure
 EOF
 ```
 

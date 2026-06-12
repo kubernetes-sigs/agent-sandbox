@@ -39,7 +39,7 @@ func createSandboxTemplate(ns *corev1.Namespace, name string) *extensionsv1beta1
 	template := &extensionsv1beta1.SandboxTemplate{}
 	template.Name = name
 	template.Namespace = ns.Name
-	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
+	template.Spec.SandboxSpec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -63,7 +63,7 @@ func createSandboxWarmPool(ns *corev1.Namespace, template *extensionsv1beta1.San
 }
 
 func updateSandboxTemplateSpec(template *extensionsv1beta1.SandboxTemplate) {
-	template.Spec.PodTemplate.Spec.Containers[0].Env = append(template.Spec.PodTemplate.Spec.Containers[0].Env, corev1.EnvVar{
+	template.Spec.SandboxSpec.PodTemplate.Spec.Containers[0].Env = append(template.Spec.SandboxSpec.PodTemplate.Spec.Containers[0].Env, corev1.EnvVar{
 		Name:  "TEST_ENV",
 		Value: "updated",
 	})
@@ -394,7 +394,7 @@ func TestWarmPoolRolloutMetadataUpdate(t *testing.T) {
 
 	// Create a SandboxTemplate with initial labels in pod template
 	template := createSandboxTemplate(ns, "test-template")
-	template.Spec.PodTemplate.ObjectMeta = sandboxv1beta1.PodMetadata{
+	template.Spec.SandboxSpec.PodTemplate.ObjectMeta = sandboxv1beta1.PodMetadata{
 		Labels: map[string]string{"initial-label": "value"},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
@@ -429,7 +429,7 @@ func TestWarmPoolRolloutMetadataUpdate(t *testing.T) {
 
 	// Update the labels in the template's pod template metadata
 	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: template.Name, Namespace: template.Namespace}, template))
-	template.Spec.PodTemplate.ObjectMeta.Labels["new-label"] = "new-value"
+	template.Spec.SandboxSpec.PodTemplate.ObjectMeta.Labels["new-label"] = "new-value"
 	require.NoError(t, tc.Update(t.Context(), template))
 
 	// Verify that no rollout occurs (sandbox remains the same)

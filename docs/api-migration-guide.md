@@ -46,27 +46,9 @@ See [Recovery from backup](#recovery-from-backup) in the Troubleshooting section
 
 Pick one of three flows depending on how you manage installs.
 
-### Flow A — Helm-managed, automatic (default)
+### Flow A — Manual via kubectl (default)
 
-The chart ships two Helm hook Jobs that run the bootstrap and rewrite phases automatically as part of `helm upgrade`:
-
-```bash
-helm upgrade agent-sandbox ./helm/ \
-  --namespace agent-sandbox-system \
-  --reuse-values \
-  --set image.tag=<new-version>
-```
-
-| Phase | Job name | Hook | What it does |
-|---|---|---|---|
-| Pre-upgrade | `agent-sandbox-migration-bootstrap` | `pre-upgrade` | Runs `migrate.sh --phase=bootstrap` against the existing v1alpha1 state. |
-| Post-upgrade | `agent-sandbox-migration-rewrite` | `post-upgrade` | Runs `migrate.sh --phase=migrate` after the new controller + webhook are running. The Job has a `wait-for-webhook` initContainer that polls the webhook Service endpoints for up to 120s. |
-
-Both Jobs run `helm/files/migrate.sh` from a ConfigMap (defaultMode 0755) mounted in the pod. Helm retries on failure (`backoffLimit: 2`); operators can also `kubectl delete job <name>` and re-run `helm upgrade` to re-trigger.
-
-### Flow B — Manual via kubectl (Helm-free install)
-
-For clusters that install the controller via `kubectl apply -f` (not Helm), run the script directly. The script is at `dev/tools/migrate.sh` (a thin wrapper around `helm/files/migrate.sh`).
+The official agent-sandbox installation path is `kubectl apply -f` against the release manifests (see the project README and release notes), so this is the default migration flow. Run the script directly from `dev/tools/migrate.sh` (a thin wrapper around `helm/files/migrate.sh`):
 
 ```bash
 # 1. Pre-create the shadow pools BEFORE applying the new CRDs.
@@ -93,6 +75,24 @@ If the cluster is large, scope the rewrite to one namespace at a time:
 ```bash
 bash dev/tools/migrate.sh --phase=migrate --namespace=team-alpha
 ```
+
+### Flow B — Helm-managed, automatic
+
+For installs managed by the Helm chart, the chart ships two Helm hook Jobs that run the bootstrap and rewrite phases automatically as part of `helm upgrade`:
+
+```bash
+helm upgrade agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system \
+  --reuse-values \
+  --set image.tag=<new-version>
+```
+
+| Phase | Job name | Hook | What it does |
+|---|---|---|---|
+| Pre-upgrade | `agent-sandbox-migration-bootstrap` | `pre-upgrade` | Runs `migrate.sh --phase=bootstrap` against the existing v1alpha1 state. |
+| Post-upgrade | `agent-sandbox-migration-rewrite` | `post-upgrade` | Runs `migrate.sh --phase=migrate` after the new controller + webhook are running. The Job has a `wait-for-webhook` initContainer that polls the webhook Service endpoints for up to 120s. |
+
+Both Jobs run `helm/files/migrate.sh` from a ConfigMap (defaultMode 0755) mounted in the pod. Helm retries on failure (`backoffLimit: 2`); operators can also `kubectl delete job <name>` and re-run `helm upgrade` to re-trigger.
 
 ### Flow C — Helm-managed, manual script (hooks disabled)
 
@@ -143,7 +143,7 @@ kubectl get sandboxwarmpools -A -o json \
       | "\(.metadata.namespace)/\(.metadata.name) (for template: \(.metadata.annotations["agents.x-k8s.io/migration-source-template"]))"'
 ```
 
-Do **not** delete these pools while any v1beta1 `SandboxClaim` still references them via `warmPoolRef`. Once v1alpha1 is fully removed from the codebase (a future release) and you've manually re-pointed any remaining claims to real warm pools, the shadow pools can be cleaned up.
+Do **not** delete these pools while any v1beta1 `SandboxClaim` still references them via `warmPoolRef`. v1alpha1 is removed from the codebase in the release this guide accompanies, so there is no v1alpha1 fallback for claims still pointing at a shadow pool. Once you've manually re-pointed any remaining claims to real warm pools, the shadow pools can be cleaned up.
 
 ### Re-pointing warm-started claims
 

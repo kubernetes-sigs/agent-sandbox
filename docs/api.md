@@ -63,6 +63,7 @@ _Appears in:_
 
 
 _Appears in:_
+- [SandboxClaimSpec](#sandboxclaimspec)
 - [SandboxSpec](#sandboxspec)
 - [SandboxTemplateSpec](#sandboxtemplatespec)
 
@@ -348,6 +349,7 @@ _Appears in:_
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
+| `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.<br />Specifying this field forces a cold start because warm pool pods will not have these volumes. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -438,6 +440,7 @@ _Appears in:_
 | `networkPolicy` _[NetworkPolicySpec](#networkpolicyspec)_ | networkPolicy defines the network policy to be applied to the sandboxes<br />created from this template. A single shared NetworkPolicy is created per Template.<br />Behavior is dictated by the NetworkPolicyManagement field:<br />- If Management is "Unmanaged": This field is completely ignored.<br />- If Management is "Managed" (default) and this field is omitted (nil): The controller<br />  automatically applies a strict Secure Default policy:<br />    * Ingress: Allow traffic only from the Sandbox Router.<br />    * Egress: Allow Public Internet only. Blocks internal IPs (RFC1918), Metadata Server, etc.<br />- If Management is "Managed" and this field is provided: The controller applies your custom rules.<br />Update Behavior:<br />Because the NetworkPolicy is shared at the template level, any updates to these rules<br />will be applied to the single shared policy object. The underlying Kubernetes CNI will then<br />dynamically enforce the updated rules across all existing and future sandboxes<br />referencing this template.<br />NOTE: This is a restricted subset of the standard Kubernetes NetworkPolicySpec.<br />Fields like 'PodSelector' and 'PolicyTypes' are intentionally excluded because<br />they are managed by the controller to ensure strict isolation and default-deny posture.<br />WARNING: This policy enforces a strict "Default Deny" ingress posture.<br />If your Pod uses sidecars (e.g., Istio proxy, monitoring agents) that listen<br />on their own ports, the NetworkPolicy will BLOCK traffic to them by default.<br />You MUST explicitly allow traffic to these sidecar ports using 'Ingress',<br />otherwise the sidecars may fail health checks. |  | Optional: \{\} <br /> |
 | `networkPolicyManagement` _[NetworkPolicyManagement](#networkpolicymanagement)_ | networkPolicyManagement defines whether the controller manages the NetworkPolicy.<br />Valid values are "Managed" (default) or "Unmanaged". | Managed | Enum: [Managed Unmanaged] <br />Optional: \{\} <br /> |
 | `envVarsInjectionPolicy` _[EnvVarsInjectionPolicy](#envvarsinjectionpolicy)_ | envVarsInjectionPolicy allows a SandboxClaim to inject or override environment variables defined in the template.<br />If set to Disallowed, the SandboxClaim will be rejected if it specifies any environment variables. | Disallowed | Enum: [Allowed Overrides Disallowed] <br />Optional: \{\} <br /> |
+| `volumeClaimTemplatesPolicy` _[VolumeClaimTemplatesPolicy](#volumeclaimtemplatespolicy)_ | volumeClaimTemplatesPolicy allows a SandboxClaim to inject or override volume claim templates defined in the template.<br />If set to Disallowed, the SandboxClaim will be rejected if it specifies any volume claim templates. | Disallowed | Enum: [Disallowed Allowed Overrides] <br />Optional: \{\} <br /> |
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for Sandboxes created from this template.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 
 
@@ -566,5 +569,23 @@ _Appears in:_
 | `Delete` | ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.<br /> |
 | `DeleteForeground` | ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground<br />cascade deletion. The claim remains in the API (with a deletionTimestamp) until its<br />underlying Sandbox and Pod are fully terminated. This allows external systems to observe<br />shutdown progress by checking whether the claim still exists.<br /> |
 | `Retain` | ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).<br />The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,<br />but the SandboxClaim object itself remains.<br /> |
+
+
+#### VolumeClaimTemplatesPolicy
+
+_Underlying type:_ _string_
+
+VolumeClaimTemplatesPolicy defines whether a SandboxClaim is allowed to inject or override volume claim templates.
+
+
+
+_Appears in:_
+- [SandboxTemplateSpec](#sandboxtemplatespec)
+
+| Field | Description |
+| --- | --- |
+| `Disallowed` | VolumeClaimTemplatesPolicyDisallowed prevents a SandboxClaim from specifying any volume claim templates.<br /> |
+| `Allowed` | VolumeClaimTemplatesPolicyAllowed allows a SandboxClaim to inject new volume claim templates, but not override existing ones.<br /> |
+| `Overrides` | VolumeClaimTemplatesPolicyOverrides allows a SandboxClaim to inject new and override existing volume claim templates.<br /> |
 
 

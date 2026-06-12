@@ -25,6 +25,23 @@ The migration script has two phases, run in this order:
 
 Both phases are idempotent — safe to re-run.
 
+## Before you start: back up your data
+
+Before running either phase, dump every CR the migration will touch so you have a known-good snapshot to fall back to if anything goes wrong:
+
+```bash
+kubectl get sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools \
+  -A -o yaml > agent-sandbox-backup-$(date -u +%Y%m%dT%H%M%SZ).yaml
+```
+
+Keep the file somewhere durable (not on a worker pod that may get rescheduled). Useful for:
+
+- Inspecting the original v1alpha1 shape if a converted v1beta1 record looks wrong.
+- Comparing pre- vs post-migration to confirm only the expected fields changed.
+- Re-creating individual mangled resources by hand without restoring the whole namespace.
+
+See [Recovery from backup](#recovery-from-backup) in the Troubleshooting section if you need to roll back.
+
 ## Migration flows
 
 Pick one of three flows depending on how you manage installs.
@@ -196,3 +213,36 @@ kubectl get endpoints agent-sandbox-webhook-service -n agent-sandbox-system
 **Migrate phase reports failures on specific resources**: re-run the script (`bash dev/tools/migrate.sh --phase=migrate`). It's idempotent — already-migrated resources just get the annotation timestamp updated. If a specific resource keeps failing, fetch it (`kubectl get -o yaml`) and inspect what's wrong — usually it's a conversion-webhook error tied to a bad field combination that needs manual cleanup.
 
 **Bootstrap printed `OPERATOR ACTION REQUIRED` for some claims**: those claims reference specific pool names that don't currently exist. The conversion webhook will still rewrite them to point at those names — you must create the pools manually post-migration, or re-point the claims (see "Re-pointing warm-started claims" above).
+
+### Recovery from backup
+
+If migration produces broken or unexpected v1beta1 resources, use the backup file from [Before you start: back up your data](#before-you-start-back-up-your-data) to restore.
+
+**Per-resource restore** (preferred — only touches what's actually broken):
+
+```bash
+# Inspect a specific resource against the backup to confirm it's wrong.
+kubectl get <kind> <name> -n <namespace> -o yaml \
+  | diff - <(yq '.items[] | select(.kind=="<kind>" and .metadata.name=="<name>")' backup.yaml)
+
+# Delete the broken record and re-apply the v1alpha1 spec from the backup.
+# The conversion webhook re-converts it on apply.
+kubectl delete <kind> <name> -n <namespace>
+yq '.items[] | select(.kind=="<kind>" and .metadata.name=="<name>")' backup.yaml \
+  | kubectl apply -f -
+```
+
+**Bulk restore** (last resort — only when many resources are broken AND the conversion webhook is functioning):
+
+```bash
+# CAUTION: deletes every Sandbox/SandboxClaim/SandboxTemplate/SandboxWarmPool
+# across all namespaces, then re-creates them from the backup.
+kubectl delete sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools -A --all
+kubectl apply -f backup.yaml
+```
+
+Caveats:
+
+- Restoration depends on a functioning conversion webhook. If the webhook itself is broken, fix that first (typically: roll the controller image back to the pre-migration version, then re-apply the backup), or restore in two phases by first re-installing the old chart and then re-applying the backup against the old CRDs.
+- The backup captures `status` subresources too. Strip them before re-apply so the controllers re-derive status from spec rather than racing your stale snapshot: `yq 'del(.items[].status)' backup.yaml | kubectl apply -f -`.
+- Backups don't capture cluster-scoped state like `SandboxWarmPool` controller progress; freshly-applied pools will repopulate themselves from the template.

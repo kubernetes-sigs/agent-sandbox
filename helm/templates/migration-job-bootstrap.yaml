@@ -29,9 +29,23 @@ spec:
     spec:
       serviceAccountName: agent-sandbox-migration
       restartPolicy: OnFailure
+      # Restricted Pod Security Admission requires runAsNonRoot and a
+      # non-Unconfined seccompProfile at pod-level (or via every container);
+      # set both here so Jobs are accepted under "restricted" out of the box.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: migrate
           image: {{ .Values.migration.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           command:
             - /bin/bash
             - /scripts/migrate.sh

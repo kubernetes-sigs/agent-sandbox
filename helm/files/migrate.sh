@@ -193,9 +193,17 @@ bootstrap_phase() {
   # Pull namespace, name, templateRef, warmpool policy, and the bound
   # sandbox name (if any) for every SandboxClaim in one shot. jsonpath
   # keeps us jq-free so the container image can be any minimal kubectl
-  # image. Trailing blank fields are preserved as empty strings between
-  # tabs. status.sandboxStatus.name distinguishes warm-started (sandbox
+  # image. status.sandboxStatus.name distinguishes warm-started (sandbox
   # exists and != claim name) from cold-start.
+  #
+  # We deliberately use '|' (a non-whitespace character) as the field
+  # delimiter rather than tab. When IFS contains whitespace characters
+  # like tab, bash's `read` collapses *consecutive* whitespace IFS chars
+  # into a single delimiter (POSIX word-splitting rule), so an empty
+  # spec.warmpool field (which is the common case under default
+  # networkPolicyManagement) would shift sandbox_name into the warmpool
+  # slot and corrupt the warm-start detection. '|' is non-whitespace, so
+  # consecutive '|' characters are preserved as empty fields.
   #
   # Listing failures must abort the phase. Suppressing them silently would
   # make a missing-RBAC or transient API error look like "no claims found"
@@ -203,7 +211,7 @@ bootstrap_phase() {
   local items
   # shellcheck disable=SC2046
   if ! items="$(kctl get sandboxclaims.extensions.agents.x-k8s.io $(ns_args) \
-      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.sandboxTemplateRef.name}{"\t"}{.spec.warmpool}{"\t"}{.status.sandboxStatus.name}{"\n"}{end}' \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.spec.sandboxTemplateRef.name}{"|"}{.spec.warmpool}{"|"}{.status.sandboxStatus.name}{"\n"}{end}' \
       2>&1)"; then
     errlog "failed to list SandboxClaims: $items"
     errlog "check RBAC: ServiceAccount needs get/list on sandboxclaims.extensions.agents.x-k8s.io"
@@ -215,7 +223,7 @@ bootstrap_phase() {
     return 0
   fi
 
-  while IFS=$'\t' read -r claim_ns claim_name template_name warmpool sandbox_name; do
+  while IFS='|' read -r claim_ns claim_name template_name warmpool sandbox_name; do
     [[ -z "$claim_ns" ]] && continue
     scanned=$((scanned + 1))
 

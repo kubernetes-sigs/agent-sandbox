@@ -21,7 +21,9 @@ export {
   SandboxPortForwardError,
   SandboxRequestError,
   SandboxResponseTooLargeError,
+  SandboxTemplateNotFoundError,
   SandboxTimeoutError,
+  SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
 export * from "./extensions/index.js";
 export { Filesystem } from "./files/index.js";

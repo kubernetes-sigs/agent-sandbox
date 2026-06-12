@@ -2000,11 +2000,15 @@ describe("Sandbox", () => {
     it("aborts fetchPodIp mid-lookup when the caller's signal fires", async () => {
       vi.useFakeTimers();
       // K8s API call that never resolves (simulates a hanging / throttled API)
-      mockGetNamespacedCustomObject.mockImplementation(() => new Promise(() => {}));
+      mockGetNamespacedCustomObject.mockImplementation(
+        () => new Promise(() => {}),
+      );
       const sandbox = createReadySandbox({ apiUrl: undefined });
 
       const controller = new AbortController();
-      const listPromise = sandbox.files.list(".", { signal: controller.signal });
+      const listPromise = sandbox.files.list(".", {
+        signal: controller.signal,
+      });
       const settled = listPromise.catch((e) => e);
 
       // Flush microtasks: fetchPodIp is now awaiting the K8s API response

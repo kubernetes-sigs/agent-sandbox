@@ -29,7 +29,9 @@ import {
   SandboxError,
   SandboxMetadataError,
   SandboxNotFoundError,
+  SandboxTemplateNotFoundError,
   SandboxTimeoutError,
+  SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
 import type { SandboxInit } from "./sandbox.js";
 import { Sandbox } from "./sandbox.js";
@@ -95,6 +97,31 @@ function validateLabels(labels: Record<string, string>): void {
     // Values can be empty; non-empty values must follow the same name constraints
     if (value) {
       validateLabelName(value, `value '${value}' for key '${key}'`);
+    }
+  }
+}
+
+/**
+ * Inspects SandboxClaim status conditions and throws a typed error when the
+ * controller has signalled a terminal failure (WarmPoolNotFound, TemplateNotFound).
+ */
+function inspectClaimConditions(
+  conditions: Array<Record<string, string>>,
+): void {
+  for (const cond of conditions) {
+    if (
+      cond.type === "Ready" &&
+      cond.status === "False" &&
+      cond.reason === "TemplateNotFound"
+    ) {
+      throw new SandboxTemplateNotFoundError(
+        `SandboxTemplate requested does not exist: ${cond.message ?? "Template not found"}`,
+      );
+    }
+    if (cond.reason === "WarmPoolNotFound") {
+      throw new SandboxWarmPoolNotFoundError(
+        `SandboxWarmPool requested does not exist: ${cond.message ?? "WarmPool not found"}`,
+      );
     }
   }
 }
@@ -267,12 +294,12 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
    * On failure, any orphaned SandboxClaim is cleaned up automatically.
    */
   async createSandbox(
-    template: string,
+    warmpool: string,
     namespace?: string,
     opts?: CreateSandboxOptions,
   ): Promise<T> {
-    if (!template) {
-      throw new Error("Template name cannot be empty.");
+    if (!warmpool) {
+      throw new Error("Warmpool name cannot be empty.");
     }
 
     // Review #16: normalize empty string to defaultNamespace (matches Go behaviour)
@@ -303,7 +330,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
         sandboxTracingManager?.getTraceContextJson() ?? "";
       await this.createClaim(
         claimName,
-        template,
+        warmpool,
         ns,
         opts?.labels,
         traceContextStr,
@@ -596,6 +623,45 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   }
 
   /**
+   * Returns the WarmPool name referenced by a SandboxClaim.
+   * Throws SandboxNotFoundError if the claim does not exist.
+   */
+  async getSandboxClaimWarmpoolName(
+    claimName: string,
+    namespace?: string,
+  ): Promise<string> {
+    const ns = namespace ?? this.defaultNamespace;
+    let claimObj: unknown;
+    try {
+      claimObj = await this.customObjectsApi.getNamespacedCustomObject({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: ns,
+        plural: CLAIM_PLURAL_NAME,
+        name: claimName,
+      });
+    } catch (err) {
+      if (isK8s404(err)) {
+        throw new SandboxNotFoundError(
+          `SandboxClaim '${claimName}' not found in namespace '${ns}'.`,
+          { cause: err },
+        );
+      }
+      throw new SandboxError(
+        `Failed to get SandboxClaim '${claimName}' in namespace '${ns}'.`,
+        { cause: err },
+      );
+    }
+    const spec =
+      ((claimObj as Record<string, unknown>)?.spec as Record<
+        string,
+        unknown
+      >) ?? {};
+    const warmPoolRef = (spec.warmPoolRef as Record<string, unknown>) ?? {};
+    return warmPoolRef.name as string;
+  }
+
+  /**
    * Closes the sandbox handle (if tracked) and deletes the Kubernetes resources.
    */
   async deleteSandbox(claimName: string, namespace?: string): Promise<void> {
@@ -696,7 +762,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
   private async createClaim(
     claimName: string,
-    template: string,
+    warmpool: string,
     namespace: string,
     labels?: Record<string, string>,
     traceContextStr: string = "",
@@ -728,14 +794,14 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           ...(labels ? { labels } : {}),
         },
         spec: {
-          sandboxTemplateRef: { name: template },
+          warmPoolRef: { name: warmpool },
         },
       };
 
       console.info(
         `Creating SandboxClaim '${claimName}' ` +
           `in namespace '${namespace}' ` +
-          `using template '${template}'...`,
+          `using warm pool '${warmpool}'...`,
       );
 
       await this.customObjectsApi.createNamespacedCustomObject({
@@ -804,6 +870,17 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           (type: string, obj: Record<string, unknown>) => {
             if (type === "ADDED" || type === "MODIFIED") {
               const status = (obj.status as Record<string, unknown>) ?? {};
+              const conditions =
+                (status.conditions as Array<Record<string, string>>) ?? [];
+              try {
+                inspectClaimConditions(conditions);
+              } catch (err) {
+                settle({
+                  type: "error",
+                  error: err instanceof Error ? err : new Error(String(err)),
+                });
+                return;
+              }
               const sandboxStatus =
                 (status.sandbox as Record<string, unknown>) ?? {};
               const name = sandboxStatus.name as string | undefined;
@@ -868,27 +945,15 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
     while (true) {
       // Re-list: check if claim is already resolved (initial GET or re-list after clean close).
+      let fetchedClaim: unknown;
       try {
-        const existing = await this.customObjectsApi.getNamespacedCustomObject({
+        fetchedClaim = await this.customObjectsApi.getNamespacedCustomObject({
           group: CLAIM_API_GROUP,
           version: CLAIM_API_VERSION,
           namespace,
           plural: CLAIM_PLURAL_NAME,
           name: claimName,
         });
-        const status =
-          ((existing as Record<string, unknown>)?.status as Record<
-            string,
-            unknown
-          >) ?? {};
-        const sandboxStatus = (status.sandbox as Record<string, unknown>) ?? {};
-        const name = sandboxStatus.name as string | undefined;
-        if (name) {
-          console.info(
-            `Resolved sandbox name '${name}' from claim status (GET).`,
-          );
-          return name;
-        }
       } catch (err) {
         // 404 means the claim is gone — fail immediately, do not fall through to watch.
         if (isK8s404(err)) {
@@ -898,6 +963,25 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           );
         }
         // Non-404 (transient network error, etc.) — fall through to watch.
+      }
+
+      if (fetchedClaim !== undefined) {
+        const status =
+          ((fetchedClaim as Record<string, unknown>)?.status as Record<
+            string,
+            unknown
+          >) ?? {};
+        const conditions =
+          (status.conditions as Array<Record<string, string>>) ?? [];
+        inspectClaimConditions(conditions); // throws SandboxTemplateNotFoundError / SandboxWarmPoolNotFoundError
+        const sandboxStatus = (status.sandbox as Record<string, unknown>) ?? {};
+        const name = sandboxStatus.name as string | undefined;
+        if (name) {
+          console.info(
+            `Resolved sandbox name '${name}' from claim status (GET).`,
+          );
+          return name;
+        }
       }
 
       const remaining = deadline - Date.now();

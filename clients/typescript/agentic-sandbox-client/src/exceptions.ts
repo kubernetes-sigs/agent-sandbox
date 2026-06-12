@@ -48,6 +48,16 @@ export class SandboxMetadataError extends SandboxError {}
 export class SandboxTimeoutError extends SandboxError {}
 
 /**
+ * Raised when the SandboxTemplate referenced by the WarmPool does not exist.
+ */
+export class SandboxTemplateNotFoundError extends SandboxError {}
+
+/**
+ * Raised when the referenced SandboxWarmPool does not exist.
+ */
+export class SandboxWarmPoolNotFoundError extends SandboxError {}
+
+/**
  * Raised when an HTTP request to the sandbox fails.
  */
 export class SandboxRequestError extends SandboxError {

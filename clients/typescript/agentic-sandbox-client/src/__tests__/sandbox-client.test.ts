@@ -82,7 +82,12 @@ import {
   CLAIM_PLURAL_NAME,
   POD_NAME_ANNOTATION,
 } from "../constants.js";
-import { SandboxError, SandboxNotFoundError } from "../exceptions.js";
+import {
+  SandboxError,
+  SandboxNotFoundError,
+  SandboxTemplateNotFoundError,
+  SandboxWarmPoolNotFoundError,
+} from "../exceptions.js";
 import { Sandbox } from "../sandbox.js";
 import { SandboxClient } from "../sandbox-client.js";
 
@@ -262,9 +267,7 @@ describe("SandboxClient (registry)", () => {
       expect(createArgs.version).toBe(CLAIM_API_VERSION);
       expect(createArgs.plural).toBe(CLAIM_PLURAL_NAME);
       expect(createArgs.namespace).toBe("default");
-      expect(createArgs.body.spec.sandboxTemplateRef.name).toBe(
-        "test-template",
-      );
+      expect(createArgs.body.spec.warmPoolRef.name).toBe("test-template");
 
       // Verify two watches were used
       expect(mockWatchFn).toHaveBeenCalledTimes(2);
@@ -314,10 +317,10 @@ describe("SandboxClient (registry)", () => {
       });
     });
 
-    it("throws when template is empty", async () => {
+    it("throws when warmpool is empty", async () => {
       const client = new SandboxClient({ apiUrl: "http://api:8080" });
       await expect(client.createSandbox("")).rejects.toThrow(
-        "Template name cannot be empty.",
+        "Warmpool name cannot be empty.",
       );
     });
 
@@ -1344,6 +1347,221 @@ describe("SandboxClient (registry)", () => {
       expect((err as SandboxError).cause).toBe(k8sErr);
       // Handle evicted from registry
       expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
+  });
+
+  // ===== SandboxWarmPoolNotFoundError / SandboxTemplateNotFoundError =====
+
+  describe("claim condition error detection", () => {
+    it("watch path: throws SandboxWarmPoolNotFoundError on WarmPoolNotFound condition", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // Initial GET returns no sandbox name yet
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      // Watch fires a MODIFIED event with WarmPoolNotFound condition
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: {
+              conditions: [
+                {
+                  type: "Ready",
+                  status: "False",
+                  reason: "WarmPoolNotFound",
+                  message: "pool not found",
+                },
+              ],
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("missing-pool")).rejects.toBeInstanceOf(
+        SandboxWarmPoolNotFoundError,
+      );
+    });
+
+    it("GET path: throws SandboxWarmPoolNotFoundError on WarmPoolNotFound condition", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // Initial GET returns WarmPoolNotFound condition
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: {
+          conditions: [
+            {
+              type: "Ready",
+              status: "False",
+              reason: "WarmPoolNotFound",
+              message: "pool not found",
+            },
+          ],
+        },
+      });
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(client.createSandbox("missing-pool")).rejects.toBeInstanceOf(
+        SandboxWarmPoolNotFoundError,
+      );
+      // Watch must NOT have been called — error propagates from GET path
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("watch path: throws SandboxTemplateNotFoundError on Ready=False/TemplateNotFound condition", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: {
+              conditions: [
+                {
+                  type: "Ready",
+                  status: "False",
+                  reason: "TemplateNotFound",
+                  message: "template missing",
+                },
+              ],
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(
+        client.createSandbox("warmpool-with-bad-tpl"),
+      ).rejects.toBeInstanceOf(SandboxTemplateNotFoundError);
+    });
+
+    it("GET path: throws SandboxTemplateNotFoundError on Ready=False/TemplateNotFound condition", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: {
+          conditions: [
+            {
+              type: "Ready",
+              status: "False",
+              reason: "TemplateNotFound",
+              message: "template missing",
+            },
+          ],
+        },
+      });
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(
+        client.createSandbox("warmpool-with-bad-tpl"),
+      ).rejects.toBeInstanceOf(SandboxTemplateNotFoundError);
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("does NOT throw for Ready=True/TemplateNotFound (condition type mismatch)", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      // Watch fires Ready=True with reason TemplateNotFound — should NOT error, just continue
+      // Then immediately give the sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: {
+              conditions: [
+                { type: "Ready", status: "True", reason: "TemplateNotFound" },
+              ],
+              sandbox: { name: "sandbox-ok" },
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Second watch: sandbox becomes ready
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            metadata: { name: "sandbox-ok", annotations: {} },
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("warmpool-ok");
+      expect(sandbox.sandboxName).toBe("sandbox-ok");
+    });
+  });
+
+  // ===== getSandboxClaimWarmpoolName =====
+
+  describe("getSandboxClaimWarmpoolName()", () => {
+    it("returns warmpool name from claim spec", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        spec: { warmPoolRef: { name: "my-warmpool" } },
+      });
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const name = await client.getSandboxClaimWarmpoolName("my-claim");
+      expect(name).toBe("my-warmpool");
+
+      const callArgs = mockGetNamespacedCustomObject.mock.calls[0][0];
+      expect(callArgs.group).toBe(CLAIM_API_GROUP);
+      expect(callArgs.version).toBe(CLAIM_API_VERSION);
+      expect(callArgs.plural).toBe(CLAIM_PLURAL_NAME);
+      expect(callArgs.name).toBe("my-claim");
+    });
+
+    it("uses provided namespace", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        spec: { warmPoolRef: { name: "pool-in-ns" } },
+      });
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await client.getSandboxClaimWarmpoolName("my-claim", "custom-ns");
+
+      const callArgs = mockGetNamespacedCustomObject.mock.calls[0][0];
+      expect(callArgs.namespace).toBe("custom-ns");
+    });
+
+    it("throws SandboxNotFoundError when claim returns 404", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      await expect(
+        client.getSandboxClaimWarmpoolName("missing-claim"),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+    });
+
+    it("throws SandboxError on non-404 Kubernetes error", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Service Unavailable"), { code: 503 }),
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const err = await client
+        .getSandboxClaimWarmpoolName("my-claim")
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SandboxError);
+      expect(err).not.toBeInstanceOf(SandboxNotFoundError);
     });
   });
 

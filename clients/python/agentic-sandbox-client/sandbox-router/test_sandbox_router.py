@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import importlib
 import os
+import queue
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers, URL
 
 os.environ["ALLOW_UNAUTHENTICATED_ROUTER"] = "true"
 import sandbox_router
@@ -300,6 +303,38 @@ class TestAuthentication:
             with pytest.raises(RuntimeError, match="ROUTER_AUTH_TOKEN must be set"):
                 importlib.reload(sandbox_router)
 
+    def test_custom_auth_header_preserves_authorization_for_sandbox(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ROUTER_AUTH_TOKEN": "secret-token",
+                "ROUTER_AUTH_HEADER": "X-Router-Authorization",
+            },
+            clear=True,
+        ):
+            importlib.reload(sandbox_router)
+            from fastapi.testclient import TestClient
+            client = TestClient(sandbox_router.app)
+
+            captured_request = {}
+
+            async def capture_send(req, **kwargs):
+                captured_request["headers"] = dict(req.headers)
+                raise httpx.ConnectError("stop here")
+
+            with patch.object(sandbox_router.client, "send", side_effect=capture_send):
+                resp = client.post(
+                    "/execute",
+                    headers={
+                        "X-Sandbox-ID": "my-sandbox",
+                        "X-Router-Authorization": "Bearer secret-token",
+                        "Authorization": "Bearer runtime-token",
+                    },
+                )
+            assert resp.status_code == 502
+            assert captured_request["headers"]["authorization"] == "Bearer runtime-token"
+            assert "x-router-authorization" not in captured_request["headers"]
+
 
 class TestProxyTimeout:
     def test_default_timeout(self):
@@ -439,6 +474,30 @@ class TestProxyRouting:
             )
             assert "authorization" not in captured_request.get("headers", {})
 
+    def test_routing_headers_not_forwarded(self, client):
+        """Sandbox routing headers should be consumed by the router, not forwarded."""
+        captured_request = {}
+
+        async def capture_send(req, **kwargs):
+            captured_request["headers"] = dict(req.headers)
+            raise httpx.ConnectError("stop here")
+
+        with patch.object(sandbox_router.client, "send", side_effect=capture_send):
+            client.post(
+                "/execute",
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "X-Sandbox-Namespace": "my-ns",
+                    "X-Sandbox-Port": "9999",
+                    "X-Sandbox-Pod-IP": "10.20.30.40",
+                },
+            )
+            headers = captured_request.get("headers", {})
+            assert "x-sandbox-id" not in headers
+            assert "x-sandbox-namespace" not in headers
+            assert "x-sandbox-port" not in headers
+            assert "x-sandbox-pod-ip" not in headers
+
     def test_query_parameters_forwarded(self, client):
         """Query parameters should be preserved in the proxied request."""
         captured_request = {}
@@ -485,3 +544,185 @@ class TestProxyRouting:
         assert hasattr(
             sent_request.stream, "__aiter__"
         ), "Content should be an async iterable"
+
+
+class FakeUpstreamWebSocket:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+        self.messages = queue.Queue()
+
+    async def send(self, message):
+        self.sent.append(message)
+        self.messages.put(f"echo:{message}" if isinstance(message, str) else message)
+
+    async def close(self):
+        self.closed = True
+        self.messages.put(None)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        message = await asyncio.to_thread(self.messages.get)
+        if message is None:
+            raise StopAsyncIteration
+        return message
+
+
+class FakeClientWebSocket:
+    def __init__(self, messages=None, *, headers=None, path="/api/ws/v2", query=""):
+        self.headers = Headers(headers or {})
+        self.url = URL(f"ws://router.test{path}{'?' + query if query else ''}")
+        self.accepted = False
+        self.closed_codes = []
+        self.sent_text = []
+        self.sent_bytes = []
+        self.messages = queue.Queue()
+        for message in messages or []:
+            self.messages.put(message)
+
+    async def accept(self):
+        self.accepted = True
+
+    async def close(self, code=1000, reason=None):
+        self.closed_codes.append(code)
+
+    async def receive(self):
+        return await asyncio.to_thread(self.messages.get)
+
+    async def send_text(self, message):
+        self.sent_text.append(message)
+
+    async def send_bytes(self, message):
+        self.sent_bytes.append(message)
+
+
+class TestWebSocketProxy:
+    @pytest.mark.asyncio
+    async def test_websocket_endpoint_connects_to_target_and_relays(self):
+        upstream = FakeUpstreamWebSocket()
+        captured_connect = {}
+
+        async def fake_connect(uri, **kwargs):
+            captured_connect["uri"] = uri
+            captured_connect["kwargs"] = kwargs
+            return upstream
+
+        async def fake_relay(*, client_ws, upstream_ws):
+            assert upstream_ws is upstream
+            await upstream_ws.send("hello")
+
+        fake_client = FakeClientWebSocket(
+            headers={
+                "X-Sandbox-ID": "my-sandbox",
+                "X-Sandbox-Namespace": "my-ns",
+                "X-Sandbox-Port": "9999",
+            },
+            path="/api/ws/v2",
+            query="thread=abc",
+        )
+        with (
+            patch.object(sandbox_router.websockets, "connect", side_effect=fake_connect),
+            patch.object(sandbox_router, "_relay_websockets", side_effect=fake_relay),
+        ):
+            await sandbox_router.proxy_websocket(fake_client, "api/ws/v2")
+
+        assert (
+            captured_connect["uri"]
+            == "ws://my-sandbox.my-ns.svc.cluster.local:9999/api/ws/v2?thread=abc"
+        )
+        assert fake_client.accepted is True
+        assert upstream.sent == ["hello"]
+        assert upstream.closed is True
+        assert fake_client.closed_codes == [1000]
+
+    @pytest.mark.asyncio
+    async def test_websocket_preserves_authorization_with_custom_router_auth_header(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ROUTER_AUTH_TOKEN": "secret-token",
+                "ROUTER_AUTH_HEADER": "X-Router-Authorization",
+            },
+            clear=True,
+        ):
+            importlib.reload(sandbox_router)
+            upstream = FakeUpstreamWebSocket()
+            captured_connect = {}
+
+            async def fake_connect(uri, **kwargs):
+                captured_connect["uri"] = uri
+                captured_connect["kwargs"] = kwargs
+                return upstream
+
+            async def fake_relay(*, client_ws, upstream_ws):
+                assert upstream_ws is upstream
+
+            fake_client = FakeClientWebSocket(
+                headers={
+                    "X-Sandbox-ID": "my-sandbox",
+                    "X-Router-Authorization": "Bearer secret-token",
+                    "Authorization": "Bearer runtime-token",
+                },
+            )
+            with (
+                patch.object(sandbox_router.websockets, "connect", side_effect=fake_connect),
+                patch.object(sandbox_router, "_relay_websockets", side_effect=fake_relay),
+            ):
+                await sandbox_router.proxy_websocket(fake_client, "api/ws/v2")
+
+            forwarded = dict(captured_connect["kwargs"]["additional_headers"])
+            assert forwarded["authorization"] == "Bearer runtime-token"
+            assert "x-router-authorization" not in forwarded
+
+    @pytest.mark.asyncio
+    async def test_websocket_rejects_missing_auth(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ROUTER_AUTH_TOKEN": "secret-token",
+            },
+            clear=True,
+        ):
+            importlib.reload(sandbox_router)
+
+            fake_client = FakeClientWebSocket(headers={"X-Sandbox-ID": "my-sandbox"})
+            await sandbox_router.proxy_websocket(fake_client, "api/ws/v2")
+            assert fake_client.accepted is False
+            assert fake_client.closed_codes == [1008]
+
+    @pytest.mark.asyncio
+    async def test_client_to_upstream_relays_text_bytes_and_disconnect(self):
+        upstream = FakeUpstreamWebSocket()
+        fake_client = FakeClientWebSocket(
+            [
+                {"type": "websocket.receive", "text": "hello"},
+                {"type": "websocket.receive", "bytes": b"data"},
+                {"type": "websocket.disconnect"},
+            ]
+        )
+
+        await sandbox_router._client_to_upstream(
+            client_ws=fake_client,
+            upstream_ws=upstream,
+        )
+
+        assert upstream.sent == ["hello", b"data"]
+        assert upstream.closed is True
+
+    @pytest.mark.asyncio
+    async def test_upstream_to_client_relays_text_and_bytes_until_close(self):
+        upstream = FakeUpstreamWebSocket()
+        upstream.messages.put("hello")
+        upstream.messages.put(b"data")
+        upstream.messages.put(None)
+        fake_client = FakeClientWebSocket()
+
+        await sandbox_router._upstream_to_client(
+            client_ws=fake_client,
+            upstream_ws=upstream,
+        )
+
+        assert fake_client.sent_text == ["hello"]
+        assert fake_client.sent_bytes == [b"data"]

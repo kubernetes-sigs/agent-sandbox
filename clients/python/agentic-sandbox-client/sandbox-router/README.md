@@ -49,6 +49,30 @@ The router can be configured using the following environment variables:
 | Variable | Description | Default |
 |---|---|---|
 | `PROXY_TIMEOUT_SECONDS` | Timeout in seconds for proxied requests to sandbox pods. Increase this for long-running operations (e.g., code execution, model inference). | `180` (3 minutes) |
+| `CLUSTER_DOMAIN` | Kubernetes cluster DNS suffix used when constructing sandbox service names. | `cluster.local` |
+| `ROUTER_AUTH_TOKEN` | Bearer token required by the router before proxying traffic. Required unless unauthenticated mode is explicitly enabled. | unset |
+| `ALLOW_UNAUTHENTICATED_ROUTER` | Allows the router to start without `ROUTER_AUTH_TOKEN`. Use only for local development or testing. | `false` |
+| `ROUTER_AUTH_HEADER` | Header used for the router bearer token. By default this is `Authorization`, which is stripped before forwarding. Set this to a dedicated header such as `X-Router-Authorization` when the sandbox also needs its own `Authorization` header. | `Authorization` |
+
+## Routing Headers
+
+Each proxied HTTP or WebSocket request must include `X-Sandbox-ID`. Optional routing headers are:
+
+| Header | Description | Default |
+|---|---|---|
+| `X-Sandbox-Namespace` | Namespace containing the target sandbox service. | `default` |
+| `X-Sandbox-Port` | Target sandbox service or pod port. | `8888` |
+| `X-Sandbox-Pod-IP` | Direct pod IP target. When omitted, the router uses Kubernetes service DNS. | unset |
+
+The router consumes routing headers, hop-by-hop headers, and the configured router auth header
+instead of forwarding them to the sandbox. Other application headers are preserved, including a
+sandbox `Authorization` header when router authentication uses a separate `ROUTER_AUTH_HEADER`.
+
+## WebSocket Proxying
+
+The router supports WebSocket proxying on the same catch-all route as HTTP traffic. A WebSocket
+connection uses the same sandbox routing headers, opens a `ws://` connection to the target sandbox,
+and relays text and binary frames bidirectionally until either side closes.
 
 ## Deployment
 

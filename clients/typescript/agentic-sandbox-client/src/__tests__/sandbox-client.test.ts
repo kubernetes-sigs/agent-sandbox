@@ -1548,6 +1548,101 @@ describe("SandboxClient (registry)", () => {
     });
   });
 
+  // ===== getSandbox() closes active handle before evicting from registry =====
+
+  describe("getSandbox() closes active handle on eviction (resource leak fix)", () => {
+    it("calls closeLocal() on active handle when claim GET returns 404", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-leak-404");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+      expect(sandbox1.isActive).toBe(true);
+
+      // Claim GET returns 404 on cache-hit validation
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      await expect(client.getSandbox(sandbox1.claimName)).rejects.toThrow(
+        SandboxNotFoundError,
+      );
+
+      // Active handle must be closed to release kubectl process / tracing span
+      expect(sandbox1.isActive).toBe(false);
+    });
+
+    it("calls closeLocal() on active handle when claim GET returns non-404 error", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-leak-500");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+      expect(sandbox1.isActive).toBe(true);
+
+      // Claim GET returns 500 on cache-hit validation
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Internal Server Error"), { code: 500 }),
+      );
+
+      await expect(client.getSandbox(sandbox1.claimName)).rejects.toThrow(
+        SandboxError,
+      );
+
+      expect(sandbox1.isActive).toBe(false);
+    });
+
+    it("calls closeLocal() on active handle when underlying Sandbox CR returns 404", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-leak-cr-404");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+      expect(sandbox1.isActive).toBe(true);
+
+      // 1st GET: claim verify succeeds with matching sandbox name
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: sandbox1.claimName },
+        status: { sandbox: { name: sandbox1.sandboxName } },
+      });
+      // 2nd GET: Sandbox CR returns 404
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      await expect(client.getSandbox(sandbox1.claimName)).rejects.toThrow(
+        SandboxNotFoundError,
+      );
+
+      expect(sandbox1.isActive).toBe(false);
+    });
+
+    it("calls closeLocal() on active handle when sandboxRef name has changed", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-original-handle");
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox1 = await client.createSandbox("tpl");
+      expect(sandbox1.isActive).toBe(true);
+
+      // Cache-hit validation returns a *different* sandbox name (sandboxRef changed)
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: sandbox1.claimName },
+        status: { sandbox: { name: "sandbox-new-name" } },
+      });
+
+      // Set up re-attach flow for the new sandbox
+      mockSandboxReadyFlow("sandbox-new-name");
+
+      const sandbox2 = await client.getSandbox(sandbox1.claimName);
+
+      // Old handle must be closed; new handle must be active
+      expect(sandbox1.isActive).toBe(false);
+      expect(sandbox2.isActive).toBe(true);
+      expect(sandbox2.sandboxName).toBe("sandbox-new-name");
+    });
+  });
+
   // ===== getSandboxClaimWarmpoolName =====
 
   describe("getSandboxClaimWarmpoolName()", () => {

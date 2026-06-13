@@ -434,6 +434,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
         });
       } catch (err) {
         // Evict the stale handle regardless of the error type.
+        await existing.closeLocal().catch(() => {});
         this.registry.delete(key);
         // Distinguish 404 (not found) from other K8s errors (network, auth, …).
         if (isK8s404(err)) {
@@ -472,6 +473,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
             name: existing.sandboxName,
           });
         } catch (err) {
+          await existing.closeLocal().catch(() => {});
           this.registry.delete(key);
           if (isK8s404(err)) {
             throw new SandboxNotFoundError(
@@ -494,6 +496,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
         `SandboxClaim '${claimName}' sandboxRef changed ` +
           `from '${existing.sandboxName}' to '${currentSandboxName}'; re-attaching.`,
       );
+      await existing.closeLocal().catch(() => {});
       this.registry.delete(key);
     }
 

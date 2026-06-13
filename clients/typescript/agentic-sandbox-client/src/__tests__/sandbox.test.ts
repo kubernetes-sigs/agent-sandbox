@@ -1885,6 +1885,164 @@ describe("Sandbox", () => {
     });
   });
 
+  // ===== close() + reconnect() race — spawned process must not leak =====
+
+  describe("close() during reconnect does not leak port-forward process", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("process spawned during reconnect is killed when _isClosed is set before baseUrl", async () => {
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 54321 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValue(fakeServer);
+
+      // Reconnect spawns this process; TCP connection eventually succeeds
+      // but by then _isClosed will be true
+      const reconnectProc = {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn(),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      mockSpawn.mockReturnValue(reconnectProc);
+
+      // TCP connect succeeds on the first poll so we enter the _isClosed branch
+      mockCreateConnection.mockImplementation(
+        (_opts: unknown, cb?: () => void) => {
+          const sock = { destroy: vi.fn(), on: vi.fn() };
+          process.nextTick(() => cb?.());
+          return sock;
+        },
+      );
+
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 5 }),
+      );
+      sandbox._baseUrl = "http://127.0.0.1:12345";
+
+      // Dead process triggers reconnect on next request()
+      const deadProc = {
+        exitCode: 1 as number | null,
+        signalCode: null as string | null,
+        kill: vi.fn(),
+        on: vi.fn((ev: string, cb: () => void) => {
+          if (ev === "exit") setTimeout(cb, 0);
+        }),
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+      };
+      sandbox._portForwardProcess = deadProc as never;
+
+      // Start a request (triggers reconnect); also call close() concurrently
+      (fetch as Mock).mockResolvedValue(
+        new Response(JSON.stringify({ exists: true }), { status: 200 }),
+      );
+      const requestPromise = sandbox.files.exists("test.txt");
+      const reqSettled = requestPromise.catch(() => {});
+
+      // Let reconnect begin (stopPortForward + first spawn cycle starts)
+      await vi.advanceTimersByTimeAsync(0);
+
+      // close() is called while reconnect is in progress
+      const closePromise = sandbox.close();
+      const closeSettled = closePromise.catch(() => {});
+
+      // Advance enough time to let the reconnect's _isClosed check fire
+      await vi.advanceTimersByTimeAsync(10_000);
+      await reqSettled;
+      await closeSettled;
+
+      // The process spawned during reconnect must have been killed
+      expect(reconnectProc.kill).toHaveBeenCalledWith("SIGTERM");
+    });
+
+    it("startAndWaitForPortForward throws without spawning when _isClosed is true at spawn-time", async () => {
+      // This test does NOT use fake timers (close() on a sandbox with no process is instant)
+      vi.useRealTimers();
+
+      const fakeServer = {
+        listen: vi.fn((_p: number, _h: string, cb: () => void) => cb()),
+        address: vi.fn(() => ({ port: 54321 })),
+        close: vi.fn((cb: () => void) => cb()),
+        on: vi.fn(),
+      };
+      mockCreateServer.mockReturnValueOnce(fakeServer);
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+
+      const sandbox = new TestableSandbox(
+        createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 1 }),
+      );
+
+      // Close sandbox (no port-forward process attached → completes immediately)
+      await sandbox.close();
+      expect(sandbox.isActive).toBe(false);
+
+      const spawnCountBefore = mockSpawn.mock.calls.length;
+
+      // connect() → startAndWaitForPortForward() must detect _isClosed before spawning
+      await expect(sandbox.connect()).rejects.toThrow(
+        "Sandbox connection has been closed.",
+      );
+
+      // spawn must NOT have been called
+      expect(mockSpawn.mock.calls.length).toBe(spawnCountBefore);
+    });
+  });
+
+  // ===== fetchPodIp abort listener does not accumulate on external signal =====
+
+  describe("fetchPodIp abort listener does not leak on external AbortSignal", () => {
+    it("listener count stays flat when podIp is re-fetched multiple times with the same signal", async () => {
+      const { getEventListeners } = await import("node:events");
+
+      // podIPs: [] → ip is null → _podIpResolved stays false → fetchPodIp called every request
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        status: { podIPs: [] },
+      });
+
+      const sandbox = createReadySandbox({ apiUrl: undefined });
+
+      // timeout: 0 is falsy → no overallSignal → podIpSignal === options.signal directly.
+      // This is the exact condition that triggers listener accumulation without the fix.
+      const controller = new AbortController();
+
+      const RUNS = 5;
+      for (let i = 0; i < RUNS; i++) {
+        // Fresh Response per call to avoid re-using a consumed body
+        (fetch as Mock).mockResolvedValueOnce(
+          new Response(JSON.stringify({ exists: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+        await sandbox.files.exists("test.txt", {
+          timeout: 0,
+          signal: controller.signal,
+        });
+      }
+
+      // Without fix: listener count grows to RUNS (5)
+      // With fix:    removeEventListener in finally keeps the count at 0
+      const listenerCount = getEventListeners(
+        controller.signal,
+        "abort",
+      ).length;
+      expect(listenerCount).toBeLessThanOrEqual(1);
+    });
+  });
+
   // ===== X-Sandbox-Pod-IP header =====
 
   describe("X-Sandbox-Pod-IP header", () => {

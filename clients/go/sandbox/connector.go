@@ -112,6 +112,9 @@ func newConnector(cfg connectorConfig) *connector {
 		ownsTransport:     cfg.HTTPTransport == nil,
 		httpClient: &http.Client{
 			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		log:     cfg.Log,
 		tracer:  cfg.Tracer,
@@ -215,6 +218,12 @@ func (cc *cancelOnClose) Close() error {
 
 // SendRequest sends an HTTP request to the sandbox router with required
 // headers and retry logic for transient failures.
+//
+// Note on Redirect Handling:
+// Automatic HTTP redirection is disabled in the underlying HTTP client to mitigate
+// client-side SSRF vulnerabilities. If the sandbox returns a redirect status code
+// (e.g., 301, 302, 303, 307, 308), the response is returned directly to the caller
+// with its body unclosed and a nil error (instead of being followed automatically).
 func (c *connector) SendRequest(ctx context.Context, method, endpoint string, body io.Reader, contentType string, maxRetries int) (*http.Response, error) {
 	limit := maxRetries
 	if limit <= 0 {

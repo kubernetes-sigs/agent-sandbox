@@ -1107,6 +1107,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		}
 	}
 
+	// Propagate template labels, but system/claim-identity labels take precedence.
+	sandbox.Labels = maps.Clone(template.Labels)
+
 	// Propagate claim identity labels for discovery and NetworkPolicy targeting.
 	// Fork extension: also write SandboxIDLabel onto the top-level Sandbox metadata
 	// (KEP-0174 only propagates to pod template labels; platform's informer reads

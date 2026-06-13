@@ -28,10 +28,16 @@ Because multiple Sandboxes share one PDB, we use `maxUnavailable: 0`.
 ### Step 1: Apply the Template
 The template includes the required labels and the `safe-to-evict` annotation.
 ```bash
-kubectl apply -f sandbox-template.yaml
+kubectl apply -f sandboxtemplate.yaml -n default
 ```
 
-### Step 2: Apply the Shared PDB (Once per Namespace)
+### Step 2: Apply the WarmPool
+The WarmPool references the template, with the desired number of sandboxes set to 2.
+```bash
+kubectl apply -f sandboxwarmpool.yaml -n default
+```
+
+### Step 3: Apply the Shared PDB (Once per Namespace)
 You must apply the PDB manifest to **every** namespace where you intend to run Sandboxes.
 
 ```bash
@@ -39,12 +45,12 @@ You must apply the PDB manifest to **every** namespace where you intend to run S
 kubectl apply -f shared-pdb.yaml -n default
 ```
 
-### Step 3: Create Sandbox Claims
+### Step 4: Create Sandbox Claims
 You can now create as many Claims as you want in that namespace.
 
 ```bash
 # Example for the 'default' namespace
-kubectl apply -f sandbox-claim.yaml -n default
+kubectl apply -f sandboxclaim.yaml -n default
 ```
 
 

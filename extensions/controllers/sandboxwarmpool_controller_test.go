@@ -757,6 +757,46 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusClearsZeroValues(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pool",
+			Namespace: "default",
+		},
+		Status: extensionsv1beta1.SandboxWarmPoolStatus{
+			Replicas:      3,
+			ReadyReplicas: 2,
+			Selector:      "agents.x-k8s.io/warm-pool=test",
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(warmPool.DeepCopy()).
+			WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+			Build(),
+		Scheme: scheme,
+	}
+
+	desired := warmPool.DeepCopy()
+	desired.Status.Replicas = 0
+	desired.Status.ReadyReplicas = 0
+
+	oldStatus := warmPool.Status
+	err := r.updateStatus(ctx, &oldStatus, desired)
+	require.NoError(t, err)
+
+	var updated extensionsv1beta1.SandboxWarmPool
+	err = r.Get(ctx, types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}, &updated)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), updated.Status.Replicas)
+	require.Equal(t, int32(0), updated.Status.ReadyReplicas)
+	require.Equal(t, desired.Status.Selector, updated.Status.Selector)
+}
+
 func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"

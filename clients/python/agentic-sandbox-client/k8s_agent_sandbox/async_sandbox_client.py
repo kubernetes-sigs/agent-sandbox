@@ -455,7 +455,4 @@ class AsyncSandboxClient(Generic[T]):
 
     @async_trace_span("delete_claim")
     async def _delete_claim(self, claim_name: str, namespace: str):
-        try:
-            await self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
-        except Exception as e:
-            logger.error(f"Failed to cleanup SandboxClaim '{claim_name}': {e}")
+        await self.k8s_helper.delete_sandbox_claim(claim_name, namespace)

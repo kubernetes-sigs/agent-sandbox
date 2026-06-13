@@ -96,7 +96,10 @@ async function deployRouter(tc: TestContext, namespace: string): Promise<void> {
     .replaceAll("IMAGE_PLACEHOLDER", routerImage)
     .replaceAll("${ROUTER_IMAGE}", routerImage)
     // Enable unauthenticated mode for E2E test execution (mirrors Python E2E test)
-    .replaceAll('value: "false"', 'value: "true"');
+    .replace(
+      '- name: ALLOW_UNAUTHENTICATED_ROUTER\n          value: "false"',
+      '- name: ALLOW_UNAUTHENTICATED_ROUTER\n          value: "true"',
+    );
 
   console.log(`Applying router manifest to namespace: ${namespace}`);
   tc.applyManifestText(manifest, namespace);

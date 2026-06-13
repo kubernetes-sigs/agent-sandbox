@@ -158,6 +158,73 @@ We aim for the Sandbox to be vendor-neutral, supporting various runtimes. Key ch
 
 The current Roadmap can be found at [roadmap.md](roadmap.md).
 
+
+## FAQ
+
+### General
+
+**Q: What is Agent Sandbox?**
+Agent Sandbox is a Kubernetes-based platform that provides isolated, stateful, singleton workloads ideal for AI agent runtimes. It enables easy management of sandboxed environments where AI agents can execute code safely.
+
+**Q: How does Agent Sandbox differ from other sandbox solutions?**
+Agent Sandbox is designed specifically for AI agent workloads on Kubernetes, providing features like sandbox warm pools, snapshot/restore capabilities, and claim-based lifecycle management that are tailored for AI agent use cases.
+
+**Q: What is the relationship between Sandbox, SandboxTemplate, and SandboxClaim?**
+- **Sandbox**: The core resource representing an isolated execution environment
+- **SandboxTemplate**: Defines the configuration for sandboxes (container image, resources, etc.)
+- **SandboxClaim**: Requests a sandbox from a template and manages its lifecycle
+
+### Installation & Setup
+
+**Q: How do I install Agent Sandbox?**
+Follow the [Installation Guide](./docs/installation.md) to deploy the Agent Sandbox controller and CRDs to your Kubernetes cluster.
+
+**Q: What are the system requirements?**
+- Kubernetes 1.28+
+- Container runtime supporting user namespaces
+- Sufficient cluster resources for sandbox workloads
+
+**Q: Can I use Agent Sandbox with cloud providers?**
+Yes, Agent Sandbox works with any Kubernetes cluster including GKE, EKS, AKS, and on-premises clusters.
+
+### Usage
+
+**Q: How do I create a sandbox?**
+1. Create a SandboxTemplate defining your sandbox configuration
+2. Create a SandboxClaim to request a sandbox
+3. The controller will provision a Sandbox based on your template
+
+**Q: What is a SandboxWarmPool?**
+A SandboxWarmPool maintains a pool of pre-provisioned sandboxes ready to be claimed, reducing startup latency for time-sensitive agent workloads.
+
+**Q: How do snapshots work?**
+Snapshots capture the state of a sandbox at a point in time, allowing you to restore the sandbox to that state later. This is useful for saving agent progress or creating reproducible environments.
+
+### Extensions
+
+**Q: What extensions are available?**
+Agent Sandbox supports extensions like:
+- **PodSnapshot**: For capturing and restoring sandbox state
+- Custom extensions for specific use cases
+
+**Q: How do I develop custom extensions?**
+See the [Extension Development Guide](./docs/extension-development.md) for details on building custom extensions.
+
+### Troubleshooting
+
+**Q: My sandbox is not starting. What should I check?**
+1. Verify the SandboxTemplate is valid
+2. Check the SandboxClaim status for error messages
+3. Review the controller logs for any errors
+4. Ensure your cluster has sufficient resources
+
+**Q: How do I debug sandbox issues?**
+Use `kubectl describe sandbox <name>` to view the sandbox status and events. Check the controller logs for more detailed information.
+
+**Q: Where can I get help?**
+- Join the [Kubernetes Slack](https://slack.k8s.io/) and visit #agent-sandbox
+- Open an issue on [GitHub](https://github.com/kubernetes-sigs/agent-sandbox/issues)
+- Check the [documentation](./docs/) for detailed guides
 ## Community, Discussion, Contribution, and Support
 
 This is a community-driven effort, and we welcome collaboration!

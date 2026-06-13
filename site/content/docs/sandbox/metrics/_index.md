@@ -5,6 +5,30 @@ weight: 15
 description: >
   Create a Sandbox and check its metrics.
 ---
+## Controller Prometheus Metrics
+
+The controller exposes Prometheus metrics from the `/metrics` endpoint on the controller Service. The default manifest serves this endpoint on port `8080` through the `agent-sandbox-controller` Service in the `agent-sandbox-system` namespace.
+
+For a quick local check, port-forward the Service and query the endpoint:
+
+```bash
+kubectl -n agent-sandbox-system port-forward svc/agent-sandbox-controller 8080:8080
+curl http://127.0.0.1:8080/metrics
+```
+
+Agent Sandbox registers the following controller-specific metrics:
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `agent_sandbox_claim_startup_latency_ms` | Histogram | `launch_type`, `sandbox_template` | End-to-end latency from when a `SandboxClaim` is first observed by the webhook to when the claim reaches Ready. This metric is recorded when the claim has the `agents.x-k8s.io/webhook-first-observed-at` annotation. |
+| `agent_sandbox_claim_controller_startup_latency_ms` | Histogram | `launch_type`, `sandbox_template` | Controller processing latency from when the `SandboxClaim` controller first observes a claim to when the claim reaches Ready. Use this to isolate controller-side latency from admission and client-side time. |
+| `agent_sandbox_creation_latency_ms` | Histogram | `namespace`, `launch_type`, `sandbox_template` | Latency from `Sandbox` creation to Pod Ready. For warm launches, this measures synchronization overhead because the Pod was already pre-provisioned. |
+| `agent_sandbox_claim_creation_total` | Counter | `namespace`, `sandbox_template`, `launch_type`, `warmpool_name`, `pod_condition` | Number of `SandboxClaim` creations, labeled by launch path and whether the backing Pod was ready at creation time. |
+| `agent_sandboxes` | Gauge | `namespace`, `ready_condition`, `expired`, `launch_type`, `sandbox_template`, `owned_by` | Point-in-time count of `Sandbox` resources grouped by readiness, expiry, launch type, template, and owner. |
+| `agent_sandbox_build_info` | Gauge | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` | Controller build metadata exposed with a constant value of `1`. |
+
+The `launch_type` label is `warm` when a claim adopts a Sandbox from a `SandboxWarmPool`, `cold` when the controller creates a Sandbox directly, and `unknown` when the launch path cannot be determined. Claim and warm-pool metrics require the extensions controllers to be enabled.
+
 ## Local Observability and Telemetry Gathering
 
 When building agentic workflows, you often need to inspect the latency, execution times, and network spans of your sandbox interactions. The `k8s_agent_sandbox` SDK integrates seamlessly with OpenTelemetry (OTel). 

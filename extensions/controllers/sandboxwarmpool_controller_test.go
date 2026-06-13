@@ -151,16 +151,19 @@ func TestReconcilePool(t *testing.T) {
 
 	testCases := []struct {
 		name             string
+		replicas         int32
 		initialObjs      []runtime.Object
 		expectedReplicas int32
 	}{
 		{
 			name:             "creates sandboxes when pool is empty",
+			replicas:         replicas,
 			initialObjs:      []runtime.Object{template},
 			expectedReplicas: replicas,
 		},
 		{
-			name: "creates additional sandboxes when under-provisioned",
+			name:     "creates additional sandboxes when under-provisioned",
+			replicas: replicas,
 			initialObjs: []runtime.Object{
 				template,
 				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
@@ -168,7 +171,8 @@ func TestReconcilePool(t *testing.T) {
 			expectedReplicas: replicas,
 		},
 		{
-			name: "deletes excess sandboxes when over-provisioned",
+			name:     "deletes excess sandboxes when over-provisioned",
+			replicas: replicas,
 			initialObjs: []runtime.Object{
 				template,
 				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
@@ -179,7 +183,8 @@ func TestReconcilePool(t *testing.T) {
 			expectedReplicas: replicas,
 		},
 		{
-			name: "maintains correct replica count",
+			name:     "maintains correct replica count",
+			replicas: replicas,
 			initialObjs: []runtime.Object{
 				template,
 				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
@@ -188,10 +193,22 @@ func TestReconcilePool(t *testing.T) {
 			},
 			expectedReplicas: replicas,
 		},
+		{
+			name:     "zero replicas deletes all sandboxes (empty pool)",
+			replicas: 0,
+			initialObjs: []runtime.Object{
+				template,
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-def456"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-ghi789"),
+			},
+			expectedReplicas: 0,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			warmPool.Spec.Replicas = tc.replicas
 			r := SandboxWarmPoolReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(scheme).

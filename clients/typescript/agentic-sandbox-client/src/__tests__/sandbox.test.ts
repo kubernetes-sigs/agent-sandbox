@@ -36,21 +36,17 @@ const {
 // ---------- mock: @kubernetes/client-node ----------
 
 vi.mock("@kubernetes/client-node", () => {
-  const KubeConfig = vi.fn().mockImplementation(function () {
-    return {
-      loadFromDefault: vi.fn(),
-      makeApiClient: vi.fn().mockReturnValue({
-        deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
-        getNamespacedCustomObject: mockGetNamespacedCustomObject,
-      }),
-    };
-  });
+  const KubeConfig = vi.fn().mockImplementation(() => ({
+    loadFromDefault: vi.fn(),
+    makeApiClient: vi.fn().mockReturnValue({
+      deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+      getNamespacedCustomObject: mockGetNamespacedCustomObject,
+    }),
+  }));
 
   const CustomObjectsApi = vi.fn();
 
-  const Watch = vi.fn().mockImplementation(function () {
-    return { watch: mockWatchFn };
-  });
+  const Watch = vi.fn().mockImplementation(() => ({ watch: mockWatchFn }));
 
   return { KubeConfig, CustomObjectsApi, Watch };
 });
@@ -2005,7 +2001,9 @@ describe("Sandbox", () => {
 
   describe("fetchPodIp abort listener does not leak on external AbortSignal", () => {
     it("listener count stays flat when podIp is re-fetched multiple times with the same signal", async () => {
-      const { getEventListeners } = await import("node:events");
+      const { EventEmitter } = await import("node:events");
+      const getEventListeners =
+        EventEmitter.getEventListeners.bind(EventEmitter);
 
       // podIPs: [] → ip is null → _podIpResolved stays false → fetchPodIp called every request
       mockGetNamespacedCustomObject.mockResolvedValue({

@@ -30,6 +30,7 @@ const {
 // ---------- mock: @kubernetes/client-node ----------
 
 vi.mock("@kubernetes/client-node", () => {
+  // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
   const KubeConfig = vi.fn().mockImplementation(function () {
     return {
       loadFromDefault: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("@kubernetes/client-node", () => {
 
   const CustomObjectsApi = vi.fn();
 
+  // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
   const Watch = vi.fn().mockImplementation(function () {
     return { watch: mockWatchFn };
   });

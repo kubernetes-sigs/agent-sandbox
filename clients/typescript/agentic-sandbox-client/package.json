@@ -32,7 +32,8 @@
     "format": "biome format ./src",
     "format:fix": "biome format --write ./src",
     "check": "biome check ./src",
-    "check:fix": "biome check --write ./src"
+    "check:fix": "biome check --write ./src",
+    "typecheck": "tsc --project tsconfig.test.json --noEmit"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",

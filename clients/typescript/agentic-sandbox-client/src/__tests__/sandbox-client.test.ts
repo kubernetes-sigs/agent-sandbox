@@ -36,6 +36,7 @@ const {
 
 vi.mock("@kubernetes/client-node", () => {
   // Set the default implementation on MockKubeConfig (exposed via hoisted for per-test override)
+  // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
   MockKubeConfig.mockImplementation(function () {
     return {
       loadFromDefault: vi.fn(),
@@ -51,6 +52,7 @@ vi.mock("@kubernetes/client-node", () => {
 
   const CustomObjectsApi = vi.fn();
 
+  // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
   const Watch = vi.fn().mockImplementation(function () {
     return { watch: mockWatchFn };
   });
@@ -994,6 +996,7 @@ describe("SandboxClient (registry)", () => {
 
   describe("KubeConfig validation", () => {
     it("throws SandboxError when clusters array is empty", () => {
+      // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
       MockKubeConfig.mockImplementationOnce(function () {
         return {
           loadFromDefault: vi.fn(),
@@ -1005,6 +1008,7 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("throws SandboxError when clusters is undefined", () => {
+      // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
       MockKubeConfig.mockImplementationOnce(function () {
         return {
           loadFromDefault: vi.fn(),
@@ -1016,6 +1020,7 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("throws SandboxError when only cluster is localhost:8080 (loadFromDefault fallback)", () => {
+      // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
       MockKubeConfig.mockImplementationOnce(function () {
         return {
           loadFromDefault: vi.fn(),

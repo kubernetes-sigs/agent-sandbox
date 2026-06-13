@@ -43,3 +43,33 @@ def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[
         "shutdownTime": shutdown_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "shutdownPolicy": "Delete",
     }
+
+
+def is_valid_ip(s: str) -> bool:
+    import ipaddress
+    try:
+        # Downstream callers construct URLs with `http://{ip_address}`,
+        # which only works for IPv4 literals without additional
+        # normalization. Reject IPv6 here to keep the returned value
+        # compatible with existing URL construction.
+        return isinstance(ipaddress.ip_address(s), ipaddress.IPv4Address)
+    except ValueError:
+        return False
+
+
+def is_valid_gateway_hostname(s: str) -> bool:
+    if not s or len(s) > 253:
+        return False
+    for i, c in enumerate(s):
+        if 'a' <= c <= 'z' or 'A' <= c <= 'Z' or '0' <= c <= '9':
+            continue
+        elif c == '-':
+            if i == 0 or s[i-1] == '.':
+                return False
+        elif c == '.':
+            if i == 0 or s[i-1] == '.' or s[i-1] == '-':
+                return False
+        else:
+            return False
+    last = s[-1]
+    return last != '-' and last != '.'

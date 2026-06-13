@@ -260,8 +260,8 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 		if ownerUID != "" {
 			sb.OwnerReferences = []metav1.OwnerReference{
 				{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxWarmPool",
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 					Name:       poolName,
 					UID:        types.UID(ownerUID),
 					Controller: new(true),
@@ -894,7 +894,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			template := &extensionsv1beta1.SandboxTemplate{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: extensionsv1beta1.GroupVersion.String(),
-					Kind:       "SandboxTemplate",
+					Kind:       extensionsv1beta1.SandboxTemplateKind,
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      templateName,
@@ -1040,7 +1040,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 	template1 := &extensionsv1beta1.SandboxTemplate{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: extensionsv1beta1.GroupVersion.String(),
-			Kind:       "SandboxTemplate",
+			Kind:       extensionsv1beta1.SandboxTemplateKind,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      templateName1,
@@ -1107,7 +1107,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 	template2 := &extensionsv1beta1.SandboxTemplate{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: extensionsv1beta1.GroupVersion.String(),
-			Kind:       "SandboxTemplate",
+			Kind:       extensionsv1beta1.SandboxTemplateKind,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      templateName2,

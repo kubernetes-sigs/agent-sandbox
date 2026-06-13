@@ -17,7 +17,7 @@ import time
 import logging
 import sys
 import subprocess
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from pydantic import ValidationError
 from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (

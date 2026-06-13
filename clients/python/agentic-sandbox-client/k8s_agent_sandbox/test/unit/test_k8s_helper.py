@@ -148,5 +148,84 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
 
 
+class _K8sHelperPatchedBase(unittest.TestCase):
+    """Base class that patches K8sHelper's external dependencies via setUp/tearDown."""
+
+    def setUp(self):
+        def start(target, **kwargs):
+            p = patch(target, **kwargs)
+            self.addCleanup(p.stop)
+            return p.start()
+
+        # config module: no autospec — we override ConfigException after patching
+        self.mock_config = start("k8s_agent_sandbox.k8s_helper.config")
+        self.mock_configuration_cls = start("k8s_agent_sandbox.k8s_helper.client.Configuration", autospec=True)
+        self.mock_custom_objects_api_cls = start("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi", autospec=True)
+        self.mock_core_cls = start("k8s_agent_sandbox.k8s_helper.client.CoreV1Api", autospec=True)
+        self.mock_api_client_cls = start("k8s_agent_sandbox.k8s_helper.client.ApiClient", autospec=True)
+        self.mock_normalize = start("k8s_agent_sandbox.k8s_helper.normalize_kubernetes_auth_config", autospec=True)
+        self.mock_config.ConfigException = Exception
+
+
+class TestK8sHelperNormalization(_K8sHelperPatchedBase):
+
+    def test_k8s_helper_init_calls_normalization(self):
+        """Test that K8sHelper.__init__ loads into an explicit Configuration and passes it to normalize and ApiClient."""
+        helper = K8sHelper()
+
+        expected_cfg = self.mock_configuration_cls.return_value
+        self.mock_normalize.assert_called_once_with(configuration=expected_cfg)
+        self.mock_api_client_cls.assert_called_once_with(configuration=self.mock_normalize.return_value)
+
+
+class TestK8sHelperClose(_K8sHelperPatchedBase):
+
+    def test_close_calls_api_client_close_and_nulls_state(self):
+        """Test that close() releases the ApiClient and nulls out API attributes."""
+        mock_api_client_instance = MagicMock()
+        self.mock_api_client_cls.return_value = mock_api_client_instance
+
+        helper = K8sHelper()
+        helper.close()
+
+        mock_api_client_instance.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+        self.assertIsNone(helper.custom_objects_api)
+        self.assertIsNone(helper.core_v1_api)
+
+    def test_close_is_idempotent(self):
+        """Test that calling close() twice only closes the ApiClient once and leaves state as None."""
+        mock_api_client_instance = MagicMock()
+        self.mock_api_client_cls.return_value = mock_api_client_instance
+
+        helper = K8sHelper()
+        helper.close()
+        helper.close()
+
+        mock_api_client_instance.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+        self.assertIsNone(helper.custom_objects_api)
+        self.assertIsNone(helper.core_v1_api)
+
+    def test_context_manager_closes_on_exit(self):
+        """Test that K8sHelper can be used as a context manager and closes on exit."""
+        mock_api_client_instance = MagicMock()
+        self.mock_api_client_cls.return_value = mock_api_client_instance
+
+        with K8sHelper() as helper:
+            self.assertIsNotNone(helper._api_client)
+
+        mock_api_client_instance.close.assert_called_once()
+        self.assertIsNone(helper._api_client)
+
+    def test_use_after_close_raises_runtime_error(self):
+        """Test that calling a public method after close() raises RuntimeError."""
+        helper = K8sHelper()
+        helper.close()
+
+        with self.assertRaisesRegex(RuntimeError, 'closed'):
+            helper.create_sandbox_claim('name', 'template', 'namespace')
+
+
 if __name__ == '__main__':
     unittest.main()

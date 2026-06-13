@@ -31,6 +31,7 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
 )
+from .utils import normalize_kubernetes_auth_config
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 
 
@@ -48,11 +49,14 @@ class AsyncK8sHelper:
         async with self._init_lock:
             if self._initialized:
                 return
+            cfg = client.Configuration()
             try:
-                config.load_incluster_config()
+                config.load_incluster_config(client_configuration=cfg)
             except config.ConfigException:
-                await config.load_kube_config()
-            self._api_client = client.ApiClient()
+                await config.load_kube_config(client_configuration=cfg)
+
+            cfg = normalize_kubernetes_auth_config(configuration=cfg)
+            self._api_client = client.ApiClient(configuration=cfg)
             self.custom_objects_api = client.CustomObjectsApi(self._api_client)
             self.core_v1_api = client.CoreV1Api(self._api_client)
             self._initialized = True
@@ -325,7 +329,12 @@ class AsyncK8sHelper:
 
     async def close(self):
         """Closes the shared Kubernetes API client session."""
-        if self._api_client:
-            await self._api_client.close()
-            self._api_client = None
-            self._initialized = False
+        async with self._init_lock:
+            try:
+                if self._api_client is not None:
+                    await self._api_client.close()
+            finally:
+                self._api_client = None
+                self.custom_objects_api = None
+                self.core_v1_api = None
+                self._initialized = False

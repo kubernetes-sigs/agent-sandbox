@@ -187,5 +187,62 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
+
+@patch("k8s_agent_sandbox.async_k8s_helper.normalize_kubernetes_auth_config")
+@patch("k8s_agent_sandbox.async_k8s_helper.client")
+@patch("k8s_agent_sandbox.async_k8s_helper.config")
+class TestAsyncK8sHelperNormalization(unittest.IsolatedAsyncioTestCase):
+
+    async def test_async_k8s_helper_init_calls_normalization(self, mock_config, mock_client, mock_normalize):
+        """Test that AsyncK8sHelper._ensure_initialized calls normalize_kubernetes_auth_config."""
+        # Setup mocks
+        mock_config.ConfigException = Exception
+        mock_config.load_incluster_config.side_effect = Exception()
+        mock_config.load_kube_config = AsyncMock()
+        mock_api_client = MagicMock()
+        mock_client.ApiClient.return_value = mock_api_client
+
+        helper = AsyncK8sHelper()
+        await helper._ensure_initialized()
+
+        # Verify normalization was called with the exact Configuration instance
+        expected_cfg = mock_client.Configuration.return_value
+        mock_normalize.assert_called_once_with(configuration=expected_cfg)
+        # Verify the return value of normalize was passed to ApiClient
+        mock_client.ApiClient.assert_called_once_with(configuration=mock_normalize.return_value)
+
+class TestAsyncK8sHelperClose(unittest.IsolatedAsyncioTestCase):
+
+    async def test_close_nulls_state(self):
+        """Test that close() calls ApiClient.close() and nulls all API attributes."""
+        helper = AsyncK8sHelper()
+        mock_api_client = AsyncMock()
+        helper._api_client = mock_api_client
+        helper.custom_objects_api = MagicMock()
+        helper.core_v1_api = MagicMock()
+        helper._initialized = True
+
+        await helper.close()
+
+        mock_api_client.close.assert_awaited_once()
+        self.assertIsNone(helper._api_client)
+        self.assertIsNone(helper.custom_objects_api)
+        self.assertIsNone(helper.core_v1_api)
+        self.assertFalse(helper._initialized)
+
+    async def test_close_is_idempotent(self):
+        """Test that calling close() twice only closes the ApiClient once."""
+        helper = AsyncK8sHelper()
+        mock_api_client = AsyncMock()
+        helper._api_client = mock_api_client
+        helper._initialized = True
+
+        await helper.close()
+        await helper.close()
+
+        mock_api_client.close.assert_awaited_once()
+        self.assertIsNone(helper._api_client)
+
+
 if __name__ == "__main__":
     unittest.main()

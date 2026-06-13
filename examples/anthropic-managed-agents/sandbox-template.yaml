@@ -14,6 +14,11 @@ spec:
       runtimeClassName: gvisor
       nodeSelector:
         sandbox.gke.io/runtime: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

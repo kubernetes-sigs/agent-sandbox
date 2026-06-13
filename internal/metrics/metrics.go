@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -109,6 +110,23 @@ var (
 		nil,
 	)
 
+	writesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_writes_total",
+			Help: "Total Kubernetes write calls from sandbox controllers, by path and result",
+		},
+		[]string{"controller", "action", "subresource", "verb", "result"},
+	)
+
+	writeDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "agent_sandbox_write_duration_seconds",
+			Help:    "Latency of individual Kubernetes write calls from sandbox controllers",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"controller", "action", "subresource", "verb", "result"},
+	)
+
 	buildVersionInfo = version.Get()
 
 	// BuildInfo exposes agent-sandbox-controller build metadata as a constant gauge.
@@ -136,6 +154,8 @@ func init() {
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 	metrics.Registry.MustRegister(BuildInfo)
+	metrics.Registry.MustRegister(writesTotal)
+	metrics.Registry.MustRegister(writeDuration)
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.
@@ -158,4 +178,25 @@ func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType,
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.
 func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition string) {
 	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition).Inc()
+}
+
+// InstrumentWrite times an API write, classifies the result (success/conflict/error),
+// and records both agent_sandbox_writes_total and agent_sandbox_write_duration_seconds.
+func InstrumentWrite(controller, action, subresource, verb string, fn func() error) error {
+	start := time.Now()
+	err := fn()
+	result := "success"
+	if err != nil {
+		switch {
+		case apierrors.IsConflict(err):
+			result = "conflict"
+		case apierrors.IsNotFound(err):
+			result = "notfound"
+		default:
+			result = "error"
+		}
+	}
+	writesTotal.WithLabelValues(controller, action, subresource, verb, result).Inc()
+	writeDuration.WithLabelValues(controller, action, subresource, verb, result).Observe(time.Since(start).Seconds())
+	return err
 }

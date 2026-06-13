@@ -245,6 +245,14 @@ export class TestContext {
                 ),
               );
             }
+            if (!err && !settled) {
+              settled = true;
+              reject(
+                new Error(
+                  `Watch for ${name} ended before predicate was satisfied.`,
+                ),
+              );
+            }
           },
         )
         .then((ac) => {

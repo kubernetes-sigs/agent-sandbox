@@ -1,0 +1,22 @@
+# Headless Service: Envoy's STRICT_DNS cluster resolves the A records and
+# load-balances per-replica directly, which is the right shape for gRPC
+# streams. The Envoy ConfigMap targets this exact Service DNS name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ext-proc-sandbox-router
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ext-proc-sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  type: ClusterIP
+  clusterIP: None # headless
+  selector:
+    app.kubernetes.io/name: ext-proc-sandbox-router
+    app.kubernetes.io/component: sandbox-router
+  ports:
+  - name: grpc
+    port: 50051
+    targetPort: grpc
+    protocol: TCP

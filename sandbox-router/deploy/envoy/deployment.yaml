@@ -1,0 +1,89 @@
+# Envoy frontend for the sandbox-router. Mounts the ConfigMap as
+# /etc/envoy/envoy.yaml and runs Envoy as a non-root user.
+#
+# Tune replicaCount + resources for your traffic — Envoy handles thousands
+# of req/s per replica on modest CPU. Two replicas is the HA minimum.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router-envoy
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sandbox-router-envoy
+    app.kubernetes.io/component: sandbox-router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-router-envoy
+      app.kubernetes.io/component: sandbox-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-router-envoy
+        app.kubernetes.io/component: sandbox-router
+    spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: sandbox-router-envoy
+      containers:
+      - name: envoy
+        # Distroless Envoy image; pin to a release rather than -latest in
+        # production. See https://github.com/envoyproxy/envoy/releases
+        image: envoyproxy/envoy:distroless-v1.32-latest
+        args:
+        - --config-path
+        - /etc/envoy/envoy.yaml
+        - --log-level
+        - info
+        ports:
+        - name: proxy
+          containerPort: 8080
+          protocol: TCP
+        - name: admin
+          containerPort: 9901
+          protocol: TCP
+        # /healthz bypasses ext_proc (defined in the route table) so
+        # Envoy is alive iff its own listener is up. /ready could be
+        # added later as a deeper probe (e.g. through ext_proc).
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: proxy
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: proxy
+          initialDelaySeconds: 1
+          periodSeconds: 5
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 101 # envoy user in the distroless image
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+      volumes:
+      - name: config
+        configMap:
+          name: sandbox-router-envoy
+      terminationGracePeriodSeconds: 30

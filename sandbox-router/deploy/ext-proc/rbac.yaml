@@ -1,0 +1,29 @@
+# Minimal RBAC for the ext_proc service. Only needs to read Pods labeled
+# as sandboxes — no writes, no other resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ext-proc-sandbox-router
+  labels:
+    app.kubernetes.io/name: ext-proc-sandbox-router
+    app.kubernetes.io/component: sandbox-router
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ext-proc-sandbox-router
+  labels:
+    app.kubernetes.io/name: ext-proc-sandbox-router
+    app.kubernetes.io/component: sandbox-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ext-proc-sandbox-router
+subjects:
+- kind: ServiceAccount
+  name: ext-proc-sandbox-router
+  namespace: default

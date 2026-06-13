@@ -67,9 +67,14 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
     for tag in args.extra_image_tags:  # additional image tags
         extra_tag = utils.get_full_image_name(args, service_name, tag=tag)
         build_cmd.extend(["-t", extra_tag])
+    # Use the Dockerfile path relative to the build context so overrides
+    # like context_dir="." with a Dockerfile under a subdirectory (e.g.
+    # sandbox-router/Dockerfile) resolve correctly. os.path.basename
+    # alone collapses to "Dockerfile" and accidentally picks up the
+    # repo-root Dockerfile when cwd=".".
     build_cmd.extend([
         "-f",
-        os.path.basename(dockerfile_path),
+        os.path.relpath(dockerfile_path, srcdir),
         ".",
     ])
     # Inject version info into Go binaries
@@ -121,6 +126,14 @@ def main(args):
 
             if service_name == ".":
                 service_name = "agent-sandbox-controller"
+
+            # The sandbox-router/Dockerfile needs the repo root as the
+            # build context because it imports the shared Go module.
+            # Image is named sandbox-router-ext-proc to avoid colliding
+            # with the Python router's "sandbox-router" image.
+            if root == os.path.join(".", "sandbox-router"):
+                context_dir = "."
+                service_name = "sandbox-router-ext-proc"
 
             if args.images and service_name not in args.images:
                 continue

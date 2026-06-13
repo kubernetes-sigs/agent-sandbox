@@ -1,0 +1,22 @@
+# Service name `sandbox-router-svc` preserves the Python router's name so
+# existing Gateway / HTTPRoute manifests pointing at it keep working.
+# Callers see the same DNS name + port; the implementation behind it has
+# moved to Envoy + ext_proc.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sandbox-router-envoy
+    app.kubernetes.io/component: sandbox-router
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sandbox-router-envoy
+    app.kubernetes.io/component: sandbox-router
+  ports:
+  - name: proxy
+    port: 8080
+    targetPort: proxy
+    protocol: TCP

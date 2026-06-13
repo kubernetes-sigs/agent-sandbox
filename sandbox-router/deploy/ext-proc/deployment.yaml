@@ -1,0 +1,86 @@
+# ext-proc-sandbox-router runs the K8s informer + UID→PodIP cache +
+# Envoy ext_proc gRPC handler. Stateless; 3 replicas is a reasonable HA
+# floor. Each replica maintains its own informer cache.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ext-proc-sandbox-router
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ext-proc-sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ext-proc-sandbox-router
+      app.kubernetes.io/component: sandbox-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ext-proc-sandbox-router
+        app.kubernetes.io/component: sandbox-router
+    spec:
+      serviceAccountName: ext-proc-sandbox-router
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: ext-proc-sandbox-router
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: ext-proc-sandbox-router
+      containers:
+      - name: ext-proc
+        # Replace with the published image tag.
+        image: registry.k8s.io/agent-sandbox/sandbox-router-ext-proc:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - --listen-address=:50051
+        - --cluster-domain=cluster.local
+        # --namespace="" (cluster-wide watch) is the default; uncomment
+        # to scope this replica to a single tenant namespace.
+        # - --namespace=my-tenant
+        ports:
+        - name: grpc
+          containerPort: 50051
+          protocol: TCP
+        # K8s native gRPC probes (1.24+). The health server starts as
+        # NOT_SERVING and flips to SERVING only after the informer cache
+        # has synced, so /readyz waits out the informer cold-start.
+        readinessProbe:
+          grpc:
+            port: 50051
+            service: envoy.service.ext_proc.v3.ExternalProcessor
+          initialDelaySeconds: 1
+          periodSeconds: 3
+          failureThreshold: 2
+        livenessProbe:
+          grpc:
+            port: 50051
+          # No service: probes the empty default service name. Tracks
+          # process-aliveness rather than informer-readiness.
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+      terminationGracePeriodSeconds: 45

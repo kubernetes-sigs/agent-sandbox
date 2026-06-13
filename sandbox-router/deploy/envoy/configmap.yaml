@@ -1,0 +1,206 @@
+# Envoy configuration for the sandbox-router.
+#
+# Pattern: every request flows through an ext_proc filter that asks the
+# sandbox-router ext_proc service "where should this go?". The handler
+# returns a header mutation setting `x-envoy-original-dst-host` to the
+# resolved upstream (Pod IP or DNS form). The single ORIGINAL_DST cluster
+# then dispatches the request to whatever that header says.
+#
+# No xDS, no per-sandbox cluster configuration. New sandboxes are routable
+# as soon as the ext_proc service's informer sees them as Ready.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-router-envoy
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sandbox-router-envoy
+    app.kubernetes.io/component: sandbox-router
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+    static_resources:
+      listeners:
+      - name: proxy
+        address:
+          socket_address: { address: 0.0.0.0, port_value: 8080 }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: sandbox_router
+              codec_type: AUTO
+              # Forward x-request-id, generate one if missing — useful when
+              # paired with ext_proc to trace a request end-to-end.
+              generate_request_id: true
+              # use_remote_address gives us X-Forwarded-For (client IP) and
+              # X-Forwarded-Proto (http/https from the listener) for free
+              # on every upstream request. X-Forwarded-Host is set
+              # separately in request_headers_to_add below — Envoy doesn't
+              # populate it as part of use_remote_address.
+              use_remote_address: true
+
+              access_log:
+              - name: envoy.access_loggers.stdout
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+
+              route_config:
+                name: sandbox
+                virtual_hosts:
+                - name: any
+                  domains: ["*"]
+                  # X-Forwarded-Host: copy the inbound :authority (the
+                  # client-visible Host) into a header the upstream can
+                  # read. Browser-facing backends like vscode-server and
+                  # Jupyter need this to construct correct self-links
+                  # and redirects when sitting behind a proxy that
+                  # dispatches by IP. Overwrite rather than append so a
+                  # well-formed single value reaches the backend.
+                  request_headers_to_add:
+                  - header:
+                      key: X-Forwarded-Host
+                      value: "%REQ(:AUTHORITY)%"
+                    append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                  routes:
+                  # Cheap liveness — bypasses ext_proc so a broken
+                  # ext-proc service doesn't take Envoy down with it.
+                  # ext_proc would otherwise reject this with 400 (no
+                  # X-Sandbox-ID header) before the route matches, so we
+                  # explicitly disable ext_proc on this route.
+                  - match: { path: "/healthz" }
+                    direct_response:
+                      status: 200
+                      body: { inline_string: '{"status":"ok"}' }
+                    typed_per_filter_config:
+                      envoy.filters.http.ext_proc:
+                        "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                        disabled: true
+                  # Everything else: the ext_proc filter has already set
+                  # x-envoy-original-dst-host (or rejected with 4xx).
+                  # ORIGINAL_DST cluster reads that header.
+                  - match: { prefix: "/" }
+                    route:
+                      cluster: sandbox_upstream
+                      # Be generous on per-route timeout; long-lived sandbox
+                      # operations (file uploads, code execution) need
+                      # minutes, not seconds. Tune via your own config if
+                      # you need stricter SLOs.
+                      timeout: 180s
+
+              http_filters:
+              # Strip any inbound x-envoy-original-dst-host BEFORE
+              # ext_proc runs. ext_proc always sets this header via
+              # HeaderMutation, so after this filter chain the value
+              # in the header is provably the one ext_proc wrote (or
+              # absent if ext_proc was bypassed for the route, in
+              # which case the ORIGINAL_DST cluster won't find a
+              # target and returns 503 — fail-closed). Defense-in-
+              # depth: keeps the security of the data path from
+              # resting on "ext_proc is enabled on every route".
+              - name: envoy.filters.http.header_mutation
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                  mutations:
+                    request_mutations:
+                    - remove: x-envoy-original-dst-host
+
+              # ext_proc must run before the router filter so we get the
+              # header mutation applied + route cache cleared before the
+              # routing decision is made.
+              - name: envoy.filters.http.ext_proc
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                  grpc_service:
+                    envoy_grpc:
+                      cluster_name: ext_proc_sandbox_router
+                    # Per-stream timeout — gives the ext_proc handler
+                    # plenty of slack while still failing fast on stalls.
+                    timeout: 1s
+                  # Without this, an unreachable / slow ext_proc service
+                  # would silently let requests through with no routing
+                  # target, which would 503 anyway. Fail fast and surface
+                  # the problem.
+                  failure_mode_allow: false
+                  message_timeout: 0.2s
+                  # By default ext_proc cannot mutate x-envoy-* headers (a
+                  # security default to stop external processors spoofing
+                  # internal Envoy state). We rely on x-envoy-original-dst-host
+                  # for the routing decision, so we have to opt back in.
+                  # disallow_is_error stays default (false) so any future
+                  # blocked mutation fails silently rather than 500'ing.
+                  mutation_rules:
+                    allow_envoy: true
+                  processing_mode:
+                    request_header_mode: SEND
+                    response_header_mode: SKIP
+                    request_body_mode: NONE
+                    response_body_mode: NONE
+                    request_trailer_mode: SKIP
+                    response_trailer_mode: SKIP
+                  # ext_proc must not be allowed to override the mode at
+                  # runtime — keeps the contract simple.
+                  allow_mode_override: false
+
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+      # Cluster for the ext_proc gRPC service. Headless K8s Service +
+      # STRICT_DNS gives us per-pod LB; gRPC streams are multiplexed.
+      - name: ext_proc_sandbox_router
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        connect_timeout: 1s
+        # gRPC requires HTTP/2.
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
+        load_assignment:
+          cluster_name: ext_proc_sandbox_router
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: ext-proc-sandbox-router.default.svc.cluster.local
+                    port_value: 50051
+        health_checks:
+        - timeout: 1s
+          interval: 5s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          grpc_health_check:
+            service_name: envoy.service.ext_proc.v3.ExternalProcessor
+        # Eject replicas that consistently fail so new streams don't pile
+        # up on a half-broken instance.
+        outlier_detection:
+          consecutive_5xx: 3
+          base_ejection_time: 10s
+          max_ejection_percent: 50
+
+      # The actual sandbox traffic cluster. ORIGINAL_DST reads the
+      # upstream address from the x-envoy-original-dst-host header (set
+      # by our ext_proc filter). No static endpoints — every dispatch is
+      # per-request.
+      - name: sandbox_upstream
+        type: ORIGINAL_DST
+        lb_policy: CLUSTER_PROVIDED
+        connect_timeout: 5s
+        original_dst_lb_config:
+          use_http_header: true
+        # Outlier detection on the synthetic per-IP endpoints — flaps a
+        # dead Pod IP out for a short cooldown after consecutive failures.
+        outlier_detection:
+          consecutive_5xx: 3
+          base_ejection_time: 30s
+          max_ejection_percent: 100
+        # No active health checking — Pod IPs come and go too quickly for
+        # it to be useful; we rely on the cache + outlier detection.

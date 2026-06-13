@@ -90,7 +90,7 @@ export class Filesystem {
       async (span) => {
         if (span.isRecording()) {
           span.setAttribute("sandbox.file.path", filePath);
-          span.setAttribute("sandbox.file.size", content.length);
+          span.setAttribute("sandbox.file.size", Buffer.byteLength(content));
         }
 
         if (!filePath) {

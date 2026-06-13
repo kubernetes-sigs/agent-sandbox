@@ -812,6 +812,10 @@ export class Sandbox {
         `Starting Dev Mode tunnel: localhost:${localPort} -> ${routerSvc}:8080...`,
       );
 
+      if (this._isClosed) {
+        throw new SandboxNotReadyError("Sandbox connection has been closed.");
+      }
+
       this.portForwardProcess = spawn(
         "kubectl",
         [
@@ -876,6 +880,12 @@ export class Sandbox {
           ]);
 
           if (connected) {
+            if (this._isClosed) {
+              await this.stopPortForward();
+              throw new SandboxNotReadyError(
+                "Sandbox connection has been closed.",
+              );
+            }
             this.baseUrl = `http://127.0.0.1:${localPort}`;
             console.info(
               `Dev Mode ready. Tunneled to Router at ${this.baseUrl}`,
@@ -1117,16 +1127,28 @@ export class Sandbox {
         plural: SANDBOX_PLURAL_NAME,
         name: this.sandboxName,
       });
-      const obj = (await (signal
-        ? Promise.race([
-            apiCall,
-            new Promise<never>((_, reject) => {
-              signal.addEventListener("abort", () => reject(signal.reason), {
-                once: true,
-              });
-            }),
-          ])
-        : apiCall)) as Record<string, unknown>;
+      let obj: Record<string, unknown>;
+      if (signal) {
+        let onAbort!: () => void;
+        const abortPromise = new Promise<never>((_, reject) => {
+          onAbort = () =>
+            reject(
+              signal.reason ??
+                new DOMException("The operation was aborted.", "AbortError"),
+            );
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        try {
+          obj = (await Promise.race([apiCall, abortPromise])) as Record<
+            string,
+            unknown
+          >;
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+      } else {
+        obj = (await apiCall) as Record<string, unknown>;
+      }
       const status = (obj?.status as Record<string, unknown>) ?? {};
       const podIPs = (status.podIPs as string[] | undefined) ?? [];
       return podIPs[0] ?? null;
@@ -1159,6 +1181,7 @@ export class Sandbox {
     const doReconnect = async (): Promise<void> => {
       await this.stopPortForward();
       for (let i = 1; i <= MAX_RECONNECT_ATTEMPTS; i++) {
+        if (this._isClosed) return;
         try {
           console.info(
             `Port-forward reconnect attempt ${i}/${MAX_RECONNECT_ATTEMPTS}...`,

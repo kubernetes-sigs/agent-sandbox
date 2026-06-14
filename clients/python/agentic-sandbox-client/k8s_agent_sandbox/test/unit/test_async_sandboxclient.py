@@ -65,7 +65,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             sandbox = await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-warmpool", "test-namespace", labels=None, lifecycle=None
+                ANY, "test-warmpool", "test-namespace", labels=None, lifecycle=None, pod_metadata=None
             )
             self.assertEqual(sandbox, mock_sandbox_instance)
 
@@ -260,6 +260,34 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_validate_labels_rejects_empty_key(self):
         with self.assertRaises(ValueError):
             await self.client.create_sandbox("t", labels={"": "v"})
+
+    async def test_create_sandbox_with_pod_metadata(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            await self.client.create_sandbox(
+                "test-warmpool", "test-namespace",
+                pod_labels={"client-id": "tenant-a"},
+                pod_annotations={"note": "owned-by-tenant-a"},
+            )
+
+            call_kwargs = mock_create.call_args[1]
+            self.assertEqual(
+                call_kwargs["pod_metadata"],
+                {
+                    "labels": {"client-id": "tenant-a"},
+                    "annotations": {"note": "owned-by-tenant-a"},
+                },
+            )
+
+    async def test_create_sandbox_rejects_invalid_pod_label(self):
+        with self.assertRaises(ValueError):
+            await self.client.create_sandbox("t", pod_labels={"bad key!": "v"})
 
     async def test_create_sandbox_with_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")

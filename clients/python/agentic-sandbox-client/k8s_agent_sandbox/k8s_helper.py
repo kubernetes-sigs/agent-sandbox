@@ -40,8 +40,15 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 
-    def create_sandbox_claim(self, name: str, warmpool: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None):
-        """Creates a SandboxClaim custom resource."""
+    def create_sandbox_claim(self, name: str, warmpool: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, pod_metadata: dict | None = None):
+        """Creates a SandboxClaim custom resource.
+
+        Args:
+            pod_metadata: Optional ``{"labels": {...}, "annotations": {...}}``
+                dict emitted as ``spec.additionalPodMetadata`` so the labels and
+                annotations propagate onto the running Sandbox Pod (as opposed to
+                ``labels``, which only land on the SandboxClaim object).
+        """
         metadata = {
             "name": name,
             "annotations": annotations or {},
@@ -56,6 +63,8 @@ class K8sHelper:
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
+        if pod_metadata:
+            spec["additionalPodMetadata"] = pod_metadata
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",

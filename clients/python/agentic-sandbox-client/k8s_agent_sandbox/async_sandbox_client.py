@@ -137,6 +137,8 @@ class AsyncSandboxClient(Generic[T]):
         labels: dict[str, str] | None = None,
         *,
         shutdown_after_seconds: int | None = None,
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
     ) -> T:
         """Provisions a new Sandbox claim and returns an async Sandbox handle.
 
@@ -144,12 +146,19 @@ class AsyncSandboxClient(Generic[T]):
             warmpool: Name of the SandboxWarmPool to use.
             namespace: Kubernetes namespace for the claim.
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
-            labels: Optional Kubernetes labels to attach to the claim.
+            labels: Optional Kubernetes labels to attach to the claim object
+                (``SandboxClaim.metadata.labels``).
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
                 of ``"Delete"``, so the controller auto-deletes the claim on
                 expiry. Must be a positive integer.
+            pod_labels: Optional labels stamped onto the running Sandbox **Pod**
+                via ``spec.additionalPodMetadata.labels``. Unlike ``labels``
+                (which land on the claim object), these are readable from inside
+                the sandbox through the Downward API.
+            pod_annotations: Optional annotations stamped onto the running
+                Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
 
         Example::
 
@@ -163,12 +172,14 @@ class AsyncSandboxClient(Generic[T]):
         if labels:
             self._validate_labels(labels)
 
+        pod_metadata = self._build_pod_metadata(pod_labels, pod_annotations)
+
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
         try:
-            await self._create_claim(claim_name, warmpool, namespace, labels=labels, lifecycle=lifecycle)
+            await self._create_claim(claim_name, warmpool, namespace, labels=labels, lifecycle=lifecycle, pod_metadata=pod_metadata)
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, sandbox_ready_timeout
@@ -423,6 +434,29 @@ class AsyncSandboxClient(Generic[T]):
                     value, f"value '{value}' for key '{key}'"
                 )
 
+    @classmethod
+    def _build_pod_metadata(
+        cls,
+        pod_labels: dict[str, str] | None,
+        pod_annotations: dict[str, str] | None,
+    ) -> dict | None:
+        """Assembles the ``spec.additionalPodMetadata`` payload.
+
+        ``pod_labels`` are validated with the same RFC-1123 rules as claim
+        labels so callers fail fast client-side. Empty sections are omitted, and
+        ``None`` is returned when neither labels nor annotations are supplied so
+        no empty ``additionalPodMetadata`` is written to the manifest.
+        """
+        if pod_labels:
+            cls._validate_labels(pod_labels)
+
+        pod_metadata: dict = {}
+        if pod_labels:
+            pod_metadata["labels"] = pod_labels
+        if pod_annotations:
+            pod_metadata["annotations"] = pod_annotations
+        return pod_metadata or None
+
     @async_trace_span("create_claim")
     async def _create_claim(
         self,
@@ -431,6 +465,7 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str,
         labels: dict[str, str] | None = None,
         lifecycle: dict | None = None,
+        pod_metadata: dict | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():
@@ -446,7 +481,7 @@ class AsyncSandboxClient(Generic[T]):
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
         await self.k8s_helper.create_sandbox_claim(
-            claim_name, warmpool_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle
+            claim_name, warmpool_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle, pod_metadata=pod_metadata
         )
 
     @async_trace_span("wait_for_sandbox_ready")

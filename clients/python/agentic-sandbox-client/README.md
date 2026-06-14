@@ -286,6 +286,32 @@ async def main():
 asyncio.run(main())
 ```
 
+### 7. Labels and Pod Metadata
+
+`create_sandbox` lets you attach metadata at two different levels:
+
+- `labels`: Kubernetes labels on the **SandboxClaim object** itself
+  (`SandboxClaim.metadata.labels`). Useful for selecting/listing claims.
+- `pod_labels` / `pod_annotations`: labels and annotations stamped onto the
+  running Sandbox **Pod** via `spec.additionalPodMetadata`. Because they live on
+  the Pod, the workload can read them from inside the sandbox through the
+  [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)
+  (for example, to stamp a tenant or client identifier and reject requests that
+  don't belong to it).
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    labels={"team": "platform"},            # on the SandboxClaim object
+    pod_labels={"client-id": "tenant-a"},   # on the running Pod
+    pod_annotations={"owner": "tenant-a"},  # on the running Pod
+)
+```
+
+`pod_labels` are validated with the same Kubernetes label rules as `labels`. The
+same parameters are available on `AsyncSandboxClient.create_sandbox`.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

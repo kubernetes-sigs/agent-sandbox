@@ -46,6 +46,38 @@ func TestSimpleSandboxQueue_BasicOperations(t *testing.T) {
 	}
 }
 
+func TestSimpleSandboxQueue_Get_FallbackWhenNamespacedQueueExistsButIsEmpty(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	legacyIndex := "index-1"
+	namespace := "my-ns"
+	namespacedIndex := GetNamespacedWarmPoolName(namespace, legacyIndex)
+
+	keyLegacy := SandboxKey{Namespace: namespace, Name: "sb-legacy"}
+	keyNamespaced := SandboxKey{Namespace: namespace, Name: "sb-namespaced"}
+
+	// Add to legacy queue
+	q.Add(legacyIndex, keyLegacy)
+
+	// Add to namespaced queue to make it exist
+	q.Add(namespacedIndex, keyNamespaced)
+
+	// Pop from namespaced queue to make it empty
+	got, ok := q.Get(namespacedIndex)
+	if !ok || got != keyNamespaced {
+		t.Fatalf("Setup failed: expected to pop %v from namespaced queue, got %v (ok: %v)", keyNamespaced, got, ok)
+	}
+
+	// Now the namespaced queue exists but is empty.
+	// Get should fallback to the legacy queue and return keyLegacy.
+	gotFallback, okFallback := q.Get(namespacedIndex)
+	if !okFallback {
+		t.Errorf("Expected to get item from legacy queue fallback, but got !ok")
+	}
+	if gotFallback != keyLegacy {
+		t.Errorf("Expected %v from legacy queue fallback, got %v", keyLegacy, gotFallback)
+	}
+}
+
 func TestSimpleSandboxQueue_RemoveItem_GhostPodFix(t *testing.T) {
 	q := NewSimpleSandboxQueue()
 	hash := "template-hash-1"
@@ -216,19 +248,19 @@ func TestSimpleSandboxQueue_KeyFallbackBehavior(t *testing.T) {
 		t.Errorf("Expected legacy Get to NOT find namespaced item")
 	}
 
-	// Test RemoveItem does nothing with legacy hash
+	// Test RemoveItem does nothing with legacy index
 	q.RemoveItem(legacyIndex, key1)
 	got2, ok := q.Get(namespacedWarmPoolName)
 	if !ok || got2 != key1 {
-		t.Errorf("Expected item %v to still be in queue after RemoveItem with legacy hash, got %v", key1, got2)
+		t.Errorf("Expected item %v to still be in queue after RemoveItem with legacy index, got %v", key1, got2)
 	}
 
-	// Test RemoveQueue does nothing with legacy hash (add item back first)
+	// Test RemoveQueue does nothing with legacy index (add item back first)
 	q.Add(namespacedWarmPoolName, key1)
 	q.RemoveQueue(legacyIndex)
 	got3, ok := q.Get(namespacedWarmPoolName)
 	if !ok || got3 != key1 {
-		t.Errorf("Expected item %v to still be in namespaced queue after RemoveQueue with legacy hash, got %v", key1, got3)
+		t.Errorf("Expected item %v to still be in namespaced queue after RemoveQueue with legacy index, got %v", key1, got3)
 	}
 }
 
@@ -283,13 +315,69 @@ func TestGetWarmPoolNameIfNamespaced(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			hash, ok := GetWarmPoolNameIfNamespaced(tc.input)
+			warmPoolName, ok := GetWarmPoolNameIfNamespaced(tc.input)
 			if ok != tc.expectedOk {
 				t.Errorf("Expected ok %v, got %v", tc.expectedOk, ok)
 			}
-			if hash != tc.expectedValue {
-				t.Errorf("Expected hash %q, got %q", tc.expectedValue, hash)
+			if warmPoolName != tc.expectedValue {
+				t.Errorf("Expected warmPoolName %q, got %q", tc.expectedValue, warmPoolName)
 			}
 		})
+	}
+}
+
+func TestSimpleSandboxQueue_RemoveItem_BothQueuesExist(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	legacyIndex := "template-index-1"
+	namespace := "my-ns"
+	namespacedIndex := GetNamespacedWarmPoolName(namespace, legacyIndex)
+
+	key := SandboxKey{Namespace: namespace, Name: "sb-1"}
+
+	// Add the same item to both queues
+	q.Add(legacyIndex, key)
+	q.Add(namespacedIndex, key)
+
+	// Remove the item using namespacedIndex.
+	// It should be removed from both namespaced and legacy queues.
+	q.RemoveItem(namespacedIndex, key)
+
+	// Verify legacy queue is empty
+	_, ok := q.Get(legacyIndex)
+	if ok {
+		t.Errorf("Expected legacy queue to be empty after RemoveItem")
+	}
+
+	// Verify namespaced queue is also empty
+	_, ok = q.Get(namespacedIndex)
+	if ok {
+		t.Errorf("Expected namespaced queue to be empty after RemoveItem")
+	}
+}
+
+func TestSimpleSandboxQueue_RemoveQueue_BothQueuesExist(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	legacyIndex := "template-index-1"
+	namespace := "my-ns"
+	namespacedIndex := GetNamespacedWarmPoolName(namespace, legacyIndex)
+
+	keyLegacy := SandboxKey{Namespace: namespace, Name: "sb-legacy"}
+	keyNamespaced := SandboxKey{Namespace: namespace, Name: "sb-namespaced"}
+
+	// Add to both queues
+	q.Add(legacyIndex, keyLegacy)
+	q.Add(namespacedIndex, keyNamespaced)
+
+	// Remove namespaced queue. It should also remove legacy queue.
+	q.RemoveQueue(namespacedIndex)
+
+	// Verify both are removed from sync.Map
+	_, ok := q.queues.Load(namespacedIndex)
+	if ok {
+		t.Errorf("Expected namespaced queue to be deleted")
+	}
+	_, ok = q.queues.Load(legacyIndex)
+	if ok {
+		t.Errorf("Expected legacy queue to be deleted")
 	}
 }

@@ -56,7 +56,9 @@ func (s *SimpleSandboxQueue) Add(warmPoolName string, item SandboxKey) {
 // Get pops an item from the specific warm pool's queue.
 func (s *SimpleSandboxQueue) Get(namespacedWarmPoolName string) (SandboxKey, bool) {
 	if q, ok := s.queues.Load(namespacedWarmPoolName); ok {
-		return q.(*synchronizedQueue).Pop()
+		if item, ok := q.(*synchronizedQueue).Pop(); ok {
+			return item, true
+		}
 	}
 
 	// Remain compatible with the legacy namespace-agnostic index
@@ -72,7 +74,9 @@ func (s *SimpleSandboxQueue) Get(namespacedWarmPoolName string) (SandboxKey, boo
 // GetWithStrategy pops an item from the specific warm pool's queue using a custom strategy.
 func (s *SimpleSandboxQueue) GetWithStrategy(namespacedWarmPoolName string, pick func([]SandboxKey) (SandboxKey, bool)) (SandboxKey, bool) {
 	if q, ok := s.queues.Load(namespacedWarmPoolName); ok {
-		return q.(*synchronizedQueue).PopWithStrategy(pick)
+		if item, ok := q.(*synchronizedQueue).PopWithStrategy(pick); ok {
+			return item, true
+		}
 	}
 
 	// Remain compatible with the legacy namespace-agnostic index
@@ -90,7 +94,6 @@ func (s *SimpleSandboxQueue) RemoveItem(namespacedWarmPoolName string, item Sand
 	if q, ok := s.queues.Load(namespacedWarmPoolName); ok {
 		sq := q.(*synchronizedQueue)
 		sq.Remove(item)
-		return
 	}
 	// Remain compatible with the legacy namespace-agnostic hash
 	if warmPoolName, ok := GetWarmPoolNameIfNamespaced(namespacedWarmPoolName); ok {
@@ -237,7 +240,6 @@ func (q *synchronizedQueue) PopWithStrategy(pick func([]SandboxKey) (SandboxKey,
 func (s *SimpleSandboxQueue) RemoveQueue(namespacedWarmPoolName string) {
 	if _, ok := s.queues.Load(namespacedWarmPoolName); ok {
 		s.queues.Delete(namespacedWarmPoolName)
-		return
 	}
 	// Remain compatible with the legacy namespace-agnostic index
 	if warmPoolName, ok := GetWarmPoolNameIfNamespaced(namespacedWarmPoolName); ok {

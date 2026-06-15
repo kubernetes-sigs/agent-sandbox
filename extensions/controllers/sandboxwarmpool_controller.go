@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -32,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -331,6 +334,47 @@ func computePodTemplateHash(template *extensionsv1beta1.SandboxTemplate) (string
 	return sandboxcontrollers.NameHash(string(specJSON)), nil
 }
 
+func newWarmPoolSandboxName(warmPoolName string) (string, error) {
+	suffix, err := uuid.NewV7()
+	if err != nil {
+		return "", fmt.Errorf("generate sandbox name UUID: %w", err)
+	}
+	return warmPoolSandboxName(warmPoolName, suffix.String()), nil
+}
+
+func warmPoolSandboxName(warmPoolName, suffix string) string {
+	maxPoolNameLength := validation.DNS1123LabelMaxLength - len(suffix) - 1
+	trimmedPoolName := dns1123LabelPrefix(warmPoolName)
+	if len(trimmedPoolName) > maxPoolNameLength {
+		trimmedPoolName = trimmedPoolName[:maxPoolNameLength]
+	}
+	trimmedPoolName = strings.TrimRight(trimmedPoolName, "-")
+	if trimmedPoolName == "" {
+		trimmedPoolName = "warmpool"
+	}
+	return trimmedPoolName + "-" + suffix
+}
+
+func dns1123LabelPrefix(name string) string {
+	lowerName := strings.ToLower(name)
+	var builder strings.Builder
+	lastHyphen := false
+	for i := 0; i < len(lowerName); i++ {
+		ch := lowerName[i]
+		valid := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		if valid {
+			builder.WriteByte(ch)
+			lastHyphen = false
+			continue
+		}
+		if builder.Len() > 0 && !lastHyphen {
+			builder.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
 // fetchTemplateAndHash fetches the sandbox template and computes its hash.
 func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) (*extensionsv1beta1.SandboxTemplate, string, error) {
 	logger := log.FromContext(ctx)
@@ -381,10 +425,9 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 
 	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: fmt.Sprintf("%s-", warmPool.Name),
-			Namespace:    warmPool.Namespace,
-			Labels:       sandboxLabels,
-			Annotations:  sandboxAnnotations,
+			Namespace:   warmPool.Namespace,
+			Labels:      sandboxLabels,
+			Annotations: sandboxAnnotations,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			Service: template.Spec.Service,
@@ -421,6 +464,12 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxCR *sandboxv1beta1.Sandbox) error {
 	logger := log.FromContext(ctx)
 	sandbox := sandboxCR.DeepCopy()
+	name, err := newWarmPoolSandboxName(warmPool.Name)
+	if err != nil {
+		logger.Error(err, "Failed to generate pool sandbox name")
+		return err
+	}
+	sandbox.Name = name
 	if err := r.Create(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to create pool sandbox")
 		return err

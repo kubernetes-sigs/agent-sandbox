@@ -48,6 +48,8 @@ reviews:
         Focus on technical accuracy, clarity, and markdown formatting. Verify that code snippets and configuration examples match current CRD definitions.
 
   auto_review:
+    base_branches:
+      - ".*"
     labels:
       - "!needs-ok-to-test"
       - "!do-not-merge/work-in-progress"

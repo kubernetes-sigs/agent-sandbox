@@ -292,7 +292,7 @@ func (x *StreamEvent) GetStderr() string {
 
 type StatusEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	Status        KernelStatus           `protobuf:"varint,1,opt,name=status,proto3,enum=jupyter.v1.KernelStatus" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -327,11 +327,11 @@ func (*StatusEvent) Descriptor() ([]byte, []int) {
 	return file_jupyter_v1_jupyter_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *StatusEvent) GetStatus() string {
+func (x *StatusEvent) GetStatus() KernelStatus {
 	if x != nil {
 		return x.Status
 	}
-	return ""
+	return KernelStatus_KERNEL_STATUS_UNSPECIFIED
 }
 
 type ExecuteJupyterCodeResponse struct {
@@ -503,9 +503,9 @@ const file_jupyter_v1_jupyter_proto_rawDesc = "" +
 	"\x04code\x18\x02 \x01(\tR\x04code\"=\n" +
 	"\vStreamEvent\x12\x16\n" +
 	"\x06stdout\x18\x01 \x01(\tR\x06stdout\x12\x16\n" +
-	"\x06stderr\x18\x02 \x01(\tR\x06stderr\"%\n" +
-	"\vStatusEvent\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status\"\xc0\x01\n" +
+	"\x06stderr\x18\x02 \x01(\tR\x06stderr\"?\n" +
+	"\vStatusEvent\x120\n" +
+	"\x06status\x18\x01 \x01(\x0e2\x18.jupyter.v1.KernelStatusR\x06status\"\xc0\x01\n" +
 	"\x1aExecuteJupyterCodeResponse\x121\n" +
 	"\x06stream\x18\x01 \x01(\v2\x17.jupyter.v1.StreamEventH\x00R\x06stream\x123\n" +
 	"\x06output\x18\x02 \x01(\v2\x19.jupyter.v1.JupyterOutputH\x00R\x06output\x121\n" +
@@ -551,18 +551,19 @@ var file_jupyter_v1_jupyter_proto_goTypes = []any{
 }
 var file_jupyter_v1_jupyter_proto_depIdxs = []int32{
 	0, // 0: jupyter.v1.JupyterSession.status:type_name -> jupyter.v1.KernelStatus
-	4, // 1: jupyter.v1.ExecuteJupyterCodeResponse.stream:type_name -> jupyter.v1.StreamEvent
-	7, // 2: jupyter.v1.ExecuteJupyterCodeResponse.output:type_name -> jupyter.v1.JupyterOutput
-	5, // 3: jupyter.v1.ExecuteJupyterCodeResponse.status:type_name -> jupyter.v1.StatusEvent
-	1, // 4: jupyter.v1.Jupyter.CreateSession:input_type -> jupyter.v1.CreateJupyterSessionRequest
-	3, // 5: jupyter.v1.Jupyter.ExecuteCode:input_type -> jupyter.v1.ExecuteJupyterCodeRequest
-	2, // 6: jupyter.v1.Jupyter.CreateSession:output_type -> jupyter.v1.JupyterSession
-	6, // 7: jupyter.v1.Jupyter.ExecuteCode:output_type -> jupyter.v1.ExecuteJupyterCodeResponse
-	6, // [6:8] is the sub-list for method output_type
-	4, // [4:6] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0, // 1: jupyter.v1.StatusEvent.status:type_name -> jupyter.v1.KernelStatus
+	4, // 2: jupyter.v1.ExecuteJupyterCodeResponse.stream:type_name -> jupyter.v1.StreamEvent
+	7, // 3: jupyter.v1.ExecuteJupyterCodeResponse.output:type_name -> jupyter.v1.JupyterOutput
+	5, // 4: jupyter.v1.ExecuteJupyterCodeResponse.status:type_name -> jupyter.v1.StatusEvent
+	1, // 5: jupyter.v1.Jupyter.CreateSession:input_type -> jupyter.v1.CreateJupyterSessionRequest
+	3, // 6: jupyter.v1.Jupyter.ExecuteCode:input_type -> jupyter.v1.ExecuteJupyterCodeRequest
+	2, // 7: jupyter.v1.Jupyter.CreateSession:output_type -> jupyter.v1.JupyterSession
+	6, // 8: jupyter.v1.Jupyter.ExecuteCode:output_type -> jupyter.v1.ExecuteJupyterCodeResponse
+	7, // [7:9] is the sub-list for method output_type
+	5, // [5:7] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_jupyter_v1_jupyter_proto_init() }

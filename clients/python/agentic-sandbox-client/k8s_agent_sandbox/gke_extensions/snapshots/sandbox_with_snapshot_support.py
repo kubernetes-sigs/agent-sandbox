@@ -229,6 +229,17 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_reason=f"Failed to patch operatingMode: {e}",
                 error_code=ERROR_CODE
             )
+          
+        # Explicitly close the container connection since the pod is being terminated.
+        try:
+            self.connector.close()
+        except Exception as e:
+            logger.warning(
+                "Failed to close connector during suspend for Sandbox '%s': %s",
+                self.sandbox_id,
+                e,
+            )
+        self._pod_name = None
 
         if wait_for_pod_termination(self.k8s_helper, self.namespace, pod_name_to_wait, pod_uid_to_wait, wait_timeout):
             logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")
@@ -250,7 +261,14 @@ class SandboxWithSnapshotSupport(Sandbox):
     def _restore_internal(self, target_snapshot_uid: str | None, wait_timeout: int) -> RestorationResponse:
         """Internal restore logic shared by resume() and restore()."""
         # Clear cached pod name and connection before resuming to ensure we pick up the new pod
-        self.connector.close()
+        try:
+            self.connector.close()
+        except Exception as e:
+            logger.warning(
+                "Failed to close connector during restore/resume for Sandbox '%s': %s",
+                self.sandbox_id,
+                e,
+            )
         self._pod_name = None
 
         try:

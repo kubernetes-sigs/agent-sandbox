@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import math
 import socket
 import subprocess
 import time
@@ -36,6 +37,25 @@ from .exceptions import (
 )
 
 ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
+
+
+def _router_timeout_header_value(timeout) -> str | None:
+    value = None
+    if isinstance(timeout, bool):
+        return None
+    if isinstance(timeout, (int, float)):
+        value = timeout
+    elif isinstance(timeout, tuple):
+        if len(timeout) == 0:
+            return None
+        value = timeout[-1]
+    else:
+        return None
+
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return str(value)
+
 
 class ConnectionStrategy(ABC):
     """Abstract base class for connection strategies."""
@@ -364,6 +384,9 @@ class SandboxConnector:
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
                 headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+                timeout_header = _router_timeout_header_value(kwargs.get("timeout"))
+                if timeout_header is not None:
+                    headers["X-Sandbox-Timeout"] = timeout_header
                 if self._get_pod_ip and not self._pod_ip_auth_failed:
                     if not self._pod_ip_resolved:
                         try:

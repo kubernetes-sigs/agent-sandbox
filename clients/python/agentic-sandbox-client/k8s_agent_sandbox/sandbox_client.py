@@ -358,10 +358,7 @@ class SandboxClient(Generic[T]):
     @trace_span("delete_claim")
     def _delete_claim(self, claim_name: str, namespace: str):
         """Deletes the SandboxClaim custom resource from the Kubernetes cluster."""
-        try:
-            self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
-        except Exception as e:
-            logging.error(f"Failed to cleanup SandboxClaim '{claim_name}': {e}")
+        self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
 
     def get_sandbox_claim_warmpool_name(self, claim_name: str, namespace: str) -> str:
         """Get warmpool name of a sandbox claim."""

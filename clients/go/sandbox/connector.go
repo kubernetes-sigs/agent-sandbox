@@ -283,6 +283,16 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		req.Header.Set(headerSandboxID, sandboxID)
 		req.Header.Set(headerSandboxNamespace, namespace)
 		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining > 0 {
+				timeout := remaining
+				if c.perAttemptTimeout > 0 && c.perAttemptTimeout < timeout {
+					timeout = c.perAttemptTimeout
+				}
+				req.Header.Set(headerSandboxTimeout, strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64))
+			}
+		}
 		req.Header.Set(headerRequestID, reqID)
 		if podIP != "" {
 			req.Header.Set(headerSandboxPodIP, podIP)

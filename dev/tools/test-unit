@@ -30,6 +30,13 @@ PYTHON_TEST_SUITES = [
         "name": "k8s-agent-sandbox",
         "dir": os.path.join("clients", "python", "agentic-sandbox-client", "k8s_agent_sandbox"),
         "requirements": "requirements.txt",
+    },
+    {
+        "name": "dev-tools-shared",
+        "dir": os.path.join("dev", "tools", "shared"),
+        # No requirements file; headers.py relies only on the standard library,
+        # so the runner just installs pytest and runs the suite.
+        "requirements": "requirements.txt",
     }
 ]
 

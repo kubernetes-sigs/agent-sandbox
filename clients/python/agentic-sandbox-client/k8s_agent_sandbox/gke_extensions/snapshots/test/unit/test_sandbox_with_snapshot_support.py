@@ -1125,6 +1125,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_suspend_success(self, mock_is_suspended, mock_wait):
         """Test suspend successfully takes a snapshot and scales down."""
         mock_wait.return_value = True
+        self.sandbox._pod_name = "test-pod"
         with patch.object(self.engine, 'create') as mock_create:
             mock_create.return_value = SnapshotResponse(
                 success=True, trigger_name="test-trigger", snapshot_uid="uid-123",
@@ -1142,17 +1143,37 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 name=self.sandbox.sandbox_id,
                 body={"spec": {"operatingMode": "Suspended"}}
             )
+            self.sandbox.connector.close.assert_called_once()
+            self.assertIsNone(self.sandbox._pod_name)
 
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_termination')
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
     def test_suspend_without_snapshot(self, mock_is_suspended, mock_wait):
         """Test suspend successfully scales down without taking a snapshot."""
         mock_wait.return_value = True
+        self.sandbox._pod_name = "test-pod"
         result = self.sandbox.suspend(snapshot_before_suspend=False)
         
         self.assertTrue(result.success)
         self.assertIsNone(result.snapshot_response)
         self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_called_once()
+        self.sandbox.connector.close.assert_called_once()
+        self.assertIsNone(self.sandbox._pod_name)
+
+    @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_termination')
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
+    def test_suspend_connector_close_exception(self, mock_is_suspended, mock_wait):
+        """Test suspend does not crash if connector close raises an exception."""
+        mock_wait.return_value = True
+        self.sandbox._pod_name = "test-pod"
+        self.sandbox.connector.close.side_effect = Exception("Mock Close Exception")
+        
+        result = self.sandbox.suspend(snapshot_before_suspend=False)
+        
+        self.assertTrue(result.success)
+        self.assertIsNone(result.snapshot_response)
+        self.sandbox.connector.close.assert_called_once()
+        self.assertIsNone(self.sandbox._pod_name)
 
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
     def test_suspend_pod_not_there(self, mock_is_suspended):
@@ -1195,6 +1216,22 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 body={"spec": {"operatingMode": "Running"}}
             )
 
+    @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_ready')
+    @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
+    def test_resume_connector_close_exception(self, mock_is_suspended, mock_wait):
+        """Test resume does not crash if connector close raises an exception during restore."""
+        mock_wait.return_value = True
+        self.sandbox.connector.close.side_effect = Exception("Mock Close Exception")
+        with patch.object(self.engine, 'list') as mock_list:
+            mock_list.return_value = ListSnapshotResult(success=True, snapshots=[], error_reason="", error_code=0)
+            self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.return_value = {"status": "patched"}
+            
+            result = self.sandbox.resume()
+            
+            self.assertTrue(result.success)
+            self.assertFalse(result.restored_from_snapshot)
+            self.sandbox.connector.close.assert_called_once()
+
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_termination')
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended')
     def test_suspend_multiple_calls(self, mock_is_suspended, mock_wait):
@@ -1216,6 +1253,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             self.assertEqual(
                 self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.call_count, 1
             )
+            self.sandbox.connector.close.assert_called_once()
 
     @patch('k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_ready')
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended')
@@ -1248,6 +1286,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
     def test_suspend_api_exception(self, mock_is_suspended):
         """Test suspend raises exception when custom object patch API call fails."""
+        self.sandbox._pod_name = "test-pod"
         with patch.object(self.engine, 'create') as mock_create:
             mock_create.return_value = SnapshotResponse(
                 success=True, trigger_name="test-trigger", snapshot_uid="uid-123",
@@ -1258,6 +1297,8 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             result = self.sandbox.suspend()
             self.assertFalse(result.success)
             self.assertIn("Failed", result.error_reason)
+            self.sandbox.connector.close.assert_not_called()
+            self.assertEqual(self.sandbox._pod_name, "test-pod")
 
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=True)
     def test_resume_api_exception(self, mock_is_suspended):
@@ -1313,6 +1354,7 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def test_suspend_timeout(self, mock_is_suspended, mock_wait):
         """Test suspend times out when wait_for_pod_termination expires."""
         mock_wait.return_value = False
+        self.sandbox._pod_name = "test-pod"
         with patch.object(self.engine, 'create') as mock_create:
             mock_create.return_value = SnapshotResponse(
                 success=True, trigger_name="test-trigger", snapshot_uid="uid-123",
@@ -1323,6 +1365,8 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             
             self.assertFalse(result.success)
             self.assertIn("Timed out", result.error_reason)
+            self.sandbox.connector.close.assert_called_once()
+            self.assertIsNone(self.sandbox._pod_name)
 
     @patch.object(SandboxWithSnapshotSupport, 'is_suspended', return_value=False)
     def test_suspend_missing_name_hash(self, mock_is_suspended):

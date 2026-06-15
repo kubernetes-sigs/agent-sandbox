@@ -34,6 +34,7 @@ const (
 	headerSandboxNamespace = "X-Sandbox-Namespace"
 	headerSandboxPort      = "X-Sandbox-Port"
 	headerSandboxPodIP     = "X-Sandbox-Pod-IP"
+	headerSandboxTimeout   = "X-Sandbox-Timeout"
 	headerRequestID        = "X-Request-ID"
 )
 

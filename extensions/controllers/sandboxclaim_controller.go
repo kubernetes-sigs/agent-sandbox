@@ -1950,9 +1950,6 @@ func getWarmPoolName(obj metav1.Object) string {
 }
 
 func shouldSuppressError(err error) bool {
-	if k8errors.IsInvalid(err) {
-		return true
-	}
 	for _, target := range suppressErrors {
 		if errors.Is(err, target) {
 			return true

@@ -35,7 +35,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -3291,81 +3290,4 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
 	require.Len(t, got.Status.Conditions, 1,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
-}
-
-func TestSandboxReconcileIsInvalidError(t *testing.T) {
-	sbName := "invalid-sandbox"
-	sbNs := "default"
-
-	sandbox := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       sbName,
-			Namespace:  sbNs,
-			UID:        sandboxUID,
-			Generation: 1,
-		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "c", Image: "img"}},
-				},
-			},
-			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
-				{
-					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "workspace"},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("-6Gi"),
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(Scheme).
-		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
-		WithObjects(sandbox).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
-					return k8serrors.NewInvalid(
-						obj.GetObjectKind().GroupVersionKind().GroupKind(),
-						obj.GetName(),
-						nil, // validation errors detail
-					)
-				}
-				return c.Create(ctx, obj, opts...)
-			},
-		}).
-		Build()
-
-	r := &SandboxReconciler{
-		Client: fakeClient,
-		Scheme: Scheme,
-		Tracer: asmetrics.NewNoOp(),
-	}
-
-	ctx := context.Background()
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sbName, Namespace: sbNs}}
-
-	_, err := r.Reconcile(ctx, req)
-	// We expect reconcile to return a nil error because IsInvalid error is suppressed
-	require.NoError(t, err)
-
-	// Verify that the sandbox status Ready condition is set to False with the correct reason/message
-	var got sandboxv1beta1.Sandbox
-	err = fakeClient.Get(ctx, req.NamespacedName, &got)
-	require.NoError(t, err)
-
-	cond := meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-	require.NotNil(t, cond)
-	require.Equal(t, metav1.ConditionFalse, cond.Status)
-	require.Equal(t, "ReconcilerError", cond.Reason)
-	require.Contains(t, cond.Message, "is invalid")
 }

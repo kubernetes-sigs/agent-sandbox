@@ -33,13 +33,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -4415,7 +4413,6 @@ func TestCreateSandboxClaimVolumeClaimTemplatesErrors(t *testing.T) {
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
 			_, err := reconciler.Reconcile(context.Background(), req)
-			// Reconcile should return nil (error suppressed)
 			require.NoError(t, err)
 
 			// Verify claim condition reflects the error status
@@ -4430,74 +4427,4 @@ func TestCreateSandboxClaimVolumeClaimTemplatesErrors(t *testing.T) {
 			require.Contains(t, cond.Message, tc.expectedMessageMatch)
 		})
 	}
-}
-
-func TestCreateSandboxClaimIsInvalidError(t *testing.T) {
-	scheme := newScheme(t)
-	claimName := "invalid-sandbox-claim"
-
-	claim := &extensionsv1beta1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
-		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "vct-warmpool"},
-		},
-	}
-
-	warmPool := &extensionsv1beta1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "vct-warmpool", Namespace: "default"},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "vct-template"}},
-	}
-
-	template := &extensionsv1beta1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "vct-template", Namespace: "default"},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "app", Image: "test"}},
-				},
-			},
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(claim, template, warmPool).
-		WithStatusSubresource(claim).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
-					return k8errors.NewInvalid(
-						schema.GroupKind{Group: "agents.x-k8s.io", Kind: "Sandbox"},
-						obj.GetName(),
-						nil, // validation errors detail
-					)
-				}
-				return c.Create(ctx, obj, opts...)
-			},
-		}).
-		Build()
-
-	reconciler := &SandboxClaimReconciler{
-		Client:           fakeClient,
-		Scheme:           scheme,
-		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
-		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
-	}
-
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
-	_, err := reconciler.Reconcile(context.Background(), req)
-	// We expect reconcile to return a nil error because IsInvalid error is suppressed
-	require.NoError(t, err)
-
-	// Verify that the claim status Ready condition is set to False with the correct reason/message
-	updatedClaim := &extensionsv1beta1.SandboxClaim{}
-	err = fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim)
-	require.NoError(t, err)
-
-	cond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-	require.NotNil(t, cond)
-	require.Equal(t, metav1.ConditionFalse, cond.Status)
-	require.Equal(t, "ReconcilerError", cond.Reason)
-	require.Contains(t, cond.Message, "is invalid")
 }

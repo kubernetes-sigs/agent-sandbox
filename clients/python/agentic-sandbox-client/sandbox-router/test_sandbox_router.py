@@ -14,6 +14,7 @@
 
 import asyncio
 import importlib
+import ipaddress
 import os
 import time
 from contextlib import asynccontextmanager
@@ -885,11 +886,68 @@ class TestWebSocketResourceLimits:
                     pass
             assert captured_kwargs.get("max_size") is None
 
-    def test_client_connection_key_prefers_forwarded_for(self):
+    def test_client_connection_key_uses_forwarded_for_from_trusted_proxy(self):
         websocket = MagicMock()
         websocket.headers = {"x-forwarded-for": "203.0.113.10, 10.0.0.1"}
-        websocket.client = ("127.0.0.1", 12345)
-        assert sandbox_router._client_connection_key(websocket) == "203.0.113.10"
+        websocket.client.host = "10.0.0.5"
+        trusted = (ipaddress.ip_network("10.0.0.0/8"),)
+        assert (
+            sandbox_router._client_connection_key(
+                websocket,
+                trusted_networks=trusted,
+            )
+            == "203.0.113.10"
+        )
+
+    def test_client_connection_key_ignores_spoofed_forwarded_for_prefix(self):
+        """A client-supplied leftmost X-Forwarded-For hop must not win over appended hops."""
+        websocket = MagicMock()
+        websocket.headers = {"x-forwarded-for": "203.0.113.1, 203.0.113.10"}
+        websocket.client.host = "10.0.0.5"
+        trusted = (ipaddress.ip_network("10.0.0.0/8"),)
+        assert (
+            sandbox_router._client_connection_key(
+                websocket,
+                trusted_networks=trusted,
+            )
+            == "203.0.113.10"
+        )
+
+    def test_client_connection_key_ignores_forwarded_for_from_untrusted_peer(self):
+        websocket = MagicMock()
+        websocket.headers = {"x-forwarded-for": "203.0.113.10"}
+        websocket.client.host = "203.0.113.99"
+        trusted = (ipaddress.ip_network("10.0.0.0/8"),)
+        assert (
+            sandbox_router._client_connection_key(
+                websocket,
+                trusted_networks=trusted,
+            )
+            == "203.0.113.99"
+        )
+
+    def test_client_connection_key_ignores_forwarded_for_when_no_trusted_proxies(self):
+        websocket = MagicMock()
+        websocket.headers = {"x-forwarded-for": "203.0.113.10"}
+        websocket.client.host = "127.0.0.1"
+        assert (
+            sandbox_router._client_connection_key(
+                websocket,
+                trusted_networks=(),
+            )
+            == "127.0.0.1"
+        )
+
+    def test_parse_trusted_proxy_networks_skips_invalid_entries(self, capsys):
+        networks = sandbox_router._parse_trusted_proxy_networks(
+            "10.0.0.0/8, not-a-cidr, 192.168.0.0/16"
+        )
+        assert networks == (
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("192.168.0.0/16"),
+        )
+        captured = capsys.readouterr()
+        assert "not-a-cidr" in captured.out
 
     def test_connection_limit_rejects_excess_connections(self):
         with patch.dict(

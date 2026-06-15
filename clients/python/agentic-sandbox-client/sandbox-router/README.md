@@ -52,7 +52,10 @@ The router can be configured using the following environment variables:
 | `PROXY_TIMEOUT_SECONDS` | Timeout in seconds for proxied HTTP requests to sandbox pods and for the WebSocket backend handshake (`open_timeout`). Increase this for long-running operations (e.g., code execution, model inference). | `180` (3 minutes) |
 | `WEBSOCKET_IDLE_TIMEOUT_SECONDS` | Close proxied WebSocket connections after this many seconds without any message in either direction. Set to `0` to disable. | `3600` (1 hour) |
 | `WEBSOCKET_MAX_LIFETIME_SECONDS` | Close proxied WebSocket connections after this many seconds regardless of activity. Set to `0` to disable. | `86400` (24 hours) |
-| `WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT` | Maximum concurrent WebSocket connections allowed per client IP (`X-Forwarded-For` when present, otherwise the direct peer address). Set to `0` to disable. | `64` |
+| `WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT` | Maximum concurrent WebSocket connections allowed per client IP. Set to `0` to disable. | `64` |
+| `TRUSTED_PROXY_CIDRS` | Comma-separated CIDRs of trusted L7 reverse proxies (ingress controller, Gateway, etc.). When the direct TCP peer is in one of these networks, the client IP is derived from `X-Forwarded-For` by walking the chain right-to-left and stopping at the first untrusted address; otherwise the direct peer address is used. **Required for meaningful per-client limits when the router sits behind a proxy** — without it, `X-Forwarded-For` is ignored so clients cannot spoof unique keys. | *(unset — `X-Forwarded-For` ignored)* |
+
+When the router is exposed only via a trusted ingress or Gateway, set `TRUSTED_PROXY_CIDRS` to the source IP ranges that the router actually sees from that proxy tier (for example the ingress controller pod CIDRs or node CIDRs, depending on your datapath). If the router can be reached directly, leave this unset so limits are keyed on the direct peer address.
 
 ## Deployment
 
@@ -120,7 +123,7 @@ This file contains unit tests for the Sandbox Router. The tests use `pytest` wit
 * **`TestWebSocketResourceLimits`**: Validates WebSocket resource-exhaustion protections.
     * Default idle timeout, max lifetime, and per-client connection limits are applied at startup.
     * Environment variables override the defaults; `0` disables each limit.
-    * `X-Forwarded-For` is preferred when deriving the per-client connection key.
+    * `X-Forwarded-For` is used only when the direct peer is in `TRUSTED_PROXY_CIDRS`; the rightmost untrusted hop is treated as the client address.
     * Excess concurrent connections from the same client are rejected with status `1008`.
     * The relay watchdog closes idle connections after the configured timeout.
 

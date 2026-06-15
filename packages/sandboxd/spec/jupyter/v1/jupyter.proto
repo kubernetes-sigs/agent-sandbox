@@ -39,7 +39,7 @@ message StreamEvent {
 }
 
 message StatusEvent {
-  string status = 1;
+  KernelStatus status = 1;
 }
 
 message ExecuteJupyterCodeResponse {

@@ -169,6 +169,63 @@ def _get_cluster_domain() -> str:
     return cluster_domain
 
 
+def _parse_trusted_proxy_networks(raw: str | None) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse a comma-separated list of CIDRs for trusted reverse-proxy peers."""
+    if not raw:
+        return ()
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for item in raw.split(","):
+        cidr = item.strip()
+        if not cidr:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            print(f"WARNING: Ignoring invalid TRUSTED_PROXY_CIDRS entry: {cidr!r}")
+    return tuple(networks)
+
+
+def _peer_host(websocket: WebSocket) -> str | None:
+    if websocket.client:
+        return websocket.client.host
+    return None
+
+
+def _is_trusted_address(
+    host: str,
+    trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> bool:
+    if not host or not trusted_networks:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(ip in network for network in trusted_networks)
+
+
+def _is_trusted_proxy(
+    peer_host: str | None,
+    trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> bool:
+    if not peer_host:
+        return False
+    return _is_trusted_address(peer_host, trusted_networks)
+
+
+def _client_ip_from_forwarded_for(
+    forwarded_for: str,
+    trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> str | None:
+    """Return the client IP from X-Forwarded-For, skipping trusted proxy hops."""
+    hops = [hop.strip() for hop in forwarded_for.split(",") if hop.strip()]
+    for hop in reversed(hops):
+        if _is_trusted_address(hop, trusted_networks):
+            continue
+        return hop
+    return hops[0] if hops else None
+
+
 def _get_request_timeout(request: Request) -> float:
     raw = request.headers.get("X-Sandbox-Timeout")
     if raw is None:
@@ -291,13 +348,20 @@ def _url_for_log(target_url: str) -> str:
     return target_url.split("?", 1)[0]
 
 
-def _client_connection_key(websocket: WebSocket) -> str:
+def _client_connection_key(
+    websocket: WebSocket,
+    *,
+    trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> str:
     """Return a stable key for per-client WebSocket connection accounting."""
+    peer_host = _peer_host(websocket)
     forwarded_for = websocket.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip()
-    if websocket.client:
-        return websocket.client.host
+    if forwarded_for and _is_trusted_proxy(peer_host, trusted_networks):
+        client_ip = _client_ip_from_forwarded_for(forwarded_for, trusted_networks)
+        if client_ip:
+            return client_ip
+    if peer_host:
+        return peer_host
     return "unknown"
 
 
@@ -353,6 +417,9 @@ websocket_max_connections_per_client = _get_non_negative_int_env(
 )
 client = httpx.AsyncClient(timeout=proxy_timeout)
 ws_connection_tracker = WebSocketConnectionTracker(websocket_max_connections_per_client)
+trusted_proxy_networks = _parse_trusted_proxy_networks(
+    os.environ.get("TRUSTED_PROXY_CIDRS")
+)
 
 ROUTER_AUTH_TOKEN = os.environ.get("ROUTER_AUTH_TOKEN", "").strip() or None
 ALLOW_UNAUTHENTICATED_ROUTER = _env_var_is_truthy("ALLOW_UNAUTHENTICATED_ROUTER")
@@ -374,6 +441,16 @@ if websocket_max_connections_per_client:
     )
 else:
     print("Sandbox router WebSocket max connections per client: disabled")
+if trusted_proxy_networks:
+    print(
+        "Sandbox router trusted proxy CIDRs for X-Forwarded-For: "
+        f"{', '.join(str(network) for network in trusted_proxy_networks)}"
+    )
+else:
+    print(
+        "Sandbox router trusted proxy CIDRs: none configured; "
+        "X-Forwarded-For is ignored for per-client WebSocket limits"
+    )
 if ROUTER_AUTH_TOKEN:
     print("Authentication enabled: requests must include valid Bearer token.")
 elif ALLOW_UNAUTHENTICATED_ROUTER:
@@ -492,7 +569,10 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
 
     _log_proxy_target(sandbox_id, target_url, protocol="WebSocket")
 
-    client_key = _client_connection_key(websocket)
+    client_key = _client_connection_key(
+        websocket,
+        trusted_networks=trusted_proxy_networks,
+    )
     try:
         await ws_connection_tracker.acquire(client_key)
     except ConnectionLimitExceeded as exc:

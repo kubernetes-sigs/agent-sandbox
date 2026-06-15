@@ -47,8 +47,15 @@ spec:
           value: "3600"
         - name: WEBSOCKET_MAX_LIFETIME_SECONDS
           value: "86400"
+        # Per-client caps are disabled until TRUSTED_PROXY_CIDRS is set. Behind
+        # ingress/Route, all clients share the proxy peer IP without it.
         - name: WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT
-          value: "64"
+          value: "0"
+        # When behind ingress/Route, uncomment and set both:
+        # - name: TRUSTED_PROXY_CIDRS
+        #   value: "10.128.0.0/14"
+        # - name: WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT
+        #   value: "64"
         - name: ALLOW_UNAUTHENTICATED_ROUTER
           value: "false"
         # - name: ROUTER_AUTH_TOKEN

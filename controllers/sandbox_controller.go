@@ -1124,7 +1124,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 		if !k8serrors.IsNotFound(err) {
 			logger.Error(err, "Failed to get PVC")
-			return fmt.Errorf("PVC Get Failed: %w", err)
+			return fmt.Errorf("failed to get PVC: %w", err)
 		}
 
 		pvcLabels := maps.Clone(pvcTemplate.Labels)

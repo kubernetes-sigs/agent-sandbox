@@ -8288,4 +8288,3 @@ spec:
           name: agent-sandbox-webhook-service
           namespace: agent-sandbox-system
           path: /convert
-        caBundle: Cg==

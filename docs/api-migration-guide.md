@@ -76,43 +76,31 @@ If the cluster is large, scope the rewrite to one namespace at a time:
 bash dev/tools/migrate.sh --phase=migrate --namespace=team-alpha
 ```
 
-### Flow B — Helm-managed, automatic
+### Flow B — Helm-managed, manual script
 
-For installs managed by the Helm chart, the chart ships two Helm hook Jobs that run the bootstrap and rewrite phases automatically as part of `helm upgrade`:
-
-```bash
-helm upgrade agent-sandbox ./helm/ \
-  --namespace agent-sandbox-system \
-  --reuse-values \
-  --set image.tag=<new-version>
-```
-
-| Phase | Job name | Hook | What it does |
-|---|---|---|---|
-| Pre-upgrade | `agent-sandbox-migration-bootstrap` | `pre-upgrade` | Runs `migrate.sh --phase=bootstrap` against the existing v1alpha1 state. |
-| Post-upgrade | `agent-sandbox-migration-rewrite` | `post-upgrade` | Runs `migrate.sh --phase=migrate` after the new controller + webhook are running. The Job has a `wait-for-webhook` initContainer that polls the webhook Service endpoints for up to 120s. |
-
-Both Jobs run `helm/files/migrate.sh` from a ConfigMap (defaultMode 0755) mounted in the pod. Helm retries on failure (`backoffLimit: 2`); operators can also `kubectl delete job <name>` and re-run `helm upgrade` to re-trigger.
-
-### Flow C — Helm-managed, manual script (hooks disabled)
-
-If you want Helm to manage the chart but want to run the migration script yourself (e.g., to scope to specific namespaces, dry-run first, or run between specific cluster events), disable the hooks:
+For installs managed by the Helm chart, the migration is driven manually by the operator using `dev/tools/migrate.sh`.
 
 ```bash
 # 1. Pre-create shadow pools while v1alpha1 is still the storage version.
 bash dev/tools/migrate.sh --phase=bootstrap --dry-run   # inspect first
 bash dev/tools/migrate.sh --phase=bootstrap
 
-# 2. Upgrade the chart WITHOUT the migration Jobs.
+# 2. Manually apply the upgraded CRD manifests using Server-Side Apply.
+#    Since Helm does not upgrade CRDs on upgrade, they must be applied manually:
+kubectl apply --server-side --force-conflicts -f path/to/chart/crds/
+
+# 3. Upgrade the chart.
 helm upgrade agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --reuse-values \
-  --set image.tag=<new-version> \
-  --set migration.enabled=false
+  --set image.tag=<new-version>
 
-# 3. Wait for the new controller + webhook to be Ready, then rewrite storage.
+# 4. Wait for the new controller + webhook to be Ready, then rewrite storage.
+kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
 bash dev/tools/migrate.sh --phase=migrate
 ```
+
+
 
 ## Dry-runs
 
@@ -202,17 +190,27 @@ Only do this after you've confirmed every existing record carries `agents.x-k8s.
 
 ## Troubleshooting
 
-**Pre-upgrade Job fails with "failed to list SandboxClaims"**: the script's ServiceAccount RBAC isn't applied yet. The bootstrap ClusterRole + ClusterRoleBinding should land in the same Helm hook batch. If you're testing manually, apply `helm/templates/migration-rbac.yaml` first.
-
-**Post-upgrade Job's init container `wait-for-webhook` times out**: the conversion webhook isn't reachable. Check that the Service named by `migration.webhookServiceName` (default `agent-sandbox-webhook-service`) exists in the controller's namespace and that its endpoints are populated:
-
-```bash
-kubectl get endpoints agent-sandbox-webhook-service -n agent-sandbox-system
-```
-
 **Migrate phase reports failures on specific resources**: re-run the script (`bash dev/tools/migrate.sh --phase=migrate`). It's idempotent — already-migrated resources just get the annotation timestamp updated. If a specific resource keeps failing, fetch it (`kubectl get -o yaml`) and inspect what's wrong — usually it's a conversion-webhook error tied to a bad field combination that needs manual cleanup.
 
 **Bootstrap printed `OPERATOR ACTION REQUIRED` for some claims**: those claims reference specific pool names that don't currently exist. The conversion webhook will still rewrite them to point at those names — you must create the pools manually post-migration, or re-point the claims (see "Re-pointing warm-started claims" above).
+
+**Webhook connection timeouts in managed/private clusters (e.g., GKE)**: If you see `dial tcp ... connect: connection refused` or connection timeouts from the API server during the `migrate` phase, it is likely that the control plane VPC cannot reach the webhook target port (`9443`) on the worker nodes.
+* By default, GKE private clusters block master-to-worker node traffic on ports other than standard ones like `443` and `10250`.
+* **Fix**: Create a firewall rule in your GCP console allowing ingress from your GKE master node IP range to your worker nodes on TCP port `9443`.
+
+**Emergency Rescue: Webhook blocks all custom resource writes**: If the migration is aborted or fails, and you cannot write or delete Custom Resources because the conversion webhook is failing or unreachable, you can temporarily disable the conversion webhook to restore basic cluster write access:
+```bash
+for crd in \
+    sandboxes.agents.x-k8s.io \
+    sandboxclaims.extensions.agents.x-k8s.io \
+    sandboxtemplates.extensions.agents.x-k8s.io \
+    sandboxwarmpools.extensions.agents.x-k8s.io; do
+  kubectl patch crd "${crd}" --type=merge -p '{"spec":{"conversion":{"strategy":"None","webhook":null}}}'
+done
+```
+> [!CAUTION]
+> Disabling the conversion webhook stops version conversion. Stored resources will remain in whatever version they were last written. Only use this for rollback recovery or emergency troubleshooting.
+
 
 ### Recovery from backup
 

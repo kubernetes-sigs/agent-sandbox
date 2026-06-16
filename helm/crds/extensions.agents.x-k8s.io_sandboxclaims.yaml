@@ -23,6 +23,9 @@ spec:
     - jsonPath: .status.sandbox.name
       name: Sandbox
       type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Reason
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

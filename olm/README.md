@@ -10,21 +10,23 @@ The operator packages the upstream Agent Sandbox controller (including extension
 ## Getting Started
 
 ### Prerequisites
-- go version v1.24.0+
+- go version v1.26.0+
 - docker version 17.03+.
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
 
 ### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+
+This module does not ship its own controller binary. It installs the
+`agent-sandbox-controller` image built from the parent repo.
+
+**Build and push the controller image** (from `agent-sandbox-operator/`; uses `../Dockerfile`):
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/agent-sandbox-operator:tag
+make docker-build docker-push IMG=<some-registry>/agent-sandbox-controller:tag
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+`docker-build` is an alias for `controller-image-build`, which runs `docker build` against the repo root Dockerfile.
 
 **Install the CRDs into the cluster:**
 
@@ -35,7 +37,7 @@ make install
 **Deploy the Manager to the cluster with the image specified by `IMG`:**
 
 ```sh
-make deploy IMG=<some-registry>/agent-sandbox-operator:tag
+make deploy IMG=<some-registry>/agent-sandbox-controller:tag
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
@@ -78,7 +80,7 @@ Following the options to release and provide this solution to the users.
 1. Build the installer for the image built and published in the registry:
 
 ```sh
-make build-installer IMG=<some-registry>/agent-sandbox-operator:tag
+make build-installer IMG=<some-registry>/agent-sandbox-controller:tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'

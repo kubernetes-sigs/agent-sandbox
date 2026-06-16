@@ -211,6 +211,49 @@ func TestSimpleSandboxQueue_GetWithStrategy(t *testing.T) {
 	}
 }
 
+func TestSimpleSandboxQueue_GetWithStrategyFallback(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	legacyIndex := "my-legacy-index"
+	namespace := "my-ns"
+	namespacedWarmPoolName := GetNamespacedWarmPoolName(namespace, legacyIndex)
+
+	key1 := SandboxKey{Namespace: namespace, Name: "sb-1"}
+	key2 := SandboxKey{Namespace: namespace, Name: "sb-2"}
+
+	// 1. Add items to the legacy queue
+	q.Add(legacyIndex, key1)
+	q.Add(legacyIndex, key2)
+
+	// Custom strategy to pick key2 specifically
+	pickKey2 := func(items []SandboxKey) (SandboxKey, bool) {
+		for _, item := range items {
+			if item.Name == "sb-2" {
+				return item, true
+			}
+		}
+		return SandboxKey{}, false
+	}
+
+	// 2. Call GetWithStrategy with namespaced index (which should fall back to legacy)
+	got, ok := q.GetWithStrategy(namespacedWarmPoolName, pickKey2)
+	if !ok || got != key2 {
+		t.Errorf("Expected to pick %v via fallback, got %v (ok: %v)", key2, got, ok)
+	}
+
+	// 3. Verify key2 was removed from legacy queue by checking remaining items
+	// Standard Get with namespaced index should still fall back to legacy and get key1
+	got1, ok1 := q.Get(namespacedWarmPoolName)
+	if !ok1 || got1 != key1 {
+		t.Errorf("Expected to get %v via fallback, got %v (ok: %v)", key1, got1, ok1)
+	}
+
+	// Queue should now be empty
+	_, okEmpty := q.Get(namespacedWarmPoolName)
+	if okEmpty {
+		t.Errorf("Expected queue to be empty")
+	}
+}
+
 func TestSimpleSandboxQueue_KeyFallbackBehavior(t *testing.T) {
 	q := NewSimpleSandboxQueue()
 	legacyIndex := "my-index-1"

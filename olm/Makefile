@@ -49,6 +49,7 @@ endif
 # Set the Operator SDK version to use. By default, what is installed on the system is used.
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
 OPERATOR_SDK_VERSION ?= v1.42.2
+OPM_VERSION ?= v1.55.0
 # Image URL for the agent-sandbox-controller (built from the repo root Dockerfile).
 IMG ?= controller:latest
 
@@ -287,11 +288,18 @@ operator-sdk: ## Download operator-sdk locally if necessary.
 ifeq (,$(wildcard $(OPERATOR_SDK)))
 ifeq (, $(shell which operator-sdk 2>/dev/null))
 	@{ \
-	set -e ;\
-	mkdir -p $(dir $(OPERATOR_SDK)) ;\
-	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPERATOR_SDK) https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)/operator-sdk_$${OS}_$${ARCH} ;\
-	chmod +x $(OPERATOR_SDK) ;\
+	set -euo pipefail; \
+	mkdir -p $(dir $(OPERATOR_SDK)); \
+	tmp=$$(mktemp -d); \
+	OS=$$(go env GOOS); ARCH=$$(go env GOARCH); \
+	bin=operator-sdk_$${OS}_$${ARCH}; \
+	base=https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION); \
+	curl -sSL -o "$$tmp/checksums.txt" "$$base/checksums.txt"; \
+	curl -sSL -o "$$tmp/$$bin" "$$base/$$bin"; \
+	grep " $$bin$$" "$$tmp/checksums.txt" | (cd "$$tmp" && { sha256sum -c - 2>/dev/null || shasum -a 256 -c -; }); \
+	mv "$$tmp/$$bin" "$(OPERATOR_SDK)"; \
+	chmod +x "$(OPERATOR_SDK)"; \
+	rm -rf "$$tmp"; \
 	}
 else
 OPERATOR_SDK = $(shell which operator-sdk)
@@ -319,11 +327,18 @@ opm: ## Download opm locally if necessary.
 ifeq (,$(wildcard $(OPM)))
 ifeq (,$(shell which opm 2>/dev/null))
 	@{ \
-	set -e ;\
-	mkdir -p $(dir $(OPM)) ;\
-	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/v1.55.0/$${OS}-$${ARCH}-opm ;\
-	chmod +x $(OPM) ;\
+	set -euo pipefail; \
+	mkdir -p $(dir $(OPM)); \
+	tmp=$$(mktemp -d); \
+	OS=$$(go env GOOS); ARCH=$$(go env GOARCH); \
+	bin=$${OS}-$${ARCH}-opm; \
+	base=https://github.com/operator-framework/operator-registry/releases/download/$(OPM_VERSION); \
+	curl -sSL -o "$$tmp/checksums.txt" "$$base/checksums.txt"; \
+	curl -sSL -o "$$tmp/$$bin" "$$base/$$bin"; \
+	grep " $$bin$$" "$$tmp/checksums.txt" | (cd "$$tmp" && { sha256sum -c - 2>/dev/null || shasum -a 256 -c -; }); \
+	mv "$$tmp/$$bin" "$(OPM)"; \
+	chmod +x "$(OPM)"; \
+	rm -rf "$$tmp"; \
 	}
 else
 OPM = $(shell which opm)

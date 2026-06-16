@@ -1869,8 +1869,8 @@ func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1
 	}
 
 	warmPoolName := getWarmPoolName(candidate)
-	if warmPoolName == "" || (warmPoolName != claim.Spec.WarmPoolRef.Name) {
-		return fmt.Errorf("incorrect warm pool, expected %v, got %v", claim.Spec.WarmPoolRef.Name, warmPoolName)
+	if warmPoolName == "" || warmPoolName != claim.Spec.WarmPoolRef.Name {
+		return fmt.Errorf("incorrect warm pool, expected %v", claim.Spec.WarmPoolRef.Name)
 	}
 	return nil
 }

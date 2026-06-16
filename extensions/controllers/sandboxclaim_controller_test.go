@@ -980,8 +980,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 						continue
 					}
 					warmPoolName := getWarmPoolName(sb)
+					namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sb.Namespace, warmPoolName)
 					key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name}
-					reconciler.WarmSandboxQueue.Add(warmPoolName, key)
+					reconciler.WarmSandboxQueue.Add(namespacedWarmPoolName, key)
 				}
 			}
 			req := reconcile.Request{
@@ -2223,10 +2224,11 @@ func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 	handler := &sandboxEventHandler{sandboxQueue: q}
 
 	warmPoolName := "test-warmpool"
+	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName("default", warmPoolName)
 	key := queue.SandboxKey{Namespace: "default", Name: "ghost-pod"}
 
 	// 1. Add the pod to the queue
-	q.Add(warmPoolName, key)
+	q.Add(namespacedWarmPoolName, key)
 
 	// 2. Create the mock Sandbox object that is being deleted
 	sb := &sandboxv1beta1.Sandbox{
@@ -2244,7 +2246,7 @@ func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 	handler.Delete(context.Background(), event.DeleteEvent{Object: sb}, nil)
 
 	// 4. Verify the Ghost Pod was removed from the queue
-	_, ok := q.Get(warmPoolName)
+	_, ok := q.Get(namespacedWarmPoolName)
 	if ok {
 		t.Errorf("Expected the deleted sandbox to be removed from the queue")
 	}
@@ -2641,8 +2643,9 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 		if isAdoptable(warmSandbox) == nil {
 			warmPoolName := getWarmPoolName(warmSandbox)
+			namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(warmSandbox.Namespace, warmPoolName)
 			key := queue.SandboxKey{Namespace: warmSandbox.Namespace, Name: warmSandbox.Name, NodeName: warmSandbox.Status.NodeName}
-			warmSandboxQueue.Add(warmPoolName, key)
+			warmSandboxQueue.Add(namespacedWarmPoolName, key)
 		}
 
 		reconciler := &SandboxClaimReconciler{
@@ -3393,6 +3396,13 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 				warmPoolSandboxLabel:   poolNameHash,
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}},
@@ -3412,9 +3422,10 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	warmSandboxQueue := queue.NewSimpleSandboxQueue()
 	if isAdoptable(extraSandbox) == nil {
-		hash := extraSandbox.Labels[sandboxTemplateRefHash]
+		warmPoolName := getWarmPoolName(extraSandbox)
+		namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(extraSandbox.Namespace, warmPoolName)
 		key := queue.SandboxKey{Namespace: extraSandbox.Namespace, Name: extraSandbox.Name, NodeName: extraSandbox.Status.NodeName}
-		warmSandboxQueue.Add(hash, key)
+		warmSandboxQueue.Add(namespacedWarmPoolName, key)
 	}
 
 	reconciler := &SandboxClaimReconciler{

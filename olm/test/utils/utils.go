@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
@@ -191,14 +192,24 @@ func GetNonEmptyLines(output string) []string {
 	return res
 }
 
-// GetProjectDir will return the directory where the project is
+// GetProjectDir returns the operator module root by walking up from the current
+// working directory until a PROJECT marker file is found.
 func GetProjectDir() (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
-		return wd, fmt.Errorf("failed to get current working directory: %w", err)
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
 	}
-	wd = strings.ReplaceAll(wd, "/test/e2e", "")
-	return wd, nil
+	dir := wd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "PROJECT")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("PROJECT file not found in any parent of %q", wd)
+		}
+		dir = parent
+	}
 }
 
 // UncommentCode searches for target in the file and remove the comment prefix

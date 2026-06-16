@@ -29,10 +29,22 @@ import (
 )
 
 func main() {
-	controllerPath := flag.String("controller", "../k8s/controller.yaml", "multi-doc YAML (Namespace, RBAC bootstrap, Service, non-extensions Deployment, …)")
+	controllerPath := flag.String(
+		"controller",
+		"../k8s/controller.yaml",
+		"multi-doc YAML (Namespace, RBAC bootstrap, Service, non-extensions Deployment, …)",
+	)
 	extensionsPath := flag.String("extensions", "../k8s/extensions.controller.yaml", "extensions controller Deployment")
-	supportOut := flag.String("support-out", "config/rbac/support.yaml", "write ServiceAccount + ClusterRoleBinding + Service from controller")
-	managerOut := flag.String("manager-out", "config/manager/manager.yaml", "write Namespace from controller + Deployment from extensions")
+	supportOut := flag.String(
+		"support-out",
+		"config/rbac/support.yaml",
+		"write ServiceAccount + ClusterRoleBinding + Service from controller",
+	)
+	managerOut := flag.String(
+		"manager-out",
+		"config/manager/manager.yaml",
+		"write Namespace from controller + Deployment from extensions",
+	)
 	image := flag.String("image", "controller:latest", "container image for the extensions Deployment")
 	flag.Parse()
 
@@ -68,7 +80,10 @@ func run(controllerPath, extensionsPath, supportOut, managerOut, image string) e
 		return fmt.Errorf("%s: no Namespace document", controllerPath)
 	}
 	if len(support) == 0 {
-		return fmt.Errorf("%s: no support documents (expected ServiceAccount, ClusterRoleBinding, Service, …)", controllerPath)
+		return fmt.Errorf(
+			"%s: no support documents (expected ServiceAccount, ClusterRoleBinding, Service, …)",
+			controllerPath,
+		)
 	}
 
 	extDocs, err := readDocuments(extensionsPath)

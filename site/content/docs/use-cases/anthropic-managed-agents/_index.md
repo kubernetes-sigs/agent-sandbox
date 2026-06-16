@@ -142,7 +142,10 @@ while True:
         labels={"anthropic.com/session-id": item.data.id},
     )
     pod = sb.k8s_helper.core_v1_api.read_namespaced_pod(sb.get_pod_name(), sb.namespace)
-    urllib.request.urlopen(f"http://{pod.status.pod_ip}:8080/", data=...)
+    urllib.request.urlopen(
+        f"http://{pod.status.pod_ip}:8080/",
+        data=json.dumps({"session_id": item.data.id, "work_id": item.id}).encode(),
+    )
 ```
 
 Two details that matter in practice: the environment key is a bearer token, so it

@@ -4075,3 +4075,356 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "vct-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "test"}},
+				},
+			},
+			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("1Gi"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "vct-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "vct-template"}},
+	}
+
+	testCases := []struct {
+		name                   string
+		claimVCTs              []sandboxv1beta1.PersistentVolumeClaimTemplate
+		policy                 extensionsv1beta1.VolumeClaimTemplatesPolicy
+		expectedVCTs           []string
+		expectedStorage        string
+		expectColdStart        bool
+		setupWarmPoolSandbox   bool
+		expectSandboxAdoption  bool
+		expectedAdoptedSandbox string
+	}{
+		{
+			name: "policy=Overrides overrides template volume",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("5Gi"),
+							},
+						},
+					},
+				},
+			},
+			policy:          extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides,
+			expectedVCTs:    []string{"data"},
+			expectedStorage: "5Gi",
+			expectColdStart: true,
+		},
+		{
+			name: "policy=Allowed allows adding new custom volumes",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "custom"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("2Gi"),
+							},
+						},
+					},
+				},
+			},
+			policy:          extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
+			expectedVCTs:    []string{"data", "custom"},
+			expectedStorage: "2Gi", // for custom volume
+			expectColdStart: true,
+		},
+		{
+			name:                   "bypasses VCT policy check if claim requests no custom volumes",
+			claimVCTs:              nil,
+			policy:                 extensionsv1beta1.VolumeClaimTemplatesPolicyDisallowed,
+			expectedVCTs:           []string{"data"},
+			expectedStorage:        "1Gi",
+			expectColdStart:        false,
+			setupWarmPoolSandbox:   true,
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "warm-sandbox",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			claimName := "vct-claim-" + tc.name
+
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					WarmPoolRef:          extensionsv1beta1.SandboxWarmPoolRef{Name: "vct-warmpool"},
+					VolumeClaimTemplates: tc.claimVCTs,
+				},
+			}
+
+			// Copy of template with VCT policy set
+			templateCopy := template.DeepCopy()
+			templateCopy.Spec.VolumeClaimTemplatesPolicy = tc.policy
+
+			var existingObjects []client.Object
+			existingObjects = append(existingObjects, claim, templateCopy, warmPool)
+
+			var readyWarmSandbox *sandboxv1beta1.Sandbox
+			warmSandboxQueue := queue.NewSimpleSandboxQueue()
+			if tc.setupWarmPoolSandbox {
+				poolNameHash := sandboxcontrollers.NameHash("vct-warmpool")
+				readyWarmSandbox = &sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "warm-sandbox",
+						Namespace: "default",
+						Labels: map[string]string{
+							warmPoolSandboxLabel:   poolNameHash,
+							sandboxTemplateRefHash: sandboxcontrollers.NameHash("vct-template"),
+						},
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+							Kind:       "SandboxWarmPool",
+							Name:       "vct-warmpool",
+							UID:        "pool-uid-123",
+							Controller: ptr.To(true), // nolint:modernize
+						}},
+					},
+					Spec: sandboxv1beta1.SandboxSpec{
+						PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "test"}}},
+						},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{{
+							Type:   string(sandboxv1beta1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						}},
+					},
+				}
+				existingObjects = append(existingObjects, readyWarmSandbox)
+				warmSandboxQueue.Add("vct-warmpool", queue.SandboxKey{Namespace: "default", Name: "warm-sandbox"})
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(existingObjects...).
+				WithStatusSubresource(claim).
+				Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:           fakeClient,
+				Scheme:           scheme,
+				Recorder:         events.NewFakeRecorder(10),
+				Tracer:           asmetrics.NewNoOp(),
+				WarmSandboxQueue: warmSandboxQueue,
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+			_, err := reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+
+			if tc.expectSandboxAdoption {
+				var adopted sandboxv1beta1.Sandbox
+				require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: tc.expectedAdoptedSandbox, Namespace: "default"}, &adopted))
+				controllerRef := metav1.GetControllerOf(&adopted)
+				require.NotNil(t, controllerRef)
+				require.Equal(t, claim.UID, controllerRef.UID)
+
+				// Verify claim's AssignedSandboxName annotation
+				var updatedClaim extensionsv1beta1.SandboxClaim
+				require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim))
+				require.Equal(t, tc.expectedAdoptedSandbox, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+				return
+			}
+
+			// Verify newly created cold-started sandbox with propagated/merged VolumeClaimTemplates
+			sandbox := &sandboxv1beta1.Sandbox{}
+			err = fakeClient.Get(context.Background(), types.NamespacedName{Name: claimName, Namespace: "default"}, sandbox)
+			require.NoError(t, err)
+
+			if tc.expectColdStart {
+				require.Equal(t, string(sandboxv1beta1.SandboxLaunchTypeCold), sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel])
+			}
+
+			require.Len(t, sandbox.Spec.VolumeClaimTemplates, len(tc.expectedVCTs))
+			for i, name := range tc.expectedVCTs {
+				require.Equal(t, name, sandbox.Spec.VolumeClaimTemplates[i].Name)
+				if name == "data" && tc.policy == extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides {
+					actualStorage := sandbox.Spec.VolumeClaimTemplates[i].Spec.Resources.Requests[corev1.ResourceStorage]
+					require.True(t, actualStorage.Equal(resource.MustParse(tc.expectedStorage)))
+				}
+				if name == "custom" {
+					actualStorage := sandbox.Spec.VolumeClaimTemplates[i].Spec.Resources.Requests[corev1.ResourceStorage]
+					require.True(t, actualStorage.Equal(resource.MustParse(tc.expectedStorage)))
+				}
+			}
+		})
+	}
+}
+
+func TestCreateSandboxClaimVolumeClaimTemplatesErrors(t *testing.T) {
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "vct-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "test"}},
+				},
+			},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "vct-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "vct-template"}},
+	}
+
+	testCases := []struct {
+		name                 string
+		claimVCTs            []sandboxv1beta1.PersistentVolumeClaimTemplate
+		templateVCTs         []sandboxv1beta1.PersistentVolumeClaimTemplate
+		policy               extensionsv1beta1.VolumeClaimTemplatesPolicy
+		expectedError        error
+		expectedMessageMatch string
+	}{
+		{
+			name: "disallowed policy",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "custom"}},
+			},
+			policy:               extensionsv1beta1.VolumeClaimTemplatesPolicyDisallowed,
+			expectedError:        ErrVolumeClaimTemplatesDisallowed,
+			expectedMessageMatch: "volume claim templates are disallowed by the template",
+		},
+		{
+			name: "forbidden override policy",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}},
+			},
+			templateVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}},
+			},
+			policy:               extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
+			expectedError:        ErrVolumeClaimTemplatesOverrideForbidden,
+			expectedMessageMatch: "cannot override template volume \"data\"",
+		},
+		{
+			name: "default empty policy is treated as Disallowed",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "custom"}},
+			},
+			policy:               "",
+			expectedError:        ErrVolumeClaimTemplatesDisallowed,
+			expectedMessageMatch: "volume claim templates are disallowed by the template",
+		},
+		{
+			name: "empty volume name in claim VCTs",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: ""}},
+			},
+			policy:               extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
+			expectedError:        ErrVolumeClaimTemplatesInvalid,
+			expectedMessageMatch: "name at index 0 is empty",
+		},
+		{
+			name: "duplicate volume name in claim VCTs",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}},
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}},
+			},
+			policy:               extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
+			expectedError:        ErrVolumeClaimTemplatesInvalid,
+			expectedMessageMatch: "duplicate name \"data\"",
+		},
+		{
+			name:      "empty volume name in template VCTs",
+			claimVCTs: nil,
+			templateVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: ""}},
+			},
+			policy:               extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
+			expectedError:        ErrVolumeClaimTemplatesInvalid,
+			expectedMessageMatch: "name at index 0 is empty",
+		},
+		{
+			name:      "duplicate volume name in template VCTs",
+			claimVCTs: nil,
+			templateVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}},
+				{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}},
+			},
+			policy:               extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
+			expectedError:        ErrVolumeClaimTemplatesInvalid,
+			expectedMessageMatch: "duplicate name \"data\"",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			claimName := "vct-error-claim-" + tc.name
+
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					WarmPoolRef:          extensionsv1beta1.SandboxWarmPoolRef{Name: "vct-warmpool"},
+					VolumeClaimTemplates: tc.claimVCTs,
+				},
+			}
+
+			templateCopy := template.DeepCopy()
+			templateCopy.Spec.VolumeClaimTemplates = tc.templateVCTs
+			templateCopy.Spec.VolumeClaimTemplatesPolicy = tc.policy
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(claim, templateCopy, warmPool).
+				WithStatusSubresource(claim).
+				Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:           fakeClient,
+				Scheme:           scheme,
+				Recorder:         events.NewFakeRecorder(10),
+				Tracer:           asmetrics.NewNoOp(),
+				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+			_, err := reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+
+			// Verify claim condition reflects the error status
+			updatedClaim := &extensionsv1beta1.SandboxClaim{}
+			err = fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim)
+			require.NoError(t, err)
+
+			cond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+			require.NotNil(t, cond)
+			require.Equal(t, metav1.ConditionFalse, cond.Status)
+			require.Equal(t, "VolumeClaimTemplatesError", cond.Reason)
+			require.Contains(t, cond.Message, tc.expectedMessageMatch)
+		})
+	}
+}

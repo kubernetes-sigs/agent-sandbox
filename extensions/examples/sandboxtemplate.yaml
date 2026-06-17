@@ -25,6 +25,11 @@ spec:
         volumeMounts:
         - name: workspace
           mountPath: /workspace
+  # volumeClaimTemplatesPolicy specifies the policy for sandbox claims 
+  # to inject or override volume claim templates defined in the template.
+  # Valid values are: Disallowed, Allowed, Overrides
+  # Default value is Disallowed.
+  volumeClaimTemplatesPolicy: Overrides
   # volumeClaimTemplates creates persistent storage for each sandbox.
   # When used with SandboxWarmPool, PVCs are pre-provisioned with warm pods.
   volumeClaimTemplates:

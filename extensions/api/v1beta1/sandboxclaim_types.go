@@ -125,6 +125,12 @@ type SandboxClaimSpec struct {
 	// +listType=atomic
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
+
+	// volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.
+	// Specifying this field forces a cold start because warm pool pods will not have these volumes.
+	// +optional
+	// +listType=atomic
+	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

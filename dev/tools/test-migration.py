@@ -507,7 +507,7 @@ def validate_migration(active_pod_info):
     assert "upgrade-claim" in claims_v1alpha1_by_name, "upgrade-claim missing in v1alpha1 list!"
     c1_v1alpha1 = claims_v1alpha1_by_name["upgrade-claim"]
     assert "warmpool" in c1_v1alpha1["spec"], f"upgrade-claim missing warmpool in v1alpha1 spec! spec: {c1_v1alpha1['spec']}"
-    assert c1_v1alpha1["spec"]["warmpool"] == "default", f"Expected warmpool default, got {c1_v1alpha1["spec"]["warmpool"]}"
+    assert c1_v1alpha1["spec"]["warmpool"] == "default", f"Expected warmpool default, got {c1_v1alpha1['spec']['warmpool']}"
     assert "warmPoolRef" not in c1_v1alpha1["spec"], f"upgrade-claim should NOT have warmPoolRef in v1alpha1 spec! spec: {c1_v1alpha1['spec']}"
     print("upgrade-claim dynamic reverse-conversion validation PASSED.")
     

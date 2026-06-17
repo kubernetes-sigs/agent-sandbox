@@ -471,6 +471,53 @@ def validate_migration(active_pod_info):
     assert pod_data["metadata"]["creationTimestamp"] == active_pod_info["creationTimestamp"], "Pod creationTimestamp changed! The running Pod was recreated/disrupted during conversion."
     print("upgrade-sandbox-running Pod disruption validation PASSED (Pod UID and creationTimestamp unchanged).")
     
+    # 2.5 Verify reverse conversion (v1beta1 -> v1alpha1) via the webhook
+    print("\n=== Validation Phase: Asserting dynamic v1beta1 -> v1alpha1 conversion ===")
+    
+    # Query SandboxClaims using v1alpha1 API version
+    print("Checking SandboxClaims via v1alpha1 endpoint...")
+    res = run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True)
+    claims_v1alpha1 = json.loads(res.stdout)["items"]
+    claims_v1alpha1_by_name = {c["metadata"]["name"]: c for c in claims_v1alpha1}
+    
+    # Validate upgrade-claim: spec should be dynamically converted back to warmpool: "default"
+    assert "upgrade-claim" in claims_v1alpha1_by_name, "upgrade-claim missing in v1alpha1 list!"
+    c1_v1alpha1 = claims_v1alpha1_by_name["upgrade-claim"]
+    assert "warmpool" in c1_v1alpha1["spec"], f"upgrade-claim missing warmpool in v1alpha1 spec! spec: {c1_v1alpha1['spec']}"
+    assert c1_v1alpha1["spec"]["warmpool"] == "default", f"Expected warmpool default, got {c1_v1alpha1["spec"]["warmpool"]}"
+    assert "warmPoolRef" not in c1_v1alpha1["spec"], f"upgrade-claim should NOT have warmPoolRef in v1alpha1 spec! spec: {c1_v1alpha1['spec']}"
+    print("upgrade-claim dynamic reverse-conversion validation PASSED.")
+    
+    # Validate upgrade-claim-none: spec should be dynamically converted back to warmpool: "none"
+    assert "upgrade-claim-none" in claims_v1alpha1_by_name, "upgrade-claim-none missing in v1alpha1 list!"
+    c_none_v1alpha1 = claims_v1alpha1_by_name["upgrade-claim-none"]
+    assert "warmpool" in c_none_v1alpha1["spec"], f"upgrade-claim-none missing warmpool in v1alpha1 spec! spec: {c_none_v1alpha1['spec']}"
+    assert c_none_v1alpha1["spec"]["warmpool"] == "none", f"Expected warmpool none, got {c_none_v1alpha1['spec']['warmpool']}"
+    assert "warmPoolRef" not in c_none_v1alpha1["spec"], f"upgrade-claim-none should NOT have warmPoolRef in v1alpha1 spec! spec: {c_none_v1alpha1['spec']}"
+    print("upgrade-claim-none dynamic reverse-conversion validation PASSED.")
+    
+    # Query Sandboxes using v1alpha1 API version
+    print("Checking Sandboxes via v1alpha1 endpoint...")
+    res = run_cmd(["kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True)
+    sandboxes_v1alpha1 = json.loads(res.stdout)["items"]
+    sandboxes_v1alpha1_by_name = {s["metadata"]["name"]: s for s in sandboxes_v1alpha1}
+    
+    # Validate upgrade-sandbox: operatingMode: Suspended should be dynamically converted back to replicas: 0
+    assert "upgrade-sandbox" in sandboxes_v1alpha1_by_name, "upgrade-sandbox missing in v1alpha1 list!"
+    sb_v1alpha1 = sandboxes_v1alpha1_by_name["upgrade-sandbox"]
+    assert "replicas" in sb_v1alpha1["spec"], f"upgrade-sandbox missing replicas in v1alpha1 spec! spec: {sb_v1alpha1['spec']}"
+    assert sb_v1alpha1["spec"]["replicas"] == 0, f"Expected replicas 0, got {sb_v1alpha1['spec']['replicas']}"
+    assert "operatingMode" not in sb_v1alpha1["spec"], f"upgrade-sandbox should NOT have operatingMode in v1alpha1 spec! spec: {sb_v1alpha1['spec']}"
+    print("upgrade-sandbox dynamic reverse-conversion validation PASSED.")
+    
+    # Validate upgrade-sandbox-running: operatingMode: Running should be dynamically converted back to replicas: 1
+    assert "upgrade-sandbox-running" in sandboxes_v1alpha1_by_name, "upgrade-sandbox-running missing in v1alpha1 list!"
+    sb_running_v1alpha1 = sandboxes_v1alpha1_by_name["upgrade-sandbox-running"]
+    assert "replicas" in sb_running_v1alpha1["spec"], f"upgrade-sandbox-running missing replicas in v1alpha1 spec! spec: {sb_running_v1alpha1['spec']}"
+    assert sb_running_v1alpha1["spec"]["replicas"] == 1, f"Expected replicas 1, got {sb_running_v1alpha1['spec']['replicas']}"
+    assert "operatingMode" not in sb_running_v1alpha1["spec"], f"upgrade-sandbox-running should NOT have operatingMode in v1alpha1 spec! spec: {sb_running_v1alpha1['spec']}"
+    print("upgrade-sandbox-running dynamic reverse-conversion validation PASSED.")
+    
     # 3. Clean up storedVersions in CRDs
     print("Pruning v1alpha1 from CRD storedVersions...")
     crds = [

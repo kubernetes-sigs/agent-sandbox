@@ -66,6 +66,12 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
 kubectl wait --for=condition=Ready pods -l app=agent-sandbox-controller -n agent-sandbox-system
 
+# Wait until the conversion webhook is responsive (this may take a few seconds after the pod starts)
+until kubectl get sandboxwarmpools.extensions.agents.x-k8s.io -A >/dev/null 2>&1; do
+  echo "Waiting for conversion webhook to be responsive..."
+  sleep 2
+done
+
 # 3. Force-rewrite every resource in v1beta1 storage format.
 bash dev/tools/migrate.sh --phase=migrate
 ```
@@ -76,43 +82,40 @@ If the cluster is large, scope the rewrite to one namespace at a time:
 bash dev/tools/migrate.sh --phase=migrate --namespace=team-alpha
 ```
 
-### Flow B — Helm-managed, automatic
+### Flow B — Helm-managed, manual script
 
-For installs managed by the Helm chart, the chart ships two Helm hook Jobs that run the bootstrap and rewrite phases automatically as part of `helm upgrade`:
-
-```bash
-helm upgrade agent-sandbox ./helm/ \
-  --namespace agent-sandbox-system \
-  --reuse-values \
-  --set image.tag=<new-version>
-```
-
-| Phase | Job name | Hook | What it does |
-|---|---|---|---|
-| Pre-upgrade | `agent-sandbox-migration-bootstrap` | `pre-upgrade` | Runs `migrate.sh --phase=bootstrap` against the existing v1alpha1 state. |
-| Post-upgrade | `agent-sandbox-migration-rewrite` | `post-upgrade` | Runs `migrate.sh --phase=migrate` after the new controller + webhook are running. The Job has a `wait-for-webhook` initContainer that polls the webhook Service endpoints for up to 120s. |
-
-Both Jobs run `helm/files/migrate.sh` from a ConfigMap (defaultMode 0755) mounted in the pod. Helm retries on failure (`backoffLimit: 2`); operators can also `kubectl delete job <name>` and re-run `helm upgrade` to re-trigger.
-
-### Flow C — Helm-managed, manual script (hooks disabled)
-
-If you want Helm to manage the chart but want to run the migration script yourself (e.g., to scope to specific namespaces, dry-run first, or run between specific cluster events), disable the hooks:
+For installs managed by the Helm chart, the migration is driven manually by the operator using `dev/tools/migrate.sh`.
 
 ```bash
 # 1. Pre-create shadow pools while v1alpha1 is still the storage version.
 bash dev/tools/migrate.sh --phase=bootstrap --dry-run   # inspect first
 bash dev/tools/migrate.sh --phase=bootstrap
 
-# 2. Upgrade the chart WITHOUT the migration Jobs.
+# 2. Manually apply the upgraded CRD manifests using Server-Side Apply.
+#    Since Helm does not upgrade CRDs on upgrade, they must be applied manually:
+kubectl apply --server-side --force-conflicts -f path/to/chart/crds/
+
+# 3. Upgrade the chart.
+# (If you are using extension resources like claims, templates, or pools, make sure --set controller.extensions=true is set or enabled in values)
 helm upgrade agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --reuse-values \
   --set image.tag=<new-version> \
-  --set migration.enabled=false
+  --set controller.extensions=true
 
-# 3. Wait for the new controller + webhook to be Ready, then rewrite storage.
+# 4. Wait for the new controller + webhook to be Ready, then rewrite storage.
+kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
+
+# Wait until the conversion webhook is responsive (this may take a few seconds after the pod starts)
+until kubectl get sandboxwarmpools.extensions.agents.x-k8s.io -A >/dev/null 2>&1; do
+  echo "Waiting for conversion webhook to be responsive..."
+  sleep 2
+done
+
 bash dev/tools/migrate.sh --phase=migrate
 ```
+
+
 
 ## Dry-runs
 
@@ -202,19 +205,91 @@ Only do this after you've confirmed every existing record carries `agents.x-k8s.
 
 ## Troubleshooting
 
-**Pre-upgrade Job fails with "failed to list SandboxClaims"**: the script's ServiceAccount RBAC isn't applied yet. The bootstrap ClusterRole + ClusterRoleBinding should land in the same Helm hook batch. If you're testing manually, apply `helm/templates/migration-rbac.yaml` first.
-
-**Post-upgrade Job's init container `wait-for-webhook` times out**: the conversion webhook isn't reachable. Check that the Service named by `migration.webhookServiceName` (default `agent-sandbox-webhook-service`) exists in the controller's namespace and that its endpoints are populated:
-
-```bash
-kubectl get endpoints agent-sandbox-webhook-service -n agent-sandbox-system
-```
-
 **Migrate phase reports failures on specific resources**: re-run the script (`bash dev/tools/migrate.sh --phase=migrate`). It's idempotent — already-migrated resources just get the annotation timestamp updated. If a specific resource keeps failing, fetch it (`kubectl get -o yaml`) and inspect what's wrong — usually it's a conversion-webhook error tied to a bad field combination that needs manual cleanup.
 
 **Bootstrap printed `OPERATOR ACTION REQUIRED` for some claims**: those claims reference specific pool names that don't currently exist. The conversion webhook will still rewrite them to point at those names — you must create the pools manually post-migration, or re-point the claims (see "Re-pointing warm-started claims" above).
 
-### Recovery from backup
+**Webhook connection timeouts in managed/private clusters (e.g., GKE)**: If you see `dial tcp ... connect: connection refused` or connection timeouts from the API server during the `migrate` phase, it is likely that the control plane VPC cannot reach the webhook target port (`9443`) on the worker nodes.
+* By default, GKE private clusters block master-to-worker node traffic on ports other than standard ones like `443` and `10250`.
+* **Fix**: Create a firewall rule in your GCP console allowing ingress from your GKE master node IP range to your worker nodes on TCP port `9443`.
+
+
+## Emergency Rollback Procedure (Reverting to v1alpha1)
+
+If the migration fails critically (e.g., the new controller fails to start, the webhook causes severe issues, or you encounter unresolvable errors) and you need to completely revert to the `v1alpha1` version:
+
+### Step 1: Disable Conversion Webhooks
+First, stop the API server from attempting version conversion to prevent blockages on custom resource writes and deletions:
+```bash
+for crd in \
+    sandboxes.agents.x-k8s.io \
+    sandboxclaims.extensions.agents.x-k8s.io \
+    sandboxtemplates.extensions.agents.x-k8s.io \
+    sandboxwarmpools.extensions.agents.x-k8s.io; do
+  kubectl patch crd "${crd}" --type=merge -p '{"spec":{"conversion":{"strategy":"None","webhook":null}}}'
+done
+```
+
+### Step 2: Scale down the controller deployment
+Scale down the `agent-sandbox-controller` deployment to `0` replicas, and wait for the pods to terminate completely. This stops the controller manager from reconciling resources or creating new Sandboxes to replace deleted ones while you are cleaning up the resources:
+```bash
+kubectl scale deploy/agent-sandbox-controller -n agent-sandbox-system --replicas=0
+kubectl wait --for=delete pod -l app=agent-sandbox-controller -n agent-sandbox-system --timeout=60s
+```
+
+### Step 3: Delete upgraded resources
+While the upgraded CRDs (supporting both `v1alpha1` and `v1beta1` versions) are still installed, delete all custom resources so etcd is completely emptied of `v1beta1` records:
+```bash
+kubectl delete sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools -A --all
+```
+
+### Step 4: Delete shadow pools (optional)
+If the bootstrap phase created shadow warm pools, delete them:
+```bash
+kubectl get sandboxwarmpools -A -o json \
+  | jq -r '.items[] | select(.metadata.annotations["agents.x-k8s.io/migration-shadow"]=="true") | "\(.metadata.namespace)/\(.metadata.name)"' \
+  | xargs -I {} sh -c 'kubectl delete sandboxwarmpool $(echo {} | cut -d/ -f2) -n $(echo {} | cut -d/ -f1)'
+```
+
+### Step 5: Reset CRD storedVersions to v1alpha1
+Because the API server enforces that any version in `status.storedVersions` must be present in `spec.versions`, you must patch the CRDs to list only `v1alpha1` in their stored versions before downgrading the CRD definitions:
+```bash
+for crd in \
+    sandboxes.agents.x-k8s.io \
+    sandboxclaims.extensions.agents.x-k8s.io \
+    sandboxtemplates.extensions.agents.x-k8s.io \
+    sandboxwarmpools.extensions.agents.x-k8s.io; do
+  kubectl patch crd "${crd}" --subresource=status --type=merge -p '{"status":{"storedVersions":["v1alpha1"]}}'
+done
+```
+
+### Step 6: Revert the CRD manifests and Controller
+Downgrade the installed components back to the old version:
+
+* **For Flow A (kubectl):** Re-apply the old version's manifests (substitute `<old-version>` with your previous version, e.g., `v0.4.6`):
+  ```bash
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/manifest.yaml
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/extensions.yaml
+  ```
+* **For Flow B (Helm):** Roll back the Helm release to the pre-migration revision (find the revision number using `helm history agent-sandbox`):
+  ```bash
+  helm rollback agent-sandbox <previous-revision-number> -n agent-sandbox-system
+  # Re-apply the old CRD versions manually:
+  kubectl apply --server-side --force-conflicts -f path/to/old-chart/crds/
+  ```
+
+### Step 7: Restore Data from Backup
+Apply the backup file to restore your original `v1alpha1` resources:
+```bash
+# Re-apply the backup (stripping status fields is recommended to allow the old controller to re-initialize them)
+yq 'del(.items[].status)' backup.yaml | kubectl apply -f -
+```
+
+---
+
+## Recovery from Backup (Remaining on v1beta1)
+
+If you intend to stay on `v1beta1` but need to restore specific broken or corrupt objects from your backup:
 
 If migration produces broken or unexpected v1beta1 resources, use the backup file from [Before you start: back up your data](#before-you-start-back-up-your-data) to restore.
 

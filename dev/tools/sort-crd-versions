@@ -81,8 +81,7 @@ def sort_crd_versions(file_path):
                                 'name': 'agent-sandbox-webhook-service',
                                 'namespace': 'agent-sandbox-system',
                                 'path': '/convert'
-                            },
-                            'caBundle': 'Cg=='
+                            }
                         }
                     }
                 }

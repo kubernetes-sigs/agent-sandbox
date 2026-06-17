@@ -28,6 +28,10 @@ class TestRunner:
         if self.repo_root not in sys.path:
             sys.path.insert(0, self.repo_root)
 
+        # Pin IMAGE_TAG in the environment to prevent timezone/date drift between setup/build and test execution steps.
+        if not os.getenv("IMAGE_TAG"):
+            os.environ["IMAGE_TAG"] = tools_utils.get_image_tag()
+
         self.parser = argparse.ArgumentParser(description=self.description)
         self.parser.add_argument(
             "--image-prefix",

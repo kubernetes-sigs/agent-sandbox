@@ -31,6 +31,8 @@ _repo_root = os.path.dirname(os.path.dirname(_self_dir))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+from dev.tools.shared import utils as tools_utils
+
 
 V1ALPHA1_RESOURCES = """apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
@@ -110,6 +112,15 @@ spec:
     name: upgrade-template
   warmpool: "none" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template)
 """
+
+def _safe_extract(tar, dest, members=None):
+    base = os.path.realpath(dest)
+    selected = members if members is not None else tar.getmembers()
+    for member in selected:
+        target = os.path.realpath(os.path.join(dest, member.name))
+        if target != base and not target.startswith(base + os.sep):
+            raise ValueError(f"Unsafe tar member path: {member.name}")
+    tar.extractall(path=dest, members=selected)
 
 def run_cmd(cmd, check=True, text=True, input_data=None, capture_output=False):
     """Executes a CLI command and prints/returns output."""
@@ -210,21 +221,27 @@ def install_v1alpha1(method, version):
     ]
 
     if method == "kubectl":
-        manifest_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{version}/manifest.yaml"
-        extensions_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{version}/extensions.yaml"
+        local_dir = os.path.join(_repo_root, "test/migration/testdata", version)
+        local_manifest = os.path.join(local_dir, "manifest.yaml")
+        local_extensions = os.path.join(local_dir, "extensions.yaml")
         
-        print(f"Applying manifest: {manifest_url}")
-        run_cmd(["kubectl", "apply", "-f", manifest_url])
-        
-        print(f"Applying extensions: {extensions_url}")
-        run_cmd(["kubectl", "apply", "-f", extensions_url])
+        if os.path.exists(local_manifest) and os.path.exists(local_extensions):
+            print(f"Applying local manifest: {local_manifest}")
+            run_cmd(["kubectl", "apply", "-f", local_manifest])
+            print(f"Applying local extensions: {local_extensions}")
+            run_cmd(["kubectl", "apply", "-f", local_extensions])
+        else:
+            manifest_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{version}/manifest.yaml"
+            extensions_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{version}/extensions.yaml"
+            print(f"Applying manifest: {manifest_url}")
+            run_cmd(["kubectl", "apply", "-f", manifest_url])
+            print(f"Applying extensions: {extensions_url}")
+            run_cmd(["kubectl", "apply", "-f", extensions_url])
         
     elif method == "helm":
         # Strip leading 'v' for the helm package version if present
         helm_version = version[1:] if version.startswith("v") else version
         
-        # We download the source tarball from GitHub and extract the helm chart subdirectory
-        import urllib.request
         import tarfile
         import shutil
         
@@ -233,30 +250,36 @@ def install_v1alpha1(method, version):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir)
         
-        tarball_url = f"https://github.com/kubernetes-sigs/agent-sandbox/archive/refs/tags/{version}.tar.gz"
-        tarball_path = os.path.join(temp_dir, "archive.tar.gz")
+        local_tarball = os.path.join(_repo_root, "test/migration/testdata", version, f"helm-{version}.tar.gz")
         
-        print(f"Downloading source archive from {tarball_url}...")
         try:
-            urllib.request.urlretrieve(tarball_url, tarball_path)
-            
-            print("Extracting Helm chart...")
-            with tarfile.open(tarball_path, "r:gz") as tar:
-                # Find the path to the helm directory in the archive
-                helm_src_dir = None
-                for member in tar.getmembers():
-                    if (member.name.endswith("/helm") or member.name.endswith("/helm/")) and member.isdir():
-                        helm_src_dir = member.name
-                        break
-
-                if not helm_src_dir:
-                    # Guess default structure
-                    helm_src_dir = f"agent-sandbox-{helm_version}/helm/"
-                tar.extractall(path=temp_dir)
+            if os.path.exists(local_tarball):
+                print(f"Extracting local Helm chart from {local_tarball}...")
+                with tarfile.open(local_tarball, "r:gz") as tar:
+                    _safe_extract(tar, temp_dir)
+                extracted_helm_path = os.path.join(temp_dir, "helm")
+            else:
+                import urllib.request
+                tarball_url = f"https://github.com/kubernetes-sigs/agent-sandbox/archive/refs/tags/{version}.tar.gz"
+                tarball_path = os.path.join(temp_dir, "archive.tar.gz")
+                print(f"Downloading source archive from {tarball_url}...")
+                urllib.request.urlretrieve(tarball_url, tarball_path)
                 
-            extracted_helm_path = os.path.join(temp_dir, helm_src_dir)
+                print("Extracting Helm chart...")
+                with tarfile.open(tarball_path, "r:gz") as tar:
+                    # Find the path to the helm directory in the archive
+                    helm_src_dir = None
+                    for member in tar.getmembers():
+                        if (member.name.endswith("/helm") or member.name.endswith("/helm/")) and member.isdir():
+                            helm_src_dir = member.name
+                            break
+                    if not helm_src_dir:
+                        # Guess default structure
+                        helm_src_dir = f"agent-sandbox-{helm_version}/helm/"
+                    _safe_extract(tar, temp_dir)
+                extracted_helm_path = os.path.join(temp_dir, helm_src_dir)
+                
             print(f"Installing Helm release from extracted path: {extracted_helm_path}")
-            
             run_cmd([
                 "helm", "install", "agent-sandbox", extracted_helm_path,
                 "-n", "agent-sandbox-system", "--create-namespace",
@@ -585,10 +608,21 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
     # Step 5: Downgrade controller and CRDs to v1alpha1
     print("Step 5: Downgrading controller and CRDs to v1alpha1...")
     if method == "kubectl":
-        manifest_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{v1alpha1_version}/manifest.yaml"
-        extensions_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{v1alpha1_version}/extensions.yaml"
-        run_cmd(["kubectl", "apply", "-f", manifest_url])
-        run_cmd(["kubectl", "apply", "-f", extensions_url])
+        local_dir = os.path.join(_repo_root, "test/migration/testdata", v1alpha1_version)
+        local_manifest = os.path.join(local_dir, "manifest.yaml")
+        local_extensions = os.path.join(local_dir, "extensions.yaml")
+        
+        if os.path.exists(local_manifest) and os.path.exists(local_extensions):
+            print(f"Applying local manifest: {local_manifest}")
+            run_cmd(["kubectl", "apply", "-f", local_manifest])
+            print(f"Applying local extensions: {local_extensions}")
+            run_cmd(["kubectl", "apply", "-f", local_extensions])
+        else:
+            manifest_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{v1alpha1_version}/manifest.yaml"
+            extensions_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{v1alpha1_version}/extensions.yaml"
+            run_cmd(["kubectl", "apply", "-f", manifest_url])
+            run_cmd(["kubectl", "apply", "-f", extensions_url])
+            
     elif method == "helm":
         res = run_cmd(["helm", "history", "agent-sandbox", "-n", "agent-sandbox-system", "-o", "json"], capture_output=True)
         history = json.loads(res.stdout)
@@ -600,9 +634,8 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
         print(f"Rolling back Helm release to revision {prev_revision}...")
         run_cmd(["helm", "rollback", "agent-sandbox", str(prev_revision), "-n", "agent-sandbox-system"])
         
-        # Download old source archive to extract and manually downgrade the CRDs
-        print(f"Downloading old source archive for version {v1alpha1_version} to extract and manually downgrade CRDs...")
-        import urllib.request
+        local_tarball = os.path.join(_repo_root, "test/migration/testdata", v1alpha1_version, f"helm-{v1alpha1_version}.tar.gz")
+        
         import tarfile
         import shutil
         
@@ -610,40 +643,39 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
         shutil.rmtree(temp_dir, ignore_errors=True)
         os.makedirs(temp_dir)
         
-        tarball_url = f"https://github.com/kubernetes-sigs/agent-sandbox/archive/refs/tags/{v1alpha1_version}.tar.gz"
-        tarball_path = os.path.join(temp_dir, "archive.tar.gz")
-        
         try:
-            urllib.request.urlretrieve(tarball_url, tarball_path)
-            
-            with tarfile.open(tarball_path, "r:gz") as tar:
-                # Find the path to the helm/crds directory in the archive
-                crds_src_dir = None
-                for member in tar.getmembers():
-                    if member.name.endswith("/helm/crds") or member.name.endswith("/helm/crds/"):
-                        crds_src_dir = member.name
-                        break
+            if os.path.exists(local_tarball):
+                print(f"Extracting local Helm CRDs from {local_tarball}...")
+                with tarfile.open(local_tarball, "r:gz") as tar:
+                    _safe_extract(tar, temp_dir)
+                extracted_crds_path = os.path.join(temp_dir, "helm/crds")
+            else:
+                # Download old source archive to extract and manually downgrade the CRDs
+                print(f"Downloading old source archive for version {v1alpha1_version} to extract and manually downgrade CRDs...")
+                import urllib.request
+                tarball_url = f"https://github.com/kubernetes-sigs/agent-sandbox/archive/refs/tags/{v1alpha1_version}.tar.gz"
+                tarball_path = os.path.join(temp_dir, "archive.tar.gz")
+                urllib.request.urlretrieve(tarball_url, tarball_path)
                 
-                if not crds_src_dir:
-                    # Fallback to search any crds/ directory
+                with tarfile.open(tarball_path, "r:gz") as tar:
+                    crds_src_dir = None
                     for member in tar.getmembers():
-                        if member.name.endswith("/crds") or member.name.endswith("/crds/"):
+                        if member.name.endswith("/helm/crds") or member.name.endswith("/helm/crds/"):
                             crds_src_dir = member.name
                             break
+                    if not crds_src_dir:
+                        for member in tar.getmembers():
+                            if member.name.endswith("/crds") or member.name.endswith("/crds/"):
+                                crds_src_dir = member.name
+                                break
+                    assert crds_src_dir, f"Could not find helm/crds directory in source archive of {v1alpha1_version}!"
+                    members = [m for m in tar.getmembers() if m.name.startswith(crds_src_dir)]
+                    _safe_extract(tar, temp_dir, members=members)
+                extracted_crds_path = os.path.join(temp_dir, crds_src_dir)
                 
-                assert crds_src_dir, f"Could not find helm/crds directory in source archive of {v1alpha1_version}!"
-                
-                # Extract only the crds directory
-                for member in tar.getmembers():
-                    if member.name.startswith(crds_src_dir):
-                        tar.extract(member, path=temp_dir)
-                        
-            extracted_crds_path = os.path.join(temp_dir, crds_src_dir)
-            
             # Apply the old CRDs using server-side apply
             run_cmd(["kubectl", "apply", "--server-side", "--force-conflicts", "-f", extracted_crds_path])
         finally:
-            # Clean up temp folder
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     # Wait for the CRDs to be re-established under v1alpha1
@@ -749,12 +781,12 @@ def main():
     parser = argparse.ArgumentParser(description="Run E2E migration tests for agent-sandbox")
     parser.add_argument("--image-prefix",
                         dest="image_prefix",
-                        help="registry/prefix for target images. Defaults to None",
+                        help="registry/prefix for target images. Defaults to kind.local/",
                         type=str,
-                        default=None)
+                        default="kind.local/")
     parser.add_argument("--image-tag",
                         dest="image_tag",
-                        help="tag for target images. Defaults to None",
+                        help="tag for target images. Defaults to local built tag",
                         type=str,
                         default=None)
     parser.add_argument("--method",

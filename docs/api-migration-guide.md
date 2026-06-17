@@ -111,7 +111,6 @@ until kubectl get sandboxwarmpools.extensions.agents.x-k8s.io -A >/dev/null 2>&1
   echo "Waiting for conversion webhook to be responsive..."
   sleep 2
 done
-
 bash dev/tools/migrate.sh --phase=migrate
 ```
 
@@ -229,7 +228,6 @@ for crd in \
   kubectl patch crd "${crd}" --type=merge -p '{"spec":{"conversion":{"strategy":"None","webhook":null}}}'
 done
 ```
-
 ### Step 2: Scale down the controller deployment
 Scale down the `agent-sandbox-controller` deployment to `0` replicas, and wait for the pods to terminate completely. This stops the controller manager from reconciling resources or creating new Sandboxes to replace deleted ones while you are cleaning up the resources:
 ```bash

@@ -57,7 +57,6 @@ Upgrades to chart versions that move CRDs from `v1alpha1` to `v1beta1` require a
 
 See [`docs/api-migration-guide.md`](../docs/api-migration-guide.md) for full details, sequence of steps, and operational guidelines.
 
-
 ## Uninstallation
 
 ```bash

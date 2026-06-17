@@ -40,12 +40,18 @@ class TestRunner:
             type=str,
             default="kind.local/",
         )
+        self.parser.add_argument(
+            "--skip-initial-deploy",
+            dest="skip_initial_deploy",
+            help="skip deploying the controller during cluster setup",
+            action="store_true",
+        )
 
     def _get_repo_root(self):
         return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
     def setup_cluster(self, args, extra_push_images_args=None):
-        image_tag = tools_utils.get_image_tag()
+        image_tag = os.environ["IMAGE_TAG"]
         result = subprocess.run([f"{self.repo_root}/dev/tools/create-kind-cluster", self.name, "--recreate", "--kubeconfig", f"{self.repo_root}/bin/KUBECONFIG"])
         if result.returncode != 0:
             return result
@@ -57,9 +63,10 @@ class TestRunner:
         if result.returncode != 0:
             return result
 
-        result = subprocess.run([f"{self.repo_root}/dev/tools/deploy-to-kube", "--image-prefix", args.image_prefix, "--image-tag", image_tag, "--extensions"])
-        if result.returncode != 0:
-            return result
+        if not getattr(args, "skip_initial_deploy", False):
+            result = subprocess.run([f"{self.repo_root}/dev/tools/deploy-to-kube", "--image-prefix", args.image_prefix, "--image-tag", image_tag, "--extensions"])
+            if result.returncode != 0:
+                return result
 
         result = subprocess.run([f"{self.repo_root}/dev/tools/deploy-cloud-provider"])
         return result

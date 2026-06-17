@@ -221,8 +221,8 @@ class AsyncK8sHelper:
             logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
-                logger.error(f"Error terminating sandbox {name}: {e}")
-                raise SandboxNotFoundError(f"The sandbox claim {name} does not exist.")
+                logger.error(f"Error terminating SandboxClaim {name}: {e}")
+                raise
 
     async def get_sandbox(self, name: str, namespace: str):
         """Gets a Sandbox custom resource."""

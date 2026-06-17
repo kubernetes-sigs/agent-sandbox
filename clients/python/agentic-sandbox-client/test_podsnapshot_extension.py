@@ -235,6 +235,82 @@ def test_list_and_delete(sandbox, first_snapshot_uid: str, second_snapshot_uid: 
     print(f"Remaining snapshots deleted successfully: {delete_result.deleted_snapshots}")
 
 
+def test_restore_from_snapshot(sandbox, snapshot_uid: str):
+    """Tests restoring a sandbox from a previous snapshot."""
+    print("\n======= Testing Restore from Previous Snapshot =======")
+    
+    print(f"\nSuspending sandbox '{sandbox.sandbox_id}' before dedicated restore...")
+    suspend_result = sandbox.suspend(snapshot_before_suspend=False)
+    assert suspend_result.success, f"Suspend failed before restore: {suspend_result.error_reason}"
+    assert sandbox.is_suspended(), "Sandbox should be suspended."
+
+    print(f"\nRestoring sandbox '{sandbox.sandbox_id}' from snapshot '{snapshot_uid}'...")
+    restore_result = sandbox.restore(snapshot_uid=snapshot_uid)
+    
+    assert restore_result.success, f"Restore failed: {restore_result.error_reason}"
+    assert restore_result.restored_from_snapshot, "Sandbox should have been restored from snapshot."
+    assert restore_result.snapshot_uid == snapshot_uid, f"Expected restored snapshot UID '{snapshot_uid}', but got '{restore_result.snapshot_uid}'"
+    
+    print(f"Sandbox successfully restored from Snapshot UID: {restore_result.snapshot_uid}")
+
+
+def test_restore_fails_on_running_sandbox(sandbox, snapshot_uid: str):
+    """Tests that restore fails gracefully on a running sandbox."""
+    print("\n======= Testing Restore Fails on a Running Sandbox =======")
+    assert not sandbox.is_suspended(), "Sandbox should be running."
+    
+    result = sandbox.restore(snapshot_uid=snapshot_uid)
+    assert not result.success, "Expected restore to fail on a running sandbox."
+    assert "Sandbox is currently running and cannot be restored." in result.error_reason, f"Unexpected error message: {result.error_reason}"
+    print("Restore on a running sandbox failed gracefully as expected.")
+
+
+def test_suspend_resume_restore_cycle(sandbox) -> tuple[str, str]:
+    """Tests a full suspend, resume, suspend, and restore cycle."""
+    print("\n======= Testing Suspend-Resume-Suspend-Restore-Suspend-Resume Cycle =======")
+    
+    print("Suspending sandbox (1st time)...")
+    res_suspend1 = sandbox.suspend(snapshot_before_suspend=True)
+    assert res_suspend1.success, res_suspend1.error_reason
+    snap_a_uid = res_suspend1.snapshot_response.snapshot_uid
+    print(f"1st Suspend snapshot: {snap_a_uid}")
+    assert wait_for_snapshot_ready(sandbox, snap_a_uid), f"Snapshot '{snap_a_uid}' did not become ready in time."
+    
+    print("Resuming sandbox (1st time)...")
+    res_resume = sandbox.resume()
+    assert res_resume.success, res_resume.error_reason
+    assert res_resume.restored_from_snapshot
+    assert res_resume.snapshot_uid == snap_a_uid
+    
+    print("Suspending sandbox (2nd time)...")
+    res_suspend2 = sandbox.suspend(snapshot_before_suspend=True)
+    assert res_suspend2.success, res_suspend2.error_reason
+    snap_b_uid = res_suspend2.snapshot_response.snapshot_uid
+    print(f"2nd Suspend snapshot: {snap_b_uid}")
+    assert wait_for_snapshot_ready(sandbox, snap_b_uid), f"Snapshot '{snap_b_uid}' did not become ready in time."
+    
+    print(f"Restoring sandbox back to 1st snapshot '{snap_a_uid}'...")
+    res_restore = sandbox.restore(snapshot_uid=snap_a_uid)
+    assert res_restore.success, res_restore.error_reason
+    assert res_restore.restored_from_snapshot
+    assert res_restore.snapshot_uid == snap_a_uid
+    
+    print("Suspending sandbox (3rd time, after restoration)...")
+    res_suspend3 = sandbox.suspend(snapshot_before_suspend=True)
+    assert res_suspend3.success, res_suspend3.error_reason
+    snap_c_uid = res_suspend3.snapshot_response.snapshot_uid
+    print(f"3rd Suspend snapshot: {snap_c_uid}")
+    assert wait_for_snapshot_ready(sandbox, snap_c_uid), f"Snapshot '{snap_c_uid}' did not become ready in time."
+    
+    print("Resuming sandbox (after restoration)...")
+    res_resume2 = sandbox.resume()
+    assert res_resume2.success, res_resume2.error_reason
+    assert res_resume2.restored_from_snapshot
+    assert res_resume2.snapshot_uid == snap_c_uid
+
+    print("Suspend-Resume-Suspend-Restore cycle (with subsequent suspend-resume) completed successfully.")
+    return snap_a_uid, snap_b_uid
+
 def main(
     warmpool_name: str,
     api_url: str | None,
@@ -282,9 +358,19 @@ def main(
         
         time.sleep(WAIT_TIME_SECONDS)
         
+        test_restore_from_snapshot(sandbox, first_snapshot_uid)
+
+        test_restore_fails_on_running_sandbox(sandbox, first_snapshot_uid)
+        
         test_list_and_delete(
             sandbox, first_snapshot_uid, second_snapshot_uid, suspend_third_snapshot_uid
         )
+        
+        test_suspend_resume_restore_cycle(sandbox)
+        
+        print("\nCleaning up remaining snapshots from extra tests...")
+        delete_result = sandbox.snapshots.delete_all(delete_by="all")
+        assert delete_result.success, delete_result.error_reason
 
         # Create a fresh sandbox to test suspend-resume flow on a brand new instance
         print("\n***** Phase 2: Testing Suspend/Resume on a new Sandbox *****")

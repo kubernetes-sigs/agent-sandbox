@@ -86,9 +86,9 @@ jobs:
       id-token: write # IMPORTANT: mandatory for trusted publishing
       contents: read
 
-    # Run if it is a push event AND NOT a release candidate
+    # Run if it is a push event
     if: >-
-      (github.event_name == 'push' && !contains(github.ref, 'rc'))
+      (github.event_name == 'push')
 
     steps:
       - name: Download all the dists

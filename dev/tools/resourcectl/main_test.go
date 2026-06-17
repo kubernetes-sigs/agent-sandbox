@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -33,8 +34,10 @@ func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}
-	// Just sleep forever (or until killed)
-	select {}
+	// Sleep until the parent kills us. We use a long sleep rather than an empty
+	// `select{}` because the latter trips Go's deadlock detector (exit code 2),
+	// which races the kill and makes the kill-signal assertion flaky.
+	time.Sleep(time.Hour)
 }
 
 func TestIsHeartbeatProcess(t *testing.T) {
@@ -79,6 +82,67 @@ func TestIsHeartbeatProcess(t *testing.T) {
 	}
 }
 
+func TestConcurrentStateUpdates(t *testing.T) {
+	// Create a temporary home directory to sandbox the state file.
+	tmpHome, err := os.MkdirTemp("", "resourcectl-test-home-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpHome)
+
+	t.Setenv("HOME", tmpHome)
+
+	// Concurrently append a distinct resource from many goroutines. Without the
+	// state file lock these read-modify-write cycles would race and lose
+	// entries; with it, every entry must survive.
+	const n = 20
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errCh <- updateState(func(state *State) error {
+				// Widen the read-modify-write window so a missing lock would
+				// reliably drop entries.
+				time.Sleep(time.Millisecond)
+				state.BoskosResources = append(state.BoskosResources, BoskosResource{
+					Name: fmt.Sprintf("resource-%d", i),
+				})
+				return nil
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("updateState failed: %v", err)
+		}
+	}
+
+	state, err := readState()
+	if err != nil {
+		t.Fatalf("failed to read state file: %v", err)
+	}
+	if len(state.BoskosResources) != n {
+		t.Errorf("expected %d resources after concurrent updates, but got %d", n, len(state.BoskosResources))
+	}
+
+	seen := make(map[string]int, len(state.BoskosResources))
+	for _, resource := range state.BoskosResources {
+		seen[resource.Name]++
+	}
+
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("resource-%d", i)
+		if seen[name] != 1 {
+			t.Fatalf("expected exactly one %q entry, got %d", name, seen[name])
+		}
+	}
+}
+
 func TestRunCleanup(t *testing.T) {
 	// Create temporary home directory to sandbox state file
 	tmpHome, err := os.MkdirTemp("", "resourcectl-test-home-*")
@@ -88,9 +152,7 @@ func TestRunCleanup(t *testing.T) {
 	defer os.RemoveAll(tmpHome)
 
 	// Override HOME
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	t.Setenv("HOME", tmpHome)
 
 	// Start a mock Boskos server
 	mockBoskos := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

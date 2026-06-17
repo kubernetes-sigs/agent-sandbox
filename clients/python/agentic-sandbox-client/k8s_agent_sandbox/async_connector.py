@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 from typing import Callable, Awaitable
 
 import httpx
@@ -33,6 +34,22 @@ from .models import (
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 MAX_RETRIES = 5
 BACKOFF_FACTOR = 0.5
+
+
+def _router_timeout_header_value(timeout) -> str | None:
+    value = None
+    if isinstance(timeout, bool):
+        return None
+    if isinstance(timeout, (int, float)):
+        value = timeout
+    elif isinstance(timeout, httpx.Timeout):
+        value = timeout.read
+    else:
+        return None
+
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return str(value)
 
 
 class AsyncSandboxConnector:
@@ -167,6 +184,9 @@ class AsyncSandboxConnector:
             headers["X-Sandbox-ID"] = self.id
             headers["X-Sandbox-Namespace"] = self.namespace
             headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+            timeout_header = _router_timeout_header_value(kwargs.get("timeout"))
+            if timeout_header is not None:
+                headers["X-Sandbox-Timeout"] = timeout_header
             if self._get_pod_ip and not self._pod_ip_auth_failed:
                 if not self._pod_ip_resolved:
                     try:

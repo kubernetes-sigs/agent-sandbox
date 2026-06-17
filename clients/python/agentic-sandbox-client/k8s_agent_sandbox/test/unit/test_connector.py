@@ -194,6 +194,66 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         self.assertIn("X-Sandbox-Namespace", sent_headers)
         self.assertIn("X-Sandbox-Port", sent_headers)
 
+    def test_timeout_header_is_sent_for_router_requests(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=123)
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123")
+
+    def test_timeout_tuple_uses_last_value_for_router_requests(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=(3, 123))
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123")
+
+    def test_timeout_tuple_without_read_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=(5, None))
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
+    def test_unsupported_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=object())
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
+    def test_timeout_header_is_not_sent_for_in_cluster_requests(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        strategy = InClusterConnectionStrategy("my-sb", "my-ns", config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=123)
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
     def test_in_cluster_url_is_pod_dns(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         strategy = InClusterConnectionStrategy("my-sb", "my-ns", config)

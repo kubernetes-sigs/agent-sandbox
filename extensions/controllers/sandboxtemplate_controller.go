@@ -64,6 +64,10 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	ctx, end := r.Tracer.StartSpan(ctx, template, "ReconcileSandboxTemplate", nil)
 	defer end()
 
+	if err := r.ensureTemplateRefHashLabel(ctx, template); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if !template.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
@@ -151,6 +155,28 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	logger.Info("Successfully created shared NetworkPolicy", "name", npName)
 	return ctrl.Result{}, nil
+}
+
+func (r *SandboxTemplateReconciler) ensureTemplateRefHashLabel(ctx context.Context, template *extensionsv1beta1.SandboxTemplate) error {
+	if !template.DeletionTimestamp.IsZero() {
+		return nil
+	}
+
+	expectedHash := SandboxTemplateRefHash(template.Name)
+	if template.Labels[sandboxTemplateRefHash] == expectedHash {
+		return nil
+	}
+
+	original := template.DeepCopy()
+	if template.Labels == nil {
+		template.Labels = make(map[string]string)
+	}
+	template.Labels[sandboxTemplateRefHash] = expectedHash
+
+	if err := r.Patch(ctx, template, client.MergeFrom(original)); err != nil {
+		return fmt.Errorf("failed to label sandbox template %q with template ref hash: %w", client.ObjectKeyFromObject(template), err)
+	}
+	return nil
 }
 
 // buildDefaultNetworkPolicySpec generates the "Secure by Default" network policy.

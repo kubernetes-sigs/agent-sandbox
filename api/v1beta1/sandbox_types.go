@@ -71,6 +71,8 @@ const (
 	SandboxPropagatedAnnotationsAnnotation = "agents.x-k8s.io/propagated-annotations"
 	// SandboxAdoptableLabel is the label used to authorize a Sandbox to adopt an existing unowned resource.
 	SandboxAdoptableLabel = "agents.x-k8s.io/adoptable"
+	// SandboxWarmPoolLabel is the label used to track the warm pool that owns the Sandbox.
+	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
 )
 
 type PodMetadata struct {

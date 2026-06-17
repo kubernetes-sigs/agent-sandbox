@@ -277,15 +277,15 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
         assert shadow_pool["spec"]["sandboxTemplateRef"]["name"] == "upgrade-template", "Shadow pool template mismatch!"
         print("Shadow pool successfully verified!")
         
-            # Run local deploy command to upgrade controller to new v1beta1 version
+        # Run local deploy command to upgrade controller to new v1beta1 version
         print("Deploying target controller/CRDs...")
-            deploy_cmd = ["python3", "dev/tools/deploy-to-kube", "--extensions"]
-            if image_prefix:
-                deploy_cmd.extend(["--image-prefix", image_prefix])
-            if image_tag:
-                deploy_cmd.extend(["--image-tag", image_tag])
+        deploy_cmd = ["python3", "dev/tools/deploy-to-kube", "--extensions"]
+        if image_prefix:
+            deploy_cmd.extend(["--image-prefix", image_prefix])
+        if image_tag:
+            deploy_cmd.extend(["--image-tag", image_tag])
             
-            run_cmd(deploy_cmd)
+        run_cmd(deploy_cmd)
         
         print("Waiting for upgraded controller deployment...")
         run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])

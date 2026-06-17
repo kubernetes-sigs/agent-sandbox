@@ -266,39 +266,38 @@ def create_v1alpha1_objects():
 def upgrade_and_migrate(method, image_prefix, image_tag):
     print(f"\n=== Phase 3 & 4: Upgrading to target version & Migrating using {method} ===")
     
+    # 1. Dry-run Bootstrap
+    print("Running pre-upgrade migration bootstrap (dry-run)...")
+    run_cmd(["bash", "dev/tools/migrate.sh", "--phase=bootstrap", "--dry-run"])
+    # Verify shadow pool was NOT created
+    res = run_cmd(["kubectl", "get", "sandboxwarmpools", "-n", "default", "-o", "json"], capture_output=True)
+    pools = json.loads(res.stdout)["items"]
+    for p in pools:
+        assert p["metadata"].get("annotations", {}).get("agents.x-k8s.io/migration-shadow") != "true", "Dry-run bootstrap created a shadow pool!"
+    print("Dry-run bootstrap validation PASSED.")
+
+    # 2. Live Bootstrap
+    print("Running pre-upgrade migration bootstrap...")
+    run_cmd(["bash", "dev/tools/migrate.sh", "--phase=bootstrap"])
+    
+    # Verify shadow pool was created
+    print("Verifying shadow pool creation...")
+    res = run_cmd(["kubectl", "get", "sandboxwarmpool", "shadow-pool-upgrade-template", "-n", "default", "-o", "json"], capture_output=True)
+    shadow_pool = json.loads(res.stdout)
+    assert shadow_pool["spec"]["sandboxTemplateRef"]["name"] == "upgrade-template", "Shadow pool template mismatch!"
+    print("Shadow pool successfully verified!")
+
+    # 3. Upgrade Controller & CRDs
     if method == "kubectl":
-        print("Running pre-upgrade migration bootstrap...")
-        run_cmd(["bash", "dev/tools/migrate.sh", "--phase=bootstrap"])
-        
-        # Verify shadow pool was created
-        print("Verifying shadow pool creation...")
-        res = run_cmd(["kubectl", "get", "sandboxwarmpool", "shadow-pool-upgrade-template", "-n", "default", "-o", "json"], capture_output=True)
-        shadow_pool = json.loads(res.stdout)
-        assert shadow_pool["spec"]["sandboxTemplateRef"]["name"] == "upgrade-template", "Shadow pool template mismatch!"
-        print("Shadow pool successfully verified!")
-        
-        # Run local deploy command to upgrade controller to new v1beta1 version
         print("Deploying target controller/CRDs...")
         deploy_cmd = ["python3", "dev/tools/deploy-to-kube", "--extensions"]
         if image_prefix:
             deploy_cmd.extend(["--image-prefix", image_prefix])
         if image_tag:
             deploy_cmd.extend(["--image-tag", image_tag])
-            
         run_cmd(deploy_cmd)
         
-        print("Waiting for upgraded controller deployment...")
-        run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])
-        
-        wait_for_webhook_ready()
-        
-        print("Running post-upgrade storage rewrite (migrate phase)...")
-        run_cmd(["bash", "dev/tools/migrate.sh", "--phase=migrate"])
-        
     elif method == "helm":
-        print("Running pre-upgrade bootstrap phase...")
-        run_cmd(["bash", "dev/tools/migrate.sh", "--phase=bootstrap"])
-        
         print("Applying upgraded CRD manifests using Server-Side Apply...")
         run_cmd(["kubectl", "apply", "--server-side", "--force-conflicts", "-f", "./helm/crds/"])
         
@@ -314,16 +313,27 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
             upgrade_cmd.extend(["--set", f"image.repository={repo}"])
         if image_tag:
             upgrade_cmd.extend(["--set", f"image.tag={image_tag}"])
-            
         run_cmd(upgrade_cmd)
-        
-        print("Waiting for upgraded controller deployment...")
-        run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])
-        
-        wait_for_webhook_ready()
-        
-        print("Running post-upgrade storage rewrite (migrate phase)...")
-        run_cmd(["bash", "dev/tools/migrate.sh", "--phase=migrate"])
+
+    print("Waiting for upgraded controller deployment...")
+    run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])
+    
+    wait_for_webhook_ready()
+
+    # 4. Dry-run Migrate
+    print("Running post-upgrade storage rewrite (dry-run migrate)...")
+    run_cmd(["bash", "dev/tools/migrate.sh", "--phase=migrate", "--dry-run"])
+    # Verify no resources have the storage-migrated-at annotation
+    for resource_type in ["sandboxes", "sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]:
+        res = run_cmd(["kubectl", "get", resource_type, "-n", "default", "-o", "json"], capture_output=True)
+        items = json.loads(res.stdout)["items"]
+        for item in items:
+            assert "agents.x-k8s.io/storage-migrated-at" not in item.get("metadata", {}).get("annotations", {}), f"Dry-run migrate modified resource {item['metadata']['name']}!"
+    print("Dry-run migrate validation PASSED.")
+
+    # 5. Live Migrate
+    print("Running post-upgrade storage rewrite (migrate phase)...")
+    run_cmd(["bash", "dev/tools/migrate.sh", "--phase=migrate"])
 
 
 def validate_migration():
@@ -431,8 +441,13 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
     run_cmd(["kubectl", "delete", "sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools", "-A", "--all"])
 
     # Step 3: Delete shadow warm pools
-    print("Step 3: Deleting shadow warm pools...")
-    run_cmd(["kubectl", "delete", "sandboxwarmpool", "shadow-pool-upgrade-template", "-n", "default", "--ignore-not-found"])
+    print("Step 3: Deleting shadow warm pools using jq pipeline...")
+    cmd = (
+        "kubectl get sandboxwarmpools -A -o json | "
+        "jq -r '.items[] | select(.metadata.annotations[\"agents.x-k8s.io/migration-shadow\"]==\"true\") | \"\\(.metadata.namespace)/\\(.metadata.name)\"' | "
+        "xargs -I {} sh -c 'kubectl delete sandboxwarmpool $(echo {} | cut -d/ -f2) -n $(echo {} | cut -d/ -f1)'"
+    )
+    run_cmd(["bash", "-c", cmd])
 
     # Step 4: Reset storedVersions to v1alpha1 in CRD status
     print("Step 4: Resetting CRD status.storedVersions to ['v1alpha1']...")
@@ -457,6 +472,52 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
                 break
         print(f"Rolling back Helm release to revision {prev_revision}...")
         run_cmd(["helm", "rollback", "agent-sandbox", str(prev_revision), "-n", "agent-sandbox-system"])
+        
+        # Download old source archive to extract and manually downgrade the CRDs
+        print(f"Downloading old source archive for version {v1alpha1_version} to extract and manually downgrade CRDs...")
+        import urllib.request
+        import tarfile
+        import shutil
+        
+        temp_dir = os.path.join(_repo_root, "dev/tools/tmp_rollback_crds")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        os.makedirs(temp_dir)
+        
+        tarball_url = f"https://github.com/kubernetes-sigs/agent-sandbox/archive/refs/tags/{v1alpha1_version}.tar.gz"
+        tarball_path = os.path.join(temp_dir, "archive.tar.gz")
+        
+        try:
+            urllib.request.urlretrieve(tarball_url, tarball_path)
+            
+            with tarfile.open(tarball_path, "r:gz") as tar:
+                # Find the path to the helm/crds directory in the archive
+                crds_src_dir = None
+                for member in tar.getmembers():
+                    if member.name.endswith("/helm/crds") or member.name.endswith("/helm/crds/"):
+                        crds_src_dir = member.name
+                        break
+                
+                if not crds_src_dir:
+                    # Fallback to search any crds/ directory
+                    for member in tar.getmembers():
+                        if member.name.endswith("/crds") or member.name.endswith("/crds/"):
+                            crds_src_dir = member.name
+                            break
+                
+                assert crds_src_dir, f"Could not find helm/crds directory in source archive of {v1alpha1_version}!"
+                
+                # Extract only the crds directory
+                for member in tar.getmembers():
+                    if member.name.startswith(crds_src_dir):
+                        tar.extract(member, path=temp_dir)
+                        
+            extracted_crds_path = os.path.join(temp_dir, crds_src_dir)
+            
+            # Apply the old CRDs using server-side apply
+            run_cmd(["kubectl", "apply", "--server-side", "--force-conflicts", "-f", extracted_crds_path])
+        finally:
+            # Clean up temp folder
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     # Wait for the CRDs to be re-established under v1alpha1
     for crd in crds:

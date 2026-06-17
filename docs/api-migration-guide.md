@@ -96,10 +96,12 @@ bash dev/tools/migrate.sh --phase=bootstrap
 kubectl apply --server-side --force-conflicts -f path/to/chart/crds/
 
 # 3. Upgrade the chart.
+# (If you are using extension resources like claims, templates, or pools, make sure --set controller.extensions=true is set or enabled in values)
 helm upgrade agent-sandbox ./helm/ \
   --namespace agent-sandbox-system \
   --reuse-values \
-  --set image.tag=<new-version>
+  --set image.tag=<new-version> \
+  --set controller.extensions=true
 
 # 4. Wait for the new controller + webhook to be Ready, then rewrite storage.
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
@@ -229,9 +231,10 @@ done
 ```
 
 ### Step 2: Scale down the controller deployment
-Scale down the `agent-sandbox-controller` deployment to `0` replicas. This stops the controller manager from reconciling resources or creating new Sandboxes to replace deleted ones while you are cleaning up the resources:
+Scale down the `agent-sandbox-controller` deployment to `0` replicas, and wait for the pods to terminate completely. This stops the controller manager from reconciling resources or creating new Sandboxes to replace deleted ones while you are cleaning up the resources:
 ```bash
 kubectl scale deploy/agent-sandbox-controller -n agent-sandbox-system --replicas=0
+kubectl wait --for=delete pod -l app=agent-sandbox-controller -n agent-sandbox-system --timeout=60s
 ```
 
 ### Step 3: Delete upgraded resources

@@ -39,6 +39,9 @@ const (
 	// SandboxReasonDependenciesNotReady indicates the Sandbox is expected to be running
 	// but its underlying dependencies are not fully provisioned or ready yet.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
+	// SandboxReasonSandboxCompleted indicates the Sandbox has been completed.
+	SandboxReasonSandboxCompleted = "SandboxCompleted"
+
 	// SandboxReasonSuspended indicates the Sandbox has been administratively suspended
 	// (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"
@@ -242,6 +245,9 @@ type SandboxStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
+// +kubebuilder:printcolumn:name=Ready,type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name=Reason,type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
+// +kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

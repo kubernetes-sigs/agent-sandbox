@@ -253,6 +253,29 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		},
 	}
 
+	templateWithEnvAllowedAndEnvFrom := templateWithEnvAllowed.DeepCopy()
+	templateWithEnvAllowedAndEnvFrom.Name = "test-template-env-allowed-envfrom"
+	templateWithEnvAllowedAndEnvFrom.Spec.PodTemplate.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{
+		{
+			ConfigMapRef: &corev1.ConfigMapEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "some-configmap"},
+			},
+		},
+	}
+
+	warmPoolWithEnvAllowedAndEnvFrom := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool-env-allowed-envfrom", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template-env-allowed-envfrom"}},
+	}
+
+	claimWithEnvAllowedAndEnvFrom := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-env-allowed-envfrom", Namespace: "default", UID: "claim-env-allowed-envfrom-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool-env-allowed-envfrom"},
+			Env:         []extensionsv1beta1.EnvVar{{Name: "NEW_VAR_ALLOWED", Value: "claim-value"}},
+		},
+	}
+
 	claimWithEnvOverrideNotAllowed := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-env-override-not-allowed", Namespace: "default", UID: "claim-override-not-allowed-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
@@ -874,6 +897,16 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectError:      true,
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: environment variable injection is not allowed by the template policy",
+			},
+		},
+		{
+			name:             "sandbox creation fails when claim injects env var but template has EnvFrom and policy is Allowed",
+			claimToReconcile: claimWithEnvAllowedAndEnvFrom,
+			existingObjects:  []client.Object{templateWithEnvAllowedAndEnvFrom, warmPoolWithEnvAllowedAndEnvFrom},
+			expectSandbox:    false,
+			expectError:      false,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: environment variable injection with policy 'Allowed' is disallowed because the template has EnvFrom sources",
 			},
 		},
 		{

@@ -73,6 +73,9 @@ var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
 var ErrCrossNamespaceAdoption = errors.New("cross-namespace adoption forbidden")
 
+// ErrEnvVarsInjectionRejected is a sentinel error indicating environment variable injection was rejected.
+var ErrEnvVarsInjectionRejected = errors.New("environment variable injection rejected")
+
 // observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
 // We store the UID to protect against stale data when a claim is deleted and a new one
 // is created with the same name.
@@ -273,7 +276,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Suppress invalid metadata and ownership errors to avoid crash loops
-	if errors.Is(reconcileErr, ErrInvalidMetadata) || errors.Is(reconcileErr, ErrSandboxNotOwned) {
+	if errors.Is(reconcileErr, ErrInvalidMetadata) || errors.Is(reconcileErr, ErrSandboxNotOwned) || errors.Is(reconcileErr, ErrEnvVarsInjectionRejected) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
 	}
@@ -493,6 +496,16 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 		}
 		if errors.Is(err, ErrInvalidMetadata) {
 			reason = "InvalidMetadata"
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            err.Error(),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrEnvVarsInjectionRejected) {
+			reason = "EnvVarsInjectionRejected"
 			return metav1.Condition{
 				Type:               string(v1beta1.SandboxConditionReady),
 				Status:             metav1.ConditionFalse,
@@ -1127,6 +1140,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		if template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyAllowed && template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyOverrides {
 			err := fmt.Errorf("environment variable injection is not allowed by the template policy")
 			logger.Error(err, "Environment variable injection rejected", "claimName", claim.Name)
+			return nil, err
+		}
+
+		if template.Spec.EnvVarsInjectionPolicy == extensionsv1beta1.EnvVarsInjectionPolicyAllowed && hasEnvFrom(&template.Spec.PodTemplate.Spec) {
+			err := fmt.Errorf("%w: environment variable injection with policy 'Allowed' is disallowed because the template has EnvFrom sources", ErrEnvVarsInjectionRejected)
+			logger.Error(err, "Environment variable injection rejected due to EnvFrom on Allowed policy", "claimName", claim.Name)
 			return nil, err
 		}
 
@@ -1828,4 +1847,18 @@ func getWarmPoolName(obj metav1.Object) string {
 		}
 	}
 	return ""
+}
+
+func hasEnvFrom(podSpec *corev1.PodSpec) bool {
+	for _, c := range podSpec.InitContainers {
+		if len(c.EnvFrom) > 0 {
+			return true
+		}
+	}
+	for _, c := range podSpec.Containers {
+		if len(c.EnvFrom) > 0 {
+			return true
+		}
+	}
+	return false
 }

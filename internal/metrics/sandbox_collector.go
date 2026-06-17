@@ -23,9 +23,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -134,16 +134,10 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		ownedByStr := "None"
-		if controllerRef := metav1.GetControllerOf(&sandbox); controllerRef != nil {
-			gvk := schema.FromAPIVersionAndKind(controllerRef.APIVersion, controllerRef.Kind)
-			if gvk.Group == extensionsv1beta1.GroupVersion.Group {
-				switch gvk.Kind {
-				case extensionsv1beta1.SandboxClaimKind:
-					ownedByStr = extensionsv1beta1.SandboxClaimKind
-				case extensionsv1beta1.SandboxWarmPoolKind:
-					ownedByStr = extensionsv1beta1.SandboxWarmPoolKind
-				}
-			}
+		controllerRef := metav1.GetControllerOf(&sandbox)
+		if g, k := utils.GetGroupKind(controllerRef); g == extensionsv1beta1.GroupVersion.Group &&
+			(k == extensionsv1beta1.SandboxClaimKind || k == extensionsv1beta1.SandboxWarmPoolKind) {
+			ownedByStr = k
 		}
 
 		key := AgentSandboxesMetricKey{

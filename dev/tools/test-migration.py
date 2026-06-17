@@ -113,6 +113,15 @@ spec:
   warmpool: "none" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template)
 """
 
+def _safe_extract(tar, dest, members=None):
+    base = os.path.realpath(dest)
+    selected = members if members is not None else tar.getmembers()
+    for member in selected:
+        target = os.path.realpath(os.path.join(dest, member.name))
+        if target != base and not target.startswith(base + os.sep):
+            raise ValueError(f"Unsafe tar member path: {member.name}")
+    tar.extractall(path=dest, members=selected)
+
 def run_cmd(cmd, check=True, text=True, input_data=None, capture_output=False):
     """Executes a CLI command and prints/returns output."""
     cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
@@ -247,7 +256,7 @@ def install_v1alpha1(method, version):
             if os.path.exists(local_tarball):
                 print(f"Extracting local Helm chart from {local_tarball}...")
                 with tarfile.open(local_tarball, "r:gz") as tar:
-                    tar.extractall(path=temp_dir)
+                    _safe_extract(tar, temp_dir)
                 extracted_helm_path = os.path.join(temp_dir, "helm")
             else:
                 import urllib.request
@@ -267,7 +276,7 @@ def install_v1alpha1(method, version):
                     if not helm_src_dir:
                         # Guess default structure
                         helm_src_dir = f"agent-sandbox-{helm_version}/helm/"
-                    tar.extractall(path=temp_dir)
+                    _safe_extract(tar, temp_dir)
                 extracted_helm_path = os.path.join(temp_dir, helm_src_dir)
                 
             print(f"Installing Helm release from extracted path: {extracted_helm_path}")
@@ -638,7 +647,7 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
             if os.path.exists(local_tarball):
                 print(f"Extracting local Helm CRDs from {local_tarball}...")
                 with tarfile.open(local_tarball, "r:gz") as tar:
-                    tar.extractall(path=temp_dir)
+                    _safe_extract(tar, temp_dir)
                 extracted_crds_path = os.path.join(temp_dir, "helm/crds")
             else:
                 # Download old source archive to extract and manually downgrade the CRDs
@@ -660,9 +669,8 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
                                 crds_src_dir = member.name
                                 break
                     assert crds_src_dir, f"Could not find helm/crds directory in source archive of {v1alpha1_version}!"
-                    for member in tar.getmembers():
-                        if member.name.startswith(crds_src_dir):
-                            tar.extract(member, path=temp_dir)
+                    members = [m for m in tar.getmembers() if m.name.startswith(crds_src_dir)]
+                    _safe_extract(tar, temp_dir, members=members)
                 extracted_crds_path = os.path.join(temp_dir, crds_src_dir)
                 
             # Apply the old CRDs using server-side apply

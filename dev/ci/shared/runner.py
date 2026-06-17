@@ -51,7 +51,7 @@ class TestRunner:
         return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
     def setup_cluster(self, args, extra_push_images_args=None):
-        image_tag = tools_utils.get_image_tag()
+        image_tag = os.environ["IMAGE_TAG"]
         result = subprocess.run([f"{self.repo_root}/dev/tools/create-kind-cluster", self.name, "--recreate", "--kubeconfig", f"{self.repo_root}/bin/KUBECONFIG"])
         if result.returncode != 0:
             return result

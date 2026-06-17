@@ -4265,8 +4265,8 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 							sandboxTemplateRefHash: sandboxcontrollers.NameHash("vct-template"),
 						},
 						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "vct-warmpool",
 							UID:        "pool-uid-123",
 							Controller: ptr.To(true), // nolint:modernize

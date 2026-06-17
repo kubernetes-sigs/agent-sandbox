@@ -118,6 +118,25 @@ def wait_for_crd(crd_name, timeout=30):
     print(f"Waiting for CRD {crd_name} to be established...")
     run_cmd(["kubectl", "wait", "--for=condition=Established", f"crd/{crd_name}", f"--timeout={timeout}s"])
 
+def wait_for_webhook_ready():
+    print("Waiting for conversion webhook to be responsive...")
+    for i in range(30):
+        res = subprocess.run(
+            ["kubectl", "get", "sandboxwarmpools.extensions.agents.x-k8s.io", "--all-namespaces"],
+            capture_output=True, text=True
+        )
+        if res.returncode == 0:
+            print("Conversion webhook is responsive and ready!")
+            return
+        else:
+            stderr = res.stderr.lower()
+            if "conversion webhook" in stderr or "connection refused" in stderr or "webhook" in stderr:
+                print(f"Webhook not ready yet (attempt {i+1}/30)...")
+            else:
+                print(f"List failed (attempt {i+1}/30): {res.stderr.strip()}")
+            time.sleep(2)
+    raise Exception("Timeout waiting for conversion webhook to become responsive")
+
 def cleanup_sandbox_system():
     print("\n=== Phase 0: Cleaning up existing agent-sandbox installation ===")
     
@@ -128,14 +147,7 @@ def cleanup_sandbox_system():
         "sandboxes.agents.x-k8s.io"
     ]
     
-    # 1. Patch CRDs first to disable the conversion webhook.
-    # This prevents webhook call failures when deleting objects if the webhook service is not ready/alive.
-    for crd in crds:
-        print(f"Disabling conversion webhook for CRD {crd}...")
-        patch = '{"spec":{"conversion":{"strategy":"None","webhook":null}}}'
-        run_cmd(["kubectl", "patch", "crd", crd, "--type=merge", "-p", patch], check=False)
-
-    # 2. Delete objects
+    # 1. Delete objects
     for crd in crds:
         print(f"Deleting all resources of CRD {crd}...")
         run_cmd(["kubectl", "delete", crd, "--all", "--all-namespaces", "--ignore-not-found", "--timeout=30s"], check=False)
@@ -269,6 +281,8 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
         print("Waiting for upgraded controller deployment...")
         run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])
         
+        wait_for_webhook_ready()
+        
         print("Running post-upgrade storage rewrite (migrate phase)...")
         run_cmd(["bash", "dev/tools/migrate.sh", "--phase=migrate"])
         
@@ -296,6 +310,8 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
         
         print("Waiting for upgraded controller deployment...")
         run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])
+        
+        wait_for_webhook_ready()
         
         print("Running post-upgrade storage rewrite (migrate phase)...")
         run_cmd(["bash", "dev/tools/migrate.sh", "--phase=migrate"])

@@ -66,6 +66,12 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
 kubectl wait --for=condition=Ready pods -l app=agent-sandbox-controller -n agent-sandbox-system
 
+# Wait until the conversion webhook is responsive (this may take a few seconds after the pod starts)
+until kubectl get sandboxwarmpools.extensions.agents.x-k8s.io -A >/dev/null 2>&1; do
+  echo "Waiting for conversion webhook to be responsive..."
+  sleep 2
+done
+
 # 3. Force-rewrite every resource in v1beta1 storage format.
 bash dev/tools/migrate.sh --phase=migrate
 ```
@@ -97,6 +103,13 @@ helm upgrade agent-sandbox ./helm/ \
 
 # 4. Wait for the new controller + webhook to be Ready, then rewrite storage.
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
+
+# Wait until the conversion webhook is responsive (this may take a few seconds after the pod starts)
+until kubectl get sandboxwarmpools.extensions.agents.x-k8s.io -A >/dev/null 2>&1; do
+  echo "Waiting for conversion webhook to be responsive..."
+  sleep 2
+done
+
 bash dev/tools/migrate.sh --phase=migrate
 ```
 

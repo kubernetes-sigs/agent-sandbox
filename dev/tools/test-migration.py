@@ -67,6 +67,19 @@ spec:
       - name: pause
         image: registry.k8s.io/pause:3.10
 ---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: upgrade-sandbox-running
+  namespace: default
+spec:
+  replicas: 1 # v1alpha1 syntax (converts to operatingMode: Running)
+  podTemplate:
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+---
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxClaim
 metadata:
@@ -86,6 +99,16 @@ spec:
   sandboxTemplateRef:
     name: upgrade-template
   warmpool: "upgrade-pool" # v1alpha1 syntax (converts to warmPoolRef.name: upgrade-pool)
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: upgrade-claim-none
+  namespace: default
+spec:
+  sandboxTemplateRef:
+    name: upgrade-template
+  warmpool: "none" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template)
 """
 
 def run_cmd(cmd, check=True, text=True, input_data=None, capture_output=False):
@@ -257,11 +280,37 @@ def create_v1alpha1_objects():
     print("\n=== Phase 2: Creating v1alpha1 objects ===")
     run_cmd(["kubectl", "apply", "-f", "-"], input_data=V1ALPHA1_RESOURCES)
     
+    print("Waiting for upgrade-sandbox-running Pod to be created...")
+    pod_exists = False
+    for i in range(20):
+        res = run_cmd(["kubectl", "get", "pod", "upgrade-sandbox-running", "-n", "default"], check=False, capture_output=True)
+        if res.returncode == 0:
+            pod_exists = True
+            break
+        time.sleep(1)
+        
+    assert pod_exists, "Pod upgrade-sandbox-running was not created in time!"
+    
+    print("Waiting for upgrade-sandbox-running Pod to be ready...")
+    run_cmd([
+        "kubectl", "wait", "--for=condition=Ready", "pod/upgrade-sandbox-running",
+        "-n", "default", "--timeout=60s"
+    ])
+    
+    # Get active pod details to verify disruption-free upgrade
+    res = run_cmd(["kubectl", "get", "pod", "upgrade-sandbox-running", "-n", "default", "-o", "json"], capture_output=True)
+    pod_data = json.loads(res.stdout)
+    pod_uid = pod_data["metadata"]["uid"]
+    pod_creation = pod_data["metadata"]["creationTimestamp"]
+    print(f"Captured active pod info - Name: upgrade-sandbox-running, UID: {pod_uid}, CreatedAt: {pod_creation}")
+    
     print("Waiting for v1alpha1 claims to be bound...")
     # Give a short sleep for claims to reconcile
     time.sleep(10)
     # Check claim exists and status has reconciled
     run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "-n", "default"])
+    
+    return {"uid": pod_uid, "creationTimestamp": pod_creation}
 
 def upgrade_and_migrate(method, image_prefix, image_tag):
     print(f"\n=== Phase 3 & 4: Upgrading to target version & Migrating using {method} ===")
@@ -336,7 +385,7 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
     run_cmd(["bash", "dev/tools/migrate.sh", "--phase=migrate"])
 
 
-def validate_migration():
+def validate_migration(active_pod_info):
     print("\n=== Validation Phase: Asserting converted objects ===")
     
     # 1. Fetch claims as JSON
@@ -371,6 +420,18 @@ def validate_migration():
     assert "agents.x-k8s.io/storage-migrated-at" in claim2["metadata"]["annotations"], \
         "upgrade-claim-specific missing storage-migrated-at annotation!"
     print("upgrade-claim-specific validation PASSED.")
+
+    # Validate upgrade-claim-none: cold-start, pointed to "none" in v1alpha1,
+    # should be migrated to shadow-pool-upgrade-template.
+    assert "upgrade-claim-none" in claim_by_name, "upgrade-claim-none missing!"
+    claim_none = claim_by_name["upgrade-claim-none"]
+    print("Validating upgrade-claim-none conversion...")
+    assert "warmPoolRef" in claim_none["spec"], f"upgrade-claim-none missing warmPoolRef! spec: {claim_none['spec']}"
+    assert claim_none["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template", \
+        f"Expected warmPoolRef name shadow-pool-upgrade-template, got {claim_none['spec']['warmPoolRef']['name']}"
+    assert "agents.x-k8s.io/storage-migrated-at" in claim_none["metadata"]["annotations"], \
+        "upgrade-claim-none missing storage-migrated-at annotation!"
+    print("upgrade-claim-none validation PASSED.")
     
     # 2. Fetch sandboxes as JSON
     print("Checking Sandboxes...")
@@ -378,7 +439,6 @@ def validate_migration():
     sandboxes = json.loads(res.stdout)["items"]
     sandbox_by_name = {s["metadata"]["name"]: s for s in sandboxes}
 
-    
     # Validate upgrade-sandbox: had replicas: 0 in v1alpha1, operatingMode should be Suspended.
     assert "upgrade-sandbox" in sandbox_by_name, "upgrade-sandbox missing!"
     sb = sandbox_by_name["upgrade-sandbox"]
@@ -390,6 +450,26 @@ def validate_migration():
     assert "agents.x-k8s.io/storage-migrated-at" in sb["metadata"]["annotations"], \
         "upgrade-sandbox missing storage-migrated-at annotation!"
     print("upgrade-sandbox validation PASSED.")
+
+    # Validate upgrade-sandbox-running: had replicas: 1 in v1alpha1, operatingMode should be Running.
+    assert "upgrade-sandbox-running" in sandbox_by_name, "upgrade-sandbox-running missing!"
+    sb_running = sandbox_by_name["upgrade-sandbox-running"]
+    
+    print("Validating upgrade-sandbox-running conversion...")
+    assert "operatingMode" in sb_running["spec"], f"upgrade-sandbox-running missing operatingMode! spec: {sb_running['spec']}"
+    assert sb_running["spec"]["operatingMode"] == "Running", \
+        f"Expected operatingMode Running, got {sb_running['spec']['operatingMode']}"
+    assert "agents.x-k8s.io/storage-migrated-at" in sb_running["metadata"]["annotations"], \
+        "upgrade-sandbox-running missing storage-migrated-at annotation!"
+    print("upgrade-sandbox-running validation PASSED.")
+
+    # Verify that the underlying Pod was NOT disrupted (recreated/restarted)
+    print("Validating upgrade-sandbox-running Pod stability...")
+    res = run_cmd(["kubectl", "get", "pod", "upgrade-sandbox-running", "-n", "default", "-o", "json"], capture_output=True)
+    pod_data = json.loads(res.stdout)
+    assert pod_data["metadata"]["uid"] == active_pod_info["uid"], "Pod UID changed! The running Pod was recreated/disrupted during conversion."
+    assert pod_data["metadata"]["creationTimestamp"] == active_pod_info["creationTimestamp"], "Pod creationTimestamp changed! The running Pod was recreated/disrupted during conversion."
+    print("upgrade-sandbox-running Pod disruption validation PASSED (Pod UID and creationTimestamp unchanged).")
     
     # 3. Clean up storedVersions in CRDs
     print("Pruning v1alpha1 from CRD storedVersions...")
@@ -586,6 +666,14 @@ def validate_rollback():
     assert "warmPoolRef" not in claim2["spec"], f"upgrade-claim-specific should NOT have warmPoolRef! spec: {claim2['spec']}"
     print("upgrade-claim-specific rollback validation PASSED.")
     
+    # Validate upgrade-claim-none
+    assert "upgrade-claim-none" in claim_by_name, "upgrade-claim-none missing!"
+    claim_none = claim_by_name["upgrade-claim-none"]
+    assert "warmpool" in claim_none["spec"], f"upgrade-claim-none missing warmpool policy! spec: {claim_none['spec']}"
+    assert claim_none["spec"]["warmpool"] == "none", f"Expected warmpool none, got {claim_none['spec']['warmpool']}"
+    assert "warmPoolRef" not in claim_none["spec"], f"upgrade-claim-none should NOT have warmPoolRef! spec: {claim_none['spec']}"
+    print("upgrade-claim-none rollback validation PASSED.")
+    
     # 2. Fetch sandboxes as JSON
     print("Checking Sandboxes...")
     res = run_cmd(["kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True)
@@ -599,6 +687,14 @@ def validate_rollback():
     assert sb["spec"]["replicas"] == 0, f"Expected replicas 0, got {sb['spec']['replicas']}"
     assert "operatingMode" not in sb["spec"], f"upgrade-sandbox should NOT have operatingMode! spec: {sb['spec']}"
     print("upgrade-sandbox rollback validation PASSED.")
+
+    # Validate upgrade-sandbox-running
+    assert "upgrade-sandbox-running" in sandbox_by_name, "upgrade-sandbox-running missing!"
+    sb_running = sandbox_by_name["upgrade-sandbox-running"]
+    assert "replicas" in sb_running["spec"], f"upgrade-sandbox-running missing replicas field! spec: {sb_running['spec']}"
+    assert sb_running["spec"]["replicas"] == 1, f"Expected replicas 1, got {sb_running['spec']['replicas']}"
+    assert "operatingMode" not in sb_running["spec"], f"upgrade-sandbox-running should NOT have operatingMode! spec: {sb_running['spec']}"
+    print("upgrade-sandbox-running rollback validation PASSED.")
     
     print("\nALL ROLLBACK VALIDATIONS PASSED SUCCESSFULLY!")
 
@@ -644,7 +740,7 @@ def main():
         install_v1alpha1(args.method, args.v1alpha1_version)
         
         # 2. Create v1alpha1 CR instances
-        create_v1alpha1_objects()
+        active_pod_info = create_v1alpha1_objects()
         
         # Backup v1alpha1 resources in memory
         print("Backing up v1alpha1 resources...")
@@ -658,7 +754,7 @@ def main():
         upgrade_and_migrate(args.method, args.image_prefix, args.image_tag)
         
         # 4. Perform final validation
-        validate_migration()
+        validate_migration(active_pod_info)
         
         # 5. Optionally run and validate rollback
         if args.test_rollback:

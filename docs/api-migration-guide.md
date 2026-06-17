@@ -211,7 +211,13 @@ Only do this after you've confirmed every existing record carries `agents.x-k8s.
 * By default, GKE private clusters block master-to-worker node traffic on ports other than standard ones like `443` and `10250`.
 * **Fix**: Create a firewall rule in your GCP console allowing ingress from your GKE master node IP range to your worker nodes on TCP port `9443`.
 
-**Emergency Rescue: Webhook blocks all custom resource writes**: If the migration is aborted or fails, and you cannot write or delete Custom Resources because the conversion webhook is failing or unreachable, you can temporarily disable the conversion webhook to restore basic cluster write access:
+
+## Emergency Rollback Procedure (Reverting to v1alpha1)
+
+If the migration fails critically (e.g., the new controller fails to start, the webhook causes severe issues, or you encounter unresolvable errors) and you need to completely revert to the `v1alpha1` version:
+
+### Step 1: Disable Conversion Webhooks
+First, stop the API server from attempting version conversion to prevent blockages on custom resource writes and deletions:
 ```bash
 for crd in \
     sandboxes.agents.x-k8s.io \
@@ -221,11 +227,66 @@ for crd in \
   kubectl patch crd "${crd}" --type=merge -p '{"spec":{"conversion":{"strategy":"None","webhook":null}}}'
 done
 ```
-> [!CAUTION]
-> Disabling the conversion webhook stops version conversion. Stored resources will remain in whatever version they were last written. Only use this for rollback recovery or emergency troubleshooting.
 
+### Step 2: Scale down the controller deployment
+Scale down the `agent-sandbox-controller` deployment to `0` replicas. This stops the controller manager from reconciling resources or creating new Sandboxes to replace deleted ones while you are cleaning up the resources:
+```bash
+kubectl scale deploy/agent-sandbox-controller -n agent-sandbox-system --replicas=0
+```
 
-### Recovery from backup
+### Step 3: Delete upgraded resources
+While the upgraded CRDs (supporting both `v1alpha1` and `v1beta1` versions) are still installed, delete all custom resources so etcd is completely emptied of `v1beta1` records:
+```bash
+kubectl delete sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools -A --all
+```
+
+### Step 4: Delete shadow pools (optional)
+If the bootstrap phase created shadow warm pools, delete them:
+```bash
+kubectl get sandboxwarmpools -A -o json \
+  | jq -r '.items[] | select(.metadata.annotations["agents.x-k8s.io/migration-shadow"]=="true") | "\(.metadata.namespace)/\(.metadata.name)"' \
+  | xargs -I {} sh -c 'kubectl delete sandboxwarmpool $(echo {} | cut -d/ -f2) -n $(echo {} | cut -d/ -f1)'
+```
+
+### Step 5: Reset CRD storedVersions to v1alpha1
+Because the API server enforces that any version in `status.storedVersions` must be present in `spec.versions`, you must patch the CRDs to list only `v1alpha1` in their stored versions before downgrading the CRD definitions:
+```bash
+for crd in \
+    sandboxes.agents.x-k8s.io \
+    sandboxclaims.extensions.agents.x-k8s.io \
+    sandboxtemplates.extensions.agents.x-k8s.io \
+    sandboxwarmpools.extensions.agents.x-k8s.io; do
+  kubectl patch crd "${crd}" --subresource=status --type=merge -p '{"status":{"storedVersions":["v1alpha1"]}}'
+done
+```
+
+### Step 6: Revert the CRD manifests and Controller
+Downgrade the installed components back to the old version:
+
+* **For Flow A (kubectl):** Re-apply the old version's manifests (substitute `<old-version>` with your previous version, e.g., `v0.4.6`):
+  ```bash
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/manifest.yaml
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/extensions.yaml
+  ```
+* **For Flow B (Helm):** Roll back the Helm release to the pre-migration revision (find the revision number using `helm history agent-sandbox`):
+  ```bash
+  helm rollback agent-sandbox <previous-revision-number> -n agent-sandbox-system
+  # Re-apply the old CRD versions manually:
+  kubectl apply --server-side --force-conflicts -f path/to/old-chart/crds/
+  ```
+
+### Step 7: Restore Data from Backup
+Apply the backup file to restore your original `v1alpha1` resources:
+```bash
+# Re-apply the backup (stripping status fields is recommended to allow the old controller to re-initialize them)
+yq 'del(.items[].status)' backup.yaml | kubectl apply -f -
+```
+
+---
+
+## Recovery from Backup (Remaining on v1beta1)
+
+If you intend to stay on `v1beta1` but need to restore specific broken or corrupt objects from your backup:
 
 If migration produces broken or unexpected v1beta1 resources, use the backup file from [Before you start: back up your data](#before-you-start-back-up-your-data) to restore.
 

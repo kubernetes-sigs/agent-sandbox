@@ -17,7 +17,7 @@ Agent Sandbox supports Kata Containers through the standard Kubernetes `runtimeC
 A kustomize overlay patches the base sandbox manifest to inject the Kata runtime class:
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: sandbox-example

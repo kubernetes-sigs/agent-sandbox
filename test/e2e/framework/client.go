@@ -422,7 +422,8 @@ func MustWatch[T client.Object](ctx context.Context, cl *ClusterClient, gvr sche
 	if err != nil {
 		// Only fail the test if this isn't the normal "context cancelled" shutdown error.
 		if !errors.Is(err, context.Canceled) {
-			cl.Fatalf("Watch(%v, %+v) failed with: %v", gvr, watchFilter, err)
+			// Note we probably aren't on the main test goroutine, so can't call t.Fatalf.
+			cl.Errorf("Watch(%v, %+v) failed with: %v", gvr, watchFilter, err)
 		}
 	}
 	return done

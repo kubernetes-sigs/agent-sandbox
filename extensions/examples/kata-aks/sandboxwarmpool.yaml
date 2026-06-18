@@ -1,0 +1,26 @@
+# Pre-warms a pool of Kata-isolated Hermes sandboxes so that SandboxClaims
+# get adopted (and become Ready) without paying the cold-start cost of
+# scheduling a new Kata VM, pulling the image, and binding a PVC.
+#
+# The pool is sized for a small demo. For production use, drive `replicas`
+# from an HPA on the claim-creation-rate custom metric — see
+# examples/hpa-swp-scaling/ for a working setup.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: kata-aks-warmpool
+  namespace: sandbox-agent-demo
+spec:
+  # Number of pre-warmed Hermes sandboxes to keep ready for adoption.
+  replicas: 3
+
+  # Must match the SandboxTemplate referenced by this warm pool.
+  sandboxTemplateRef:
+    name: kata-aks-template
+
+  updateStrategy:
+    # OnReplenish: stale pods are replaced only when they are adopted by a
+    # claim or manually deleted. This avoids killing healthy Kata VMs every
+    # time the template changes — flip to Recreate if you want immediate
+    # rollout of template updates.
+    type: OnReplenish

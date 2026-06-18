@@ -13,6 +13,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**jupyterlab**](./jupyterlab): An example of running JupyterLab on Agent-Sandbox.
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
+- [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
 - [**openclaw-sandbox**](./openclaw-sandbox): An example of running OpenClaw (formerly Moltbot) inside the Agent Sandbox.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.

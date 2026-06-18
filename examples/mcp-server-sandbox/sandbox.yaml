@@ -1,0 +1,31 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: mcp-sandbox
+spec:
+  podTemplate:
+    spec:
+      securityContext:
+        # Refuse to start if the image tries to run as root.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: mcp
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        # The container itself is idle; each `kubectl exec` spawns a fresh
+        # mcp_server.py process for the duration of one MCP stdio session.
+        command: ["sleep", "infinity"]
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

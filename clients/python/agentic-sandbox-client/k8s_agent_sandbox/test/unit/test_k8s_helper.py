@@ -15,6 +15,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from kubernetes import client
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
 
@@ -146,6 +147,32 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
             helper.resolve_sandbox_name("test-claim", "default", timeout=5)
             
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+
+
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperDeleteSandboxClaim(unittest.TestCase):
+
+    def test_delete_404_is_ignored(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        exc = client.ApiException(status=404)
+        mock_api.delete_namespaced_custom_object.side_effect = exc
+
+        helper = K8sHelper()
+        helper.delete_sandbox_claim("missing-claim", "default")
+
+    def test_delete_non_404_reraises(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        exc = client.ApiException(status=403)
+        mock_api.delete_namespaced_custom_object.side_effect = exc
+
+        helper = K8sHelper()
+        with self.assertRaises(client.ApiException) as ctx:
+            helper.delete_sandbox_claim("claim", "default")
+        self.assertEqual(ctx.exception.status, 403)
 
 
 if __name__ == '__main__':

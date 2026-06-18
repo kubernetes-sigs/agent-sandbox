@@ -15,19 +15,44 @@
 
 from datetime import datetime
 import os
+import re
 import subprocess
+
+
+# Version strings derived from git refs are interpolated unquoted into the
+# Dockerfile's `RUN go build -ldflags="...${GIT_VERSION}..."` instruction. A
+# git tag or branch containing shell metacharacters could therefore break out
+# of the quoted string and execute arbitrary commands during the build. Allow
+# only characters that legitimately appear in git describe/sha output and fail
+# closed on anything else.
+_SAFE_VERSION_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def _validate_version_string(value, source):
+    """Ensures a git-derived version string is safe to interpolate into a shell
+    command, raising ValueError if it contains unexpected characters.
+    """
+    if not value or not _SAFE_VERSION_RE.match(value):
+        raise ValueError(
+            f"refusing to use unsafe {source} value {value!r}: only "
+            "alphanumerics and the characters '.', '_', '/', '-' are allowed")
+    return value
 
 
 def git_describe():
     """Gets the git describe output for HEAD."""
-    return subprocess.check_output(
-        ["git", "describe", "--always", "--dirty"], text=True).strip()
+    raw_version = subprocess.check_output(
+        ["git", "describe", "--always", "--dirty"], text=True
+    ).strip()
+    return _validate_version_string(raw_version, "git describe")
 
 
 def git_sha():
     """Gets the short git SHA for HEAD."""
-    return subprocess.check_output(
-        ["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    raw_sha = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], text=True
+    ).strip()
+    return _validate_version_string(raw_sha, "git sha")
 
 
 def get_image_tag():

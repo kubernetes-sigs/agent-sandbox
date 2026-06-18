@@ -126,7 +126,7 @@ type SandboxClaimSpec struct {
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
 
-	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
+	// volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.
 	// Specifying this field forces a cold start because warm pool pods will not have these volumes.
 	// +optional
 	// +listType=atomic
@@ -159,6 +159,10 @@ type SandboxStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="Sandbox",type="string",JSONPath=".status.sandbox.name"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`

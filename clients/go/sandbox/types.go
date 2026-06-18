@@ -33,6 +33,8 @@ const (
 	headerSandboxID        = "X-Sandbox-ID"
 	headerSandboxNamespace = "X-Sandbox-Namespace"
 	headerSandboxPort      = "X-Sandbox-Port"
+	headerSandboxPodIP     = "X-Sandbox-Pod-IP"
+	headerSandboxTimeout   = "X-Sandbox-Timeout"
 	headerRequestID        = "X-Request-ID"
 )
 
@@ -116,6 +118,7 @@ type Info interface {
 	ClaimName() string
 	SandboxName() string
 	PodName() string
+	PodIP() string
 	Annotations() map[string]string
 }
 

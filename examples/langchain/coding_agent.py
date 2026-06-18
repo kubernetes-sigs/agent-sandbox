@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import asyncio
+import os
 import sys
+import tempfile
 from typing import TypedDict, Literal, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -32,14 +34,31 @@ class LocalCodeExecutor:
     
     @staticmethod
     async def execute(code: str) -> tuple[str, bool]:
+        temp_filename = None
         try:
-            with open('/tmp/agent_code.py', 'w') as f:
+            # Use a unique temporary file to prevent race conditions during concurrent executions
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                temp_filename = f.name
                 f.write(code)
             
+            # Use sys.executable as the interpreter path, and provide a minimal sanitized environment
+            # containing only safe and necessary variables (like PATH). This prevents exposure of
+            # sensitive orchestrator credentials (like HF_TOKEN) to untrusted code execution.
+            passthrough_keys = ["PATH", "LANG", "LC_ALL"]
+            extra_keys = os.getenv("SUBPROCESS_ENV_PASSTHROUGH", "")
+            if extra_keys:
+                passthrough_keys.extend([k.strip() for k in extra_keys.split(",") if k.strip()])
+
+            env = {}
+            for key in passthrough_keys:
+                if key in os.environ:
+                    env[key] = os.environ[key]
+
             proc = await asyncio.create_subprocess_exec(
-                'python', '/tmp/agent_code.py',
+                sys.executable, temp_filename,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=env
             )
             
             try:
@@ -51,45 +70,64 @@ class LocalCodeExecutor:
                     return stderr.decode(), False
                     
             except asyncio.TimeoutError:
-                proc.kill()
+                try:
+                    proc.kill()
+                    await proc.wait()  # Reap the process to prevent zombie process accumulation
+                except ProcessLookupError:
+                    pass
                 return "Execution timeout (60s)", False
                 
         except Exception as e:
             return f"Execution error: {str(e)}", False
+        finally:
+            if temp_filename and os.path.exists(temp_filename):
+                try:
+                    os.remove(temp_filename)
+                except OSError:
+                    pass
 
 
 class CodeGenerationLLM:
     
     def __init__(self, model_id: str = "Salesforce/codegen-350M-mono", hf_token: str = None):
-        import os
         if not hf_token:
             hf_token = os.getenv("HF_TOKEN")
+        if hf_token == "<HF_TOKEN>":
+            hf_token = None
         
-        if not hf_token:
-            raise ValueError("HF_TOKEN required for model download")
-        
-        print(f"Loading model {model_id}... This will take 2-5 minutes on first run.")
-
         cache_dir = os.getenv("HF_HOME", "/models")
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
-            token=hf_token,
-            trust_remote_code=True,
-            local_files_only=True,
-            cache_dir=cache_dir
-        )
-        
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            token=hf_token,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-            local_files_only=True,
-            cache_dir=cache_dir
-        )
+        print(f"Loading model {model_id} from local cache ({cache_dir})...")
+
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_id,
+                token=hf_token,
+                trust_remote_code=True,
+                local_files_only=True,
+                cache_dir=cache_dir
+            )
+            
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                token=hf_token,
+                trust_remote_code=True,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+                cache_dir=cache_dir
+            )
+        except OSError as e:
+            error_msg = (
+                f"Failed to load model '{model_id}' from local cache at '{cache_dir}'.\n"
+                f"Details: {e}\n\n"
+                "This usually indicates that the model files have not been downloaded or cached yet.\n"
+                "Please ensure that the 'model-downloader' initContainer ran successfully,\n"
+                "or download the model manually by running:\n"
+                "   python download_model.py\n"
+                "================================================================================"
+            )
+            raise RuntimeError(error_msg) from e
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -333,7 +371,12 @@ async def interactive_chat():
     print("=" * 80)
     
     print("\nInitializing LLM (this takes 2-5 minutes)...")
-    llm = CodeGenerationLLM()
+    try:
+        llm = CodeGenerationLLM()
+    except RuntimeError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+        
     executor = LocalCodeExecutor()
     graph = create_graph(llm, executor)
     print("Ready!\n")

@@ -187,5 +187,30 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
+class TestAsyncK8sHelperDeleteSandboxClaim(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self):
+        self.helper = AsyncK8sHelper()
+        self.helper._initialized = True
+        self.helper.custom_objects_api = MagicMock()
+        self.helper.core_v1_api = MagicMock()
+
+    async def test_delete_404_is_ignored(self):
+        from kubernetes_asyncio import client as async_client
+        exc = async_client.ApiException(status=404)
+        self.helper.custom_objects_api.delete_namespaced_custom_object = AsyncMock(side_effect=exc)
+
+        await self.helper.delete_sandbox_claim("missing-claim", "default")
+
+    async def test_delete_non_404_reraises(self):
+        from kubernetes_asyncio import client as async_client
+        exc = async_client.ApiException(status=403)
+        self.helper.custom_objects_api.delete_namespaced_custom_object = AsyncMock(side_effect=exc)
+
+        with self.assertRaises(async_client.ApiException) as ctx:
+            await self.helper.delete_sandbox_claim("claim", "default")
+        self.assertEqual(ctx.exception.status, 403)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,11 +4,41 @@ metadata:
   annotations:
     alm-examples: '[]'
     capabilities: Basic Install
+    categories: "AI/Machine Learning"
+    operatorframework.io/suggested-namespace: agent-sandbox-system
+    operators.operatorframework.io/builder: operator-sdk-v1.42.2
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+    support: Agent Sandbox Community
+    repository: https://github.com/kubernetes-sigs/agent-sandbox
   name: agent-sandbox-operator.v0.0.0
   namespace: placeholder
+  labels:
+    operatorframework.io/os.linux: supported
+    operatorframework.io/arch.amd64: supported
 spec:
   apiservicedefinitions: {}
-  customresourcedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: Sandbox provides an isolated, stateful runtime environment for AI agent workloads.
+      displayName: Sandbox
+      kind: Sandbox
+      name: sandboxes.agents.x-k8s.io
+      version: v1beta1
+    - description: SandboxClaim requests a Sandbox from a warm pool for use by an AI agent.
+      displayName: Sandbox Claim
+      kind: SandboxClaim
+      name: sandboxclaims.extensions.agents.x-k8s.io
+      version: v1beta1
+    - description: SandboxTemplate defines a reusable specification for creating Sandboxes.
+      displayName: Sandbox Template
+      kind: SandboxTemplate
+      name: sandboxtemplates.extensions.agents.x-k8s.io
+      version: v1beta1
+    - description: SandboxWarmPool maintains a pool of pre-provisioned Sandboxes for fast allocation.
+      displayName: Sandbox Warm Pool
+      kind: SandboxWarmPool
+      name: sandboxwarmpools.extensions.agents.x-k8s.io
+      version: v1beta1
   description: Agent-sandbox enables easy management of isolated, stateful, singleton
     workloads, ideal for use cases like AI agent runtimes.
   displayName: Agent Sandbox Operator

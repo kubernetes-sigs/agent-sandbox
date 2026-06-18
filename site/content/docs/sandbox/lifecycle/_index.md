@@ -18,7 +18,7 @@ This guide uses `kubectl` directly and is compatible with any Kubernetes environ
 - A running Kubernetes cluster.
 - The [`kubectl`](https://kubernetes.io/docs/tasks/tools/#kubectl) CLI tool installed and configured to point to your cluster.
 - The [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
-- A `SandboxTemplate` named `simple-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
+- A `SandboxWarmPool` named `simple-sandbox-pool` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
 
 ### Scheduled Shutdown
@@ -39,12 +39,12 @@ Apply an example sandbox with the `shutdownPolicy` and `shutdownTime`:
 
 ```bash
 cat <<EOF | kubectl apply -f -
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: dynamic-ephemeral-sandbox
 spec:
-  replicas: 1
+  operatingMode: Running
   shutdownPolicy: Delete
   shutdownTime: "${SHUTDOWN_TIME}"
   podTemplate:
@@ -86,7 +86,7 @@ def verify_sandbox_lifecycle():
     # 1. Verify creation and sandbox_ready_timeout
     # If the sandbox doesn't become ready within 15 seconds, this will raise an error.
     sandbox = client.create_sandbox(
-        "simple-sandbox-template",
+        "simple-sandbox-pool",
         sandbox_ready_timeout=15,
         shutdown_after_seconds=ttl_seconds
     )

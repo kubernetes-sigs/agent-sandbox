@@ -114,21 +114,19 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 			Name:      "retain-finished-sandbox",
 			Namespace: ns.Name,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Containers: []corev1.Container{{
-						Name:    "busybox",
-						Image:   "busybox:1.36",
-						Command: []string{"sh", "-c", "exit 0"},
-					}},
-				},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers: []corev1.Container{{
+					Name:    "busybox",
+					Image:   "busybox:1.36",
+					Command: []string{"sh", "-c", "exit 0"},
+				}},
 			},
-			Lifecycle: sandboxv1beta1.Lifecycle{
-				ShutdownTime:   &shutdown,
-				ShutdownPolicy: &policy,
-			},
+		}}, Lifecycle: sandboxv1beta1.Lifecycle{
+			ShutdownTime:   &shutdown,
+			ShutdownPolicy: &policy,
+		},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))

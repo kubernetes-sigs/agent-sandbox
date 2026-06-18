@@ -73,18 +73,17 @@ func runWarmPoolParallelClaim(t *framework.TestContext, warmPoolSize int) {
 			Name:      "template",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            "pause",
-							Image:           "registry.k8s.io/pause:3.10",
-							ImagePullPolicy: corev1.PullIfNotPresent,
-						},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:            "pause",
+						Image:           "registry.k8s.io/pause:3.10",
+						ImagePullPolicy: corev1.PullIfNotPresent,
 					},
 				},
 			},
+		}},
 		},
 	}
 	if err := t.CreateWithCleanup(ctx, template); err != nil {

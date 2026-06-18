@@ -1125,8 +1125,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Track the sandbox template ref to be used by metrics collector
 	sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] = template.Name
 
-	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	sandbox.Spec.Service = template.Spec.Service
+	sandbox.Spec.SandboxBlueprint = *template.Spec.SandboxBlueprint.DeepCopy()
 	// Merge volumeClaimTemplates from template and claim according to the template policy
 	resolvedVCTs, err := mergeVolumeClaimTemplates(
 		template.Spec.VolumeClaimTemplates,
@@ -1141,6 +1140,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		for i, vct := range resolvedVCTs {
 			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
 		}
+	} else {
+		sandbox.Spec.VolumeClaimTemplates = nil
 	}
 
 	// Propagate claim identity labels for discovery and NetworkPolicy targeting.

@@ -386,24 +386,16 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 			Labels:       sandboxLabels,
 			Annotations:  sandboxAnnotations,
 		},
+		// Deep-copy the entire shared blueprint
 		Spec: sandboxv1beta1.SandboxSpec{
-			Service: template.Spec.Service,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
-				ObjectMeta: sandboxv1beta1.PodMetadata{
-					Labels:      podLabels,
-					Annotations: podAnnotations,
-				},
-			},
+			SandboxBlueprint: *template.Spec.SandboxBlueprint.DeepCopy(),
 		},
 	}
 
-	// Copy volumeClaimTemplates from template to sandbox
-	if len(template.Spec.VolumeClaimTemplates) > 0 {
-		sandbox.Spec.VolumeClaimTemplates = make([]sandboxv1beta1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
-		for i, vct := range template.Spec.VolumeClaimTemplates {
-			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
-		}
+	// Propagate labels and annotations to sandbox pod template
+	sandbox.Spec.PodTemplate.ObjectMeta = sandboxv1beta1.PodMetadata{
+		Labels:      podLabels,
+		Annotations: podAnnotations,
 	}
 
 	// Apply secure defaults to the sandbox pod spec

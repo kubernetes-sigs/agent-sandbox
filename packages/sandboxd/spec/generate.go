@@ -14,4 +14,4 @@
 
 package spec
 
-//go:generate sh -c "protoc -I. --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative admin/v1/admin.proto filesystem/v1/filesystem.proto jupyter/v1/jupyter.proto process/v1/process.proto && ../../../dev/tools/fix-boilerplate"
+//go:generate sh -c "buf generate && ../../../dev/tools/fix-boilerplate"

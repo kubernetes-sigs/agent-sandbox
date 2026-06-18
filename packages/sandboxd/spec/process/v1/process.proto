@@ -8,12 +8,12 @@ option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process;pr
 option java_multiple_files = true;
 option java_package = "io.sandboxd.packages.sandboxd.spec.process";
 
-service Process {
-  rpc Start(StartRequest) returns (stream StreamOutputResponse);
+service ProcessService {
+  rpc Start(StartRequest) returns (stream StartResponse);
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
-  rpc WriteStdin(WriteStdinRequest) returns (google.protobuf.Empty);
-  rpc SendSignal(SendSignalRequest) returns (google.protobuf.Empty);
-  rpc ResizeTTY(ResizeTTYRequest) returns (google.protobuf.Empty);
+  rpc WriteStdin(WriteStdinRequest) returns (WriteStdinResponse);
+  rpc SendSignal(SendSignalRequest) returns (SendSignalResponse);
+  rpc ResizeTTY(ResizeTTYRequest) returns (ResizeTTYResponse);
 }
 
 enum Signal {
@@ -47,7 +47,7 @@ message ExitEvent {
   int32 exit_code = 1;
 }
 
-message StreamOutputResponse {
+message StartResponse {
   oneof event {
     ProcessInitEvent init = 1;
     bytes stdout = 2;
@@ -74,9 +74,15 @@ message WriteStdinRequest {
   }
 }
 
+message WriteStdinResponse {
+}
+
 message SendSignalRequest {
   int32 process_id = 1;
   Signal signal = 2;
+}
+
+message SendSignalResponse {
 }
 
 message ResizeTTYRequest {
@@ -84,3 +90,7 @@ message ResizeTTYRequest {
   uint32 cols = 2;
   uint32 rows = 3;
 }
+
+message ResizeTTYResponse {
+}
+

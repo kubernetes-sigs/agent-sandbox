@@ -15,6 +15,7 @@
 package observability
 
 import (
+	"bufio"
 	"net"
 	"net/http"
 	"time"
@@ -56,6 +57,40 @@ func (r *accessLogRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack forwards to the underlying ResponseWriter when it supports
+// hijacking. Required for protocol upgrades — httputil.ReverseProxy
+// type-asserts http.Hijacker on the ResponseWriter it gets and bails
+// out of the upgrade path if the assertion fails. Without this method
+// our wrapping middleware silently breaks every WebSocket the router
+// is supposed to carry. Returns http.ErrNotSupported when wrapping a
+// ResponseWriter that itself doesn't support hijacking (e.g. HTTP/2
+// streams).
+func (r *accessLogRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+// Push forwards to the underlying ResponseWriter when it supports
+// HTTP/2 server push. We don't use push ourselves; this just keeps
+// the capability from being stripped by our middleware.
+func (r *accessLogRecorder) Push(target string, opts *http.PushOptions) error {
+	if p, ok := r.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+// Unwrap exposes the underlying ResponseWriter for the stdlib's
+// http.ResponseController helper and any future middleware that wants
+// to peel back the wrapping. Go 1.20+ uses this to find Flush/Hijack
+// implementations when middleware doesn't expose them directly — we
+// expose them anyway, but Unwrap is cheap insurance.
+func (r *accessLogRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 // AccessLogMiddleware emits one structured log line per inbound request.

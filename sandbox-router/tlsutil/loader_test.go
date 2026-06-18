@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -123,4 +124,89 @@ func TestCertReloader_HotReload(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("certificate was not reloaded within 5s")
+}
+
+// TestCertReloader_KubernetesAtomicWriterRotation reproduces the
+// projected-Secret rotation pattern used by kubelet's AtomicWriter,
+// which is what mounts TLS material into a Pod in production. The
+// leaf file paths the reloader watches are themselves symlinks:
+//
+//	/tls/tls.crt → ..data/tls.crt
+//	/tls/tls.key → ..data/tls.key
+//	/tls/..data  → ..TIMESTAMP/         (the swap target)
+//
+// On rotation, kubelet writes the new content to a fresh
+// ..NEWTIMESTAMP/ directory and atomically renames ..data to point at
+// it. fsnotify on the parent reports CREATE/REMOVE on the
+// "..TIMESTAMP" siblings and RENAME on "..data" — the leaf file path
+// is never named in any event. The original filter rejected all of
+// these, so K8s rotations were silently missed in production. This
+// test pins the fixed behavior.
+func TestCertReloader_KubernetesAtomicWriterRotation(t *testing.T) {
+	first := genSelfSignedCert(t, "leaf-v1")
+
+	dir := t.TempDir()
+	dataV1 := filepath.Join(dir, "..2026_01_01_00_00_00.0")
+	if err := os.Mkdir(dataV1, 0o700); err != nil {
+		t.Fatalf("mkdir v1 data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataV1, "tls.crt"), first.CertPEM, 0o600); err != nil {
+		t.Fatalf("write v1 cert: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataV1, "tls.key"), first.KeyPEM, 0o600); err != nil {
+		t.Fatalf("write v1 key: %v", err)
+	}
+	if err := os.Symlink(filepath.Base(dataV1), filepath.Join(dir, "..data")); err != nil {
+		t.Fatalf("symlink ..data: %v", err)
+	}
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	if err := os.Symlink(filepath.Join("..data", "tls.crt"), certPath); err != nil {
+		t.Fatalf("symlink leaf cert: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "tls.key"), keyPath); err != nil {
+		t.Fatalf("symlink leaf key: %v", err)
+	}
+
+	r, err := NewCertReloader(certPath, keyPath, logr.Discard(), nil)
+	if err != nil {
+		t.Fatalf("NewCertReloader: %v", err)
+	}
+	if err := r.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	before, _ := r.GetCertificate(nil)
+	beforeSerial := leafSerial(t, before)
+
+	// Stage the new version exactly as kubelet would: fresh
+	// "..NEWTIMESTAMP" dir, then atomically rename ..data to point at
+	// it. The os.Rename on a symlink IS the atomic swap.
+	second := genSelfSignedCert(t, "leaf-v2")
+	dataV2 := filepath.Join(dir, "..2026_01_01_00_00_05.0")
+	if err := os.Mkdir(dataV2, 0o700); err != nil {
+		t.Fatalf("mkdir v2 data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataV2, "tls.crt"), second.CertPEM, 0o600); err != nil {
+		t.Fatalf("write v2 cert: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataV2, "tls.key"), second.KeyPEM, 0o600); err != nil {
+		t.Fatalf("write v2 key: %v", err)
+	}
+	tmpLink := filepath.Join(dir, "..data_tmp")
+	if err := os.Symlink(filepath.Base(dataV2), tmpLink); err != nil {
+		t.Fatalf("stage ..data_tmp: %v", err)
+	}
+	if err := os.Rename(tmpLink, filepath.Join(dir, "..data")); err != nil {
+		t.Fatalf("atomic ..data swap: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		after, err := r.GetCertificate(nil)
+		if err == nil && leafSerial(t, after) != beforeSerial {
+			return // success
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("certificate was not reloaded after Kubernetes-style ..data symlink swap")
 }

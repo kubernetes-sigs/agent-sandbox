@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 // recordingAuthz lets a test pin the verdict for every call and inspect
 // the (ns, sandbox) arguments after the fact.
 type recordingAuthz struct {
+	mu       sync.Mutex
 	err      error
 	requests []recordedAuthzReq
 }
@@ -52,8 +54,25 @@ func (a *recordingAuthz) Authorize(_ context.Context, r *http.Request, ns, name 
 	if tok, ok := authz.BearerTokenFromRequest(r); ok {
 		rec.bearer = tok
 	}
+	// Authorize is called on the httptest server goroutine; the test
+	// reads `requests` after http.DefaultClient.Do returns. Even
+	// though the read is happens-after the write in wall-clock
+	// terms, Go's race detector requires explicit synchronization
+	// for the access to be data-race-free.
+	a.mu.Lock()
 	a.requests = append(a.requests, rec)
+	a.mu.Unlock()
 	return a.err
+}
+
+// snapshot returns a copy of the recorded requests for tests to
+// inspect without racing against an in-flight Authorize call.
+func (a *recordingAuthz) snapshot() []recordedAuthzReq {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]recordedAuthzReq, len(a.requests))
+	copy(out, a.requests)
+	return out
 }
 
 func TestAuthzAllowedByDefault(t *testing.T) {
@@ -127,10 +146,11 @@ func TestAuthzDenialMapsToStatus(t *testing.T) {
 			if !strings.HasPrefix(string(body), `{"detail":`) {
 				t.Fatalf("body should be JSON detail shape; got %q", body)
 			}
-			if len(a.requests) != 1 {
-				t.Fatalf("expected exactly one Authorize call, got %d", len(a.requests))
+			calls := a.snapshot()
+			if len(calls) != 1 {
+				t.Fatalf("expected exactly one Authorize call, got %d", len(calls))
 			}
-			req0 := a.requests[0]
+			req0 := calls[0]
 			if req0.ns != "team" || req0.sandbox != "abc" {
 				t.Fatalf("Authorize got (ns=%q, sandbox=%q), want (team, abc)", req0.ns, req0.sandbox)
 			}
@@ -165,10 +185,11 @@ func TestAuthzPassesNamespaceAndID(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if len(a.requests) != 1 {
-		t.Fatalf("expected one Authorize call, got %d", len(a.requests))
+	calls := a.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("expected one Authorize call, got %d", len(calls))
 	}
-	if a.requests[0].ns != "team-a" || a.requests[0].sandbox != "sandbox-7" {
-		t.Fatalf("Authorize got (%q,%q) want (team-a, sandbox-7)", a.requests[0].ns, a.requests[0].sandbox)
+	if calls[0].ns != "team-a" || calls[0].sandbox != "sandbox-7" {
+		t.Fatalf("Authorize got (%q,%q) want (team-a, sandbox-7)", calls[0].ns, calls[0].sandbox)
 	}
 }

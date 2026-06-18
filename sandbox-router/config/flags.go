@@ -202,9 +202,19 @@ func ApplyPostParseEnvDefaults(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc
 	// package init beat us to flag.CommandLine), we couldn't bind
 	// c.Kubeconfig directly. Pull the post-parse value into c so the
 	// rest of the code reads from a single field.
-	if f := fs.Lookup("kubeconfig"); f != nil && c.Kubeconfig == "" {
-		if v := f.Value.String(); v != "" {
-			c.Kubeconfig = v
+	//
+	// fs.Visit was already consulted above to build setExplicitly, so
+	// we know whether the flag was passed on the command line. Use
+	// that to honor precedence: an explicit CLI override wins over any
+	// value already in c (from a config file or env var). A non-empty
+	// flag value that *wasn't* set on the command line is the parser's
+	// zero — leave c alone.
+	if f := fs.Lookup("kubeconfig"); f != nil {
+		v := f.Value.String()
+		if setExplicitly["kubeconfig"] {
+			c.Kubeconfig = v // CLI wins, even when c.Kubeconfig is non-empty
+		} else if c.Kubeconfig == "" && v != "" {
+			c.Kubeconfig = v // no CLI override; pick up any default the flag carries
 		}
 	}
 }

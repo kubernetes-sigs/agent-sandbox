@@ -17,6 +17,8 @@
 package observability
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -185,4 +187,25 @@ func (s *statusRecorder) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack forwards to the underlying ResponseWriter when it supports
+// hijacking. Required for protocol upgrades — httputil.ReverseProxy
+// type-asserts http.Hijacker on the ResponseWriter and bails out of
+// the upgrade path if the assertion fails. Without this method, the
+// metrics middleware silently breaks every WebSocket the router is
+// supposed to carry. Returns http.ErrNotSupported when wrapping a
+// ResponseWriter that itself doesn't support hijacking.
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := s.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+// Unwrap exposes the underlying ResponseWriter for the stdlib's
+// http.ResponseController helper. Go 1.20+ uses this to discover
+// Flush/Hijack implementations under middleware wrappers.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
 }

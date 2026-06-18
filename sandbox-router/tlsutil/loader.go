@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -149,11 +150,29 @@ func (r *CertReloader) run(ctx context.Context, watcher *fsnotify.Watcher) {
 			if !ok {
 				return
 			}
-			// Filter to events touching our files (by name match in the
-			// watched directory). filepath.Clean normalizes any symlink path
-			// quirks fsnotify reports.
+			// Filter to events that plausibly affect our files. Two
+			// shapes need to pass:
+			//
+			//   1. Direct edits — fsnotify reports the leaf file path.
+			//      Same as the original behavior.
+			//   2. K8s projected Secret rotation — kubelet's AtomicWriter
+			//      writes to a fresh "..TIMESTAMP" directory, then
+			//      atomically swaps a "..data" symlink at the parent.
+			//      Neither event names our leaf file; the leaf is a
+			//      symlink chain that resolves through "..data". So we
+			//      additionally let any event on a "..*" sibling
+			//      through, which is the AtomicWriter signature.
+			//
+			// Random unrelated files in the same directory still get
+			// filtered out. The reload itself is the final guard — it
+			// re-parses the file and swaps only on success, so a
+			// spurious wake-up is at worst a wasted ReadFile.
 			name := filepath.Clean(ev.Name)
-			if name != filepath.Clean(r.certFile) && name != filepath.Clean(r.keyFile) {
+			base := filepath.Base(name)
+			affectsOurFile := name == filepath.Clean(r.certFile) ||
+				name == filepath.Clean(r.keyFile) ||
+				strings.HasPrefix(base, "..") // K8s AtomicWriter prefix
+			if !affectsOurFile {
 				continue
 			}
 			stopTimer()

@@ -201,14 +201,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Transport:     h.transport,
 		FlushInterval: -1, // immediate flush for SSE / streaming responses
 		ErrorHandler: func(w http.ResponseWriter, errReq *http.Request, err error) {
-			reason := classifyError(err)
-			h.recordUpstreamErrorReason(target0.Namespace, reason)
+			h.recordUpstreamErrorReason(target0.Namespace, classifyError(err))
 			// KEP-NNNN: actively invalidate the cache entry on dial-class
-			// failures so the next request falls through to DNS instead of
-			// retrying the same stale IP. We only invalidate when the IP
-			// we tried actually came from the cache — a DNS or PodIP-header
+			// failures so the next request falls through to DNS instead
+			// of retrying the same stale IP. We use isRetriableDialError
+			// (shared with the retry transport) rather than the metric's
+			// string label because dial-time timeouts classifyError
+			// labels as "timeout" — but they're still dial failures
+			// (net.OpError.Op == "dial") and the IP is just as dead.
+			// String-matching "dial" would miss them and trap traffic on
+			// stale entries. We only invalidate when the IP we tried
+			// actually came from the cache — a DNS or PodIP-header
 			// failure means the cache had nothing useful to evict.
-			if src == SourceCache && h.cache != nil && reason == "dial" && target0.UID != "" {
+			if src == SourceCache && h.cache != nil && isRetriableDialError(err) && target0.UID != "" {
 				if h.cache.Invalidate(types.UID(target0.UID)) && h.metrics != nil {
 					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
 				}

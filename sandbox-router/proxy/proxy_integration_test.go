@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,17 +68,25 @@ func podIPHeaders(t *testing.T, backendURL string) http.Header {
 }
 
 func TestIntegration_BasicProxyRoundTrip(t *testing.T) {
-	gotMethod := ""
-	gotPath := ""
-	gotQuery := ""
-	gotHost := ""
-	gotXSandboxID := ""
+	// Handler runs on the httptest server goroutine; the assertions
+	// below run on the test goroutine after the client returns. Even
+	// though that ordering is happens-after in wall-clock terms, the
+	// race detector still requires explicit synchronization for the
+	// shared accesses to be data-race-free.
+	var (
+		mu   sync.Mutex
+		seen struct {
+			method, path, query, host, sandboxID string
+		}
+	)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		gotQuery = r.URL.RawQuery
-		gotHost = r.Host
-		gotXSandboxID = r.Header.Get(HeaderSandboxID)
+		mu.Lock()
+		seen.method = r.Method
+		seen.path = r.URL.Path
+		seen.query = r.URL.RawQuery
+		seen.host = r.Host
+		seen.sandboxID = r.Header.Get(HeaderSandboxID)
+		mu.Unlock()
 		w.Header().Set("X-From-Backend", "yes")
 		w.WriteHeader(201)
 		_, _ = io.WriteString(w, "backend-body")
@@ -114,31 +123,39 @@ func TestIntegration_BasicProxyRoundTrip(t *testing.T) {
 	if resp.Header.Get("X-From-Backend") != "yes" {
 		t.Errorf("backend headers not forwarded")
 	}
-	if gotMethod != http.MethodGet {
-		t.Errorf("backend method: got %q", gotMethod)
+	mu.Lock()
+	got := seen
+	mu.Unlock()
+	if got.method != http.MethodGet {
+		t.Errorf("backend method: got %q", got.method)
 	}
-	if gotPath != "/api/v1/items" {
-		t.Errorf("backend path: got %q", gotPath)
+	if got.path != "/api/v1/items" {
+		t.Errorf("backend path: got %q", got.path)
 	}
-	if gotQuery != "a=1&b=2" {
-		t.Errorf("backend query: got %q", gotQuery)
+	if got.query != "a=1&b=2" {
+		t.Errorf("backend query: got %q", got.query)
 	}
-	if gotXSandboxID != "test-sandbox" {
-		t.Errorf("X-Sandbox-ID not forwarded; backend saw %q", gotXSandboxID)
+	if got.sandboxID != "test-sandbox" {
+		t.Errorf("X-Sandbox-ID not forwarded; backend saw %q", got.sandboxID)
 	}
 	// httptest backend host = "127.0.0.1:NNNN" parsed from backend.URL — should
 	// match the router-derived Host, not the original router.URL host. The
 	// Python contract says we strip inbound Host so net/http picks URL host.
 	wantHost := strings.TrimPrefix(backend.URL, "http://")
-	if gotHost != wantHost {
-		t.Errorf("backend Host header: got %q want %q (inbound Host must be replaced)", gotHost, wantHost)
+	if got.host != wantHost {
+		t.Errorf("backend Host header: got %q want %q (inbound Host must be replaced)", got.host, wantHost)
 	}
 }
 
 func TestIntegration_AllMethodsForwarded(t *testing.T) {
-	methodSeen := ""
+	var (
+		mu         sync.Mutex
+		methodSeen string
+	)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		methodSeen = r.Method
+		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
@@ -146,7 +163,9 @@ func TestIntegration_AllMethodsForwarded(t *testing.T) {
 	defer router.Close()
 
 	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH"} {
+		mu.Lock()
 		methodSeen = ""
+		mu.Unlock()
 		req, _ := http.NewRequest(m, router.URL+"/", strings.NewReader("body"))
 		for k, vs := range podIPHeaders(t, backend.URL) {
 			for _, v := range vs {
@@ -158,16 +177,26 @@ func TestIntegration_AllMethodsForwarded(t *testing.T) {
 			t.Fatalf("%s: %v", m, err)
 		}
 		resp.Body.Close()
-		if methodSeen != m {
-			t.Errorf("method %q forwarded as %q", m, methodSeen)
+		mu.Lock()
+		got := methodSeen
+		mu.Unlock()
+		if got != m {
+			t.Errorf("method %q forwarded as %q", m, got)
 		}
 	}
 }
 
 func TestIntegration_RequestBodyStreamed(t *testing.T) {
-	var got bytes.Buffer
+	// bytes.Buffer is not safe for concurrent access; the read in the
+	// assertion below races the handler's Copy without a mutex.
+	var (
+		mu  sync.Mutex
+		got bytes.Buffer
+	)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		_, _ = io.Copy(&got, r.Body)
+		mu.Unlock()
 		w.WriteHeader(200)
 	}))
 	defer backend.Close()
@@ -186,8 +215,11 @@ func TestIntegration_RequestBodyStreamed(t *testing.T) {
 		t.Fatalf("do: %v", err)
 	}
 	resp.Body.Close()
-	if got.String() != payload {
-		t.Errorf("body roundtrip mismatch: got %d bytes want %d", got.Len(), len(payload))
+	mu.Lock()
+	gotStr, gotLen := got.String(), got.Len()
+	mu.Unlock()
+	if gotStr != payload {
+		t.Errorf("body roundtrip mismatch: got %d bytes want %d", gotLen, len(payload))
 	}
 }
 
@@ -361,9 +393,14 @@ func TestIntegration_MissingSandboxIDReturns400(t *testing.T) {
 // the caller against the K8s API or any other Bearer-protected
 // service. The router must strip it.
 func TestIntegration_AuthorizationStrippedFromUpstream(t *testing.T) {
-	gotAuth := "<unset>"
+	var (
+		mu      sync.Mutex
+		gotAuth = "<unset>"
+	)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
@@ -382,7 +419,10 @@ func TestIntegration_AuthorizationStrippedFromUpstream(t *testing.T) {
 		t.Fatalf("do: %v", err)
 	}
 	resp.Body.Close()
-	if gotAuth != "" {
-		t.Fatalf("upstream saw Authorization=%q, want empty (router must strip)", gotAuth)
+	mu.Lock()
+	got := gotAuth
+	mu.Unlock()
+	if got != "" {
+		t.Fatalf("upstream saw Authorization=%q, want empty (router must strip)", got)
 	}
 }

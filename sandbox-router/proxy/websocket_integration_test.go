@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -226,9 +227,14 @@ func TestIntegration_NonUpgradeStillRespectsProxyTimeout(t *testing.T) {
 // that mismatch. We drop Origin on upgrade requests so the backend
 // sees "no Origin assertion" rather than a bad one.
 func TestIntegration_WebSocketStripsOriginOnUpgrade(t *testing.T) {
-	gotOrigin := "<unset>"
+	var (
+		mu        sync.Mutex
+		gotOrigin = "<unset>"
+	)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotOrigin = r.Header.Get("Origin")
+		mu.Unlock()
 		conn, err := echoUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("backend upgrade: %v", err)
@@ -260,8 +266,11 @@ func TestIntegration_WebSocketStripsOriginOnUpgrade(t *testing.T) {
 	}
 	conn.Close()
 
-	if gotOrigin != "" {
-		t.Fatalf("backend saw Origin=%q, want empty (router must strip on upgrade)", gotOrigin)
+	mu.Lock()
+	got := gotOrigin
+	mu.Unlock()
+	if got != "" {
+		t.Fatalf("backend saw Origin=%q, want empty (router must strip on upgrade)", got)
 	}
 }
 
@@ -270,9 +279,14 @@ func TestIntegration_WebSocketStripsOriginOnUpgrade(t *testing.T) {
 // stripping it would break CORS preflights and any backend that uses
 // Origin for legitimate same-origin checks on non-WebSocket traffic.
 func TestIntegration_NonUpgradePreservesOrigin(t *testing.T) {
-	gotOrigin := "<unset>"
+	var (
+		mu        sync.Mutex
+		gotOrigin = "<unset>"
+	)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotOrigin = r.Header.Get("Origin")
+		mu.Unlock()
 		w.WriteHeader(204)
 	}))
 	defer backend.Close()
@@ -291,8 +305,11 @@ func TestIntegration_NonUpgradePreservesOrigin(t *testing.T) {
 		t.Fatalf("do: %v", err)
 	}
 	resp.Body.Close()
-	if gotOrigin != "https://client.example.com" {
-		t.Fatalf("backend Origin: got %q want https://client.example.com (only strip on upgrade)", gotOrigin)
+	mu.Lock()
+	got := gotOrigin
+	mu.Unlock()
+	if got != "https://client.example.com" {
+		t.Fatalf("backend Origin: got %q want https://client.example.com (only strip on upgrade)", got)
 	}
 }
 
@@ -303,11 +320,16 @@ func TestIntegration_NonUpgradePreservesOrigin(t *testing.T) {
 // plain HTTP we should see Proto=http; X-Forwarded-For should
 // carry the inbound client address.
 func TestIntegration_XForwardedHeadersSet(t *testing.T) {
-	var gotHost, gotProto, gotFor string
+	var (
+		mu                        sync.Mutex
+		gotHost, gotProto, gotFor string
+	)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotHost = r.Header.Get("X-Forwarded-Host")
 		gotProto = r.Header.Get("X-Forwarded-Proto")
 		gotFor = r.Header.Get("X-Forwarded-For")
+		mu.Unlock()
 		w.WriteHeader(204)
 	}))
 	defer backend.Close()
@@ -326,14 +348,18 @@ func TestIntegration_XForwardedHeadersSet(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	mu.Lock()
+	host, proto, fwdFor := gotHost, gotProto, gotFor
+	mu.Unlock()
+
 	wantHost := strings.TrimPrefix(router.URL, "http://")
-	if gotHost != wantHost {
-		t.Errorf("X-Forwarded-Host: got %q want %q", gotHost, wantHost)
+	if host != wantHost {
+		t.Errorf("X-Forwarded-Host: got %q want %q", host, wantHost)
 	}
-	if gotProto != "http" {
-		t.Errorf("X-Forwarded-Proto: got %q want %q", gotProto, "http")
+	if proto != "http" {
+		t.Errorf("X-Forwarded-Proto: got %q want %q", proto, "http")
 	}
-	if gotFor == "" {
+	if fwdFor == "" {
 		t.Errorf("X-Forwarded-For: empty; expected the client address")
 	}
 }

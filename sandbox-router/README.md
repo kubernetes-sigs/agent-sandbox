@@ -1,12 +1,12 @@
 # sandbox-router
 
-A top-level component implementing [KEP-NNNN](../docs/keps/NNNN-sandbox-router/) (Go-Based Sandbox Router with Pod IP Mapping) using **Envoy + ext_proc** rather than a from-scratch Go reverse proxy.
+A top-level component implementing [KEP-NNNN](https://github.com/kubernetes-sigs/agent-sandbox/pull/758) (Go-Based Sandbox Router with Pod IP Mapping) using **Envoy + ext_proc** rather than a from-scratch Go reverse proxy.
 
 The KEP's three core mechanisms — informer-backed UID→PodIP map, direct Pod IP dispatch, drift-handling — are still implemented in Go. Everything else (TLS termination, mTLS, rate limiting, circuit breaker, access logs, tracing, retries) is delegated to Envoy.
 
 ## Architecture
 
-```
+```text
 client ──► Envoy listener (:8080)
             │
             ├── HTTP filter: ext_proc

@@ -146,11 +146,9 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
-// SandboxSpec defines the desired state of Sandbox.
-type SandboxSpec struct {
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
+// SandboxBlueprint defines the configuration shared between a live Sandbox and a SandboxTemplate.
+// It deliberately excludes runtime-only fields (operatingMode, lifecycle).
+type SandboxBlueprint struct {
 	// podTemplate describes the pod spec that will be used to create an agent sandbox.
 	// +required
 	PodTemplate PodTemplate `json:"podTemplate"`
@@ -160,6 +158,26 @@ type SandboxSpec struct {
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+
+	// service controls whether the controller should automatically create a
+	// headless Service for this Sandbox.
+	// When unset, the controller preserves existing Services for backward
+	// compatibility but does not create new ones. Set to true to enable or false
+	// to explicitly disable and remove the Service.
+	//nolint:kubeapilinter
+	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	// +optional
+	Service *bool `json:"service,omitempty"`
+}
+
+// SandboxSpec defines the desired state of Sandbox.
+type SandboxSpec struct {
+	// The following markers will use OpenAPI v3 schema to validate the value
+	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+
+	// SandboxBlueprint defines the pod template, storage, and service configuration
+	// shared with SandboxTemplate.
+	SandboxBlueprint `json:",inline"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.
 	// +optional
@@ -171,16 +189,6 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
-
-	// service controls whether the controller should automatically create a
-	// headless Service for this Sandbox.
-	// When unset, the controller preserves existing Services for backward
-	// compatibility but does not create new ones. Set to true to enable or false
-	// to explicitly disable and remove the Service.
-	//nolint:kubeapilinter
-	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
-	// +optional
-	Service *bool `json:"service,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

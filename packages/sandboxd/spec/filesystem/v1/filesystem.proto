@@ -3,7 +3,6 @@ syntax = "proto3";
 package filesystem.v1;
 
 import "google/protobuf/timestamp.proto";
-import "google/protobuf/empty.proto";
 
 option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/filesystem;filesystem";
 option java_multiple_files = true;
@@ -16,13 +15,13 @@ enum FileType {
   FILE_TYPE_SYMLINK = 3;
 }
 
-service Filesystem {
-  rpc WriteFile(stream WriteFileRequest) returns (google.protobuf.Empty);
+service FilesystemService {
+  rpc WriteFile(stream WriteFileRequest) returns (WriteFileResponse);
   rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse);
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
   rpc StatFile(StatFileRequest) returns (StatFileResponse);
-  rpc MakeDir(MakeDirRequest) returns (google.protobuf.Empty);
-  rpc Remove(RemoveRequest) returns (google.protobuf.Empty);
+  rpc MakeDir(MakeDirRequest) returns (MakeDirResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
 }
 
 message FileMetadata {
@@ -79,3 +78,13 @@ message RemoveRequest {
   string path = 1;
   bool recursive = 2;
 }
+
+message WriteFileResponse {
+}
+
+message MakeDirResponse {
+}
+
+message RemoveResponse {
+}
+

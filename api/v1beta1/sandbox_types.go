@@ -39,8 +39,6 @@ const (
 	// SandboxReasonDependenciesNotReady indicates the Sandbox is expected to be running
 	// but its underlying dependencies are not fully provisioned or ready yet.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
-	// SandboxReasonSandboxCompleted indicates the Sandbox has been completed.
-	SandboxReasonSandboxCompleted = "SandboxCompleted"
 
 	// SandboxReasonSuspended indicates the Sandbox has been administratively suspended
 	// (i.e., intentional action by the user to suspend the Sandbox).

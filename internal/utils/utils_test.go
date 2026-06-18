@@ -38,6 +38,13 @@ func TestMatchesGroupKind(t *testing.T) {
 			wantMatch: false,
 		},
 		{
+			name:      "nil reference with empty group and kind",
+			ref:       nil,
+			group:     "",
+			kind:      "",
+			wantMatch: false,
+		},
+		{
 			name: "exact match",
 			ref: &metav1.OwnerReference{
 				APIVersion: extensionsv1beta1.GroupVersion.String(),

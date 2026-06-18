@@ -30,6 +30,9 @@ func GetGroupKind(ref *metav1.OwnerReference) (string, string) {
 
 // MatchesGroupKind returns true if the OwnerReference is not nil, and matches the specified group and kind.
 func MatchesGroupKind(ref *metav1.OwnerReference, group, kind string) bool {
+	if ref == nil {
+		return false
+	}
 	g, k := GetGroupKind(ref)
 	return g == group && k == kind
 }

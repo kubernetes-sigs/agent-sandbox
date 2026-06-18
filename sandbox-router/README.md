@@ -1,6 +1,6 @@
 # Sandbox Router (Go)
 
-A Go reimplementation of the Python [`sandbox-router`](../../python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP traffic out to thousands of ephemeral agent sandbox pods in a Kubernetes cluster.
+A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP traffic out to thousands of ephemeral agent sandbox pods in a Kubernetes cluster.
 
 It preserves the original `X-Sandbox-*` header contract (so existing clients and `Gateway` / `HTTPRoute` resources keep working) and adds the controls needed for enterprise deployments: TLS, mTLS, Prometheus metrics, OpenTelemetry tracing, hot-reloading certs, dial retries, structured logs, and graceful shutdown.
 
@@ -8,7 +8,7 @@ It preserves the original `X-Sandbox-*` header contract (so existing clients and
 
 Agent Sandbox splits creation from routing. The router only handles the **data plane**:
 
-```
+```text
                     creates                  watches
   SDK client  ─────────────────►  K8s API  ─────────►  Controller  ── creates Pod + Service
   (clients/go/sandbox or
@@ -258,7 +258,7 @@ kubectl apply -f sandbox-router/deploy/
 
 ## Scaling guidance
 
-A locally-hosted load test lives at [`dev/load-test/router/`](../../../dev/load-test/router/). Drives synthetic load through an in-process router into a no-op backend so capacity numbers can be captured without a cluster.
+A locally-hosted load test lives at [`dev/load-test/router/`](../dev/load-test/router/). Drives synthetic load through an in-process router into a no-op backend so capacity numbers can be captured without a cluster.
 
 ```sh
 go run ./dev/load-test/router --in-process --concurrency=50 --duration=30s

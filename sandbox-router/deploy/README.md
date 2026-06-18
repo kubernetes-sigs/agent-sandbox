@@ -7,7 +7,8 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 | File | What it does |
 |---|---|
 | `serviceaccount.yaml` | Identity for the router pods. |
-| `rbac.yaml` | ClusterRole + ClusterRoleBinding for `pods` get/list/watch (required when `--cache-enabled=true`) and a binding to the stock `system:auth-delegator` ClusterRole (required when `--authz-mode=tokenreview`). Both bindings are cluster-wide on purpose — see the long-form comment at the top of the file for why narrowing to non-system namespaces isn't expressible in RBAC and how the runtime label selector keeps system Pods out of the cache anyway. Skip this file entirely when running DNS-only + allow-all. |
+| `rbac.yaml` | ClusterRole + ClusterRoleBinding for `pods` get/list/watch. Required when `--cache-enabled=true`. The grant is cluster-wide on purpose — see the long-form comment at the top of the file for why narrowing to non-system namespaces isn't expressible in RBAC and how the runtime label selector keeps system Pods out of the cache anyway. Skip this file entirely when running DNS-only. |
+| `rbac-tokenreview.yaml` | Extra ClusterRoleBinding to the stock `system:auth-delegator` ClusterRole. Apply *in addition to* `rbac.yaml` only when `--authz-mode=tokenreview`. Default-mode deployments don't carry these create rights on `tokenreviews.authentication.k8s.io` / `subjectaccessreviews.authorization.k8s.io` they wouldn't use. |
 | `deployment.yaml` | 2 replicas, topology spread, distroless image, restricted SecurityContext, liveness/readiness probes. Enables `--cache-enabled=true` by default. |
 | `service.yaml` | Cluster-IP service named `sandbox-router-svc` (preserves the Python router's name — existing Gateway/HTTPRoute resources work unchanged). |
 | `pdb.yaml` | Prevents voluntary disruptions from taking the whole fleet offline. |

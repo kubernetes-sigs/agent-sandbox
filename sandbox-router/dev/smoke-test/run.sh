@@ -307,9 +307,13 @@ fi
 echo "PASS: pod deletion observed (status=${STATUS}; invalidations ${BEFORE} → ${AFTER})"
 
 # --- 10. TokenReview authorizer smoke (separate router instance). -------
-# Roll the router deployment to authz-mode=tokenreview with
-# require-token=true so we can verify the 401 path.
-log "Reconfiguring router for --authz-mode=tokenreview"
+# Add the system:auth-delegator binding the tokenreview mode needs (it's
+# in a separate manifest so default-mode deployments don't carry the
+# create rights on tokenreviews / SARs) and roll the router deployment
+# to authz-mode=tokenreview with require-token=true so we can verify
+# the 401 path.
+log "Applying tokenreview RBAC + reconfiguring router for --authz-mode=tokenreview"
+kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
 kubectl -n default patch deploy sandbox-router --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--authz-mode=tokenreview"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--authz-tokenreview-require-token=true"}

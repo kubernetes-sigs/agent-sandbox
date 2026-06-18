@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -285,21 +286,45 @@ func run(cfg *config.Config, log logr.Logger) error {
 }
 
 // buildKubernetesClient returns a typed client built from kubeconfigPath
-// when non-empty, or the in-cluster config (ServiceAccount token) when
-// empty. Mirrors clientcmd's standard precedence so operators can run
-// the router locally with KUBECONFIG and in-cluster without any flag.
+// when non-empty, or the in-cluster config (ServiceAccount token + the
+// kubernetes.default API server) when empty. Mirrors clientcmd's
+// standard precedence so operators can run the router locally with
+// KUBECONFIG and in-cluster without any flag.
+//
+// When kubeconfigPath is empty we try rest.InClusterConfig() FIRST.
+// clientcmd's loading rules don't fall through to in-cluster
+// authentication on their own — they look at $KUBECONFIG, then
+// ~/.kube/config, and error out if neither exists. In a Pod with only
+// the ServiceAccount mount that path would fail, so we'd never get
+// in-cluster mode despite the documented behavior. Only when
+// InClusterConfig fails (we're not running in a Pod) do we fall back
+// to clientcmd so the local-dev path keeps working.
 func buildKubernetesClient(kubeconfigPath string) (kubernetes.Interface, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
-	}
-	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		loadingRules, &clientcmd.ConfigOverrides{})
-	restConfig, err := clientConfig.ClientConfig()
+	restConfig, err := loadRESTConfig(kubeconfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("build rest config: %w", err)
 	}
 	return kubernetes.NewForConfig(restConfig)
+}
+
+// loadRESTConfig is split out so the precedence logic is testable
+// without spinning up a real client.
+func loadRESTConfig(kubeconfigPath string) (*rest.Config, error) {
+	if kubeconfigPath != "" {
+		// Explicit path overrides everything: respect what the
+		// operator asked for, even if we happen to be in a Pod.
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		loadingRules.ExplicitPath = kubeconfigPath
+		return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	}
+	if cfg, err := rest.InClusterConfig(); err == nil {
+		return cfg, nil
+	}
+	// Local dev fallback: $KUBECONFIG, then ~/.kube/config.
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(),
+		&clientcmd.ConfigOverrides{}).ClientConfig()
 }
 
 // limitBody applies http.MaxBytesReader to the inbound request body.

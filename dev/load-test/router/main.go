@@ -37,6 +37,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,10 +61,24 @@ func main() {
 		"Bytes of request body to send (default 0 = GET-style empty body).")
 	warmup := flag.Duration("warmup", 2*time.Second,
 		"How long to drive load before starting to record samples.")
+	backendHost := flag.String("backend-host", "",
+		"Sandbox Pod IP to send in X-Sandbox-Pod-IP. Required with --router-url; "+
+			"populated automatically from the in-process httptest backend when --in-process is set.")
+	backendPort := flag.Int("backend-port", 0,
+		"Sandbox port to send in X-Sandbox-Port. Required with --router-url; "+
+			"populated automatically from the in-process httptest backend when --in-process is set.")
 	flag.Parse()
 
 	if *routerURL == "" && !*inProcess {
 		fmt.Fprintln(os.Stderr, "either --router-url or --in-process is required")
+		flag.Usage()
+		os.Exit(2)
+	}
+	if *bodySize < 0 {
+		// make([]byte, negative) panics; surface the bad input as a usage
+		// error instead.
+		fmt.Fprintf(os.Stderr, "--body-size must be >= 0, got %d\n", *bodySize)
+		flag.Usage()
 		os.Exit(2)
 	}
 
@@ -80,12 +95,40 @@ func main() {
 			}
 		}()
 		fmt.Printf("in-process router at %s, backend at %s\n", target, backend.URL)
+		// Only fill in from the httptest backend if the operator didn't
+		// pin specific values — lets in-process mode also test against
+		// a custom backend address.
+		if *backendHost == "" || *backendPort == 0 {
+			if h, p, err := splitHostPort(backend.URL); err == nil {
+				if *backendHost == "" {
+					*backendHost = h
+				}
+				if *backendPort == 0 {
+					if n, err := strconv.Atoi(p); err == nil {
+						*backendPort = n
+					}
+				}
+			}
+		}
 	} else {
 		target = *routerURL
-		// External backend assumed to be wired by the operator behind X-Sandbox-Pod-IP.
+		// External mode: the router validates X-Sandbox-Pod-IP and
+		// X-Sandbox-Port, so both must be set to something the router
+		// will accept. Without these, every request 400's before
+		// touching the proxy code path we're trying to measure.
+		if *backendHost == "" {
+			fmt.Fprintln(os.Stderr, "--backend-host is required with --router-url")
+			flag.Usage()
+			os.Exit(2)
+		}
+		if *backendPort == 0 {
+			fmt.Fprintln(os.Stderr, "--backend-port is required with --router-url")
+			flag.Usage()
+			os.Exit(2)
+		}
 	}
 
-	results := run(target, *concurrency, *duration, *warmup, *bodySize, backend)
+	results := run(target, *concurrency, *duration, *warmup, *bodySize, *backendHost, *backendPort)
 	results.Print()
 }
 
@@ -104,6 +147,10 @@ func startInProcess() (string, *httptest.Server, []func()) {
 	cfg.ResponseHeaderTimeout = 5 * time.Second
 	// Retries are 0 here so a single dial failure doesn't skew latency.
 	cfg.UpstreamMaxRetries = 0
+	// The in-process backend is an httptest server on 127.0.0.1; the
+	// router's default SSRF guard rejects loopback X-Sandbox-Pod-IP
+	// without this opt-in.
+	cfg.AllowLoopbackPodIP = true
 
 	handler := proxy.NewHandler(proxy.Options{
 		Config: &cfg,
@@ -127,7 +174,7 @@ type results struct {
 	concurrency int
 }
 
-func run(target string, concurrency int, duration, warmup time.Duration, bodySize int, backend *httptest.Server) results {
+func run(target string, concurrency int, duration, warmup time.Duration, bodySize int, backendHost string, backendPort int) results {
 	// Tune the client for high concurrency: enough idle conns, generous timeouts.
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -145,16 +192,6 @@ func run(target string, concurrency int, duration, warmup time.Duration, bodySiz
 	// pollute percentiles.
 	recordingStart := time.Now().Add(warmup)
 
-	// Targeting the in-process backend; X-Sandbox-Pod-IP bypasses DNS so
-	// the router goes straight to the backend's host:port. When --router-url
-	// points at a real router with no backend, we just measure 502 latencies.
-	backendHost, backendPort := "127.0.0.1", "0"
-	if backend != nil {
-		if h, p, err := splitHostPort(backend.URL); err == nil {
-			backendHost, backendPort = h, p
-		}
-	}
-
 	var (
 		samples     []sample
 		samplesMu   sync.Mutex
@@ -166,6 +203,7 @@ func run(target string, concurrency int, duration, warmup time.Duration, bodySiz
 	for i := range bodyTemplate {
 		bodyTemplate[i] = byte('a' + (i % 26))
 	}
+	backendPortStr := strconv.Itoa(backendPort)
 
 	wg := sync.WaitGroup{}
 	wg.Add(concurrency)
@@ -174,7 +212,7 @@ func run(target string, concurrency int, duration, warmup time.Duration, bodySiz
 		go func() {
 			defer wg.Done()
 			for ctx.Err() == nil {
-				req := buildReq(target, backendHost, backendPort, bodyTemplate)
+				req := buildReq(target, backendHost, backendPortStr, bodyTemplate)
 				t0 := time.Now()
 				resp, err := client.Do(req)
 				dur := time.Since(t0)

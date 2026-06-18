@@ -75,9 +75,19 @@ wait_router_serving() {
   return 1
 }
 
+# created_cluster tracks whether this run is what created CLUSTER_NAME.
+# We only ever delete clusters we created — reusing an existing cluster
+# (a developer's persistent debug cluster) and then nuking it on exit
+# would be a nasty footgun.
+created_cluster=0
+
 cleanup() {
   if [[ "${KEEP_CLUSTER}" == "1" ]]; then
     log "KEEP_CLUSTER=1; leaving cluster ${CLUSTER_NAME} running"
+    return
+  fi
+  if [[ "${created_cluster}" != "1" ]]; then
+    log "Cluster ${CLUSTER_NAME} pre-existed; leaving it alone"
     return
   fi
   log "Deleting cluster ${CLUSTER_NAME}"
@@ -89,8 +99,9 @@ trap cleanup EXIT
 if ! kind get clusters | grep -qx "${CLUSTER_NAME}"; then
   log "Creating kind cluster ${CLUSTER_NAME}"
   kind create cluster --name "${CLUSTER_NAME}" --wait 60s
+  created_cluster=1
 else
-  log "Reusing existing kind cluster ${CLUSTER_NAME}"
+  log "Reusing existing kind cluster ${CLUSTER_NAME} (will not delete on exit)"
 fi
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 

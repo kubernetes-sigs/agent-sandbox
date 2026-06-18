@@ -66,3 +66,23 @@ spec:
     ports:
     - protocol: TCP
       port: 4317
+  # Kubernetes API server — required when --cache-enabled or
+  # --authz-mode=tokenreview. The cache informer LIST/WATCHes Pods and
+  # the TokenReview authorizer POSTs to authentication.k8s.io. Without
+  # this rule, cache sync hangs and tokenreview every-request fails
+  # closed. The apiserver lives at the cluster-wide kubernetes service;
+  # NetworkPolicy can't name it directly, so we allow egress to the
+  # default namespace on the standard API port. Many clusters also
+  # accept apiserver traffic over the public LB IP — if your cluster
+  # routes that way, add an ipBlock for the LB CIDR alongside this
+  # rule. Skip this rule entirely when running with --cache-enabled=false
+  # AND --authz-mode=allow-all.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443

@@ -71,7 +71,7 @@ func BuildServerTLS(cfg *config.Config, reloader *CertReloader) (*tls.Config, er
 func LoadCAPool(path string) (*x509.CertPool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read CA file %s: %w", path, err)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("CA file %s is empty", path)

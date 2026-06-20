@@ -122,7 +122,8 @@ class AsyncSandbox:
         Returns None if the controller does not populate podIPs.
         """
         sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        pod_ips = sandbox_object.get("status", {}).get("podIPs", [])
+        status_data = sandbox_object.get("status") or {}
+        pod_ips = status_data.get("podIPs", [])
         return pod_ips[0] if pod_ips else None
 
     async def status(self) -> tuple[str, str]:
@@ -137,8 +138,8 @@ class AsyncSandbox:
         if not sandbox_object:
             return "SandboxNotFound", "Sandbox object not found in Kubernetes."
 
-        status_data = sandbox_object.get("status", {})
-        for cond in status_data.get("conditions", []):
+        status_data = sandbox_object.get("status") or {}
+        for cond in status_data.get("conditions") or []:
             if cond.get("type") == "Ready":
                 message = cond.get("message", "")
                 if cond.get("status") == "True":

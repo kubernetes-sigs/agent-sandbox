@@ -127,21 +127,17 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 
 	c.mu.Lock()
 	existing := c.registry[key]
-	c.mu.Unlock()
-
 	if existing != nil && existing.IsReady() {
+		c.mu.Unlock()
 		return existing, nil
 	}
-
-	// Evict stale handle (compare-and-delete: never evict a newer handle that a
-	// concurrent caller may have installed while we checked readiness).
+	// Evict stale handle atomically: we already know existing is nil or
+	// not-ready, and no concurrent caller can have changed it since we
+	// still hold the lock.
 	if existing != nil {
-		c.mu.Lock()
-		if c.registry[key] == existing {
-			delete(c.registry, key)
-		}
-		c.mu.Unlock()
+		delete(c.registry, key)
 	}
+	c.mu.Unlock()
 
 	sandboxOpts := c.opts
 	sandboxOpts.Namespace = namespace

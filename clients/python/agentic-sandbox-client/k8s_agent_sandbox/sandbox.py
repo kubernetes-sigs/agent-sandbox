@@ -207,5 +207,3 @@ class Sandbox:
 
         # Clear after successful delete so a retry does not 404.
         self.claim_name = None
-
- 

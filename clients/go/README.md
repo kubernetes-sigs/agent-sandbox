@@ -43,7 +43,7 @@ discovers the Gateway address.
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
     WarmPoolName:     "my-sandbox-warmpool",
-	Namespace:        "default",
+    Namespace:        "default",
     GatewayName:      "external-http-gateway",
     GatewayNamespace: "default",
 })
@@ -66,7 +66,7 @@ automatically establishes an SPDY port-forward tunnel to the Router Service.
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
     WarmPoolName: "my-sandbox-warmpool",
-	Namespace:    "default",
+    Namespace:    "default",
 })
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
@@ -89,13 +89,13 @@ Use `APIURL` to bypass discovery entirely. Useful for:
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
     WarmPoolName: "my-sandbox-warmpool",
-	Namespace:    "default",
+    Namespace:    "default",
     APIURL:       "http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080",
 })
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
 
-sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
+sb, err := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
 if err != nil { log.Fatal(err) }
 
 entries, err := sb.List(ctx, ".")

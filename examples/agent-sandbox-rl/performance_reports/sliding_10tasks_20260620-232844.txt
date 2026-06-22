@@ -1,0 +1,12 @@
+── Run report (strategy=sliding) ──
+  preflight              1.44s  (n=1, max=1.44s)
+  plan                   0.00s  (n=1, max=0.00s)
+  create_warmpool        3.24s  (n=10, max=0.37s)
+  wait_pool_ready       75.00s  (n=10, max=8.34s)
+  claim                 13.22s  (n=10, max=1.79s)
+  process                5.89s  (n=10, max=0.61s)
+  release                1.28s  (n=10, max=0.14s)
+  teardown               0.34s  (n=1, max=0.34s)
+  ----------------------------------------
+  TOTAL                 86.94s
+  claims=10  tasks=10ok/0err  warm_replicas total=10 peak=5

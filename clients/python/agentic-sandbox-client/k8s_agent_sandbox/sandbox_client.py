@@ -100,10 +100,11 @@ class SandboxClient(Generic[T]):
         *,
         shutdown_after_seconds: int | None = None,
         volume_claim_templates: list[dict] | None = None,
-        pod_labels: dict[str, str] | None = None, 
-        pod_annotations: dict[str, str] | None = None
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> T:
-        """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
+        """Provisions new Sandbox claim and returns a Sandbox handle which tracks
            the underlying infrastructure.
 
         Args:
@@ -125,6 +126,7 @@ class SandboxClient(Generic[T]):
                 the sandbox through the Downward API.
             pod_annotations: Optional annotations stamped onto the running
                 Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
+            env: Optional environment variables to inject into the SandboxClaim.
 
         Example:
 
@@ -153,6 +155,7 @@ class SandboxClient(Generic[T]):
                 lifecycle=lifecycle,
                 volume_claim_templates=volume_claim_templates,
                 pod_metadata=pod_metadata,
+                env=env,
             )
             # Resolve the sandbox id from the sandbox claim object.
             # In case of warmpool, sandbox id is not the same as claim name.
@@ -325,6 +328,7 @@ class SandboxClient(Generic[T]):
         lifecycle: dict | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_metadata: dict | None = None,
+        env: dict[str, str] | None = None,
     ):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
@@ -349,6 +353,7 @@ class SandboxClient(Generic[T]):
             lifecycle=lifecycle,
             volume_claim_templates=volume_claim_templates,
             pod_metadata=pod_metadata,
+            env=env,
         )
 
     @trace_span("wait_for_sandbox_ready")

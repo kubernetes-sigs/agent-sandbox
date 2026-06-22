@@ -146,3 +146,14 @@ def is_valid_gateway_hostname(s: str) -> bool:
             return False
     last = s[-1]
     return last != '-' and last != '.'
+
+
+def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[dict[str, str]]:
+    """Construct a SandboxClaim env spec list from a mapping of names to values."""
+    if not env:
+        return []
+
+    return [
+        {"name": name, "value": value}
+        for name, value in env.items()
+    ]

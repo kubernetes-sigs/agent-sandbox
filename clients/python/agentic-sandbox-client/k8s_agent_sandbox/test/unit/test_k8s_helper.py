@@ -25,6 +25,27 @@ from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNo
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
+    def test_env_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            env={"FOO": "bar", "DEBUG": "true"},
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(
+            body["spec"]["env"],
+            [
+                {"name": "FOO", "value": "bar"},
+                {"name": "DEBUG", "value": "true"},
+            ],
+        )
+
     def test_labels_and_annotations_coexist_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import math
 import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -41,6 +42,23 @@ from .placement import get_placement
 from .sources import Task, to_tasks
 
 logger = logging.getLogger("agent_sandbox_rl.fleet")
+
+
+def _split_budget(total: int, weights: "dict[str, float]") -> "dict[str, int]":
+  """Split an integer ``total`` across keys by ``weights`` using largest-remainder
+  (Hamilton) allocation, so the result sums to exactly ``total`` (no rounding
+  overshoot). Empty/zero-weight inputs degrade gracefully."""
+  if not weights:
+    return {}
+  tw = sum(weights.values()) or float(len(weights))  # equal split if all zero
+  ideal = {k: total * (w / tw if sum(weights.values()) else 1.0 / len(weights))
+           for k, w in weights.items()}
+  alloc = {k: int(math.floor(v)) for k, v in ideal.items()}
+  remainder = total - sum(alloc.values())
+  # hand out the leftover units to the largest fractional parts
+  for k in sorted(weights, key=lambda k: ideal[k] - alloc[k], reverse=True)[:remainder]:
+    alloc[k] += 1
+  return alloc
 
 
 @dataclass
@@ -181,12 +199,13 @@ class SandboxFleet:
 
     # Split the global concurrency budget across the clusters in use, by weight,
     # so the total warm footprint stays ~max_concurrent rather than
-    # max_concurrent x n_clusters. (Single cluster → full budget, unchanged.)
+    # max_concurrent x n_clusters. Use largest-remainder allocation so the
+    # per-cluster budgets sum to *exactly* max_concurrent (no round()-induced
+    # overshoot). compute_replicas still floors each pool at 1, so a 0 budget
+    # never starves an image. (Single cluster → full budget, unchanged.)
     used = [self.registry.get(n) for n in cluster_totals]
-    total_weight = sum(c.config.weight for c in used) or 1.0
-    cluster_budget = {
-        c.name: max(1, round(self.config.max_concurrent * c.config.weight / total_weight))
-        for c in used}
+    cluster_budget = _split_budget(self.config.max_concurrent,
+                                   {c.name: c.config.weight for c in used})
 
     entries: list[PlanEntry] = []
     for image, c in assigned.items():

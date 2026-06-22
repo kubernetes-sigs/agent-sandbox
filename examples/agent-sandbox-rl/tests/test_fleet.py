@@ -207,3 +207,14 @@ def test_acquire_ondemand_reserves_pool_once(make_cluster):
   assert c.active_replicas == 1          # reserved once, not 3
   assert c.active_claims == 0
   assert f.handles() == []
+
+
+def test_plan_budget_no_overshoot_three_clusters(make_cluster):
+  # 3 clusters, max_concurrent=8: largest-remainder gives 3+3+2=8 (not round()'s
+  # 3+3+3=9). Total warm replicas must not exceed the global budget.
+  reg = ClusterRegistry([make_cluster("a"), make_cluster("b"), make_cluster("c")])
+  f = _fleet(reg, placement="round-robin", max_concurrent=8, max_warmpool_size=16)
+  f.load_tasks(["i1"] * 10 + ["i2"] * 10 + ["i3"] * 10)  # 1 image per cluster
+  plan = f.plan()
+  assert plan.total_replicas == 8
+  assert plan.total_replicas <= 8       # would have been 9 with round()

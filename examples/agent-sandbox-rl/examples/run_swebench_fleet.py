@@ -46,7 +46,9 @@ def _env(name, default):
 
 def main():
   strategy = _env("WARMPOOL_STRATEGY", "naive")
-  tasks_limit = int(_env("TASKS_LIMIT", "1"))
+  # CLI convenience: TASKS_LIMIT=0 means "all" (-> None for SweBenchSource, whose
+  # 0 means none). Any positive N caps to N.
+  tasks_limit = int(_env("TASKS_LIMIT", "1")) or None
   offset = int(_env("OFFSET", "0"))
   max_concurrent = int(_env("MAX_CONCURRENT", "1"))
   max_pool = int(_env("MAX_WARMPOOL_SIZE", "8"))

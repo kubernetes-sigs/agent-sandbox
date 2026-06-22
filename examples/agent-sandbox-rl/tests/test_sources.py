@@ -59,6 +59,11 @@ def test_jsonl_source(tmp_path):
   assert [t.id for t in tasks] == ["i1", "i2"]
   assert tasks[0].image == "img1"
   assert tasks[0].metadata["repo"] == "a"
+  # limit semantics: None (default) = all, 0 = none, N = first N
+  kw = dict(image_field="docker_image", id_field="instance_id")
+  assert JsonlSource(str(p), limit=0, **kw).load() == []
+  assert len(JsonlSource(str(p), limit=1, **kw).load()) == 1
+  assert len(JsonlSource(str(p), **kw).load()) == 2
 
 
 def test_to_tasks_dict_missing_image_raises():

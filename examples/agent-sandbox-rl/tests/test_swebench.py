@@ -45,10 +45,15 @@ ROWS = [
 
 def test_swebench_source_maps_rows(monkeypatch):
   _install_fake_datasets(monkeypatch, ROWS)
-  tasks = SweBenchSource(limit=0).load()
+  tasks = SweBenchSource().load()          # default limit=None → all
   assert [t.id for t in tasks] == [r["instance_id"] for r in ROWS]
   assert [t.image for t in tasks] == ["img-a", "img-b", "img-c"]
   assert tasks[0].metadata == {"repo": "astropy/astropy", "base_commit": "abc"}
+
+
+def test_swebench_source_limit_zero_is_empty(monkeypatch):
+  _install_fake_datasets(monkeypatch, ROWS)
+  assert SweBenchSource(limit=0).load() == []   # 0 = none (None = all)
 
 
 def test_swebench_source_offset_limit(monkeypatch):

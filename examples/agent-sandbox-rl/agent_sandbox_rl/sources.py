@@ -67,7 +67,7 @@ class JsonlSource:
     path: Path to a ``.jsonl`` file.
     image_field: Field holding the container image.
     id_field: Field holding the task id (falls back to the row index).
-    limit: Optional cap on the number of tasks; ``None`` or ``0`` means all.
+    limit: Cap on the number of tasks. ``None`` (default) = all; ``0`` = none.
   """
 
   def __init__(self, path: str, *, image_field: str = "image",
@@ -79,6 +79,8 @@ class JsonlSource:
 
   def load(self) -> list[Task]:
     tasks: list[Task] = []
+    if self.limit == 0:                      # explicit "none" (None = all)
+      return tasks
     with open(self.path) as fh:
       for i, line in enumerate(fh):
         line = line.strip()
@@ -95,7 +97,7 @@ class JsonlSource:
             metadata={k: v for k, v in row.items()
                       if k not in (self.image_field, self.id_field)},
         ))
-        if self.limit and len(tasks) >= self.limit:
+        if self.limit is not None and len(tasks) >= self.limit:
           break
     return tasks
 

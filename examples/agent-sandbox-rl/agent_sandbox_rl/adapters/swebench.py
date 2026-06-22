@@ -43,7 +43,7 @@ class SweBenchSource:
   Args:
     dataset: HF dataset id (default ``R2E-Gym/SWE-Bench-Verified``).
     split: dataset split.
-    limit: max tasks (0 = all).
+    limit: max tasks. ``None`` (default) = all; ``0`` = none.
     offset: skip the first N rows.
     image_field / id_field: dataset column names.
     keep_row: also store the full dataset row under ``Task.metadata["ds"]``.
@@ -52,7 +52,7 @@ class SweBenchSource:
   """
 
   def __init__(self, dataset: str = SWEBENCH_DATASET, split: str = "test",
-               limit: int = 0, offset: int = 0,
+               limit: int | None = None, offset: int = 0,
                image_field: str = "docker_image", id_field: str = "instance_id",
                keep_row: bool = False):
     self.dataset = dataset
@@ -71,11 +71,11 @@ class SweBenchSource:
           "SweBenchSource requires the 'swebench' extra: "
           "pip install 'agent-sandbox-rl[swebench]'") from e
     # Use HF split slicing so a small limit/offset doesn't materialize the whole
-    # split. `limit=0` (or unset) means "all".
+    # split. `limit=None` (default) = all; `limit=0` = none.
     split = self.split
-    if self.offset or self.limit:
-      end = self.offset + self.limit if self.limit else ""
-      split = f"{self.split}[{self.offset}:{end}]"
+    if self.offset or self.limit is not None:
+      end = self.offset + self.limit if self.limit is not None else ""
+      split = f"{self.split}[{self.offset}:{end}]"   # limit=0 → [off:off] → empty
     logger.info("Loading %s [%s]", self.dataset, split)
     rows = list(load_dataset(self.dataset, split=split))
     tasks = []

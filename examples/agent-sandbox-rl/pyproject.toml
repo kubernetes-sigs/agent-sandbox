@@ -36,10 +36,9 @@ dependencies = [
 
 [project.optional-dependencies]
 swebench = ["datasets"]
-# R2E-Gym is not on PyPI under a clean pin; install it from the sibling checkout
-# (`pip install -e path/to/R2E-Gym`). This extra documents the dependency; the
-# adapter raises a clear error if r2egym is missing.
-r2egym = ["r2egym"]
+# R2E-Gym (for adapters.r2egym) is not on PyPI — install it from its checkout
+# (`pip install -e path/to/R2E-Gym`); the adapter raises a clear error if it's
+# missing. So there's intentionally no `r2egym` extra here.
 async = ["k8s-agent-sandbox[async]", "kubernetes_asyncio<34.0.0"]
 tracing = [
     "opentelemetry-api~=1.39",

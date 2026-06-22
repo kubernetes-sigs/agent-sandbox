@@ -77,12 +77,15 @@ out of the box).
 | Extra | Pulls in | Use it for |
 | :--- | :--- | :--- |
 | `swebench` | `datasets` (Hugging Face) | `SweBenchSource` — loading SWE-bench task lists. |
-| `r2egym` | `r2egym` (from its checkout) | R2E-Gym adapter — run R2E-Gym/tunix `RepoEnv` rollouts on warm pods (`adapters.r2egym`). |
 | `async` | `k8s-agent-sandbox[async]`, `kubernetes_asyncio` | `AsyncSandboxFleet` on an asyncio loop. |
 | `tracing` | `opentelemetry-api` / `-sdk` / `-exporter-otlp` (~=1.39) | OpenTelemetry span export (`enable_tracing=True`). No-op when absent. |
 | `test` | `pytest`, `pytest-asyncio`, `pytest-xdist` | Running the mocked unit tests. |
 
 Combine extras with commas, e.g. `…/agent-sandbox-rl[swebench,async,tracing]`.
+
+The **R2E-Gym adapter** (`adapters.r2egym`) needs R2E-Gym, which isn't on PyPI —
+install it from its checkout (`pip install -e path/to/R2E-Gym`); the adapter
+raises a clear error if it's missing. (No `r2egym` extra for that reason.)
 
 ### 4. Verify
 

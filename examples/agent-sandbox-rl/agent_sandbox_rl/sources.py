@@ -81,7 +81,7 @@ class JsonlSource:
     tasks: list[Task] = []
     if self.limit == 0:                      # explicit "none" (None = all)
       return tasks
-    with open(self.path) as fh:
+    with open(self.path, encoding="utf-8") as fh:
       for i, line in enumerate(fh):
         line = line.strip()
         if not line:

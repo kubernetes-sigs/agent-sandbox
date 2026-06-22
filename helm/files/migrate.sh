@@ -162,7 +162,7 @@ resource_exists() {
 #       operator must create it manually).
 #
 #   (B) spec.warmpool in {"", "default"} AND the claim was warm-started
-#       (status.sandboxStatus.name is non-empty and != claim name) ->
+#       (status.sandbox.name is non-empty and != claim name) ->
 #       webhook uses stripRandomSuffix(sandboxName). The source pool
 #       already exists (the sandbox came from it); no shadow needed.
 #       ("none" never reaches this branch: claims with warmpool="none"
@@ -193,7 +193,7 @@ bootstrap_phase() {
   # Pull namespace, name, templateRef, warmpool policy, and the bound
   # sandbox name (if any) for every SandboxClaim in one shot. jsonpath
   # keeps us jq-free so the container image can be any minimal kubectl
-  # image. status.sandboxStatus.name distinguishes warm-started (sandbox
+  # image. status.sandbox.name distinguishes warm-started (sandbox
   # exists and != claim name) from cold-start.
   #
   # We deliberately use '|' (a non-whitespace character) as the field
@@ -211,7 +211,7 @@ bootstrap_phase() {
   local items
   # shellcheck disable=SC2046
   if ! items="$(kctl get sandboxclaims.extensions.agents.x-k8s.io $(ns_args) \
-      -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.spec.sandboxTemplateRef.name}{"|"}{.spec.warmpool}{"|"}{.status.sandboxStatus.name}{"\n"}{end}' \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.spec.sandboxTemplateRef.name}{"|"}{.spec.warmpool}{"|"}{.status.sandbox.name}{"\n"}{end}' \
       2>&1)"; then
     errlog "failed to list SandboxClaims: $items"
     errlog "check RBAC: ServiceAccount needs get/list on sandboxclaims.extensions.agents.x-k8s.io"

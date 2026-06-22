@@ -18,10 +18,21 @@ The other two CRDs (`SandboxTemplate`, `SandboxWarmPool`) are structurally ident
 
 ## Two phases
 
-The migration script has two phases, run in this order:
+The migration script executes in two distinct phases. **Neither phase can happen in an arbitrary order**, and if you have existing cold-start claims, skipping the bootstrap phase will immediately break them upon upgrading to `v0.5.0`.
 
-- **`--phase=bootstrap`** — must run **before** the v1beta1 CRDs/controller are applied. Pre-creates any `shadow-pool-<template>` pools needed by the conversion webhook so cold-start claims have a valid `warmPoolRef` target. Operates on the v1alpha1 API.
-- **`--phase=migrate`** — must run **after** the v1beta1 CRDs and conversion webhook are live. Patches every existing resource with a benign annotation, forcing the API server to read it through the conversion webhook and rewrite it to etcd in v1beta1 storage format.
+### Phase 1: `--phase=bootstrap` (Conditionally Mandatory, Pre-Upgrade)
+
+- **Mandatory for `v0.5.0`:** Yes, if you have existing cold-start `v1alpha1` claims (claims where `spec.warmpool` is empty/`"none"`/`"default"` AND `status.sandbox.name` matches the claim name or is empty). Note: The script automatically detects whether cold-start claims exist. If none exist, it safely exits without creating anything, so it is recommended to always run it (or use `--dry-run` to inspect) rather than skipping it manually.
+- **Timing:** Strictly **before** upgrading to `v0.5.0` (while `v1alpha1` is still active).
+- **What it does:** Scans existing `v1alpha1` claims and pre-creates `shadow-pool-<template>` warm pools. The `v0.5.0` controller reconciler is written purely against `v1beta1.SandboxClaim`, which requires a valid `spec.warmPoolRef.name`. If you do not pre-create the shadow pools, the conversion webhook will point converted claims to non-existent infrastructure, leaving converted claims stuck with a `WarmPoolNotFound` condition while the controller repeatedly requeues them.
+- **Why it cannot run after upgrade:** Bootstrap relies on `v1alpha1` field inspection. Once `v0.5.0` is installed, `kubectl get sandboxclaims` defaults to returning `v1beta1` objects (which lack `spec.sandboxTemplateRef`). The script will see empty template names, log errors for every claim, and fail to create any shadow pools.
+
+### Phase 2: `--phase=migrate` (Optional for `v0.5.0`, Post-Upgrade)
+
+- **Optional for `v0.5.0`** (but mandatory before upgrading to a future release that drops `v1alpha1`).
+- **Timing:** Strictly **after** upgrading to `v0.5.0` (when `v1beta1` is established as the storage version and the conversion webhook is live).
+- **What it does:** Patches every existing resource with a benign annotation (`agents.x-k8s.io/storage-migrated-at`). This forces the API server to read the `v1alpha1` etcd record, pass it through the conversion webhook, and rewrite it to etcd in `v1beta1` storage format. While the kube-apiserver can translate older records on the fly for `v0.5.0`, running this phase ensures all objects are re-serialized in `v1beta1` format in etcd, which is required before `v1alpha1` can be safely removed from the CRD definition in a future release.
+- **Why it cannot run before upgrade:** Before upgrading, `v1alpha1` is still the storage version in etcd. Patching the resources will merely write an annotation onto `v1alpha1` etcd records, accomplishing zero storage migration.
 
 Both phases are idempotent — safe to re-run.
 
@@ -145,7 +156,7 @@ kubectl get sandboxwarmpools -A -o json \
       | "\(.metadata.namespace)/\(.metadata.name) (for template: \(.metadata.annotations["agents.x-k8s.io/migration-source-template"]))"'
 ```
 
-Do **not** delete these pools while any v1beta1 `SandboxClaim` still references them via `warmPoolRef`. v1alpha1 is removed from the codebase in the release this guide accompanies, so there is no v1alpha1 fallback for claims still pointing at a shadow pool. Once you've manually re-pointed any remaining claims to real warm pools, the shadow pools can be cleaned up.
+Do **not** delete these pools while any v1beta1 `SandboxClaim` still references them via `warmPoolRef`. While `v1alpha1` definitions remain in the codebase for webhook conversion, the `v1beta1` controller reconciler has no `v1alpha1` fallback logic for claims pointing to missing pools. Once you've manually re-pointed any remaining claims to real warm pools, the shadow pools can be cleaned up.
 
 ### Re-pointing warm-started claims
 

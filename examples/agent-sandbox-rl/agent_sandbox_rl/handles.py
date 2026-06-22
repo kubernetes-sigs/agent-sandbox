@@ -69,7 +69,7 @@ class SandboxHandle:
   sandbox: object = None
   _cluster: "Cluster" = field(default=None, repr=False)
 
-  def exec(self, command, timeout: int | None = None) -> str:
+  def exec(self, command) -> str:
     """Run a command inside the sandbox (router-free, via the pod's exec API).
 
     Builds a fresh ``ApiClient`` per call: the kubernetes ``stream()`` (websocket)

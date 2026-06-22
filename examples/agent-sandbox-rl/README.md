@@ -174,7 +174,7 @@ python run_swebench_fleet.py
 
 Pool depth is the image's share of the concurrency budget, not its task count:
 
-```
+```text
 replicas_image = clamp(round(MAX_CONCURRENT × tasks_image / tasks_total),
                        1, min(tasks_image, MAX_WARMPOOL_SIZE))
 ```

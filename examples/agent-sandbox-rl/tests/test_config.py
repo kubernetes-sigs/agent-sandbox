@@ -69,3 +69,12 @@ def test_template_spec_overrides():
   cfg = FleetConfig(template=t, max_concurrent=8)
   assert cfg.template.runtime_class == "gvisor"
   assert cfg.template.node_selector["cloud.google.com/gke-nodepool"] == "e2-pool"
+
+
+def test_template_name_prefix_rejects_invalid():
+  import pytest
+  from agent_sandbox_rl import FleetConfig
+  with pytest.raises(Exception):           # pydantic ValidationError
+    FleetConfig(template_name_prefix="Bad_Prefix!")
+  # valid prefix is accepted
+  assert FleetConfig(template_name_prefix="r2e-img-").template_name_prefix == "r2e-img-"

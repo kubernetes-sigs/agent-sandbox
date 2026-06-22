@@ -49,6 +49,24 @@ class FakeCluster:
       return True
     return self.active_replicas + additional <= self.config.max_replicas
 
+  # atomic capacity bookkeeping (mirrors agent_sandbox_rl.cluster.Cluster)
+  def reserve_replicas(self, n):
+    self.active_replicas += n
+
+  def release_replicas(self, n):
+    self.active_replicas = max(0, self.active_replicas - n)
+
+  def reserve_claim(self):
+    self.active_claims += 1
+
+  def release_claim(self):
+    if self.active_claims > 0:
+      self.active_claims -= 1
+
+  def reset_counts(self):
+    self.active_replicas = 0
+    self.active_claims = 0
+
   def template_spec(self, base):
     return base
 

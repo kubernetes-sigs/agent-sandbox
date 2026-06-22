@@ -70,12 +70,14 @@ class SweBenchSource:
       raise ImportError(
           "SweBenchSource requires the 'swebench' extra: "
           "pip install 'agent-sandbox-rl[swebench]'") from e
-    logger.info("Loading %s [%s]", self.dataset, self.split)
-    rows = list(load_dataset(self.dataset, split=self.split))
-    if self.offset:
-      rows = rows[self.offset:]
-    if self.limit:
-      rows = rows[:self.limit]
+    # Use HF split slicing so a small limit/offset doesn't materialize the whole
+    # split. `limit=0` (or unset) means "all".
+    split = self.split
+    if self.offset or self.limit:
+      end = self.offset + self.limit if self.limit else ""
+      split = f"{self.split}[{self.offset}:{end}]"
+    logger.info("Loading %s [%s]", self.dataset, split)
+    rows = list(load_dataset(self.dataset, split=split))
     tasks = []
     for i, r in enumerate(rows):
       meta = {"repo": r.get("repo", ""), "base_commit": r.get("base_commit", "")}

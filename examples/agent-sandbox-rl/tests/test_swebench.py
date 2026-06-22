@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import sys
 import types
 from unittest.mock import MagicMock
@@ -21,7 +22,17 @@ from agent_sandbox_rl import SWEBENCH_PROBE, SweBenchSource, swebench_probe
 
 def _install_fake_datasets(monkeypatch, rows):
   mod = types.ModuleType("datasets")
-  mod.load_dataset = lambda *a, **k: rows
+
+  def fake_load(*a, **k):
+    # Honor HF split slicing ("test[1:2]") the way the real datasets lib does.
+    m = re.search(r"\[(\d*):(\d*)\]$", k.get("split", "") or "")
+    if m:
+      s = int(m.group(1)) if m.group(1) else None
+      e = int(m.group(2)) if m.group(2) else None
+      return rows[s:e]
+    return rows
+
+  mod.load_dataset = fake_load
   monkeypatch.setitem(sys.modules, "datasets", mod)
 
 

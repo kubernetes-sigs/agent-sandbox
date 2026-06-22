@@ -270,7 +270,10 @@ def test_namespace_isolated_under_concurrency(fake_r2egym):
 
   ta = threading.Thread(target=worker, args=(rt_a, "ns-a"))
   tb = threading.Thread(target=worker, args=(rt_b, "ns-b"))
-  ta.start(); tb.start(); ta.join(); tb.join()
+  ta.start()
+  tb.start()
+  ta.join()
+  tb.join()
   assert errors == []
 
 

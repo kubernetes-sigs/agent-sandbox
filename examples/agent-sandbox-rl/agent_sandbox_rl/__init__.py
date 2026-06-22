@@ -21,7 +21,7 @@ or the managed runner (`fleet.run(process_fn, strategy, concurrency)`). Async vi
 `AsyncSandboxFleet`. A `SandboxHandle` (hostname / endpoint / exec) is the
 integration point for any RL framework.
 
-See README.md, docs/architecture.md, and plans/agent-sandbox-rl-design.md.
+See README.md, docs/architecture.md, and docs/design.md.
 """
 
 from . import constants

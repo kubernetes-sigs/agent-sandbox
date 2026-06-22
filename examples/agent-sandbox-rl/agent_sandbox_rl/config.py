@@ -21,6 +21,7 @@ Single-cluster is just one entry (or the ambient kube context).
 from __future__ import annotations
 
 import hashlib
+import re
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -113,6 +114,16 @@ class FleetConfig(BaseModel):
   def _window_positive(cls, v: int | None) -> int | None:
     if v is not None and v < 1:
       raise ValueError("window_size must be >= 1 or None (auto)")
+    return v
+
+  @field_validator("template_name_prefix")
+  @classmethod
+  def _valid_prefix(cls, v: str) -> str:
+    # Template names are `<prefix><md5[:12]>` and must be DNS-1123 subdomains.
+    if not re.match(r"^[a-z0-9][a-z0-9.-]*$", v):
+      raise ValueError(
+          "template_name_prefix must start with [a-z0-9] and contain only "
+          f"lowercase DNS-1123 chars [a-z0-9.-]; got {v!r}")
     return v
 
   @field_validator("placement")

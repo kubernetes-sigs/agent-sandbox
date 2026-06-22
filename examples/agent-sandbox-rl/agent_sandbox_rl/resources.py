@@ -41,7 +41,9 @@ class Resources:
     self.custom_api = custom_api
     self.core_api = core_api
     self.namespace = namespace
-    self.labels = dict(labels) if labels else dict(constants.DEFAULT_LABELS)
+    # Always include the management labels (custom labels add to, but cannot
+    # drop, them) so teardown's managed_selector still matches everything created.
+    self.labels = {**(labels or {}), **constants.DEFAULT_LABELS}
 
   # --- templates --------------------------------------------------------- #
   def ensure_template(self, image: str, template_name: str,
@@ -61,10 +63,16 @@ class Resources:
       if e.status != 404:
         raise
 
-    self.custom_api.create_namespaced_custom_object(
-        group=constants.GROUP, version=constants.VERSION,
-        namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
-        body=self._template_manifest(image, template_name, template))
+    try:
+      self.custom_api.create_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
+          body=self._template_manifest(image, template_name, template))
+    except client.ApiException as e:
+      if e.status == 409:        # created concurrently / between our get and create
+        logger.info("SandboxTemplate '%s' already exists (409).", template_name)
+        return False
+      raise
     logger.info("Created SandboxTemplate '%s' for %s", template_name, image)
     return True
 

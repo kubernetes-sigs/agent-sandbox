@@ -1,6 +1,7 @@
 # Design: `agent-sandbox-rl` — generic, multi-cluster batch orchestration for RL on Agent Sandbox
 
-Status: design (not yet implemented). Working doc, versioned with the example.
+Status: implemented. The original design doc, kept (versioned with the example)
+as the rationale behind the package as built.
 
 ## Context
 

@@ -134,7 +134,9 @@ class AsyncSandboxFleet:
 
   # --- parallel processing + strategies ---------------------------------- #
   async def _call(self, process_fn, task, handle):
-    if inspect.iscoroutinefunction(process_fn):
+    # Covers plain coroutine functions and callable objects with `async __call__`.
+    if inspect.iscoroutinefunction(process_fn) or \
+        inspect.iscoroutinefunction(getattr(process_fn, "__call__", None)):
       return await process_fn(task, handle)
     return await asyncio.to_thread(process_fn, task, handle)
 
@@ -205,8 +207,8 @@ class AsyncSandboxFleet:
       except Exception:  # noqa: BLE001 — environment is best-effort
         logger.debug("could not collect environment", exc_info=True)
       if strategy == "naive":
-        await self.setup()
         try:
+          await self.setup()
           results = await self._process_parallel(self.tasks, process_fn, conc)
         finally:
           await self.teardown()

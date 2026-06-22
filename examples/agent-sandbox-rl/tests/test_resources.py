@@ -149,3 +149,20 @@ def test_wait_for_pool_ready_raises_on_forbidden(monkeypatch):
   monkeypatch.setattr("agent_sandbox_rl.resources.watch.Watch", lambda: _ForbiddenWatch())
   with pytest.raises(client.ApiException):
     r.wait_for_pool_ready("pool-x", 1, timeout=5)
+
+
+def test_labels_always_include_management_label():
+  # Custom labels must not drop app=agent-sandbox-rl (teardown selects on it).
+  r = Resources(MagicMock(), MagicMock(), "ns", labels={"team": "rl"})
+  assert r.labels["team"] == "rl"
+  assert r.labels[constants.MANAGED_BY_LABEL] == constants.MANAGED_BY_VALUE
+  # even if a custom label tries to override it
+  r2 = Resources(MagicMock(), MagicMock(), "ns", labels={"app": "evil"})
+  assert r2.labels["app"] == constants.MANAGED_BY_VALUE
+
+
+def test_ensure_template_swallows_409():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  assert r.ensure_template(IMG, TNAME, TemplateSpec()) is False   # no raise

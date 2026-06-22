@@ -190,8 +190,14 @@ def _build_classes():
             resp.close()
             return "".join(chunks), resp.returncode
 
-          with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+          # Don't use a `with` block: on result() timeout its __exit__ would
+          # shutdown(wait=True) and block on the hung exec thread. Shut down
+          # without waiting instead.
+          ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+          try:
             output, exit_code = ex.submit(execute_command).result(timeout=timeout + 5)
+          finally:
+            ex.shutdown(wait=False, cancel_futures=True)
 
           if exit_code is None:
             self.logger.error("Kubernetes exec: exit code not found.")

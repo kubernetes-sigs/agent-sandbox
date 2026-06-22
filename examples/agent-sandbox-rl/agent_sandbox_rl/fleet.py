@@ -218,7 +218,7 @@ class SandboxFleet:
         c.resources.ensure_template(
             e.image, e.template, c.template_spec(self.config.template))
         c.resources.create_warmpool(e.pool, e.template, e.replicas)
-      c.active_replicas += e.replicas
+      c.reserve_replicas(e.replicas)
       self._obs.warm_add(e.cluster, e.replicas)
       if wait:
         with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):
@@ -238,8 +238,8 @@ class SandboxFleet:
       c.resources.ensure_template(
           image, entry.template, c.template_spec(self.config.template))
       c.resources.create_warmpool(entry.pool, entry.template, reps)
+    c.reserve_replicas(reps)
     with self._lock:
-      c.active_replicas += reps
       self._warmed[image] = reps
     self._obs.warm_add(entry.cluster, reps)
     if wait:
@@ -257,7 +257,7 @@ class SandboxFleet:
     c.resources.delete_template(entry.template)
     with self._lock:
       reps = self._warmed.pop(image, entry.replicas)
-      c.active_replicas = max(0, c.active_replicas - reps)
+    c.release_replicas(reps)
     self._obs.warm_remove(entry.cluster, reps)
 
   def prepull(self, wait: bool = True) -> None:
@@ -303,8 +303,7 @@ class SandboxFleet:
     else:
       cluster = self.placement.select(task.image, self.registry)
       pool = self._ensure_pool(cluster, task.image, 1)
-      with self._lock:
-        cluster.active_replicas += 1
+      cluster.reserve_replicas(1)
 
     fam = repo_family(task)
     sandbox = None
@@ -327,8 +326,7 @@ class SandboxFleet:
           logger.warning("failed to terminate sandbox after acquire error",
                          exc_info=True)
       if on_demand:
-        with self._lock:
-          cluster.active_replicas = max(0, cluster.active_replicas - 1)
+        cluster.release_replicas(1)
       self._obs.claim(cluster.name, "error")
       raise
 
@@ -336,8 +334,8 @@ class SandboxFleet:
         task=task, cluster_name=cluster.name, claim_name=sandbox.claim_name,
         sandbox_id=sandbox.sandbox_id, pod_name=pod, hostname=sandbox.sandbox_id,
         pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster)
+    cluster.reserve_claim()
     with self._lock:
-      cluster.active_claims += 1
       self._handles.append(handle)
     self._obs.claim(cluster.name, "ok")
     return handle
@@ -362,8 +360,7 @@ class SandboxFleet:
         return
       self._handles.remove(handle)
       c = self.registry.get(handle.cluster_name)
-      if c.active_claims > 0:
-        c.active_claims -= 1
+    c.release_claim()
     with self._obs.phase("release", cluster=handle.cluster_name):
       handle.release()
 
@@ -389,8 +386,7 @@ class SandboxFleet:
         c.resources.delete_warmpool(pool)
       for tmpl in c.resources.list_templates(label_selector=sel):
         c.resources.delete_template(tmpl)
-      c.active_replicas = 0
-      c.active_claims = 0
+      c.reset_counts()
       if delete_namespace:
         try:
           c.core_api.delete_namespace(c.namespace)

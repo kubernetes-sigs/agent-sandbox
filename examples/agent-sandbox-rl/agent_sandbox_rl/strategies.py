@@ -82,8 +82,8 @@ def process_parallel(fleet, tasks, process_fn, concurrency):
 
 def run_naive(fleet, process_fn, concurrency):
   """Pre-warm every image up front, process all tasks in parallel, tear down."""
-  fleet.setup()
   try:
+    fleet.setup()              # inside try: a setup failure still triggers teardown
     return process_parallel(fleet, fleet.tasks, process_fn, concurrency)
   finally:
     fleet.teardown()

@@ -67,7 +67,7 @@ class JsonlSource:
     path: Path to a ``.jsonl`` file.
     image_field: Field holding the container image.
     id_field: Field holding the task id (falls back to the row index).
-    limit: Optional cap on the number of tasks.
+    limit: Optional cap on the number of tasks; ``None`` or ``0`` means all.
   """
 
   def __init__(self, path: str, *, image_field: str = "image",

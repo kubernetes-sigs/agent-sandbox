@@ -22,6 +22,7 @@ SDK's `K8sHelper` / `SandboxClient` (built lazily). No SDK fork required.
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 
 from kubernetes import client
@@ -57,7 +58,9 @@ class Cluster:
     self._k8s_helper = None
     self._sandbox_client = None
     self.tracer_config = None                 # optional SDK SandboxTracerConfig
-    # Placement / capacity bookkeeping (used by later phases).
+    # Placement / capacity bookkeeping. Mutated from parallel claim workers, so
+    # guard with a per-cluster lock and only touch via the methods below.
+    self._count_lock = threading.Lock()
     self.active_replicas = 0
     self.active_claims = 0
 
@@ -99,9 +102,33 @@ class Cluster:
     return self.config.max_replicas
 
   def has_capacity(self, additional: int) -> bool:
-    if self.config.max_replicas is None:
-      return True
-    return self.active_replicas + additional <= self.config.max_replicas
+    with self._count_lock:
+      if self.config.max_replicas is None:
+        return True
+      return self.active_replicas + additional <= self.config.max_replicas
+
+  # --- atomic capacity bookkeeping (thread-safe) ------------------------- #
+  def reserve_replicas(self, n: int) -> None:
+    with self._count_lock:
+      self.active_replicas += n
+
+  def release_replicas(self, n: int) -> None:
+    with self._count_lock:
+      self.active_replicas = max(0, self.active_replicas - n)
+
+  def reserve_claim(self) -> None:
+    with self._count_lock:
+      self.active_claims += 1
+
+  def release_claim(self) -> None:
+    with self._count_lock:
+      if self.active_claims > 0:
+        self.active_claims -= 1
+
+  def reset_counts(self) -> None:
+    with self._count_lock:
+      self.active_replicas = 0
+      self.active_claims = 0
 
   def __repr__(self) -> str:
     return (f"Cluster(name={self.name!r}, namespace={self.namespace!r}, "

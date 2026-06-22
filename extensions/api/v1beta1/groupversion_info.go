@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package v1beta1 contains API Schema definitions for the agents v1beta1 API group.
+// Package v1beta1 contains API Schema definitions for the extensions.agents v1beta1 API group.
 // +kubebuilder:object:generate=true
 // +groupName=extensions.agents.x-k8s.io
 package v1beta1

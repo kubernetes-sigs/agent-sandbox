@@ -51,6 +51,12 @@ helm upgrade agent-sandbox ./helm/ \
 > kubectl apply -f helm/crds/
 > ```
 
+### v1alpha1 → v1beta1 storage migration
+
+Upgrades to chart versions that move CRDs from `v1alpha1` to `v1beta1` require a manual storage migration using the `dev/tools/migrate.sh` script.
+
+See [`docs/api-migration-guide.md`](../docs/api-migration-guide.md) for full details, sequence of steps, and operational guidelines.
+
 ## Uninstallation
 
 ```bash
@@ -101,3 +107,4 @@ The following table lists the configurable parameters and their defaults.
 | `containerSecurityContext` | Container `securityContext` for the controller; only rendered when set | `null` |
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
 | `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
+| `webhookServiceName` | Name of the conversion webhook Service | `agent-sandbox-webhook-service` |

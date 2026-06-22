@@ -11,7 +11,7 @@ description: >
 - A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. See the [Filesystem prerequisites]({{< ref "/docs/filesystem" >}}#prerequisites) for setup instructions.
+- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See the [Filesystem prerequisites]({{< ref "/docs/filesystem" >}}#prerequisites) for setup instructions.
 
 ## Write a File
 
@@ -21,7 +21,7 @@ Use `sandbox.files.write()` to create or overwrite a file inside the sandbox. Th
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # Write a text file (string content is automatically UTF-8 encoded)
 sandbox.files.write("/home/user/greeting.txt", "Hello, world!")
@@ -48,7 +48,7 @@ Use `sandbox.files.read()` to download a file's contents from the sandbox. The m
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # Read a text file
 content = sandbox.files.read("/home/user/greeting.txt")
@@ -78,7 +78,7 @@ A common pattern is writing a script to the sandbox and then executing it:
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 
 # Write a Python script
 sandbox.files.write("/home/user/run.py", """
@@ -110,7 +110,7 @@ async def main():
     )
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
-            template="python-sandbox-template", namespace="default"
+            warmpool="python-sandbox-pool", namespace="default"
         )
         await sandbox.files.write("/tmp/hello.txt", "Hello async!")
         content = await sandbox.files.read("/tmp/hello.txt")

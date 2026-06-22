@@ -19,7 +19,7 @@ This guide requires a GKE Autopilot cluster with a gVisor node pool. See [GKE Cl
 - Google Cloud credentials configured in your environment.
 - The [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
-- A `SandboxTemplate` named `simple-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
+- A `SandboxWarmPool` named `simple-sandbox-pool` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
 
 ### Suspend & Resume with Snapshots
@@ -30,7 +30,7 @@ Unlike automatic pausing, snapshots give you granular control over when state is
 
 The following example demonstrates creating a sandbox, modifying its filesystem, taking a snapshot, and suspending/resuming it to restore the state.
 
-> Note: this example uses `simple-sandbox-template`, which you should create in your GKE cluster first. The associated resources can be found [here](https://github.com/volatilemolotov/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source).
+> Note: this example uses `simple-sandbox-pool`, which you should create in your GKE cluster first (along with its backing `simple-sandbox-template`). See the [snapshots example source folder](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source) for the matching `SandboxTemplate` manifest.
 
 > [!NOTE]
 > A sandbox can only be restored from its own previous snapshots (via the `suspend()` and `resume()` lifecycle).
@@ -49,7 +49,7 @@ def sleep():
 client = PodSnapshotSandboxClient()
 
 # 2. Create the sandbox
-sandbox = client.create_sandbox("simple-sandbox-template")
+sandbox = client.create_sandbox("simple-sandbox-pool")
 print(sandbox)
 
 # 3. Run a command that alters the filesystem (e.g., Playwright caching data)
@@ -66,13 +66,13 @@ assert snapshot_response is not None
 print(f"Snapshot saved with ID: {snapshot_response.snapshot_uid}")
 
 # 5. Suspend the Sandbox
-# This takes a snapshot and scales the container replicas to 0.
+# This takes a snapshot and sets the Sandbox's operatingMode to Suspended.
 suspend_result = sandbox.suspend(snapshot_before_suspend=True)
 assert suspend_result.success
 sleep()
 
 # 6. Later, Resume the Sandbox
-# This scales up the container and automatically restores the latest state.
+# This sets the Sandbox's operatingMode back to Running and automatically restores the latest state.
 resume_result = sandbox.resume()
 assert resume_result.success
 assert resume_result.restored_from_snapshot

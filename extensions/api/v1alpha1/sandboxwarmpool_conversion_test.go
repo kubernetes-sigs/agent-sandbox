@@ -120,3 +120,39 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 		t.Errorf("roundtrip Selector mismatch: expected %q, got %q", src.Status.Selector, roundTrip.Status.Selector)
 	}
 }
+
+// TestSandboxWarmPoolConversion_NilUpdateStrategy exercises the nil branch of
+// convertWarmPoolSpecTo/convertWarmPoolSpecFrom, ensuring a nil UpdateStrategy
+// is preserved across a full round-trip conversion.
+func TestSandboxWarmPoolConversion_NilUpdateStrategy(t *testing.T) {
+	src := &SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-warmpool",
+			Namespace: "default",
+		},
+		Spec: SandboxWarmPoolSpec{
+			Replicas:    1,
+			TemplateRef: SandboxTemplateRef{Name: "my-template"},
+			// UpdateStrategy intentionally nil to exercise the nil branch.
+			UpdateStrategy: nil,
+		},
+	}
+
+	// ConvertTo (v1alpha1 -> v1beta1) must preserve nil.
+	dst := &v1beta1.SandboxWarmPool{}
+	if err := src.ConvertTo(dst); err != nil {
+		t.Fatalf("failed to convert to v1beta1: %v", err)
+	}
+	if dst.Spec.UpdateStrategy != nil {
+		t.Errorf("expected nil UpdateStrategy after ConvertTo, got %v", dst.Spec.UpdateStrategy)
+	}
+
+	// ConvertFrom round-trip (v1beta1 -> v1alpha1) must preserve nil.
+	roundTrip := &SandboxWarmPool{}
+	if err := roundTrip.ConvertFrom(dst); err != nil {
+		t.Fatalf("failed to convert back to v1alpha1: %v", err)
+	}
+	if roundTrip.Spec.UpdateStrategy != nil {
+		t.Errorf("expected nil UpdateStrategy after round-trip, got %v", roundTrip.Spec.UpdateStrategy)
+	}
+}

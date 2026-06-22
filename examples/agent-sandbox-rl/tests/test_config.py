@@ -72,9 +72,7 @@ def test_template_spec_overrides():
 
 
 def test_template_name_prefix_rejects_invalid():
-  import pytest
-  from agent_sandbox_rl import FleetConfig
-  with pytest.raises(Exception):           # pydantic ValidationError
+  with pytest.raises(ValueError):          # pydantic ValidationError subclasses ValueError
     FleetConfig(template_name_prefix="Bad_Prefix!")
   # valid prefix is accepted
   assert FleetConfig(template_name_prefix="r2e-img-").template_name_prefix == "r2e-img-"

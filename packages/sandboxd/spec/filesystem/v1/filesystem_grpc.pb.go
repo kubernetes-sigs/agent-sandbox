@@ -33,22 +33,22 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	FilesystemService_WriteFile_FullMethodName = "/filesystem.v1.FilesystemService/WriteFile"
-	FilesystemService_ReadFile_FullMethodName  = "/filesystem.v1.FilesystemService/ReadFile"
-	FilesystemService_ListFiles_FullMethodName = "/filesystem.v1.FilesystemService/ListFiles"
-	FilesystemService_StatFile_FullMethodName  = "/filesystem.v1.FilesystemService/StatFile"
-	FilesystemService_MakeDir_FullMethodName   = "/filesystem.v1.FilesystemService/MakeDir"
-	FilesystemService_Remove_FullMethodName    = "/filesystem.v1.FilesystemService/Remove"
+	FilesystemService_Write_FullMethodName   = "/filesystem.v1.FilesystemService/Write"
+	FilesystemService_Read_FullMethodName    = "/filesystem.v1.FilesystemService/Read"
+	FilesystemService_List_FullMethodName    = "/filesystem.v1.FilesystemService/List"
+	FilesystemService_Stat_FullMethodName    = "/filesystem.v1.FilesystemService/Stat"
+	FilesystemService_MakeDir_FullMethodName = "/filesystem.v1.FilesystemService/MakeDir"
+	FilesystemService_Remove_FullMethodName  = "/filesystem.v1.FilesystemService/Remove"
 )
 
 // FilesystemServiceClient is the client API for FilesystemService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type FilesystemServiceClient interface {
-	WriteFile(ctx context.Context, opts ...grpc.CallOption) (FilesystemService_WriteFileClient, error)
-	ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (FilesystemService_ReadFileClient, error)
-	ListFiles(ctx context.Context, in *ListFilesRequest, opts ...grpc.CallOption) (*ListFilesResponse, error)
-	StatFile(ctx context.Context, in *StatFileRequest, opts ...grpc.CallOption) (*StatFileResponse, error)
+	Write(ctx context.Context, opts ...grpc.CallOption) (FilesystemService_WriteClient, error)
+	Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (FilesystemService_ReadClient, error)
+	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
+	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error)
 	MakeDir(ctx context.Context, in *MakeDirRequest, opts ...grpc.CallOption) (*MakeDirResponse, error)
 	Remove(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error)
 }
@@ -61,46 +61,46 @@ func NewFilesystemServiceClient(cc grpc.ClientConnInterface) FilesystemServiceCl
 	return &filesystemServiceClient{cc}
 }
 
-func (c *filesystemServiceClient) WriteFile(ctx context.Context, opts ...grpc.CallOption) (FilesystemService_WriteFileClient, error) {
-	stream, err := c.cc.NewStream(ctx, &FilesystemService_ServiceDesc.Streams[0], FilesystemService_WriteFile_FullMethodName, opts...)
+func (c *filesystemServiceClient) Write(ctx context.Context, opts ...grpc.CallOption) (FilesystemService_WriteClient, error) {
+	stream, err := c.cc.NewStream(ctx, &FilesystemService_ServiceDesc.Streams[0], FilesystemService_Write_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &filesystemServiceWriteFileClient{stream}
+	x := &filesystemServiceWriteClient{stream}
 	return x, nil
 }
 
-type FilesystemService_WriteFileClient interface {
-	Send(*WriteFileRequest) error
-	CloseAndRecv() (*WriteFileResponse, error)
+type FilesystemService_WriteClient interface {
+	Send(*WriteRequest) error
+	CloseAndRecv() (*WriteResponse, error)
 	grpc.ClientStream
 }
 
-type filesystemServiceWriteFileClient struct {
+type filesystemServiceWriteClient struct {
 	grpc.ClientStream
 }
 
-func (x *filesystemServiceWriteFileClient) Send(m *WriteFileRequest) error {
+func (x *filesystemServiceWriteClient) Send(m *WriteRequest) error {
 	return x.ClientStream.SendMsg(m)
 }
 
-func (x *filesystemServiceWriteFileClient) CloseAndRecv() (*WriteFileResponse, error) {
+func (x *filesystemServiceWriteClient) CloseAndRecv() (*WriteResponse, error) {
 	if err := x.ClientStream.CloseSend(); err != nil {
 		return nil, err
 	}
-	m := new(WriteFileResponse)
+	m := new(WriteResponse)
 	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
-func (c *filesystemServiceClient) ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (FilesystemService_ReadFileClient, error) {
-	stream, err := c.cc.NewStream(ctx, &FilesystemService_ServiceDesc.Streams[1], FilesystemService_ReadFile_FullMethodName, opts...)
+func (c *filesystemServiceClient) Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (FilesystemService_ReadClient, error) {
+	stream, err := c.cc.NewStream(ctx, &FilesystemService_ServiceDesc.Streams[1], FilesystemService_Read_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &filesystemServiceReadFileClient{stream}
+	x := &filesystemServiceReadClient{stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -110,35 +110,35 @@ func (c *filesystemServiceClient) ReadFile(ctx context.Context, in *ReadFileRequ
 	return x, nil
 }
 
-type FilesystemService_ReadFileClient interface {
-	Recv() (*ReadFileResponse, error)
+type FilesystemService_ReadClient interface {
+	Recv() (*ReadResponse, error)
 	grpc.ClientStream
 }
 
-type filesystemServiceReadFileClient struct {
+type filesystemServiceReadClient struct {
 	grpc.ClientStream
 }
 
-func (x *filesystemServiceReadFileClient) Recv() (*ReadFileResponse, error) {
-	m := new(ReadFileResponse)
+func (x *filesystemServiceReadClient) Recv() (*ReadResponse, error) {
+	m := new(ReadResponse)
 	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
-func (c *filesystemServiceClient) ListFiles(ctx context.Context, in *ListFilesRequest, opts ...grpc.CallOption) (*ListFilesResponse, error) {
-	out := new(ListFilesResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_ListFiles_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error) {
+	out := new(ListResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_List_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *filesystemServiceClient) StatFile(ctx context.Context, in *StatFileRequest, opts ...grpc.CallOption) (*StatFileResponse, error) {
-	out := new(StatFileResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_StatFile_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error) {
+	out := new(StatResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_Stat_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +167,10 @@ func (c *filesystemServiceClient) Remove(ctx context.Context, in *RemoveRequest,
 // All implementations must embed UnimplementedFilesystemServiceServer
 // for forward compatibility
 type FilesystemServiceServer interface {
-	WriteFile(FilesystemService_WriteFileServer) error
-	ReadFile(*ReadFileRequest, FilesystemService_ReadFileServer) error
-	ListFiles(context.Context, *ListFilesRequest) (*ListFilesResponse, error)
-	StatFile(context.Context, *StatFileRequest) (*StatFileResponse, error)
+	Write(FilesystemService_WriteServer) error
+	Read(*ReadRequest, FilesystemService_ReadServer) error
+	List(context.Context, *ListRequest) (*ListResponse, error)
+	Stat(context.Context, *StatRequest) (*StatResponse, error)
 	MakeDir(context.Context, *MakeDirRequest) (*MakeDirResponse, error)
 	Remove(context.Context, *RemoveRequest) (*RemoveResponse, error)
 	mustEmbedUnimplementedFilesystemServiceServer()
@@ -180,17 +180,17 @@ type FilesystemServiceServer interface {
 type UnimplementedFilesystemServiceServer struct {
 }
 
-func (UnimplementedFilesystemServiceServer) WriteFile(FilesystemService_WriteFileServer) error {
-	return status.Errorf(codes.Unimplemented, "method WriteFile not implemented")
+func (UnimplementedFilesystemServiceServer) Write(FilesystemService_WriteServer) error {
+	return status.Errorf(codes.Unimplemented, "method Write not implemented")
 }
-func (UnimplementedFilesystemServiceServer) ReadFile(*ReadFileRequest, FilesystemService_ReadFileServer) error {
-	return status.Errorf(codes.Unimplemented, "method ReadFile not implemented")
+func (UnimplementedFilesystemServiceServer) Read(*ReadRequest, FilesystemService_ReadServer) error {
+	return status.Errorf(codes.Unimplemented, "method Read not implemented")
 }
-func (UnimplementedFilesystemServiceServer) ListFiles(context.Context, *ListFilesRequest) (*ListFilesResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListFiles not implemented")
+func (UnimplementedFilesystemServiceServer) List(context.Context, *ListRequest) (*ListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method List not implemented")
 }
-func (UnimplementedFilesystemServiceServer) StatFile(context.Context, *StatFileRequest) (*StatFileResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method StatFile not implemented")
+func (UnimplementedFilesystemServiceServer) Stat(context.Context, *StatRequest) (*StatResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Stat not implemented")
 }
 func (UnimplementedFilesystemServiceServer) MakeDir(context.Context, *MakeDirRequest) (*MakeDirResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MakeDir not implemented")
@@ -211,85 +211,85 @@ func RegisterFilesystemServiceServer(s grpc.ServiceRegistrar, srv FilesystemServ
 	s.RegisterService(&FilesystemService_ServiceDesc, srv)
 }
 
-func _FilesystemService_WriteFile_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(FilesystemServiceServer).WriteFile(&filesystemServiceWriteFileServer{stream})
+func _FilesystemService_Write_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(FilesystemServiceServer).Write(&filesystemServiceWriteServer{stream})
 }
 
-type FilesystemService_WriteFileServer interface {
-	SendAndClose(*WriteFileResponse) error
-	Recv() (*WriteFileRequest, error)
+type FilesystemService_WriteServer interface {
+	SendAndClose(*WriteResponse) error
+	Recv() (*WriteRequest, error)
 	grpc.ServerStream
 }
 
-type filesystemServiceWriteFileServer struct {
+type filesystemServiceWriteServer struct {
 	grpc.ServerStream
 }
 
-func (x *filesystemServiceWriteFileServer) SendAndClose(m *WriteFileResponse) error {
+func (x *filesystemServiceWriteServer) SendAndClose(m *WriteResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
-func (x *filesystemServiceWriteFileServer) Recv() (*WriteFileRequest, error) {
-	m := new(WriteFileRequest)
+func (x *filesystemServiceWriteServer) Recv() (*WriteRequest, error) {
+	m := new(WriteRequest)
 	if err := x.ServerStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
-func _FilesystemService_ReadFile_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(ReadFileRequest)
+func _FilesystemService_Read_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReadRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(FilesystemServiceServer).ReadFile(m, &filesystemServiceReadFileServer{stream})
+	return srv.(FilesystemServiceServer).Read(m, &filesystemServiceReadServer{stream})
 }
 
-type FilesystemService_ReadFileServer interface {
-	Send(*ReadFileResponse) error
+type FilesystemService_ReadServer interface {
+	Send(*ReadResponse) error
 	grpc.ServerStream
 }
 
-type filesystemServiceReadFileServer struct {
+type filesystemServiceReadServer struct {
 	grpc.ServerStream
 }
 
-func (x *filesystemServiceReadFileServer) Send(m *ReadFileResponse) error {
+func (x *filesystemServiceReadServer) Send(m *ReadResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
-func _FilesystemService_ListFiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListFilesRequest)
+func _FilesystemService_List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).ListFiles(ctx, in)
+		return srv.(FilesystemServiceServer).List(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_ListFiles_FullMethodName,
+		FullMethod: FilesystemService_List_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).ListFiles(ctx, req.(*ListFilesRequest))
+		return srv.(FilesystemServiceServer).List(ctx, req.(*ListRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FilesystemService_StatFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(StatFileRequest)
+func _FilesystemService_Stat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).StatFile(ctx, in)
+		return srv.(FilesystemServiceServer).Stat(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_StatFile_FullMethodName,
+		FullMethod: FilesystemService_Stat_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).StatFile(ctx, req.(*StatFileRequest))
+		return srv.(FilesystemServiceServer).Stat(ctx, req.(*StatRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -338,12 +338,12 @@ var FilesystemService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*FilesystemServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "ListFiles",
-			Handler:    _FilesystemService_ListFiles_Handler,
+			MethodName: "List",
+			Handler:    _FilesystemService_List_Handler,
 		},
 		{
-			MethodName: "StatFile",
-			Handler:    _FilesystemService_StatFile_Handler,
+			MethodName: "Stat",
+			Handler:    _FilesystemService_Stat_Handler,
 		},
 		{
 			MethodName: "MakeDir",
@@ -356,13 +356,13 @@ var FilesystemService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "WriteFile",
-			Handler:       _FilesystemService_WriteFile_Handler,
+			StreamName:    "Write",
+			Handler:       _FilesystemService_Write_Handler,
 			ClientStreams: true,
 		},
 		{
-			StreamName:    "ReadFile",
-			Handler:       _FilesystemService_ReadFile_Handler,
+			StreamName:    "Read",
+			Handler:       _FilesystemService_Read_Handler,
 			ServerStreams: true,
 		},
 	},

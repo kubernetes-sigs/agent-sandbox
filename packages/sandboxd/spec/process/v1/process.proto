@@ -39,7 +39,7 @@ message StartRequest {
   optional PTY pty = 2;
 }
 
-message ProcessInitEvent {
+message InitEvent {
   int32 process_id = 1;
 }
 
@@ -49,7 +49,7 @@ message ExitEvent {
 
 message StartResponse {
   oneof event {
-    ProcessInitEvent init = 1;
+    InitEvent init = 1;
     bytes stdout = 2;
     bytes stderr = 3;
     ExitEvent exit = 4;

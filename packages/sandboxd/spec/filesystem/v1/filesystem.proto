@@ -16,10 +16,10 @@ enum FileType {
 }
 
 service FilesystemService {
-  rpc WriteFile(stream WriteFileRequest) returns (WriteFileResponse);
-  rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse);
-  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
-  rpc StatFile(StatFileRequest) returns (StatFileResponse);
+  rpc Write(stream WriteRequest) returns (WriteResponse);
+  rpc Read(ReadRequest) returns (stream ReadResponse);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
   rpc MakeDir(MakeDirRequest) returns (MakeDirResponse);
   rpc Remove(RemoveRequest) returns (RemoveResponse);
 }
@@ -29,26 +29,26 @@ message FileMetadata {
   optional uint32 mode = 2;
 }
 
-message WriteFileRequest {
+message WriteRequest {
   oneof payload {
     FileMetadata metadata = 1;
     bytes chunk = 2;
   }
 }
 
-message ReadFileRequest {
+message ReadRequest {
   string path = 1;
 }
 
-message ReadFileResponse {
+message ReadResponse {
   bytes chunk = 1;
 }
 
-message ListFilesRequest {
+message ListRequest {
   string path = 1;
 }
 
-message ListFilesResponse {
+message ListResponse {
   repeated FileEntry entries = 1;
 }
 
@@ -59,11 +59,11 @@ message FileEntry {
   google.protobuf.Timestamp mod_time = 4;
 }
 
-message StatFileRequest {
+message StatRequest {
   string path = 1;
 }
 
-message StatFileResponse {
+message StatResponse {
   string path = 1;
   FileType type = 2;
   int64 size = 3;
@@ -79,7 +79,7 @@ message RemoveRequest {
   bool recursive = 2;
 }
 
-message WriteFileResponse {
+message WriteResponse {
 }
 
 message MakeDirResponse {
@@ -87,4 +87,3 @@ message MakeDirResponse {
 
 message RemoveResponse {
 }
-

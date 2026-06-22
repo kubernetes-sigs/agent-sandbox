@@ -73,9 +73,10 @@ async def test_async_sliding_and_none(make_cluster):
   from agent_sandbox_rl import ClusterRegistry
   c = make_cluster("solo")
   f = _fleet(ClusterRegistry([c]), window_size=1, max_concurrent=2)
-  f.load_tasks(["i1", "i2", "i3"])
+  # interleaved image order so a grouped-by-image regression would reorder results
+  f.load_tasks(["iB", "iA", "iB"])
   res = await f.run(lambda t, h: t.image, strategy="sliding")
-  assert sorted(res) == ["i1", "i2", "i3"]
+  assert res == ["iB", "iA", "iB"]            # exact original task order
   assert f.handles() == []
 
   c2 = make_cluster("solo2")

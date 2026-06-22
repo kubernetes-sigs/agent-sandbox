@@ -174,10 +174,13 @@ class AsyncSandboxFleet:
     await self.preflight()
     await self.plan()
     images = list(self.image_counts().keys())
-    by_image: dict[str, list[Task]] = {}
-    for t in self.tasks:
-      by_image.setdefault(t.image, []).append(t)
-    results = []
+    by_image: dict[str, list] = {}
+    for i, t in enumerate(self.tasks):
+      by_image.setdefault(t.image, []).append((i, t))   # keep original index
+    # Write results back at each task's original index so the returned list
+    # matches self.tasks order (the "one result per task" contract), matching
+    # the sync sliding implementation.
+    results = [None] * len(self.tasks)
     try:
       for start in range(0, len(images), window):
         batch = images[start:start + window]
@@ -185,8 +188,11 @@ class AsyncSandboxFleet:
             asyncio.to_thread(self._fleet.warm_image, img,
                               replicas_override=replicas_override, wait=True)
             for img in batch))
-        batch_tasks = [t for img in batch for t in by_image[img]]
-        results.extend(await self._process_parallel(batch_tasks, process_fn, concurrency))
+        batch_pairs = [(i, t) for img in batch for (i, t) in by_image[img]]
+        batch_tasks = [t for _i, t in batch_pairs]
+        batch_results = await self._process_parallel(batch_tasks, process_fn, concurrency)
+        for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
+          results[i] = r
         await asyncio.gather(*(
             asyncio.to_thread(self._fleet.unwarm_image, img) for img in batch))
     finally:

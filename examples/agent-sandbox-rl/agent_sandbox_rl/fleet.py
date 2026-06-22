@@ -178,11 +178,20 @@ class SandboxFleet:
     for image, c in assigned.items():
       cluster_totals[c.name] += counts[image]
 
+    # Split the global concurrency budget across the clusters in use, by weight,
+    # so the total warm footprint stays ~max_concurrent rather than
+    # max_concurrent x n_clusters. (Single cluster → full budget, unchanged.)
+    used = [self.registry.get(n) for n in cluster_totals]
+    total_weight = sum(c.config.weight for c in used) or 1.0
+    cluster_budget = {
+        c.name: max(1, round(self.config.max_concurrent * c.config.weight / total_weight))
+        for c in used}
+
     entries: list[PlanEntry] = []
     for image, c in assigned.items():
       replicas = sizing.compute_replicas(
           counts[image], cluster_totals[c.name],
-          self.config.max_concurrent, self.config.max_warmpool_size)
+          cluster_budget[c.name], self.config.max_warmpool_size)
       template = self.config.template_name(image)
       entries.append(PlanEntry(
           cluster=c.name, image=image, template=template,

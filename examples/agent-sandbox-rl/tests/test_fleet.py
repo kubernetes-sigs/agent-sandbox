@@ -182,3 +182,15 @@ def test_start_warmpools_raises_on_pool_timeout(make_cluster):
   f.plan()
   with pytest.raises(FleetError):
     f.start_warmpools(wait=True)
+
+
+def test_plan_splits_budget_across_clusters(two_cluster_registry):
+  # Global max_concurrent must be split across clusters, not applied per-cluster
+  # (else the warm footprint would be max_concurrent x n_clusters).
+  f = _fleet(two_cluster_registry, placement="round-robin",
+             max_concurrent=8, max_warmpool_size=16)
+  f.load_tasks(["imgA"] * 10 + ["imgB"] * 10)   # round-robin → one image per cluster
+  plan = f.plan()
+  reps = {e.image: e.replicas for e in plan.entries}
+  assert reps == {"imgA": 4, "imgB": 4}         # 8 budget / 2 clusters = 4 each
+  assert plan.total_replicas == 8               # not 16

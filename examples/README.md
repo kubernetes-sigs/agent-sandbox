@@ -17,5 +17,6 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**openclaw-sandbox**](./openclaw-sandbox): An example of running OpenClaw (formerly Moltbot) inside the Agent Sandbox.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
+- [**rl-sandbox-scripts**](./rl-sandbox-scripts): Script-based (Python + bash) prototype for running SWE-bench warm-pool RL/eval on Agent Sandbox — strategies, sizing, pre-pull, and an end-to-end benchmark harness.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.

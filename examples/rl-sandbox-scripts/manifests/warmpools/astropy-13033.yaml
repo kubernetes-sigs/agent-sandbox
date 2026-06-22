@@ -1,0 +1,39 @@
+# SandboxTemplate + SandboxWarmPool for one SWE-bench task image.
+# Apply the whole `warmpools/` directory to pre-warm several images at once
+# (the "naive" strategy via pure kubectl).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: r2e-img-astropy-13033
+  namespace: rl-tunix-swebench
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: r2e-img-astropy-13033
+    spec:
+      # runtimeClassName: gvisor          # optional, requires a gVisor node pool
+      # nodeSelector:                      # optional
+      #   cloud.google.com/gke-nodepool: standard-pool
+      # imagePullSecrets:                 # optional, for Docker Hub rate limits
+      # - name: dockerhub-pro
+      containers:
+      - name: agent-runtime
+        image: slimshetty/swebench-verified:sweb.eval.x86_64.astropy__astropy-13033
+        command: ["sleep", "infinity"]
+        stdin: true
+        tty: true
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: pool-r2e-img-astropy-13033
+  namespace: rl-tunix-swebench
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: r2e-img-astropy-13033

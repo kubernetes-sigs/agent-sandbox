@@ -1,0 +1,32 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: {{ template_name }}
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        # Required. This is how the SandboxClaim knows which template to use.
+        sandbox: {{ template_name }}
+    spec:
+      runtimeClassName: gvisor
+      restartPolicy: Never
+      nodeSelector:
+        {{ nodeSelector_key }}: {{ nodeSelector_val }}
+      tolerations:
+      - key: "node.kubernetes.io/disk-pressure"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 10800
+      containers:
+      - name: agent-runtime
+        image: "{{ image_name }}"
+        command: {{ command }}
+        args: {{ args }}
+        stdin: true
+        tty: true
+        env: {{ env | default([]) | tojson }}
+        resources:
+          requests:
+            cpu: "1"
+            memory: "1Gi"

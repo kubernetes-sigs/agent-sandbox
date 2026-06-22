@@ -141,6 +141,7 @@ type SandboxTemplateSpec struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
+// +kubebuilder:deprecatedversion:warning="extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate is deprecated; use extensions.agents.x-k8s.io/v1beta1 SandboxTemplate instead"
 // SandboxTemplate is the Schema for the sandbox template API.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`

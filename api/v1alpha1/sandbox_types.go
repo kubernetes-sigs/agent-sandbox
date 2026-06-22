@@ -226,6 +226,7 @@ type SandboxStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
+// +kubebuilder:deprecatedversion:warning="agents.x-k8s.io/v1alpha1 Sandbox is deprecated; use agents.x-k8s.io/v1beta1 Sandbox instead"
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

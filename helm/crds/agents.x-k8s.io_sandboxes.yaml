@@ -4016,7 +4016,10 @@ spec:
     storage: true
     subresources:
       status: {}
-  - name: v1alpha1
+  - deprecated: true
+    deprecationWarning: agents.x-k8s.io/v1alpha1 Sandbox is deprecated; use agents.x-k8s.io/v1beta1
+      Sandbox instead
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:

@@ -6,11 +6,16 @@ on:
       - main
     paths:
       - 'helm/**'
+      - '.github/cr.yaml'
+      - '.github/workflows/helm-chart-release.yml'
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
-
 jobs:
   release:
     name: Release Chart

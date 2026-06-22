@@ -173,6 +173,9 @@ class AsyncSandboxClient(Generic[T]):
             pod_annotations: Optional annotations stamped onto the running
                 Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
             env: Optional environment variables to inject into the SandboxClaim.
+                Setting this populates ``spec.env`` and forces a cold start
+                from the warm pool template instead of adopting a pre-warmed
+                pod, which may increase startup latency.
 
         Example::
 

@@ -64,6 +64,8 @@ class SweBenchSource:
     self.keep_row = keep_row
 
   def load(self) -> list[Task]:
+    if self.limit == 0:                 # explicit "none" (None = all)
+      return []                         # short-circuit: HF rejects a "[n:n]" slice
     try:
       from datasets import load_dataset
     except ImportError as e:  # pragma: no cover
@@ -71,11 +73,11 @@ class SweBenchSource:
           "SweBenchSource requires the 'swebench' extra: "
           "pip install 'agent-sandbox-rl[swebench]'") from e
     # Use HF split slicing so a small limit/offset doesn't materialize the whole
-    # split. `limit=None` (default) = all; `limit=0` = none.
+    # split. `limit=None` (default) = all; `limit=0` = none (handled above).
     split = self.split
     if self.offset or self.limit is not None:
       end = self.offset + self.limit if self.limit is not None else ""
-      split = f"{self.split}[{self.offset}:{end}]"   # limit=0 → [off:off] → empty
+      split = f"{self.split}[{self.offset}:{end}]"
     logger.info("Loading %s [%s]", self.dataset, split)
     rows = list(load_dataset(self.dataset, split=split))
     tasks = []

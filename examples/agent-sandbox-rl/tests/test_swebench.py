@@ -24,12 +24,16 @@ def _install_fake_datasets(monkeypatch, rows):
   mod = types.ModuleType("datasets")
 
   def fake_load(*a, **k):
-    # Honor HF split slicing ("test[1:2]") the way the real datasets lib does.
+    # Honor HF split slicing ("test[1:2]") the way the real datasets lib does,
+    # including its rejection of an empty "[n:n]" slice.
     m = re.search(r"\[(\d*):(\d*)\]$", k.get("split", "") or "")
     if m:
       s = int(m.group(1)) if m.group(1) else None
       e = int(m.group(2)) if m.group(2) else None
-      return rows[s:e]
+      sliced = rows[s:e]
+      if not sliced:
+        raise ValueError(f"Instruction {k.get('split')!r} corresponds to no data!")
+      return sliced
     return rows
 
   mod.load_dataset = fake_load

@@ -122,7 +122,7 @@ func NewK8sHelper(restConfig *rest.Config, log logr.Logger) (*K8sHelper, error) 
 }
 
 // createClaim creates a SandboxClaim and returns its generated name.
-func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, tracer trace.Tracer, svcName string) (string, error) {
+func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, env []extv1beta1.EnvVar, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
 	defer span.End()
 
@@ -143,6 +143,7 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
 				Name: warmPoolName,
 			},
+			Env: env,
 		},
 	}
 

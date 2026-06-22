@@ -176,6 +176,7 @@ All options are documented on the `Options` struct in
 [options.go](sandbox/options.go). Key fields:
 
 - `WarmPoolName`: passed per-sandbox to `CreateSandbox`.
+- `Env`: environment variables to inject into the `SandboxClaim`.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.

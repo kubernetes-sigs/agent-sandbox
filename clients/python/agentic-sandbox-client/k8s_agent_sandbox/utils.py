@@ -99,6 +99,8 @@ def select_pod_ip(ips: Sequence[object] | None) -> str | None:
 
 
 def is_valid_ip(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
     import ipaddress
     try:
         # Downstream callers construct URLs with `http://{ip_address}`,
@@ -122,6 +124,8 @@ def _is_integer_label(label: str) -> bool:
 
 
 def is_valid_gateway_hostname(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
     if not s or len(s) > 253:
         return False
     labels = s.split('.')

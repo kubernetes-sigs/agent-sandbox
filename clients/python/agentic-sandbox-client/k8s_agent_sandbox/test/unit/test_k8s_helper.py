@@ -490,6 +490,34 @@ class TestK8sHelperWaitForGatewayIP(unittest.TestCase):
         ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
         self.assertEqual(ip, "192.168.1.1")
 
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_gateway_ip_integer_value(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        mock_watch = MagicMock()
+        mock_event_invalid = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": 2130706433}]
+                }
+            }
+        }
+        mock_event_valid = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-gateway"},
+                "status": {
+                    "addresses": [{"value": "192.168.1.1"}]
+                }
+            }
+        }
+        mock_watch.stream.return_value = [mock_event_invalid, mock_event_valid]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+        self.assertEqual(ip, "192.168.1.1")
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -547,6 +547,36 @@ class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
             ip = await self.helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
             self.assertEqual(ip, "192.168.1.1")
 
+    async def test_wait_for_gateway_ip_integer_value(self):
+        async def _async_gen(*args, **kwargs):
+            yield {
+                "type": "MODIFIED",
+                "object": {
+                    "metadata": {"name": "test-gateway"},
+                    "status": {
+                        "addresses": [{"value": 2130706433}]
+                    }
+                }
+            }
+            yield {
+                "type": "MODIFIED",
+                "object": {
+                    "metadata": {"name": "test-gateway"},
+                    "status": {
+                        "addresses": [{"value": "192.168.1.1"}]
+                    }
+                }
+            }
+
+        with patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch") as MockWatch:
+            mock_watch = MagicMock()
+            mock_watch.stream = _async_gen
+            mock_watch.close = AsyncMock()
+            MockWatch.return_value = mock_watch
+
+            ip = await self.helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
+            self.assertEqual(ip, "192.168.1.1")
+
 
 if __name__ == "__main__":
     unittest.main()

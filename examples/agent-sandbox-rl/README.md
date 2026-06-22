@@ -290,6 +290,11 @@ Three layers, mirroring the `k8s-agent-sandbox` SDK so traces/metrics interopera
 pytest examples/agent-sandbox-rl   # mocked, no cluster
 ```
 
+This suite is also wired into the repo's unit-test runner
+(`dev/tools/test-unit`, run by `make test-unit` and the `unit-test` presubmit),
+so regressions are caught in CI — it spins up a venv, installs the in-repo SDK +
+this package's `[test]` extra, and runs the mocked tests.
+
 ## Status
 
 Phases 1–8 implemented and live-verified on GKE (agent-sandbox `v0.5.0rc1`):

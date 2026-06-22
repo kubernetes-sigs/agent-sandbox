@@ -37,7 +37,18 @@ PYTHON_TEST_SUITES = [
         # No requirements file; headers.py relies only on the standard library,
         # so the runner just installs pytest and runs the suite.
         "requirements": "requirements.txt",
-    }
+    },
+    {
+        "name": "agent-sandbox-rl",
+        "dir": os.path.join("examples", "agent-sandbox-rl"),
+        # Editable installs (in order): the in-repo SDK first (so we don't depend
+        # on a PyPI build), then the example package with its test extra. The
+        # mocked suite needs neither datasets nor r2egym (both stubbed in tests).
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
+            (os.path.join("examples", "agent-sandbox-rl"), "[test]"),
+        ],
+    },
 ]
 
 
@@ -87,8 +98,15 @@ def run_python_tests(repo_root):
         if not os.environ.get("PIP_EXTRA_INDEX_URL"):
             env.pop("PIP_EXTRA_INDEX_URL", None)
 
-        req_file = os.path.join(test_dir, suite["requirements"])
-        if os.path.isfile(req_file):
+        req_name = suite.get("requirements")
+        req_file = os.path.join(test_dir, req_name) if req_name else None
+        if suite.get("editable_installs"):
+            # install each (relative_dir, extras) editable, in order
+            for rel_dir, extras in suite["editable_installs"]:
+                subprocess.check_call(
+                    [venv_pip, "install", "--quiet", "-e", f".{extras}"],
+                    cwd=os.path.join(repo_root, rel_dir), env=env)
+        elif req_file and os.path.isfile(req_file):
             subprocess.check_call(
                 [venv_pip, "install", "--quiet", "-r", req_file], env=env)
         elif suite["name"] == "k8s-agent-sandbox":

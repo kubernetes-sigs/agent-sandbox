@@ -5,7 +5,26 @@ CRDs are bundled in the `crds/` directory and are installed automatically by Hel
 
 ## Installation
 
-### Basic install
+### Install from the Helm repository
+
+Released chart versions are published to a Helm repository hosted on GitHub Pages.
+
+```bash
+helm repo add agent-sandbox https://kubernetes-sigs.github.io/agent-sandbox
+helm repo update
+helm install agent-sandbox agent-sandbox/agent-sandbox \
+  --namespace agent-sandbox-system \
+  --create-namespace \
+  --set image.tag=<version>
+```
+
+To list the available chart versions:
+
+```bash
+helm search repo agent-sandbox --versions
+```
+
+### Install from a local checkout
 
 ```bash
 helm install agent-sandbox ./helm/ \
@@ -101,3 +120,19 @@ The following table lists the configurable parameters and their defaults.
 | `containerSecurityContext` | Container `securityContext` for the controller; only rendered when set | `null` |
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
 | `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
+
+## Publishing new chart versions
+
+The [`helm-chart-release`](../.github/workflows/helm-chart-release.yml) workflow uses
+[`chart-releaser-action`](https://github.com/helm/chart-releaser-action) to package the
+chart and publish it to the Helm repository on the `gh-pages` branch.
+
+To cut a new chart release, bump `version` in [`Chart.yaml`](./Chart.yaml) and merge to
+`main`. The workflow only publishes a version that does not already have a corresponding
+`helm-chart-agent-sandbox-<version>` release (the release name is set in
+[`.github/cr.yaml`](../.github/cr.yaml)), so each release requires a version bump.
+
+> **One-time setup**: GitHub Pages must be enabled for the repository with the source set
+> to the `gh-pages` branch (Settings → Pages). The repository docs site is served
+> separately via Netlify, so this branch is dedicated to the Helm repository index.
+

@@ -96,19 +96,25 @@ def _run_windowed(fleet, process_fn, concurrency, window, replicas_override=None
   fleet.plan()
   images = list(fleet.image_counts().keys())
   by_image = {}
-  for t in fleet.tasks:
-    by_image.setdefault(t.image, []).append(t)
+  for i, t in enumerate(fleet.tasks):
+    by_image.setdefault(t.image, []).append((i, t))   # keep original index
 
-  results = []
+  # Results are written back at each task's original position, so the returned
+  # list matches fleet.tasks order (the documented "one result per task" contract)
+  # even though tasks are processed grouped by image/window.
+  results = [None] * len(fleet.tasks)
   try:
     for start in range(0, len(images), window):
       batch = images[start:start + window]
       for img in batch:
         fleet.warm_image(img, replicas_override=replicas_override, wait=True)
-      batch_tasks = [t for img in batch for t in by_image[img]]
+      batch_pairs = [(i, t) for img in batch for (i, t) in by_image[img]]
+      batch_tasks = [t for _i, t in batch_pairs]
       logger.info("window [%d..%d): %d image(s), %d task(s)",
                   start, start + len(batch), len(batch), len(batch_tasks))
-      results.extend(process_parallel(fleet, batch_tasks, process_fn, concurrency))
+      batch_results = process_parallel(fleet, batch_tasks, process_fn, concurrency)
+      for (i, _t), r in zip(batch_pairs, batch_results):
+        results[i] = r
       for img in batch:
         fleet.unwarm_image(img)
   finally:

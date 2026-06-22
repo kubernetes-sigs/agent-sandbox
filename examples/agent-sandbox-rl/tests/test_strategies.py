@@ -113,3 +113,13 @@ def test_per_task_error_is_captured_not_raised(make_cluster):
   assert res[0] == "a" and res[2] == "c"
   assert isinstance(res[1], RuntimeError)
   assert f.handles() == []   # all released despite the failure
+
+
+def test_sliding_preserves_task_order(make_cluster):
+  from agent_sandbox_rl import ClusterRegistry
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), placement="image-affinity",
+             max_concurrent=1, window_size=1)
+  f.load_tasks(["imgB", "imgA", "imgB"])   # processed grouped by image, window=1
+  res = f.run(lambda t, h: t.image, strategy="sliding")
+  assert res == ["imgB", "imgA", "imgB"]   # returned in original task order

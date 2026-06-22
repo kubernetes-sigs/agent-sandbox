@@ -34,7 +34,7 @@ from kubernetes import client
 from . import sizing
 from .cluster import Cluster, ClusterRegistry
 from .config import ClusterConfig, FleetConfig
-from .exceptions import PreflightError
+from .exceptions import FleetError, PreflightError
 from .handles import SandboxHandle
 from .observability import Observer, repo_family
 from .placement import get_placement
@@ -222,8 +222,11 @@ class SandboxFleet:
       self._obs.warm_add(e.cluster, e.replicas)
       if wait:
         with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):
-          c.resources.wait_for_pool_ready(
-              e.pool, e.replicas, timeout=self.config.ready_timeout)
+          if not c.resources.wait_for_pool_ready(
+              e.pool, e.replicas, timeout=self.config.ready_timeout):
+            raise FleetError(
+                f"warm pool '{e.pool}' on cluster '{e.cluster}' did not become "
+                f"ready within {self.config.ready_timeout}s")
 
   def warm_image(self, image: str, *, replicas_override: int | None = None,
                  wait: bool = True) -> None:
@@ -244,8 +247,11 @@ class SandboxFleet:
     self._obs.warm_add(entry.cluster, reps)
     if wait:
       with self._obs.phase("wait_pool_ready", cluster=entry.cluster, family=fam):
-        c.resources.wait_for_pool_ready(
-            entry.pool, reps, timeout=self.config.ready_timeout)
+        if not c.resources.wait_for_pool_ready(
+            entry.pool, reps, timeout=self.config.ready_timeout):
+          raise FleetError(
+              f"warm pool '{entry.pool}' on cluster '{entry.cluster}' did not "
+              f"become ready within {self.config.ready_timeout}s")
 
   def unwarm_image(self, image: str) -> None:
     """Tear down one image's pool + template."""

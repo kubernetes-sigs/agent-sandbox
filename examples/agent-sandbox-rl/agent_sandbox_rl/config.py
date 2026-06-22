@@ -136,5 +136,5 @@ class FleetConfig(BaseModel):
   def template_name(self, image: str) -> str:
     """Stable, DNS-compliant SandboxTemplate name for an image (same scheme as
     the rl-sandbox-scripts example: ``<prefix><md5[:12]>``)."""
-    h = hashlib.md5(image.encode()).hexdigest()[:12]
+    h = hashlib.md5(image.encode(), usedforsecurity=False).hexdigest()[:12]
     return f"{self.template_name_prefix}{h}"

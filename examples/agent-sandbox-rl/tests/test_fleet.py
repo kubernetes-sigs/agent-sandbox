@@ -170,3 +170,15 @@ def test_release_is_idempotent(make_cluster):
   assert h.sandbox.terminate.call_count == 1
   assert c.active_claims == 0
   assert f.handles() == []
+
+
+def test_start_warmpools_raises_on_pool_timeout(make_cluster):
+  from agent_sandbox_rl.exceptions import FleetError
+  c = make_cluster("solo")
+  c.resources.wait_for_pool_ready.return_value = False   # pool never ready
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  f.preflight()
+  f.plan()
+  with pytest.raises(FleetError):
+    f.start_warmpools(wait=True)

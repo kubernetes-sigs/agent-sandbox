@@ -32,7 +32,7 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
 )
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
-from .utils import select_pod_ip
+from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
 
 
 class AsyncK8sHelper:
@@ -299,14 +299,6 @@ class AsyncK8sHelper:
             logger.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
-    def _is_valid_ip(self, s: str) -> bool:
-        from .utils import is_valid_ip
-        return is_valid_ip(s)
-
-    def _is_valid_gateway_hostname(self, s: str) -> bool:
-        from .utils import is_valid_gateway_hostname
-        return is_valid_gateway_hostname(s)
-
     async def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         await self._ensure_initialized()
@@ -335,19 +327,13 @@ class AsyncK8sHelper:
                         status = gateway_object.get("status") or {}
                         addresses = status.get("addresses", [])
                         for address in addresses:
+                            if not isinstance(address, dict):
+                                continue
                             ip_address = address.get("value")
                             if not ip_address:
                                 continue
                             
-                            # Validate the address to prevent SSRF via a compromised Gateway resource.
-                            if any(c in ip_address for c in "/?#@"):
-                                logger.warning(
-                                    "Gateway address rejected by validation (contains special chars): %r",
-                                    ip_address,
-                                )
-                                continue
-                            
-                            if not self._is_valid_ip(ip_address) and not self._is_valid_gateway_hostname(ip_address):
+                            if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
                                 logger.warning(
                                     "Gateway address rejected by validation: %r",
                                     ip_address,

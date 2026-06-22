@@ -110,8 +110,27 @@ def is_valid_ip(s: str) -> bool:
         return False
 
 
+def _is_integer_label(label: str) -> bool:
+    if not label:
+        return False
+    if label.isdigit():
+        return True
+    if label.lower().startswith("0x"):
+        val = label[2:]
+        return len(val) > 0 and all(c in "0123456789abcdef" for c in val.lower())
+    return False
+
+
 def is_valid_gateway_hostname(s: str) -> bool:
     if not s or len(s) > 253:
+        return False
+    labels = s.split('.')
+    # Reject hostnames that consist entirely of integer labels (decimal or hex)
+    # as they can resolve to loopback or other IP addresses via libc resolvers.
+    if all(_is_integer_label(label) for label in labels):
+        return False
+    # Enforce DNS label length limit of 63 characters (RFC 1123 / RFC 1035)
+    if any(len(label) > 63 for label in labels):
         return False
     for i, c in enumerate(s):
         if 'a' <= c <= 'z' or 'A' <= c <= 'Z' or '0' <= c <= '9':

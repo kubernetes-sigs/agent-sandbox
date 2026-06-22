@@ -191,3 +191,14 @@ def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
             return value.strip() or None
 
     return None
+
+
+def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[dict[str, str]]:
+    """Construct a SandboxClaim env spec list from a mapping of names to values."""
+    if not env:
+        return []
+
+    return [
+        {"name": name, "value": value}
+        for name, value in env.items()
+    ]

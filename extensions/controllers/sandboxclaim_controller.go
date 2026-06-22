@@ -1085,8 +1085,11 @@ func (r *SandboxClaimReconciler) mergePodMetadata(templateMeta *v1beta1.PodMetad
 	return nil
 }
 
-// injectEnvs is a helper to inject/override a set of environment variables in a container.
 func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1beta1.EnvVar, policy extensionsv1beta1.EnvVarsInjectionPolicy, claimName string) error {
+	if policy == extensionsv1beta1.EnvVarsInjectionPolicyAllowed && len(container.EnvFrom) > 0 {
+		return fmt.Errorf("%w: container %q uses EnvFrom sources; Allowed policy cannot safely prevent overriding EnvFrom-provided variables", ErrEnvVarsInjectionRejected, container.Name)
+	}
+
 	for _, claimEnv := range envsToInject {
 		existingIdx := -1
 		for j, env := range container.Env {
@@ -1177,12 +1180,6 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		if template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyAllowed && template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyOverrides {
 			err := fmt.Errorf("environment variable injection is not allowed by the template policy")
 			logger.Error(err, "Environment variable injection rejected", "claimName", claim.Name)
-			return nil, err
-		}
-
-		if template.Spec.EnvVarsInjectionPolicy == extensionsv1beta1.EnvVarsInjectionPolicyAllowed && hasEnvFrom(&template.Spec.PodTemplate.Spec) {
-			err := fmt.Errorf("%w: environment variable injection with policy 'Allowed' is disallowed because the template has EnvFrom sources", ErrEnvVarsInjectionRejected)
-			logger.Error(err, "Environment variable injection rejected due to EnvFrom on Allowed policy", "claimName", claim.Name)
 			return nil, err
 		}
 
@@ -1967,20 +1964,6 @@ func getWarmPoolName(obj metav1.Object) string {
 		}
 	}
 	return ""
-}
-
-func hasEnvFrom(podSpec *corev1.PodSpec) bool {
-	for _, c := range podSpec.InitContainers {
-		if len(c.EnvFrom) > 0 {
-			return true
-		}
-	}
-	for _, c := range podSpec.Containers {
-		if len(c.EnvFrom) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func shouldSuppressError(err error) bool {

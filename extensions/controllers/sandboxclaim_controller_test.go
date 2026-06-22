@@ -310,7 +310,22 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-init-envfrom-allowed", Namespace: "default", UID: "claim-init-envfrom-allowed-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool-init-envfrom-allowed"},
-			Env:         []extensionsv1beta1.EnvVar{{Name: "NEW_VAR_ALLOWED", Value: "claim-value"}},
+			Env:         []extensionsv1beta1.EnvVar{{Name: "NEW_VAR_ALLOWED", Value: "claim-value", ContainerName: "init-setup"}},
+		},
+	}
+
+	claimWithInitEnvFromAllowedButInjectsToApp := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-init-envfrom-allowed-app", Namespace: "default", UID: "claim-init-envfrom-allowed-app-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool-init-envfrom-allowed"},
+			Env:         []extensionsv1beta1.EnvVar{{Name: "NEW_VAR_ALLOWED", Value: "claim-value", ContainerName: "app-container"}},
+		},
+	}
+
+	claimWithNoEnvAndEnvFrom := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim-no-env-envfrom", Namespace: "default", UID: "claim-no-env-envfrom-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool-env-allowed-envfrom"},
 		},
 	}
 
@@ -944,7 +959,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectSandbox:    false,
 			expectError:      false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: environment variable injection with policy 'Allowed' is disallowed because the template has EnvFrom sources",
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: container \"test-container\" uses EnvFrom sources; Allowed policy cannot safely prevent overriding EnvFrom-provided variables",
 			},
 		},
 		{
@@ -954,7 +969,34 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectSandbox:    false,
 			expectError:      false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: environment variable injection with policy 'Allowed' is disallowed because the template has EnvFrom sources",
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: container \"init-setup\" uses EnvFrom sources; Allowed policy cannot safely prevent overriding EnvFrom-provided variables",
+			},
+		},
+		{
+			name:             "sandbox is created when claim injects env var to a container without EnvFrom even if another container has EnvFrom",
+			claimToReconcile: claimWithInitEnvFromAllowedButInjectsToApp,
+			existingObjects:  []client.Object{templateWithInitEnvFromAllowed, warmPoolWithInitEnvFromAllowed},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, _ *extensionsv1beta1.SandboxTemplate) {
+				env := sandbox.Spec.PodTemplate.Spec.Containers[0].Env
+				if len(env) != 1 {
+					t.Errorf("Expected 1 environment variable, got %d", len(env))
+				}
+				if env[0].Name != "NEW_VAR_ALLOWED" || env[0].Value != "claim-value" {
+					t.Errorf("Expected NEW_VAR_ALLOWED=claim-value, got %s=%s", env[0].Name, env[0].Value)
+				}
+			},
+		},
+		{
+			name:             "sandbox is created when template has EnvFrom but claim does not inject any env vars",
+			claimToReconcile: claimWithNoEnvAndEnvFrom,
+			existingObjects:  []client.Object{templateWithEnvAllowedAndEnvFrom, warmPoolWithEnvAllowedAndEnvFrom},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
 			},
 		},
 		{

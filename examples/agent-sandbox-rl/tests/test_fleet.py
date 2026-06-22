@@ -194,3 +194,16 @@ def test_plan_splits_budget_across_clusters(two_cluster_registry):
   reps = {e.image: e.replicas for e in plan.entries}
   assert reps == {"imgA": 4, "imgB": 4}         # 8 budget / 2 clusters = 4 each
   assert plan.total_replicas == 8               # not 16
+
+
+def test_acquire_ondemand_reserves_pool_once(make_cluster):
+  # Repeated on-demand acquire() of the same image (no plan()) must not grow
+  # active_replicas unbounded — the size-1 pool is reserved once and reused.
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img", "img", "img"])
+  for t in f.tasks:
+    f.release(f.acquire(t))
+  assert c.active_replicas == 1          # reserved once, not 3
+  assert c.active_claims == 0
+  assert f.handles() == []

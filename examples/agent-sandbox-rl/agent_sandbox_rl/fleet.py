@@ -88,6 +88,7 @@ class SandboxFleet:
     self.plan_: FleetPlan | None = None
     self._handles: list[SandboxHandle] = []
     self._warmed: dict[str, int] = {}        # image -> replicas currently warmed
+    self._ondemand: set[tuple[str, str]] = set()   # (cluster, image) pools made via acquire()
     self._lock = threading.Lock()            # guards bookkeeping under parallel run
     self._obs = Observer(self.config.observability)
     self.report = None                       # set by run()/the Observer
@@ -315,10 +316,19 @@ class SandboxFleet:
     if not on_demand:
       cluster = self.registry.get(entry.cluster)
       pool = entry.pool
-    else:
+    created_pool = False          # did THIS call create the on-demand pool?
+    if on_demand:
       cluster = self.placement.select(task.image, self.registry)
       pool = self._ensure_pool(cluster, task.image, 1)
-      cluster.reserve_replicas(1)
+      # Reserve the size-1 pool's replica only the first time we create it for
+      # this (cluster, image); repeated acquire()s reuse it (no unbounded growth).
+      key = (cluster.name, task.image)
+      with self._lock:
+        created_pool = key not in self._ondemand
+        if created_pool:
+          self._ondemand.add(key)
+      if created_pool:
+        cluster.reserve_replicas(1)
 
     fam = repo_family(task)
     sandbox = None
@@ -340,8 +350,19 @@ class SandboxFleet:
         except Exception:  # noqa: BLE001
           logger.warning("failed to terminate sandbox after acquire error",
                          exc_info=True)
-      if on_demand:
+      # If this call created the on-demand pool, undo it fully (delete pool +
+      # template, release the replica, forget it) so a failed acquire leaves no
+      # trace. A reused pool is left for the next acquire.
+      if created_pool:
+        try:
+          cluster.resources.delete_warmpool(pool)
+          cluster.resources.delete_template(self.config.template_name(task.image))
+        except Exception:  # noqa: BLE001
+          logger.warning("failed to remove on-demand pool after acquire error",
+                         exc_info=True)
         cluster.release_replicas(1)
+        with self._lock:
+          self._ondemand.discard(key)
       self._obs.claim(cluster.name, "error")
       raise
 
@@ -408,6 +429,9 @@ class SandboxFleet:
         except Exception:  # noqa: BLE001
           pass
     self._obs.warm_reset()
+    with self._lock:
+      self._warmed.clear()
+      self._ondemand.clear()
     self.plan_ = None
 
   def __enter__(self) -> "SandboxFleet":

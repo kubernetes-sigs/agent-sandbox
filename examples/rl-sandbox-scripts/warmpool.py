@@ -48,7 +48,8 @@ def get_template_name(docker_image: str) -> str:
   Mirrors ``get_sandbox_template_name`` in the rl-tunix forks so the same image
   always maps to the same template (enabling reuse across tasks).
   """
-  img_hash = hashlib.md5(docker_image.encode()).hexdigest()[:12]
+  img_hash = hashlib.md5(docker_image.encode(),
+                         usedforsecurity=False).hexdigest()[:12]
   return f"r2e-img-{img_hash}"
 
 

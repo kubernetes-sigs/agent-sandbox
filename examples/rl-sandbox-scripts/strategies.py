@@ -73,9 +73,11 @@ class WarmPoolManager:
         runtime_class=self.runtime_class,
     )
     wp.create_warmpool(self.co, pool, template, replicas, self.namespace)
-    wp.wait_for_pool_ready(
+    if not wp.wait_for_pool_ready(
         self.co, pool, replicas, self.namespace, timeout=self.ready_timeout
-    )
+    ):
+      raise RuntimeError(
+          f"warm pool {pool!r} not ready within {self.ready_timeout}s")
     return pool
 
   def teardown(self, docker_image: str, *, delete_template: bool = False):

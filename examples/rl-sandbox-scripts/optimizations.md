@@ -1,7 +1,7 @@
 # rl-tunix SWE-bench warm pools — Optimization ideas
 
-Working notes (local, git-ignored). A living backlog of optimizations for
-running SWE-bench tasks on Agent Sandbox warm pools. Add ideas here as we go.
+Working notes: a backlog of optimizations for running SWE-bench tasks on Agent
+Sandbox warm pools.
 
 ## Workflow recap (baseline we're optimizing)
 

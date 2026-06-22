@@ -66,7 +66,9 @@ required.
 | `naive` | Pre-warm a pool for **every** unique image up front; tear all down at the end. | Small batches, ample capacity, maximum task shuffle. | Highest (all pools idle together). |
 | `sliding` | Sort tasks by image; keep only `WARMPOOL_WINDOW_SIZE` pools warm, rolling forward as each image's tasks complete. | Large, image-diverse batches with limited capacity. | Balanced. |
 
-Per-image pool size is `min(tasks_for_image, MAX_WARMPOOL_SIZE)`.
+Per-image pool size is concurrency-aware (`sizing.compute_replicas`): each image's
+share of the `MAX_CONCURRENT` budget — `round(MAX_CONCURRENT × tasks_for_image /
+tasks_total)`, clamped to `[1, min(tasks_for_image, MAX_WARMPOOL_SIZE)]`.
 
 ## Prerequisites
 

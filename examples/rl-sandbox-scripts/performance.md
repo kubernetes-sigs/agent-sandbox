@@ -1,15 +1,15 @@
 # rl-tunix SWE-bench warm pools — Performance log
 
-Working notes (local, git-ignored). Tracks measured performance of runs and the
-optimizations we test. All times in seconds unless noted. See
-[`optimizations.md`](./optimizations.md) for the idea backlog.
+Working notes: measured performance of runs and the optimizations we test. All
+times in seconds unless noted. See [`optimizations.md`](./optimizations.md) for
+the idea backlog.
 
 ## Environment
 
 | Item | Value |
 | :--- | :--- |
-| Cluster | `glottman-sandbox-test-1` (GKE Standard) |
-| Project / Region | `gke-ai-eco-dev` / `us-central1` |
+| Cluster | `<cluster>` (GKE Standard) |
+| Project / Region | `<project>` / `<region>` |
 | GKE version (master/node) | `1.35.5-gke.1000000` |
 | kubectl (client/server) | `v1.35.3-dispatcher` / `v1.35.5-gke.1000000` |
 | Node pool | `standard-pool` — `e2-standard-2`, **3 nodes**, no autoscaling |

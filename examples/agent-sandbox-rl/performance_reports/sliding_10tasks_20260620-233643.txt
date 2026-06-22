@@ -1,6 +1,6 @@
 ── Run report (strategy=sliding) ──
   environment:
-    default: context=(ambient)  namespace=rl-tunix-swebench  k8s_version=v1.35.5-gke.1000000  nodes=11  node_pools=[default-pool,e2-pool,tpu-pool-1]  instance_types=[ct4p-hightpu-4t,e2-standard-16,n1-standard-1]  region=us-central2
+    default: context=(ambient)  namespace=<namespace>  k8s_version=<k8s-version>  nodes=<n>  node_pools=[<node-pool>]  instance_types=[<instance-type>]  region=<region>
   ----------------------------------------
   preflight              0.84s  (n=1, max=0.84s)
   plan                   0.00s  (n=1, max=0.00s)

@@ -9,6 +9,11 @@ Per-run performance reports emitted by the `agent-sandbox-rl` package (the
 <strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.json   # same data, machine-readable (report.to_dict())
 ```
 
+> The one checked-in sample here has its `environment` block **redacted**
+> (`<namespace>`, `<region>`, …) — it only illustrates the format. Don't commit
+> real run reports (they embed live cluster metadata and churn); this directory is
+> for the format docs + a redacted example.
+
 Generate one:
 
 ```bash
@@ -26,9 +31,9 @@ python examples/run_swebench_fleet.py
 ```
 ── Run report (strategy=sliding) ──
   environment:
-    default: context=(ambient)  namespace=rl-tunix-swebench  k8s_version=v1.35.5-gke...
-             nodes=11  node_pools=[default-pool,e2-pool,tpu-pool-1]
-             instance_types=[...]  region=us-central2
+    default: context=(ambient)  namespace=<namespace>  k8s_version=<k8s-version>
+             nodes=<n>  node_pools=[<node-pool>]
+             instance_types=[<instance-type>]  region=<region>
   ----------------------------------------
   preflight              0.84s  (n=1, max=0.84s)
   plan                   0.00s  (n=1, max=0.00s)
@@ -121,7 +126,7 @@ Mirrors the `.txt`, machine-readable (`RunReport.to_dict()`):
   "tasks_err": 0,
   "warm_replicas_total": 10,
   "warm_replicas_peak": 5,
-  "environment": { "default": { "nodes": 11, "node_pools": ["e2-pool", "..."] } }
+  "environment": { "default": { "nodes": "<n>", "node_pools": ["<node-pool>"] } }
 }
 ```
 

@@ -73,13 +73,41 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 labels=None,
                 lifecycle=None,
                 volume_claim_templates=None,
-                pod_metadata=None
+                pod_metadata=None,
+                env=None,
             )
 
             self.assertEqual(sandbox, mock_sandbox_instance)
 
             active = await self.client.list_active_sandboxes()
             self.assertEqual(len(active), 1)
+
+    @patch("uuid.uuid4")
+    async def test_create_sandbox_with_env(self, mock_uuid):
+        mock_uuid.return_value.hex = "1234abcd"
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        env = {"FOO": "bar", "DEBUG": "true"}
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            await self.client.create_sandbox("test-warmpool", "test-namespace", env=env)
+
+            mock_create.assert_called_once_with(
+                "sandbox-claim-1234abcd",
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None,
+                env=env,
+            )
 
     async def test_create_sandbox_failure_cleanup(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
@@ -349,6 +377,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 lifecycle=None,
                 volume_claim_templates=vcts,
                 pod_metadata=None,
+                env=None,
             )
 
     async def test_create_claim_with_volume_claim_templates(self):
@@ -374,6 +403,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             lifecycle=None,
             volume_claim_templates=vcts,
             pod_metadata=None,
+            env=None,
         )
 
     async def test_create_sandbox_without_shutdown_after_seconds(self):
@@ -390,6 +420,26 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             call_kwargs = mock_create.call_args
             lifecycle = call_kwargs[1].get("lifecycle")
             self.assertIsNone(lifecycle)
+
+    async def test_create_claim_with_env(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = None
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock()
+
+        env = {"FOO": "bar"}
+        await self.client._create_claim("test-claim", "test-warmpool", "test-namespace", env=env)
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            annotations={},
+            labels=None,
+            lifecycle=None,
+            volume_claim_templates=None,
+            pod_metadata=None,
+            env=env,
+        )
 
     async def test_shutdown_after_seconds_validation_zero(self):
         with self.assertRaises(ValueError):

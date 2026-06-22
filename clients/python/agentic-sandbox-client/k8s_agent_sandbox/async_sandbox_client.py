@@ -149,6 +149,7 @@ class AsyncSandboxClient(Generic[T]):
         volume_claim_templates: list[dict] | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> T:
         """Provisions a new Sandbox claim and returns an async Sandbox handle.
 
@@ -171,6 +172,7 @@ class AsyncSandboxClient(Generic[T]):
                 the sandbox through the Downward API.
             pod_annotations: Optional annotations stamped onto the running
                 Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
+            env: Optional environment variables to inject into the SandboxClaim.
 
         Example::
 
@@ -198,7 +200,8 @@ class AsyncSandboxClient(Generic[T]):
                 labels=labels,
                 lifecycle=lifecycle,
                 volume_claim_templates=volume_claim_templates,
-                pod_metadata=pod_metadata
+                pod_metadata=pod_metadata,
+                env=env,
             )
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
@@ -416,6 +419,7 @@ class AsyncSandboxClient(Generic[T]):
         lifecycle: dict | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_metadata: dict | None = None,
+        env: dict[str, str] | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():
@@ -438,7 +442,8 @@ class AsyncSandboxClient(Generic[T]):
             labels=labels,
             lifecycle=lifecycle,
             volume_claim_templates=volume_claim_templates,
-            pod_metadata=pod_metadata
+            pod_metadata=pod_metadata,
+            env=env,
         )
 
     @async_trace_span("wait_for_sandbox_ready")

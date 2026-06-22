@@ -113,7 +113,7 @@ def _run_windowed(fleet, process_fn, concurrency, window, replicas_override=None
       logger.info("window [%d..%d): %d image(s), %d task(s)",
                   start, start + len(batch), len(batch), len(batch_tasks))
       batch_results = process_parallel(fleet, batch_tasks, process_fn, concurrency)
-      for (i, _t), r in zip(batch_pairs, batch_results):
+      for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
         results[i] = r
       for img in batch:
         fleet.unwarm_image(img)

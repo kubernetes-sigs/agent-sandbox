@@ -1178,7 +1178,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Inject environment variables from the SandboxClaim
 	if len(claim.Spec.Env) > 0 {
 		if template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyAllowed && template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyOverrides {
-			err := fmt.Errorf("environment variable injection is not allowed by the template policy")
+			err := fmt.Errorf("%w: environment variable injection is not allowed by the template policy", ErrEnvVarsInjectionRejected)
 			logger.Error(err, "Environment variable injection rejected", "claimName", claim.Name)
 			return nil, err
 		}

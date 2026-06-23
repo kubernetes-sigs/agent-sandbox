@@ -937,9 +937,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: claimWithEnvConflict,
 			existingObjects:  []client.Object{templateWithEnv, warmPoolWithEnv},
 			expectSandbox:    false,
-			expectError:      true,
+			expectError:      false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: environment variable injection is not allowed by the template policy",
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: environment variable injection is not allowed by the template policy",
 			},
 		},
 		{
@@ -947,9 +947,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: claimWithNewEnvDisallowed,
 			existingObjects:  []client.Object{template, warmPool},
 			expectSandbox:    false,
-			expectError:      true,
+			expectError:      false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: environment variable injection is not allowed by the template policy",
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: environment variable injection is not allowed by the template policy",
 			},
 		},
 		{

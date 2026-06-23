@@ -177,6 +177,34 @@ func TestTokenReview_RequiresClient(t *testing.T) {
 	}
 }
 
+// TestTokenReview_RejectsNegativeInputs guards the library-consumer
+// path: config.Config.Validate() already enforces positive TTL and
+// CacheSize for flag-driven setup, but TokenReviewOptions is exported
+// and direct callers can pass negative values. Each of the three
+// duration / size knobs would silently break the runtime if accepted
+// (negative TTL → entries expire immediately, negative CacheSize →
+// LRU panic, negative RequestTimeout → already-canceled context),
+// so the constructor must fail fast.
+func TestTokenReview_RejectsNegativeInputs(t *testing.T) {
+	cs := fake.NewClientset()
+	cases := []struct {
+		name string
+		opts TokenReviewOptions
+	}{
+		{"negative TTL", TokenReviewOptions{Client: cs, TTL: -1 * time.Second}},
+		{"negative CacheSize", TokenReviewOptions{Client: cs, CacheSize: -1}},
+		{"negative RequestTimeout", TokenReviewOptions{Client: cs, RequestTimeout: -1 * time.Second}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewTokenReviewAuthorizer(tc.opts)
+			if err == nil {
+				t.Fatalf("expected error for %s; got nil", tc.name)
+			}
+		})
+	}
+}
+
 func TestTokenReview_PassesAudiences(t *testing.T) {
 	var seenAudiences []string
 	cs, _ := withReactor(t, func(a clienttesting.Action) (bool, runtime.Object, error) {

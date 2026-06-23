@@ -115,6 +115,23 @@ func NewTokenReviewAuthorizer(o TokenReviewOptions) (*TokenReviewAuthorizer, err
 	if o.Client == nil {
 		return nil, errors.New("tokenreview: Client is required")
 	}
+	// Reject negative values for the three duration / size knobs.
+	// config.Config.Validate() already enforces this for flag-driven
+	// callers, but TokenReviewOptions is exported and library
+	// consumers can construct it directly with arbitrary values —
+	// negative inputs here cause silent runtime failures (negative
+	// TTL expires cache entries immediately, negative CacheSize
+	// panics inside LRU init, negative RequestTimeout produces an
+	// already-canceled context and 5xx's every request).
+	if o.TTL < 0 {
+		return nil, fmt.Errorf("tokenreview: TTL must be non-negative, got %s", o.TTL)
+	}
+	if o.CacheSize < 0 {
+		return nil, fmt.Errorf("tokenreview: CacheSize must be non-negative, got %d", o.CacheSize)
+	}
+	if o.RequestTimeout < 0 {
+		return nil, fmt.Errorf("tokenreview: RequestTimeout must be non-negative, got %s", o.RequestTimeout)
+	}
 	if o.TTL == 0 {
 		o.TTL = defaultTokenReviewTTL
 	}
@@ -197,12 +214,16 @@ func (a *TokenReviewAuthorizer) decide(d *tokenDecision, sandbox, namespace stri
 			"sandbox", sandbox, "namespace", namespace, "from_cache", fromCache)
 		return ErrUnauthenticated
 	}
+	// Username only — no UID / Groups. The full UserInfo is PII that
+	// doesn't need to land in operator-visible logs even at V(1) on
+	// every cache hit; "who's calling" attribution is the question
+	// debug logs answer, and Username is enough for that. If a
+	// deployment needs full identity for audit, route it to a separate
+	// audit sink instead.
 	a.log.V(1).Info("authz allow",
 		"sandbox", sandbox,
 		"namespace", namespace,
 		"user", d.user.Username,
-		"uid", d.user.UID,
-		"groups", d.user.Groups,
 		"from_cache", fromCache,
 	)
 	return nil

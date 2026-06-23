@@ -36,6 +36,7 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 // TestWarmPoolPodExclusivity is a regression test for the 1:1 sandbox-to-pod
@@ -71,8 +72,8 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 					sandboxTemplateRefHash: templateHash,
 				},
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxWarmPool",
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 					Name:       "pool",
 					UID:        warmPoolUID,
 					Controller: new(true),
@@ -154,7 +155,7 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	sandboxToOwners := make(map[string][]string) // sandbox name → [claim names]
 	for _, sb := range allSandboxes.Items {
 		ref := metav1.GetControllerOf(&sb)
-		if ref != nil && ref.Kind == "SandboxClaim" {
+		if utils.MatchesGroupKind(ref, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind) {
 			sandboxToOwners[sb.Name] = append(sandboxToOwners[sb.Name], ref.Name)
 		}
 	}

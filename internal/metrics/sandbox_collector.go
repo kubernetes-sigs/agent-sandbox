@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -132,17 +133,11 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			sandboxTemplateStr = template
 		}
 
-		apiVersion := extensionsv1beta1.GroupVersion.String()
 		ownedByStr := "None"
-		if controllerRef := metav1.GetControllerOf(&sandbox); controllerRef != nil {
-			if controllerRef.APIVersion == apiVersion {
-				switch controllerRef.Kind {
-				case "SandboxClaim":
-					ownedByStr = "SandboxClaim"
-				case "SandboxWarmPool":
-					ownedByStr = "SandboxWarmPool"
-				}
-			}
+		controllerRef := metav1.GetControllerOf(&sandbox)
+		if g, k := utils.GetGroupKind(controllerRef); g == extensionsv1beta1.GroupVersion.Group &&
+			(k == extensionsv1beta1.SandboxClaimKind || k == extensionsv1beta1.SandboxWarmPoolKind) {
+			ownedByStr = k
 		}
 
 		key := AgentSandboxesMetricKey{

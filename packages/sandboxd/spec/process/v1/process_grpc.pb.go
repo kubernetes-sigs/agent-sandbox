@@ -18,7 +18,7 @@
 // - protoc             (unknown)
 // source: process/v1/process.proto
 
-package process
+package processv1
 
 import (
 	context "context"

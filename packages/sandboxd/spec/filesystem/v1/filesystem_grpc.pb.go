@@ -18,7 +18,7 @@
 // - protoc             (unknown)
 // source: filesystem/v1/filesystem.proto
 
-package filesystem
+package filesystemv1
 
 import (
 	context "context"

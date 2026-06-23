@@ -31,6 +31,47 @@ roleRef:
 
 ---
 
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resourceNames:
+  - agent-sandbox-webhook-certs
+  resources:
+  - secrets
+  verbs:
+  - get
+  - patch
+  - update
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
 kind: Service
 apiVersion: v1
 metadata:

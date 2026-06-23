@@ -53,8 +53,8 @@ func generateWebhookCerts(ctx context.Context, c client.Client, certDir string, 
 		serverPEM := secret.Data["tls.crt"]
 		serverKeyPEM := secret.Data["tls.key"]
 
-		if len(caPEM) == 0 || len(serverPEM) == 0 || len(serverKeyPEM) == 0 {
-			return nil, fmt.Errorf("shared Secret %s is missing certificate data", secretName)
+		if err := validatePEMBytes(caPEM, serverPEM, serverKeyPEM); err != nil {
+			return nil, fmt.Errorf("shared Secret %s has invalid certificate data: %w", secretName, err)
 		}
 
 		// Write to local certDir for the webhook server
@@ -179,6 +179,10 @@ func generateWebhookCerts(ctx context.Context, c client.Client, certDir string, 
 		serverPEM = secret.Data["tls.crt"]
 		serverKeyPEM = secret.Data["tls.key"]
 
+		if err := validatePEMBytes(caPEM, serverPEM, serverKeyPEM); err != nil {
+			return nil, fmt.Errorf("shared Secret %s has invalid certificate data during concurrent load: %w", secretName, err)
+		}
+
 		// Overwrite our local files with the other replica's certs
 		if err := writeCertFiles(certDir, serverPEM, serverKeyPEM); err != nil {
 			return nil, fmt.Errorf("failed to overwrite certificate files locally: %w", err)
@@ -188,6 +192,23 @@ func generateWebhookCerts(ctx context.Context, c client.Client, certDir string, 
 	}
 
 	return nil, fmt.Errorf("failed to create shared Secret: %w", err)
+}
+
+// validatePEMBytes verifies that the provided certificate slices contain valid PEM blocks.
+func validatePEMBytes(caPEM, serverPEM, serverKeyPEM []byte) error {
+	if len(caPEM) == 0 || len(serverPEM) == 0 || len(serverKeyPEM) == 0 {
+		return fmt.Errorf("missing certificate or key data")
+	}
+	if p, _ := pem.Decode(caPEM); p == nil {
+		return fmt.Errorf("invalid CA certificate PEM data")
+	}
+	if p, _ := pem.Decode(serverPEM); p == nil {
+		return fmt.Errorf("invalid server certificate PEM data")
+	}
+	if p, _ := pem.Decode(serverKeyPEM); p == nil {
+		return fmt.Errorf("invalid server private key PEM data")
+	}
+	return nil
 }
 
 // writeCertFiles writes the server certificate and key to the local certDir.

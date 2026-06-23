@@ -73,6 +73,37 @@ def test_create_warmpool_body():
   assert body["spec"] == {"replicas": 3, "sandboxTemplateRef": {"name": TNAME}}
 
 
+def test_ensure_template_dry_run_forwarded():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(), dry_run=True)
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  assert kwargs["dry_run"] == "All"
+
+
+def test_create_warmpool_dry_run_forwarded():
+  r = _resources()
+  r.create_warmpool("pool-x", TNAME, 1, dry_run=True)
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  assert kwargs["dry_run"] == "All"
+  # default is a real create (no dry run)
+  r2 = _resources()
+  r2.create_warmpool("pool-y", TNAME, 1)
+  _, kwargs2 = r2.custom_api.create_namespaced_custom_object.call_args
+  assert kwargs2["dry_run"] is None
+
+
+def test_validate_manifests_dry_runs_template_then_warmpool():
+  r = _resources()
+  r.validate_manifests(IMG, TemplateSpec())
+  calls = r.custom_api.create_namespaced_custom_object.call_args_list
+  assert len(calls) == 2
+  assert calls[0].kwargs["plural"] == constants.TEMPLATES_PLURAL
+  assert calls[0].kwargs["dry_run"] == "All"
+  assert calls[1].kwargs["plural"] == constants.WARMPOOLS_PLURAL
+  assert calls[1].kwargs["dry_run"] == "All"
+
+
 def test_create_warmpool_swallows_409():
   r = _resources()
   r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
@@ -123,6 +154,26 @@ def test_wait_for_pool_ready_via_watch(monkeypatch):
 
   monkeypatch.setattr("agent_sandbox_rl.resources.watch.Watch", lambda: FakeWatch())
   assert r.wait_for_pool_ready("pool-x", 2, timeout=5) is True
+
+
+def test_wait_for_pool_ready_scopes_watch_with_field_selector(monkeypatch):
+  # The watch must be scoped server-side to this pool, not list all warmpools.
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = {"status": {"readyReplicas": 0}}
+  seen = {}
+
+  class _RecordingWatch:
+    def stream(self, func, **kw):
+      seen.update(kw)
+      return [{"type": "MODIFIED", "object": {"metadata": {"name": "pool-x"},
+                                              "status": {"readyReplicas": 1}}}]
+
+    def stop(self):
+      pass
+
+  monkeypatch.setattr("agent_sandbox_rl.resources.watch.Watch", lambda: _RecordingWatch())
+  assert r.wait_for_pool_ready("pool-x", 1, timeout=5) is True
+  assert seen.get("field_selector") == "metadata.name=pool-x"
 
 
 def test_list_uses_label_selector():

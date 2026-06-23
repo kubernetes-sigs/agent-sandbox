@@ -8,6 +8,29 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 Initial implementation (design phases 1–7), live-verified on GKE against Agent
 Sandbox `v0.5.0rc1` (v1beta1).
 
+### Changed / hardening (from PR #1000 review)
+- **Prometheus is now an optional `metrics` extra** (`pyproject.toml`,
+  `observability.py`): moved off the core deps, and the `asrl_*` collectors are
+  registered **lazily** on the first metrics-enabled run rather than at import —
+  so importing the package no longer mutates the global Prometheus registry.
+  `RunReport` stays always-on and dependency-free.
+- **Router-free `exec` no longer leaks clients** (`handles.py`, `cluster.py`):
+  reuses a **thread-local** `CoreV1Api` (`Cluster.exec_core_api`) instead of
+  building a fresh `ApiClient` (urllib3 pool + thread pool) per call.
+- **Scoped WarmPool watch** (`resources.py`): `wait_for_pool_ready` passes
+  `field_selector=metadata.name=<name>` so it no longer fans out every other
+  pool's events in the namespace.
+- **CRD manifest dry-run validation** (`resources.py`, `preflight.py`):
+  `Resources.validate_manifests` + a `dry_run` path on `ensure_template` /
+  `create_warmpool` server-side dry-run (`dryRun=All`) the hand-built
+  SandboxTemplate/WarmPool against the live CRD schema; preflight runs it
+  (hard-fails on 400/422 schema rejection, warns otherwise) to catch drift the
+  mocked tests can't.
+- **`_split_budget` cleanup** (`fleet.py`): compute the weight sum once, drop the
+  dead all-zero branch, single-cluster fast path.
+- **Docs**: reconciled the removed `r2egym` extra; surfaced the sizing old-vs-new
+  table and featured pre-pull in the README.
+
 ### Added
 - **Config** (`config.py`): `FleetConfig`, `ClusterConfig`, `TemplateSpec`,
   `ResourceSpec`; deterministic `template_name()`.
@@ -54,8 +77,9 @@ Sandbox `v0.5.0rc1` (v1beta1).
   with the SDK's claim/exec spans; `repo_family()` cardinality bound;
   `serve_metrics()` HTTP helper. Wired through `fleet.py`/`strategies.py`/
   `async_fleet.py`; `ObservabilityConfig` on `FleetConfig.observability`;
-  `fleet.report` after `run()`. `prometheus-client` is a dep; OTel via the
-  `tracing` extra (no-op when absent).
+  `fleet.report` after `run()`. Prometheus via the optional `metrics` extra
+  (lazy collectors, no import side effects); OTel via the `tracing` extra (no-op
+  when absent).
 - **R2E-Gym adapter** (`adapters/r2egym.py`): `make_fleet_repo_env`,
   `FleetRepoEnv`, `FleetDockerRuntime`, `r2egym_command_files` — bind a
   fleet-pre-warmed pod into R2E-Gym's `RepoEnv` (overriding the cold
@@ -63,7 +87,8 @@ Sandbox `v0.5.0rc1` (v1beta1).
   namespace-forwarding exec/copy) so SWE-bench rollouts reuse warm pools and tunix
   deepswe benefits transitively. Lazy/guarded (core imports without R2E-Gym).
   `SweBenchSource(keep_row=True)` stores the full dataset row under
-  `metadata["ds"]` (required by the adapter). New `r2egym` extra.
+  `metadata["ds"]` (required by the adapter). R2E-Gym isn't on PyPI, so it's
+  installed from its checkout — there is no `r2egym` extra.
 - **Examples**: `examples/run_swebench_fleet.py` (multi-cluster CLI),
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).

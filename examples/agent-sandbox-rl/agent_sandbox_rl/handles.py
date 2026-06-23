@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from kubernetes import client
 from kubernetes.stream import stream
 
 from .sources import Task
@@ -72,11 +71,13 @@ class SandboxHandle:
   def exec(self, command) -> str:
     """Run a command inside the sandbox (router-free, via the pod's exec API).
 
-    Builds a fresh ``ApiClient`` per call: the kubernetes ``stream()`` (websocket)
-    exec is not thread-safe across a shared client, so this keeps parallel execs
-    isolated.
+    Uses a **thread-local** ``CoreV1Api`` (``Cluster.exec_core_api``): the
+    kubernetes ``stream()`` (websocket) exec is not thread-safe across a shared
+    client, so parallel execs stay isolated per thread — but the client is cached
+    per thread rather than rebuilt per call, avoiding a leaked connection/thread
+    pool on every exec.
     """
-    core = client.CoreV1Api(client.ApiClient(self._cluster.api_client.configuration))
+    core = self._cluster.exec_core_api()
     return exec_in_pod(core, self.pod_name, self._cluster.namespace, command)
 
   def endpoint(self, port: int = 8888) -> str:

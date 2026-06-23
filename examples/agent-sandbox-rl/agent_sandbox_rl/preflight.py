@@ -84,8 +84,17 @@ _EXT_CRDS = (constants.TEMPLATES_PLURAL, constants.WARMPOOLS_PLURAL,
 
 def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
                       image_pull_secret: str | None = None,
-                      namespace: str | None = None) -> PreflightReport:
-  """Run all checks on one cluster and return a `PreflightReport`."""
+                      namespace: str | None = None,
+                      validate_template=None,
+                      sample_image: str = "busybox:latest") -> PreflightReport:
+  """Run all checks on one cluster and return a `PreflightReport`.
+
+  If ``validate_template`` (a `TemplateSpec`) is given, the hand-built
+  SandboxTemplate + SandboxWarmPool manifests are server-side dry-run validated
+  against the live CRD schema — a clear schema rejection (HTTP 400/422) is a hard
+  failure (catches drift the mocked unit tests can't); other errors (RBAC,
+  dry-run unsupported) are warnings so we never false-fail.
+  """
   r = PreflightReport(cluster.name)
   ns = namespace or cluster.namespace
 
@@ -145,6 +154,18 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
       r.add(f"secret:{image_pull_secret}", True)
     except Exception as e:  # noqa: BLE001
       r.add(f"secret:{image_pull_secret}", False, str(e))
+
+  # 7. CRD manifest schema (server-side dry run) — the hand-built manifests are
+  #    the one component with no SDK to lean on; the unit tests only see mocks.
+  if validate_template is not None:
+    try:
+      cluster.resources.validate_manifests(sample_image, validate_template)
+      r.add("manifests", True, "dry-run accepted")
+    except client.ApiException as e:
+      hard = e.status in (400, 422)        # Invalid / BadRequest = real schema drift
+      r.add("manifests", False, f"HTTP {e.status}: {e.reason}", warn_only=not hard)
+    except Exception as e:  # noqa: BLE001 — connectivity / dry-run unsupported
+      r.add("manifests", False, str(e), warn_only=True)
 
   return r
 

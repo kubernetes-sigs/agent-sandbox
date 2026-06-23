@@ -47,12 +47,13 @@ logger = logging.getLogger("agent_sandbox_rl.fleet")
 def _split_budget(total: int, weights: "dict[str, float]") -> "dict[str, int]":
   """Split an integer ``total`` across keys by ``weights`` using largest-remainder
   (Hamilton) allocation, so the result sums to exactly ``total`` (no rounding
-  overshoot). Empty/zero-weight inputs degrade gracefully."""
+  overshoot)."""
   if not weights:
     return {}
-  tw = sum(weights.values()) or float(len(weights))  # equal split if all zero
-  ideal = {k: total * (w / tw if sum(weights.values()) else 1.0 / len(weights))
-           for k, w in weights.items()}
+  if len(weights) == 1:                         # common case — no allocation math
+    return {next(iter(weights)): total}
+  tw = sum(weights.values())                    # ClusterConfig.weight is > 0, so tw > 0
+  ideal = {k: total * (w / tw) for k, w in weights.items()}
   alloc = {k: int(math.floor(v)) for k, v in ideal.items()}
   remainder = total - sum(alloc.values())
   # hand out the leftover units to the largest fractional parts
@@ -162,11 +163,13 @@ class SandboxFleet:
     from . import preflight as _pf
     reports = {}
     failed = {}
+    sample_image = next(iter(self.image_counts()), "busybox:latest")
     for c in self.registry:
       ts = c.template_spec(self.config.template)
       rep = _pf.preflight_cluster(
           c, require_runtime_class=ts.runtime_class,
-          image_pull_secret=ts.image_pull_secret, namespace=c.namespace)
+          image_pull_secret=ts.image_pull_secret, namespace=c.namespace,
+          validate_template=ts, sample_image=sample_image)
       reports[c.name] = rep
       for w in rep.warnings:
         logger.warning("[%s] %s: %s", c.name, w.name, w.detail)

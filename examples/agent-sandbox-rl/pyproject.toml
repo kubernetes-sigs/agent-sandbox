@@ -31,11 +31,13 @@ dependencies = [
     "k8s-agent-sandbox",
     "kubernetes",
     "pydantic>=2",
-    "prometheus-client",
 ]
 
 [project.optional-dependencies]
 swebench = ["datasets"]
+# Prometheus is optional: the always-on RunReport needs no third-party deps, and
+# importing the package registers no collectors. Install this to export asrl_*.
+metrics = ["prometheus-client"]
 # R2E-Gym (for adapters.r2egym) is not on PyPI — install it from its checkout
 # (`pip install -e path/to/R2E-Gym`); the adapter raises a clear error if it's
 # missing. So there's intentionally no `r2egym` extra here.
@@ -45,7 +47,7 @@ tracing = [
     "opentelemetry-sdk~=1.39",
     "opentelemetry-exporter-otlp~=1.39",
 ]
-test = ["pytest", "pytest-asyncio", "pytest-xdist"]
+test = ["agent-sandbox-rl[metrics]", "pytest", "pytest-asyncio", "pytest-xdist"]
 
 [tool.setuptools.packages.find]
 include = ["agent_sandbox_rl*"]

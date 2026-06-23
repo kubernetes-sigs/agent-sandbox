@@ -88,8 +88,8 @@ fleet then replaces `eval_deepswe.py`'s inline warm-pool management.
 **no-model** demo of this path (stub policy) — it falls back to a router-free
 `exec` probe when R2E-Gym isn't installed.
 
-Requires the `r2egym` extra (install R2E-Gym from its checkout:
-`pip install -e path/to/R2E-Gym`).
+Requires R2E-Gym, which isn't on PyPI — install it from its checkout
+(`pip install -e path/to/R2E-Gym`). There is no `r2egym` extra.
 
 ## TorchRL / SkyRL
 

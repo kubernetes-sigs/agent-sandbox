@@ -63,6 +63,23 @@ class Cluster:
     self._count_lock = threading.Lock()
     self.active_replicas = 0
     self.active_claims = 0
+    # One CoreV1Api per thread for router-free pod exec (see exec_core_api).
+    self._exec_local = threading.local()
+
+  def exec_core_api(self):
+    """A thread-local `CoreV1Api` for router-free pod exec.
+
+    The kubernetes ``stream()`` (websocket) exec is not thread-safe across a
+    shared client, so each thread gets its own client — but cached per thread
+    rather than rebuilt per call. A fresh ``ApiClient`` per exec would leak a
+    urllib3 connection pool + thread pool every time (GC-reliant), which at this
+    package's scale (a sandbox per trajectory → many execs) exhausts fds.
+    """
+    core = getattr(self._exec_local, "core_api", None)
+    if core is None:
+      core = client.CoreV1Api(client.ApiClient(self.api_client.configuration))
+      self._exec_local.core_api = core
+    return core
 
   @property
   def k8s_helper(self):

@@ -71,17 +71,19 @@ pip install -e clients/python/agentic-sandbox-client \
 ### Dependencies & extras
 
 Core deps (installed automatically): `k8s-agent-sandbox` (the SDK — **reused, not
-forked**), `kubernetes`, `pydantic>=2`, and `prometheus-client` (so metrics work
-out of the box).
+forked**), `kubernetes`, and `pydantic>=2`. That's it — the always-on `RunReport`
+is dependency-free, and merely importing the package registers no Prometheus
+collectors (Prometheus is the optional `metrics` extra below).
 
 | Extra | Pulls in | Use it for |
 | :--- | :--- | :--- |
 | `swebench` | `datasets` (Hugging Face) | `SweBenchSource` — loading SWE-bench task lists. |
 | `async` | `k8s-agent-sandbox[async]`, `kubernetes_asyncio` | `AsyncSandboxFleet` on an asyncio loop. |
+| `metrics` | `prometheus-client` | Export `asrl_*` Prometheus series (`enable_metrics=True`). Without it, `RunReport` still works. |
 | `tracing` | `opentelemetry-api` / `-sdk` / `-exporter-otlp` (~=1.39) | OpenTelemetry span export (`enable_tracing=True`). No-op when absent. |
 | `test` | `pytest`, `pytest-asyncio`, `pytest-xdist` | Running the mocked unit tests. |
 
-Combine extras with commas, e.g. `…/agent-sandbox-rl[swebench,async,tracing]`.
+Combine extras with commas, e.g. `…/agent-sandbox-rl[swebench,async,metrics]`.
 
 The **R2E-Gym adapter** (`adapters.r2egym`) needs R2E-Gym, which isn't on PyPI —
 install it from its checkout (`pip install -e path/to/R2E-Gym`); the adapter
@@ -183,7 +185,20 @@ replicas_image = clamp(round(MAX_CONCURRENT × tasks_image / tasks_total),
 ```
 
 `MAX_CONCURRENT` is the one knob that both **sizes pools** and **parallelizes
-claim+exec**. (`python -m agent_sandbox_rl.sizing` shows old-vs-new footprints.)
+claim+exec**. This is the core cost win — it avoids warming *N* pods for *N* tasks
+while keeping sub-second claims. `python -m agent_sandbox_rl.sizing` prints the
+old-vs-new footprints; for a skewed 100-task / 8-image batch (`MAX_WARMPOOL_SIZE=32`):
+
+| `MAX_CONCURRENT` | baseline `min(count, cap)`, all warm | concurrency-aware footprint | sliding window |
+| ---: | ---: | ---: | ---: |
+| 1 | 92 pods | **8 pods** | 1 |
+| 8 | 92 pods | **11 pods** | 5 |
+| 32 | 92 pods | **32 pods** | 8 |
+| 256 | 92 pods | 92 pods | 8 |
+
+The naive (warm-everything) baseline holds 92 pods regardless; sizing pools to the
+concurrency budget cuts that to 8–32 for the same throughput, and `sliding` bounds
+it further to a window.
 
 ## Multi-cluster
 
@@ -210,7 +225,10 @@ caller's concern (see the integration guide).
   versions, controller, namespace, and (if configured) runtime class + pull
   secret. Hard failures raise `PreflightError`; soft issues are warnings.
 - **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): a DaemonSet caches
-  task images on every node so warm pools skip the multi-GB pull.
+  task images on every node so warm pools skip the multi-GB pull. This is where
+  cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report
+  shows it as ~34 s of a 48 s run), so pre-pulling (or a persistent node-level
+  image cache) is the single biggest lever for repeated/RL runs.
 - **Watch-based readiness**: `wait_for_pool_ready` watches the WarmPool and
   returns at the `readyReplicas` event (near-exact timing, no fixed poll grid),
   reconnecting and falling back to a short re-check on watch drops.
@@ -252,8 +270,12 @@ Three layers, mirroring the `k8s-agent-sandbox` SDK so traces/metrics interopera
    breakdown of every phase and metric. (Note: per-phase totals are *summed*
    durations, so under concurrency they exceed the wall-clock `TOTAL`.)
 
-2. **Prometheus metrics** (opt-in, default **on**) — `asrl_*` series on the default
-   registry: `asrl_phase_latency_seconds`, `asrl_task_latency_seconds`,
+2. **Prometheus metrics** (opt-in, default **on**; needs the `metrics` extra) —
+   `asrl_*` series on the default registry. The collectors are registered lazily
+   on the first metrics-enabled run, so importing the package has no global side
+   effect (and with `prometheus-client` not installed, metrics are a silent
+   no-op while `RunReport` keeps working). Series:
+   `asrl_phase_latency_seconds`, `asrl_task_latency_seconds`,
    `asrl_run_latency_seconds` (histograms), `asrl_claims_total`,
    `asrl_tasks_total` (counters), `asrl_warm_replicas` (gauge). Labels are
    bounded: `phase · cluster · family · strategy · status` (`family` is the

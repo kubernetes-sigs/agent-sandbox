@@ -199,6 +199,27 @@ def test_fleet_run_populates_report(two_cluster_registry):
   assert rep.total_s >= 0.0
 
 
+def test_import_has_no_metrics_side_effect():
+  # In a fresh process, merely importing the package must NOT register any
+  # asrl_* collectors on the global default registry (they're created lazily by
+  # the first metrics-enabled Observer). Run in a subprocess so other tests in
+  # this process that build Observers can't pre-register and mask a regression.
+  import subprocess
+  import sys
+  code = (
+      "import agent_sandbox_rl, agent_sandbox_rl.observability as o\n"
+      "from prometheus_client import REGISTRY\n"
+      "names = [n for n in REGISTRY._names_to_collectors if n.startswith('asrl_')]\n"
+      "assert not names, names\n"
+      "assert o._METRICS_READY is False\n"
+      "from agent_sandbox_rl import ObservabilityConfig, Observer\n"
+      "Observer(ObservabilityConfig(enable_metrics=True, enable_tracing=False))\n"
+      "assert o._METRICS_READY is True\n"
+      "assert any(n.startswith('asrl_') for n in REGISTRY._names_to_collectors)\n"
+  )
+  subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_metric_duplicate_registration_reuses():
   from agent_sandbox_rl import observability as o
   if not o._PROM:

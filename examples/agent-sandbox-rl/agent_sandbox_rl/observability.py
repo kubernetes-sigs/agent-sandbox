@@ -17,8 +17,9 @@
 Three layers (mirroring the k8s-agent-sandbox SDK so they interoperate):
 
 1. **RunReport** — always-on, dependency-free per-phase timing + counts.
-2. **Prometheus metrics** — `asrl_*` series on the default registry (opt-in via
-   ``ObservabilityConfig.enable_metrics``, default True).
+2. **Prometheus metrics** — `asrl_*` series on the default registry (optional
+   ``metrics`` extra; opt-in via ``ObservabilityConfig.enable_metrics``, default
+   True). Collectors are registered lazily on first use, never at import.
 3. **OpenTelemetry spans** — reuse the SDK's tracer/provider so fleet spans nest
    with the SDK's own (opt-in via ``enable_tracing``; no-op without OTel).
 
@@ -35,7 +36,7 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("agent_sandbox_rl.observability")
 
-# --- Prometheus (a hard dep, but guard defensively) ------------------------ #
+# --- Prometheus (optional `metrics` extra; import guarded) ----------------- #
 try:
   from prometheus_client import REGISTRY as _REGISTRY
   from prometheus_client import Counter, Gauge, Histogram, start_http_server
@@ -61,7 +62,23 @@ def _metric(cls, name, *args, **kwargs):
     raise
 
 
-if _PROM:
+# The asrl_* collectors are created lazily (see _ensure_metrics) the first time
+# an Observer with metrics enabled is built — NOT at import. This keeps merely
+# importing the package free of global-registry side effects (prometheus is an
+# optional `metrics` extra; the always-on RunReport needs none of it).
+PHASE_LATENCY = TASK_LATENCY = RUN_LATENCY = CLAIMS = TASKS = WARM_REPLICAS = None
+_METRICS_READY = False
+
+
+def _ensure_metrics() -> bool:
+  """Register the ``asrl_*`` collectors on first use. Returns True if metrics are
+  available (prometheus installed); idempotent and safe across re-import."""
+  global _METRICS_READY, PHASE_LATENCY, TASK_LATENCY, RUN_LATENCY
+  global CLAIMS, TASKS, WARM_REPLICAS
+  if _METRICS_READY:
+    return True
+  if not _PROM:
+    return False
   PHASE_LATENCY = _metric(
       Histogram, "asrl_phase_latency_seconds", "Fleet phase latency",
       ["phase", "cluster", "family", "strategy", "status"], buckets=_SEC_BUCKETS)
@@ -78,6 +95,8 @@ if _PROM:
                   ["strategy", "status"])
   WARM_REPLICAS = _metric(Gauge, "asrl_warm_replicas", "Current warm replicas",
                           ["cluster"])
+  _METRICS_READY = True
+  return True
 
 
 # --- config --------------------------------------------------------------- #
@@ -209,7 +228,9 @@ class Observer:
   def __init__(self, config=None):
     from .config import ObservabilityConfig
     self.config = config or ObservabilityConfig()
-    self.metrics = bool(self.config.enable_metrics and _PROM)
+    # Registering the collectors is deferred to here (first metrics-enabled
+    # Observer), so importing the package never touches the global registry.
+    self.metrics = bool(self.config.enable_metrics and _PROM and _ensure_metrics())
     self.tracer = _init_tracer(self.config.trace_service_name) if self.config.enable_tracing else None
     self.report: RunReport | None = None
     self._strategy = "-"

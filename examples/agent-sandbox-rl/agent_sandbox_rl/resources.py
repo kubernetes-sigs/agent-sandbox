@@ -47,10 +47,12 @@ class Resources:
 
   # --- templates --------------------------------------------------------- #
   def ensure_template(self, image: str, template_name: str,
-                      template: TemplateSpec) -> bool:
+                      template: TemplateSpec, *, dry_run: bool = False) -> bool:
     """Create the SandboxTemplate for ``image`` if absent. Idempotent.
 
     Returns True if it created the template, False if it already existed.
+    ``dry_run=True`` sends a server-side dry run (``dryRun=All``) — validated
+    against the CRD schema but not persisted.
     """
     try:
       self.custom_api.get_namespaced_custom_object(
@@ -67,7 +69,8 @@ class Resources:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
-          body=self._template_manifest(image, template_name, template))
+          body=self._template_manifest(image, template_name, template),
+          dry_run="All" if dry_run else None)
     except client.ApiException as e:
       if e.status == 409:        # created concurrently / between our get and create
         logger.info("SandboxTemplate '%s' already exists (409).", template_name)
@@ -120,11 +123,9 @@ class Resources:
     self._delete(constants.TEMPLATES_PLURAL, template_name, "SandboxTemplate")
 
   # --- warm pools -------------------------------------------------------- #
-  def create_warmpool(self, name: str, template_name: str,
-                      replicas: int) -> None:
-    """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
-    Idempotent on 409 (already exists)."""
-    body = {
+  def _warmpool_manifest(self, name: str, template_name: str,
+                         replicas: int) -> dict:
+    return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",
         "kind": "SandboxWarmPool",
         "metadata": {
@@ -137,16 +138,45 @@ class Resources:
             "sandboxTemplateRef": {"name": template_name},
         },
     }
+
+  def create_warmpool(self, name: str, template_name: str,
+                      replicas: int, *, dry_run: bool = False) -> None:
+    """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
+    Idempotent on 409 (already exists). ``dry_run=True`` sends ``dryRun=All``."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
-          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL, body=body)
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+          body=self._warmpool_manifest(name, template_name, replicas),
+          dry_run="All" if dry_run else None)
       logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
     except client.ApiException as e:
       if e.status == 409:
         logger.info("SandboxWarmPool '%s' already exists.", name)
       else:
         raise
+
+  def validate_manifests(self, sample_image: str, template: TemplateSpec,
+                         *, name: str = "asrl-validate") -> None:
+    """Server-side dry-run the hand-built Template + WarmPool manifests against
+    the live CRD schema (nothing is persisted).
+
+    These manifests are the one component with no SDK to lean on; every unit test
+    stubs the API, so schema drift (a missing required field, wrong nesting) would
+    pass the suite and only fail live. Calling this against a real apiserver
+    catches that. Propagates ``ApiException`` on rejection; callers decide whether
+    to warn or fail.
+    """
+    self.custom_api.create_namespaced_custom_object(
+        group=constants.GROUP, version=constants.VERSION,
+        namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
+        body=self._template_manifest(sample_image, name, template),
+        dry_run="All")
+    self.custom_api.create_namespaced_custom_object(
+        group=constants.GROUP, version=constants.VERSION,
+        namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+        body=self._warmpool_manifest(name, name, 1),
+        dry_run="All")
 
   def delete_warmpool(self, name: str) -> None:
     self._delete(constants.WARMPOOLS_PLURAL, name, "SandboxWarmPool")
@@ -191,10 +221,11 @@ class Resources:
               self.custom_api.list_namespaced_custom_object,
               group=constants.GROUP, version=constants.VERSION,
               namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+              field_selector=f"metadata.name={name}",
               timeout_seconds=remaining):
             obj = event.get("object") or {}
             if (obj.get("metadata") or {}).get("name") != name:
-              continue                       # other pools / bookmarks
+              continue                       # bookmarks / belt-and-suspenders
             ready = int((obj.get("status") or {}).get("readyReplicas", 0) or 0)
             logger.info("WarmPool '%s': %d/%d ready", name, ready, expected)
             if ready >= expected:

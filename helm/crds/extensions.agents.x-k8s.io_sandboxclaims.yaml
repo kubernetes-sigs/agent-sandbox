@@ -22,11 +22,20 @@ spec:
     - jsonPath: .status.sandbox.name
       name: Sandbox
       type: string
-    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
-      name: Reason
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
+      type: date
+    - jsonPath: .spec.warmPoolRef.name
+      name: WarmPool
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .spec.lifecycle.shutdownTime
+      name: Shutdown
+      priority: 1
       type: date
     name: v1beta1
     schema:

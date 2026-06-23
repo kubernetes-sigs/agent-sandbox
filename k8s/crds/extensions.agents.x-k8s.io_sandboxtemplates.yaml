@@ -15,7 +15,19 @@ spec:
     singular: sandboxtemplate
   scope: Namespaced
   versions:
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .spec.networkPolicyManagement
+      name: Network
+      priority: 1
+      type: string
+    - jsonPath: .spec.podTemplate.spec.containers[*].name
+      name: Containers
+      priority: 1
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         properties:
@@ -4153,6 +4165,7 @@ spec:
         type: object
     served: true
     storage: true
+    subresources: {}
   - deprecated: true
     deprecationWarning: extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate is deprecated;
       use extensions.agents.x-k8s.io/v1beta1 SandboxTemplate instead

@@ -19,9 +19,24 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.replicas
+      name: Current
+      priority: 1
+      type: integer
+    - jsonPath: .spec.sandboxTemplateRef.name
+      name: Template
+      priority: 1
+      type: string
+    - jsonPath: .status.selector
+      name: Selector
+      priority: 1
+      type: string
     name: v1beta1
     schema:
       openAPIV3Schema:

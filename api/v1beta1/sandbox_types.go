@@ -244,6 +244,12 @@ type SandboxStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
 // +kubebuilder:storageversion
 // +kubebuilder:conversion:strategy=Webhook
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason",priority=1
+// +kubebuilder:printcolumn:name="Service",type="string",JSONPath=".status.service",priority=1
+// +kubebuilder:printcolumn:name="Node",type="string",JSONPath=".status.nodeName",priority=1
+// +kubebuilder:printcolumn:name="Shutdown",type="date",JSONPath=".spec.shutdownTime",priority=1
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

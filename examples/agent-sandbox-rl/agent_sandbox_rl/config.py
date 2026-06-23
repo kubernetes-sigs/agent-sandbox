@@ -119,11 +119,17 @@ class FleetConfig(BaseModel):
   @field_validator("template_name_prefix")
   @classmethod
   def _valid_prefix(cls, v: str) -> str:
-    # Template names are `<prefix><md5[:12]>` and must be DNS-1123 subdomains.
-    if not re.match(r"^[a-z0-9][a-z0-9.-]*$", v):
+    # Validate the *final* generated name `<prefix><md5[:12]>`, not just the
+    # prefix: a permissive prefix regex still allows names that aren't valid
+    # DNS-1123 subdomains (e.g. consecutive dots "r2e..img-", or a segment
+    # ending in '-' before a dot), which fail with a 422 only at create time.
+    # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in.
+    sample = f"{v}{'0' * 12}"
+    dns1123 = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+    if len(sample) > 253 or not re.match(dns1123, sample):
       raise ValueError(
-          "template_name_prefix must start with [a-z0-9] and contain only "
-          f"lowercase DNS-1123 chars [a-z0-9.-]; got {v!r}")
+          "template_name_prefix must yield a DNS-1123 subdomain when combined "
+          f"with the 12-char image hash; got a name like {sample!r}")
     return v
 
   @field_validator("placement")

@@ -134,11 +134,19 @@ class AsyncSandboxFleet:
 
   # --- parallel processing + strategies ---------------------------------- #
   async def _call(self, process_fn, task, handle):
-    # Covers plain coroutine functions and callable objects with `async __call__`.
+    # Fast path: plain coroutine functions and callable objects with `async
+    # __call__` are awaited directly on the loop.
     if inspect.iscoroutinefunction(process_fn) or \
         inspect.iscoroutinefunction(getattr(process_fn, "__call__", None)):
       return await process_fn(task, handle)
-    return await asyncio.to_thread(process_fn, task, handle)
+    # Otherwise run in a worker thread — but some callables that aren't
+    # coroutine-functions still RETURN an awaitable (e.g. functools.partial of an
+    # async fn, or a sync fn returning a coroutine). Await the result if so,
+    # rather than handing back an un-awaited coroutine.
+    result = await asyncio.to_thread(process_fn, task, handle)
+    if inspect.isawaitable(result):
+      return await result
+    return result
 
   async def _process_parallel(self, tasks, process_fn, concurrency):
     sem = asyncio.Semaphore(max(1, concurrency))

@@ -76,3 +76,26 @@ def test_template_name_prefix_rejects_invalid():
     FleetConfig(template_name_prefix="Bad_Prefix!")
   # valid prefix is accepted
   assert FleetConfig(template_name_prefix="r2e-img-").template_name_prefix == "r2e-img-"
+
+
+@pytest.mark.parametrize("bad", [
+    "r2e..img-",      # consecutive dots -> empty DNS segment
+    "r2e-.img-",      # segment ends with '-' before a dot
+    "-r2e-img-",      # cannot start with '-'
+    ".r2e-img-",      # cannot start with '.'
+    "x" * 250,        # <prefix><12 hash> exceeds the 253 char DNS-1123 cap
+])
+def test_template_name_prefix_rejects_invalid_generated_name(bad):
+  # The validator must reject prefixes whose *generated* name (<prefix><md5[:12]>)
+  # isn't a valid DNS-1123 subdomain, not just non-[a-z0-9.-] prefixes.
+  with pytest.raises(ValueError):
+    FleetConfig(template_name_prefix=bad)
+
+
+@pytest.mark.parametrize("good", ["r2e-img-", "pool.", "abc", "a1-b2."])
+def test_template_name_prefix_accepts_valid_generated_name(good):
+  cfg = FleetConfig(template_name_prefix=good)
+  name = cfg.template_name("some/image:tag")
+  dns1123 = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+  import re
+  assert re.match(dns1123, name) and len(name) <= 253

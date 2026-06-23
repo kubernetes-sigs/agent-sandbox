@@ -55,6 +55,26 @@ async def test_async_naive_async_processfn(two_cluster_registry):
   assert f.handles() == []
 
 
+async def test_async_call_awaits_returned_awaitable(two_cluster_registry):
+  # A callable that is NOT a coroutine function but RETURNS an awaitable (e.g.
+  # functools.partial of an async fn, or a sync fn returning a coroutine) must
+  # still be awaited — not handed back as an un-awaited coroutine.
+  f = _fleet(two_cluster_registry)
+  f.load_tasks(["imgA", "imgB"])
+
+  async def inner(task, handle):
+    await asyncio.sleep(0)
+    return handle.cluster_name
+
+  def returns_coro(task, handle):       # sync callable, returns a coroutine
+    return inner(task, handle)
+
+  res = await f.run(returns_coro, strategy="naive")
+  assert len(res) == 2
+  assert all(isinstance(r, str) for r in res)   # awaited (not coroutine objects)
+  assert f.handles() == []
+
+
 async def test_async_concurrency_overlaps(make_cluster):
   from agent_sandbox_rl import ClusterRegistry
   c = make_cluster("solo")

@@ -33,7 +33,21 @@ import (
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers int) {
+type ControllerOptions struct {
+	// SandboxConcurrentWorkers configures the sandbox-concurrent-workers flag
+	SandboxConcurrentWorkers int
+	// SandboxClaimConcurrentWorkers configures the sandbox-claim-concurrent-workers flag
+	SandboxClaimConcurrentWorkers int
+	// SandboxWarmPoolConcurrentWorkers configures the sandbox-warm-pool-concurrent-workers flag
+	SandboxWarmPoolConcurrentWorkers int
+
+	// KubeAPIQPS configures the kube-api-qps flag
+	KubeAPIQPS float64
+	// KubeAPIBurst configures the kube-api-burst flag
+	KubeAPIBurst int
+}
+
+func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, opt ControllerOptions) {
 	var originalDeployment appsv1.Deployment
 	err := tc.Get(t.Context(), types.NamespacedName{Name: "agent-sandbox-controller", Namespace: "agent-sandbox-system"}, &originalDeployment)
 	require.NoError(t, err, "failed to get controller deployment")
@@ -75,11 +89,21 @@ func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers
 				}
 			}
 			newArgs = append(newArgs, "--extensions")
-			newArgs = append(newArgs, fmt.Sprintf("--sandbox-concurrent-workers=%d", workers))
-			newArgs = append(newArgs, fmt.Sprintf("--sandbox-claim-concurrent-workers=%d", workers))
-			newArgs = append(newArgs, fmt.Sprintf("--sandbox-warm-pool-concurrent-workers=%d", workers))
-			newArgs = append(newArgs, "--kube-api-qps=50")
-			newArgs = append(newArgs, "--kube-api-burst=100")
+			if opt.SandboxConcurrentWorkers != 0 {
+				newArgs = append(newArgs, fmt.Sprintf("--sandbox-concurrent-workers=%d", opt.SandboxConcurrentWorkers))
+			}
+			if opt.SandboxClaimConcurrentWorkers != 0 {
+				newArgs = append(newArgs, fmt.Sprintf("--sandbox-claim-concurrent-workers=%d", opt.SandboxClaimConcurrentWorkers))
+			}
+			if opt.SandboxWarmPoolConcurrentWorkers != 0 {
+				newArgs = append(newArgs, fmt.Sprintf("--sandbox-warm-pool-concurrent-workers=%d", opt.SandboxWarmPoolConcurrentWorkers))
+			}
+			if opt.KubeAPIQPS != 0 {
+				newArgs = append(newArgs, fmt.Sprintf("--kube-api-qps=%f", opt.KubeAPIQPS))
+			}
+			if opt.KubeAPIBurst != 0 {
+				newArgs = append(newArgs, fmt.Sprintf("--kube-api-burst=%d", opt.KubeAPIBurst))
+			}
 
 			deployment.Spec.Template.Spec.Containers[i].Args = newArgs
 			break
@@ -109,7 +133,13 @@ func patchControllerConcurrency(t *testing.T, tc *framework.TestContext, workers
 
 func TestParallelSandboxes(t *testing.T) {
 	tc := framework.NewTestContext(t)
-	patchControllerConcurrency(t, tc, 10)
+	patchControllerConcurrency(t, tc, ControllerOptions{
+		SandboxConcurrentWorkers:         10,
+		SandboxClaimConcurrentWorkers:    100,
+		SandboxWarmPoolConcurrentWorkers: 10,
+		KubeAPIQPS:                       -1, // No limit
+		KubeAPIBurst:                     10,
+	})
 
 	ns := &corev1.Namespace{}
 	ns.Name = fmt.Sprintf("parallel-sandboxes-%d", time.Now().UnixNano())
@@ -145,7 +175,13 @@ func TestParallelSandboxes(t *testing.T) {
 }
 
 func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolSize int32, numClaims int) {
-	patchControllerConcurrency(t, tc, 10)
+	patchControllerConcurrency(t, tc, ControllerOptions{
+		SandboxConcurrentWorkers:         10,
+		SandboxClaimConcurrentWorkers:    100,
+		SandboxWarmPoolConcurrentWorkers: 10,
+		KubeAPIQPS:                       -1, // No limit
+		KubeAPIBurst:                     10,
+	})
 
 	ns := &corev1.Namespace{}
 	ns.Name = fmt.Sprintf("parallel-claims-pool-%d", time.Now().UnixNano())

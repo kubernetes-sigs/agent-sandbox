@@ -15,7 +15,7 @@ Using OpenTelemetry's auto-instrumentation tools, you can surface rich metric an
 
 - A running Kubernetes cluster with the [Agent Sandbox controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
+- A `SandboxWarmPool` named `simple-sandbox-pool` (backed by a `SandboxTemplate` named `simple-sandbox-template`) applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for the template setup, then create a matching `SandboxWarmPool` whose `spec.sandboxTemplateRef.name` is `simple-sandbox-template`.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed with tracing extras and the OpenTelemetry CLI tools: `pip install "k8s-agent-sandbox[tracing]" opentelemetry-distro`.
   > **Note:** The `[tracing]` extra automatically bundles the core `opentelemetry-api` and `opentelemetry-sdk` dependencies needed by the client. For a full list of available extras, see the [SDK dependencies documentation]({{< ref "/docs/python-client#dependencies" >}}).
 
@@ -31,8 +31,8 @@ from k8s_agent_sandbox import SandboxClient
 # 1. Initialize the client
 client = SandboxClient()
 
-# 2. Create the sandbox using your template
-sandbox = client.create_sandbox("simple-sandbox-template")
+# 2. Create the sandbox using your warm pool
+sandbox = client.create_sandbox("simple-sandbox-pool")
 
 # 3. Define and run a standard command
 payload = "echo 'Hello World!'"
@@ -67,7 +67,7 @@ opentelemetry-instrument python main.py
 When you run the command above, you will see your standard application logs (e.g., creating the claim, starting the tunnel) alongside a large payload of JSON-formatted telemetry data. 
 
 ```log
-2026-04-10 11:16:01,246 - INFO - Creating SandboxClaim 'sandbox-claim-30ed22c0' in namespace 'default' using template 'simple-sandbox-template'...
+2026-04-10 11:16:01,246 - INFO - Creating SandboxClaim 'sandbox-claim-30ed22c0' in namespace 'default' using warm pool 'simple-sandbox-pool'...
 2026-04-10 11:16:01,265 - INFO - Resolving sandbox name from claim 'sandbox-claim-30ed22c0'...
 2026-04-10 11:16:01,284 - INFO - Resolved sandbox name 'sandbox-claim-30ed22c0' from claim status
 2026-04-10 11:16:01,284 - INFO - Watching for Sandbox sandbox-claim-30ed22c0 to become ready...

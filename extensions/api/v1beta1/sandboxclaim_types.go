@@ -163,6 +163,8 @@ type SandboxStatus struct {
 // +kubebuilder:printcolumn:name="Sandbox",type="string",JSONPath=".status.sandbox.name"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`

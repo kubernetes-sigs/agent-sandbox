@@ -171,7 +171,7 @@ def process_manifests(all_docs, args):
     other_docs = []
 
     image_prefix = utils.get_image_prefix(args)
-    image_tag = utils.get_image_tag()
+    image_tag = args.image_tag if args.image_tag else utils.get_image_tag()
 
     for item in all_docs:
         doc = item["doc"]

@@ -23,100 +23,127 @@ import (
 )
 
 func TestSandboxWarmPoolConversion(t *testing.T) {
-	src := &SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "my-warmpool",
-			Namespace: "default",
-			Labels: map[string]string{
-				"foo": "bar",
-			},
-			Annotations: map[string]string{
-				"baz":                                  "qux",
-				v1alpha1SandboxWarmPoolStateAnnotation: "some-old-state",
-			},
-		},
-		Spec: SandboxWarmPoolSpec{
-			Replicas: 3,
-			TemplateRef: SandboxTemplateRef{
-				Name: "my-template",
-			},
-			UpdateStrategy: &SandboxWarmPoolUpdateStrategy{
+	tests := []struct {
+		name           string
+		updateStrategy *SandboxWarmPoolUpdateStrategy
+	}{
+		{
+			name: "with update strategy",
+			updateStrategy: &SandboxWarmPoolUpdateStrategy{
 				Type: RecreateSandboxWarmPoolUpdateStrategyType,
 			},
 		},
-		Status: SandboxWarmPoolStatus{
-			Replicas:      3,
-			ReadyReplicas: 2,
-			Selector:      "app=my-warmpool",
+		{
+			// Exercises the nil branch of convertWarmPoolSpecTo/convertWarmPoolSpecFrom.
+			name:           "nil update strategy",
+			updateStrategy: nil,
 		},
 	}
 
-	// Convert to Hub (v1beta1)
-	dst := &v1beta1.SandboxWarmPool{}
-	if err := src.ConvertTo(dst); err != nil {
-		t.Fatalf("failed to convert to v1beta1: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-warmpool",
+					Namespace: "default",
+					Labels: map[string]string{
+						"foo": "bar",
+					},
+					Annotations: map[string]string{
+						"baz":                                  "qux",
+						v1alpha1SandboxWarmPoolStateAnnotation: "some-old-state",
+					},
+				},
+				Spec: SandboxWarmPoolSpec{
+					Replicas: 3,
+					TemplateRef: SandboxTemplateRef{
+						Name: "my-template",
+					},
+					UpdateStrategy: tc.updateStrategy,
+				},
+				Status: SandboxWarmPoolStatus{
+					Replicas:      3,
+					ReadyReplicas: 2,
+					Selector:      "app=my-warmpool",
+				},
+			}
 
-	// Verify src annotations and labels were not mutated during ConvertTo
-	if val, ok := src.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]; !ok || val != "some-old-state" {
-		t.Errorf("src.Annotations was mutated during ConvertTo! expected 'some-old-state', got %q", val)
-	}
-	if len(src.Annotations) != 2 {
-		t.Errorf("expected 2 annotations in src, got %d", len(src.Annotations))
-	}
-	if len(src.Labels) != 1 {
-		t.Errorf("expected 1 label in src, got %d", len(src.Labels))
-	}
+			// Convert to Hub (v1beta1)
+			dst := &v1beta1.SandboxWarmPool{}
+			if err := src.ConvertTo(dst); err != nil {
+				t.Fatalf("failed to convert to v1beta1: %v", err)
+			}
 
-	// Verify the marshaled state in dst does not contain the state annotation itself (no nesting)
-	marshaledState := dst.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]
-	var stateObj SandboxWarmPool
-	if err := json.Unmarshal([]byte(marshaledState), &stateObj); err != nil {
-		t.Fatalf("failed to unmarshal state from dst: %v", err)
-	}
-	if _, ok := stateObj.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]; ok {
-		t.Errorf("dst.Annotations state nestedly contains the state annotation! causing exponential growth")
-	}
+			// Verify src annotations and labels were not mutated during ConvertTo
+			if val, ok := src.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]; !ok || val != "some-old-state" {
+				t.Errorf("src.Annotations was mutated during ConvertTo! expected 'some-old-state', got %q", val)
+			}
+			if len(src.Annotations) != 2 {
+				t.Errorf("expected 2 annotations in src, got %d", len(src.Annotations))
+			}
+			if len(src.Labels) != 1 {
+				t.Errorf("expected 1 label in src, got %d", len(src.Labels))
+			}
 
-	// Verify v1beta1 fields
-	if dst.Spec.Replicas != 3 {
-		t.Errorf("unexpected replicas: %d", dst.Spec.Replicas)
-	}
-	if dst.Spec.TemplateRef.Name != "my-template" {
-		t.Errorf("unexpected template ref: %s", dst.Spec.TemplateRef.Name)
-	}
-	if dst.Spec.UpdateStrategy == nil || string(dst.Spec.UpdateStrategy.Type) != string(RecreateSandboxWarmPoolUpdateStrategyType) {
-		t.Errorf("unexpected update strategy: %v", dst.Spec.UpdateStrategy)
-	}
-	if dst.Status.ReadyReplicas != 2 {
-		t.Errorf("unexpected ready replicas: %d", dst.Status.ReadyReplicas)
-	}
+			// Verify the marshaled state in dst does not contain the state annotation itself (no nesting)
+			marshaledState := dst.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]
+			var stateObj SandboxWarmPool
+			if err := json.Unmarshal([]byte(marshaledState), &stateObj); err != nil {
+				t.Fatalf("failed to unmarshal state from dst: %v", err)
+			}
+			if _, ok := stateObj.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]; ok {
+				t.Errorf("dst.Annotations state nestedly contains the state annotation! causing exponential growth")
+			}
 
-	// Convert back to Spoke (v1alpha1)
-	roundTrip := &SandboxWarmPool{}
-	if err := roundTrip.ConvertFrom(dst); err != nil {
-		t.Fatalf("failed to convert back to v1alpha1: %v", err)
-	}
+			// Verify v1beta1 fields
+			if dst.Spec.Replicas != 3 {
+				t.Errorf("unexpected replicas: %d", dst.Spec.Replicas)
+			}
+			if dst.Spec.TemplateRef.Name != "my-template" {
+				t.Errorf("unexpected template ref: %s", dst.Spec.TemplateRef.Name)
+			}
+			if tc.updateStrategy == nil {
+				if dst.Spec.UpdateStrategy != nil {
+					t.Errorf("expected nil UpdateStrategy after ConvertTo, got %v", dst.Spec.UpdateStrategy)
+				}
+			} else if dst.Spec.UpdateStrategy == nil || string(dst.Spec.UpdateStrategy.Type) != string(tc.updateStrategy.Type) {
+				t.Errorf("unexpected update strategy: %v", dst.Spec.UpdateStrategy)
+			}
+			if dst.Status.ReadyReplicas != 2 {
+				t.Errorf("unexpected ready replicas: %d", dst.Status.ReadyReplicas)
+			}
 
-	// Verify state annotation was stripped during ConvertFrom
-	if _, ok := roundTrip.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]; ok {
-		t.Errorf("roundTrip.Annotations still contains the state annotation after ConvertFrom!")
-	}
+			// Convert back to Spoke (v1alpha1)
+			roundTrip := &SandboxWarmPool{}
+			if err := roundTrip.ConvertFrom(dst); err != nil {
+				t.Fatalf("failed to convert back to v1alpha1: %v", err)
+			}
 
-	// Verify round-trip preserves all fields
-	if roundTrip.Spec.Replicas != src.Spec.Replicas {
-		t.Errorf("roundtrip Replicas mismatch: expected %d, got %d", src.Spec.Replicas, roundTrip.Spec.Replicas)
-	}
-	if roundTrip.Spec.TemplateRef.Name != src.Spec.TemplateRef.Name {
-		t.Errorf("roundtrip TemplateRef mismatch: expected %q, got %q", src.Spec.TemplateRef.Name, roundTrip.Spec.TemplateRef.Name)
-	}
-	if roundTrip.Spec.UpdateStrategy == nil || roundTrip.Spec.UpdateStrategy.Type != src.Spec.UpdateStrategy.Type {
-		t.Errorf("roundtrip UpdateStrategy mismatch")
-	}
-	if roundTrip.Status.ReadyReplicas != src.Status.ReadyReplicas {
-		t.Errorf("roundtrip ReadyReplicas mismatch: expected %d, got %d", src.Status.ReadyReplicas, roundTrip.Status.ReadyReplicas)
-	}
-	if roundTrip.Status.Selector != src.Status.Selector {
-		t.Errorf("roundtrip Selector mismatch: expected %q, got %q", src.Status.Selector, roundTrip.Status.Selector)
+			// Verify state annotation was stripped during ConvertFrom
+			if _, ok := roundTrip.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]; ok {
+				t.Errorf("roundTrip.Annotations still contains the state annotation after ConvertFrom!")
+			}
+
+			// Verify round-trip preserves all fields
+			if roundTrip.Spec.Replicas != src.Spec.Replicas {
+				t.Errorf("roundtrip Replicas mismatch: expected %d, got %d", src.Spec.Replicas, roundTrip.Spec.Replicas)
+			}
+			if roundTrip.Spec.TemplateRef.Name != src.Spec.TemplateRef.Name {
+				t.Errorf("roundtrip TemplateRef mismatch: expected %q, got %q", src.Spec.TemplateRef.Name, roundTrip.Spec.TemplateRef.Name)
+			}
+			if tc.updateStrategy == nil {
+				if roundTrip.Spec.UpdateStrategy != nil {
+					t.Errorf("expected nil UpdateStrategy after round-trip, got %v", roundTrip.Spec.UpdateStrategy)
+				}
+			} else if roundTrip.Spec.UpdateStrategy == nil || roundTrip.Spec.UpdateStrategy.Type != tc.updateStrategy.Type {
+				t.Errorf("roundtrip UpdateStrategy mismatch")
+			}
+			if roundTrip.Status.ReadyReplicas != src.Status.ReadyReplicas {
+				t.Errorf("roundtrip ReadyReplicas mismatch: expected %d, got %d", src.Status.ReadyReplicas, roundTrip.Status.ReadyReplicas)
+			}
+			if roundTrip.Status.Selector != src.Status.Selector {
+				t.Errorf("roundtrip Selector mismatch: expected %q, got %q", src.Status.Selector, roundTrip.Status.Selector)
+			}
+		})
 	}
 }

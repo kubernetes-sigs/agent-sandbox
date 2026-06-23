@@ -4153,7 +4153,10 @@ spec:
         type: object
     served: true
     storage: true
-  - name: v1alpha1
+  - deprecated: true
+    deprecationWarning: extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate is deprecated;
+      use extensions.agents.x-k8s.io/v1beta1 SandboxTemplate instead
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:

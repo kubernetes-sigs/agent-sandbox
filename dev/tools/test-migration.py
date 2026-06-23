@@ -305,12 +305,20 @@ def create_v1alpha1_objects():
     
     print("Waiting for upgrade-sandbox-running Pod to be created...")
     pod_exists = False
-    for i in range(20):
+    for i in range(60):
         res = run_cmd(["kubectl", "get", "pod", "upgrade-sandbox-running", "-n", "default"], check=False, capture_output=True)
         if res.returncode == 0:
             pod_exists = True
             break
-        time.sleep(1)
+        if (i + 1) % 5 == 0:
+            print(f"Pod not created yet (attempt {i+1}/60)...")
+        time.sleep(2)
+        
+    if not pod_exists:
+        print("Pod upgrade-sandbox-running was not created in time. Dumping diagnostics:", file=sys.stderr)
+        run_cmd(["kubectl", "get", "sandboxes,pods", "-n", "default"], check=False)
+        run_cmd(["kubectl", "describe", "sandbox", "upgrade-sandbox-running", "-n", "default"], check=False)
+        run_cmd(["kubectl", "logs", "-n", "agent-sandbox-system", "deploy/agent-sandbox-controller", "--tail=100"], check=False)
         
     assert pod_exists, "Pod upgrade-sandbox-running was not created in time!"
     

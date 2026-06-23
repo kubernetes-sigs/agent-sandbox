@@ -90,6 +90,7 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:deprecatedversion:warning="extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool is deprecated; use extensions.agents.x-k8s.io/v1beta1 SandboxWarmPool instead"
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.
 type SandboxWarmPool struct {
 	metav1.TypeMeta `json:",inline"`

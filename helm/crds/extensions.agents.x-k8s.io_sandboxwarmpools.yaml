@@ -87,6 +87,9 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    deprecated: true
+    deprecationWarning: extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool is deprecated;
+      use extensions.agents.x-k8s.io/v1beta1 SandboxWarmPool instead
     name: v1alpha1
     schema:
       openAPIV3Schema:

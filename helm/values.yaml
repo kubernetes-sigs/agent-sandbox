@@ -41,7 +41,7 @@ controller:
   # kubeApiBurst: 10
   # sandboxConcurrentWorkers: 1
   ##### The following workers are only active when controller.extensions=true.
-  # sandboxClaimConcurrentWorkers: 1
+  # sandboxClaimConcurrentWorkers: 50
   # sandboxWarmPoolConcurrentWorkers: 1
   # sandboxTemplateConcurrentWorkers: 1
   ##### extraArgs passes additional flags not listed above (e.g. zap logging flags).

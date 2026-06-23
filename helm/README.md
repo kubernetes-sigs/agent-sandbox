@@ -86,7 +86,7 @@ The following table lists the configurable parameters and their defaults.
 | `controller.leaderElect` | Enable leader election | `true` |
 | `controller.leaderElectionNamespace` | Namespace for the leader election resource (auto-detected if empty) | `""` |
 | `controller.clusterDomain` | Kubernetes cluster domain for service FQDN generation | `"cluster.local"` |
-| `controller.kubeApiQps` | QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
+| `controller.kubeApiQps` | Client-side QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |
 | `controller.sandboxConcurrentWorkers` | Max concurrent reconciles for the Sandbox controller | `1` |
 | `controller.sandboxClaimConcurrentWorkers` | Max concurrent reconciles for the SandboxClaim controller (extensions only) | `1` |

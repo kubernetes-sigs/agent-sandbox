@@ -25,7 +25,6 @@ func TestParseWatchNamespaces(t *testing.T) {
 		name     string
 		flag     string
 		env      string
-		envSet   bool
 		expected []string
 	}{
 		{
@@ -60,29 +59,26 @@ func TestParseWatchNamespaces(t *testing.T) {
 		{
 			name:     "falls back to WATCH_NAMESPACE env var",
 			env:      "team-a,team-b",
-			envSet:   true,
 			expected: []string{"team-a", "team-b"},
 		},
 		{
 			name:     "flag takes precedence over env var",
 			flag:     "team-a",
 			env:      "team-b",
-			envSet:   true,
 			expected: []string{"team-a"},
 		},
 		{
 			name:     "empty env var is cluster-scoped",
 			env:      "",
-			envSet:   true,
 			expected: nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.envSet {
-				t.Setenv("WATCH_NAMESPACE", tt.env)
-			}
+			// Always set WATCH_NAMESPACE so the result does not depend on the
+			// environment inherited from the test runner.
+			t.Setenv("WATCH_NAMESPACE", tt.env)
 			assert.Equal(t, tt.expected, parseWatchNamespaces(tt.flag))
 		})
 	}

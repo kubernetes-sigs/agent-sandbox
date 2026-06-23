@@ -4,7 +4,7 @@ package process.v1;
 
 import "google/protobuf/empty.proto";
 
-option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process;process";
+option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1";
 option java_multiple_files = true;
 option java_package = "io.sandboxd.packages.sandboxd.spec.process";
 

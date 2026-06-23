@@ -26,6 +26,7 @@ from urllib3.util.retry import Retry
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.pod_metadata import validate_labels
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxInClusterConnectionConfig,
@@ -314,7 +315,7 @@ class TestSandboxClient(unittest.TestCase):
         self.assertIn("exceeds max length", str(ctx.exception))
 
     def test_validate_labels_accepts_prefixed_key(self):
-        SandboxClient._validate_labels({"app.kubernetes.io/name": "my-app"})
+        validate_labels({"app.kubernetes.io/name": "my-app"})
 
     def test_validate_labels_rejects_invalid_prefix(self):
         with self.assertRaises(ValueError) as ctx:
@@ -322,13 +323,13 @@ class TestSandboxClient(unittest.TestCase):
         self.assertIn("valid DNS subdomain", str(ctx.exception))
 
     def test_validate_labels_accepts_single_char_prefix(self):
-        SandboxClient._validate_labels({"a/name": "value"})
+        validate_labels({"a/name": "value"})
 
     def test_validate_labels_accepts_empty_value(self):
-        SandboxClient._validate_labels({"key": ""})
+        validate_labels({"key": ""})
 
     def test_validate_labels_accepts_valid(self):
-        SandboxClient._validate_labels({"agent": "code-agent", "team": "platform-123"})
+        validate_labels({"agent": "code-agent", "team": "platform-123"})
 
     def test_wait_for_sandbox_ready(self):
         self.client._wait_for_sandbox_ready("sandbox-id", "test-namespace", 45)

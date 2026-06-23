@@ -312,6 +312,15 @@ sandbox = client.create_sandbox(
 `pod_labels` are validated with the same Kubernetes label rules as `labels`. The
 same parameters are available on `AsyncSandboxClient.create_sandbox`.
 
+Behavioral notes:
+
+- A `pod_label` / `pod_annotation` whose key already exists on the warmpool
+  template with a different value is rejected by the controller's "No
+  Overrides" rule, and the reconcile errors.
+- Client-side validation only checks RFC-1123 label syntax. The controller's
+  domain allow-list and system-label restrictions are enforced server-side and
+  are not replicated client-side.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

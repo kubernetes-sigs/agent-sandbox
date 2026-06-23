@@ -149,18 +149,20 @@ const (
 // SandboxBlueprint defines the configuration shared between a live Sandbox and a SandboxTemplate.
 // It deliberately excludes runtime-only fields (operatingMode, lifecycle).
 type SandboxBlueprint struct {
-	// podTemplate describes the pod spec that will be used to create an agent sandbox.
+	// podTemplate describes the pod spec that will be used to create the sandbox pod.
 	// +required
 	PodTemplate PodTemplate `json:"podTemplate"`
 
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
+	// When creating a sandbox, PVCs will be created from these templates.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
 	// service controls whether the controller should automatically create a
-	// headless Service for this Sandbox.
+	// headless Service for the sandbox.
 	// When unset, the controller preserves existing Services for backward
 	// compatibility but does not create new ones. Set to true to enable or false
 	// to explicitly disable and remove the Service.

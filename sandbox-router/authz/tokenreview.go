@@ -200,6 +200,21 @@ func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, 
 	d.authenticated = out.Status.Authenticated
 	d.user = out.Status.User
 	a.cache.Add(key, d, a.ttl)
+	if d.authenticated {
+		// Identity is logged ONCE here, at the moment we insert the
+		// fresh TokenReview result into the cache — not on every
+		// subsequent allow. Per-request decide() then logs only the
+		// non-identifying fields (sandbox, namespace, from_cache), so
+		// V(1) doesn't repeat Username / UID / Groups on every cache
+		// hit. Operators who need the request-level mapping can
+		// correlate via the K8s apiserver's TokenReview audit log.
+		a.log.V(1).Info("authz: token authenticated",
+			"user", d.user.Username,
+			"uid", d.user.UID,
+			"groups", d.user.Groups,
+			"ttl", a.ttl,
+		)
+	}
 	return a.decide(d, sandboxName, sandboxNamespace, false)
 }
 
@@ -214,16 +229,14 @@ func (a *TokenReviewAuthorizer) decide(d *tokenDecision, sandbox, namespace stri
 			"sandbox", sandbox, "namespace", namespace, "from_cache", fromCache)
 		return ErrUnauthenticated
 	}
-	// Username only — no UID / Groups. The full UserInfo is PII that
-	// doesn't need to land in operator-visible logs even at V(1) on
-	// every cache hit; "who's calling" attribution is the question
-	// debug logs answer, and Username is enough for that. If a
-	// deployment needs full identity for audit, route it to a separate
-	// audit sink instead.
+	// No identity fields on the hot path — Username can be an email
+	// (OIDC) and Groups can leak tenant/RBAC structure, and even at
+	// V(1) we don't want either repeated per request. Identity is
+	// logged once at first cache insertion (see Authorize); audit
+	// trails belong on a dedicated sink with retention controls.
 	a.log.V(1).Info("authz allow",
 		"sandbox", sandbox,
 		"namespace", namespace,
-		"user", d.user.Username,
 		"from_cache", fromCache,
 	)
 	return nil

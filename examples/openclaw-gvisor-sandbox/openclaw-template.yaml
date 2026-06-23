@@ -55,6 +55,15 @@ spec:
               name: workspaces-pvc
             - mountPath: /etc/openclaw
               name: openclaw-etc-writable
+            # Provider API key (required for chat to work). Create the Secret with:
+            #   kubectl create secret generic openclaw-provider-keys \
+            #     --from-literal=ANTHROPIC_API_KEY="sk-ant-..."
+            # Then uncomment the block below and re-apply this template.
+            # - name: ANTHROPIC_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: openclaw-provider-keys
+            #       key: ANTHROPIC_API_KEY
       volumes:
         - name: cm-volume
           configMap:

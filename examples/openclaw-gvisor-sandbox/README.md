@@ -2,7 +2,7 @@
 
 Runs [OpenClaw](https://github.com/openclaw/openclaw) inside the Agent Sandbox using the
 `SandboxTemplate` + `SandboxWarmPool` + `SandboxClaim` pattern, under gVisor, with a
-persistent workspace PVC and a NodePort for local access.
+persistent workspace PVC. Ships access flows for both kind (NodePort) and GKE (LoadBalancer + IAP tunnel).
 
 If you just want the minimal port-forward flow with a plain `Sandbox` CR, see
 [`examples/openclaw-sandbox`](../openclaw-sandbox/). This directory is the
@@ -53,15 +53,17 @@ production-shaped variant.
 
 ## Usage
 
+For kind, the easiest path is the end-to-end test script:
+
 ```bash
 ./run-test-kind.sh
 ```
 
-The script pulls the image, loads it into kind, applies the manifests, waits for
-the claim's pod to become ready, checks the gateway via `http://127.0.0.1:30789`,
-and runs the persistence test.
+It pulls the image, loads it into kind, applies the manifests, waits for the
+claim's pod to become ready, checks the gateway via `http://127.0.0.1:30789`,
+and runs the PVC persistence test.
 
-To apply manually:
+### Apply manually
 
 ```bash
 TOKEN="$(openssl rand -hex 32)"
@@ -72,32 +74,25 @@ kubectl apply -f openclaw-claim.yaml
 kubectl apply -f kind-service.yaml          # or gke-service.yaml on GKE
 ```
 
-On kind, the gateway is then reachable at `http://127.0.0.1:30789` (assuming
-the port mapping above).
+## Accessing the UI
 
-On GKE, apply `gke-service.yaml` instead and wait for an external IP:
+### On kind
 
-```bash
-kubectl get svc openclaw-gateway -w
-```
+The gateway is reachable directly at `http://127.0.0.1:30789` (assuming the
+`extraPortMappings` from the kind config above). `localhost` satisfies the
+browser's secure-context requirement, so the token form will accept input.
 
-Then browse to `http://<EXTERNAL-IP>:18789`.
+### On GKE
 
-<!-- > [!IMPORTANT]
-> **GKE Secure Context / Port-forwarding Note:**
-> gVisor's network namespace isolation prevents `kubectl port-forward` from working. Because of this, when accessing the gateway over plain HTTP using the public GKE LoadBalancer IP, your browser will treat the context as insecure and block the Web Crypto/Device Identity pairing APIs (yielding a `control ui requires device identity` error).
->
-> To test this on GKE:
-> 1. Get the secret token from your running pod:
->    `kubectl exec <POD_NAME> -- printenv OPENCLAW_GATEWAY_TOKEN`
-> 2. Open Chrome and navigate to `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
-> 3. Enable the flag and add your GKE IP address (e.g., `http://<EXTERNAL-IP>:18789`).
-> 4. Relaunch Chrome and browse to `http://<EXTERNAL-IP>:18789/?token=<TOKEN>`. -->
+GKE needs three things: a sandbox-enabled node pool, the `LoadBalancer` Service,
+and an IAP tunnel to satisfy OpenClaw's secure-context requirement. The
+LoadBalancer's public IP loads the UI but the token form rejects input over
+plain HTTP — IAP gives you a `localhost:PORT` that bypasses both the
+secure-context gate and gVisor's port-forward incompatibility.
 
-The GKE node pool must be created with `--sandbox type=gvisor`. Pods using
-`runtimeClassName: gvisor` will only schedule onto sandbox-enabled nodes — if
-none exist, they'll stay `Pending` indefinitely. To add one to an existing
-cluster:
+**1. Create a sandbox-enabled node pool** (one-time per cluster). Pods using
+`runtimeClassName: gvisor` will only schedule onto nodes in a sandbox-enabled
+pool — if none exist, they'll stay `Pending` indefinitely.
 
 ```bash
 gcloud container node-pools create sandbox-pool \
@@ -110,6 +105,123 @@ gcloud container node-pools create sandbox-pool \
 
 See the [GKE Sandbox docs](https://cloud.google.com/kubernetes-engine/docs/how-to/sandbox-pods)
 for caveats (no GPUs, Standard mode only, etc.).
+
+**2. Apply `gke-service.yaml`** instead of `kind-service.yaml`. Wait for the
+external IP to provision (only needed for visibility — the IAP tunnel uses the
+NodePort under the hood):
+
+```bash
+kubectl get svc openclaw-gateway -w
+```
+
+**3. Open an IAP TCP tunnel** to one of the cluster nodes. IAP routes from your
+laptop's `localhost:18789` straight to the node's NodePort — bypassing
+`kubectl port-forward` (which doesn't work under gVisor) and putting the
+browser in a secure context.
+
+```bash
+# Find the NodePort GKE allocated and pick any node
+NODE_PORT="$(kubectl get svc openclaw-gateway -o jsonpath='{.spec.ports[0].nodePort}')"
+NODE="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
+
+# One-time firewall rule so IAP can reach the NodePort
+gcloud compute firewall-rules create allow-iap-openclaw \
+  --direction=INGRESS \
+  --source-ranges=35.235.240.0/20 \
+  --allow="tcp:${NODE_PORT}" \
+  --network=default
+
+# Open the tunnel (leave running)
+gcloud compute start-iap-tunnel "$NODE" "$NODE_PORT" \
+  --local-host-port=localhost:18789 \
+  --zone=CLUSTER_ZONE
+```
+
+Then browse to `http://localhost:18789`. Common failure modes:
+
+- `PERMISSION_DENIED` on `start-iap-tunnel` → add the IAP tunnel IAM role:
+  `gcloud projects add-iam-policy-binding PROJECT_ID --member=user:YOU@example.com --role=roles/iap.tunnelResourceAccessor`
+- Connection times out → wrong NodePort or firewall rule didn't apply; re-run the lookup
+- `502 Bad Gateway` → no ready endpoint behind the Service; check `kubectl get endpoints openclaw-gateway`
+
+## Retrieve the gateway token
+
+Whichever access path you took, the UI will prompt for a token. The value is
+the random string `sed` injected into the template's `OPENCLAW_GATEWAY_TOKEN`
+env var at apply time. Pull it back out of the running pod:
+
+```bash
+SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
+POD=$(kubectl get sandbox "$SANDBOX_NAME" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+kubectl exec "$POD" -- printenv OPENCLAW_GATEWAY_TOKEN
+```
+
+Copy the printed value into the UI's token form.
+
+## Browser pairing / device authorization
+
+OpenClaw uses a zero-trust device authorization policy. Even with a valid token,
+the first connection from a new browser tab shows a **"pairing required"**
+message. To approve without copy-pasting IDs:
+
+```bash
+# 1. Get the active pod name
+SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
+POD_NAME=$(kubectl get sandbox $SANDBOX_NAME -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+
+# 2. Find the pending request ID and approve it
+REQUEST_ID=$(kubectl exec $POD_NAME -- node dist/index.js devices list | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n 1)
+
+if [ -n "$REQUEST_ID" ]; then
+  echo "Found pending pairing request: $REQUEST_ID"
+  kubectl exec $POD_NAME -- node dist/index.js devices approve $REQUEST_ID
+  echo "Successfully paired! Refresh your browser tab to access the dashboard."
+else
+  echo "No pending pairing requests found. Make sure you have accessed the browser page first!"
+fi
+```
+
+The pairing is stored under `/root/.openclaw`, which is on the PVC — so it
+survives pod restarts. You only do this once per browser.
+
+## Provider API keys
+
+After pairing, the dashboard loads but chat will fail until OpenClaw has a
+provider API key (Anthropic, OpenAI, Gemini, etc.). Inject it as a Kubernetes
+Secret and mount it into the container as an environment variable.
+
+1. Create the secret (Anthropic shown; use whichever provider you want):
+
+```bash
+kubectl create secret generic openclaw-provider-keys \
+  --from-literal=ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+2. Uncomment the `ANTHROPIC_API_KEY` env block in `openclaw-template.yaml`
+   (placeholder is already there next to the existing env vars). For other
+   providers, swap the var name (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, etc.) —
+   the secret key name and env name should match.
+
+3. Re-apply the template and force a pod respawn:
+
+```bash
+TOKEN="$(openssl rand -hex 32)"
+sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-template.yaml | kubectl apply -f -
+SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
+POD=$(kubectl get sandbox "$SANDBOX_NAME" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+kubectl delete pod "$POD"
+```
+
+To inject multiple provider keys at once, use `envFrom` instead:
+
+```yaml
+envFrom:
+  - secretRef:
+      name: openclaw-provider-keys
+```
+
+See [OpenClaw provider docs](https://docs.openclaw.ai/providers) for
+the env-var name per provider.
 
 ## Persistence model
 
@@ -125,21 +237,15 @@ Do not put `volumeClaimTemplates` on the `SandboxClaim`. Per
 `extensions/controllers/sandboxclaim_controller.go:1491`, a claim with VCTs
 bypasses the warm pool entirely and cold-starts a fresh sandbox.
 
-<!-- ## Known limitations
+## Known limitations
 
-- **Service selector is broad.** The Service targets all pods labeled
-  `sandbox: openclaw-template-sandbox`, which includes both the claimed pod and
-  any warm-pool replenishment pod. With `replicas: 1` and one claim this is
-  usually fine, but production deployments should narrow the selector via
-  `claim.spec.additionalPodMetadata.labels` (subject to the controller's
-  `AllowedLabelDomains` allowlist).
-- **Exposure is environment-specific.** `kind-service.yaml` (NodePort) only
-  works locally with the kind port mapping above; `gke-service.yaml`
-  (LoadBalancer) provisions a public IP on GKE and costs money while it's up.
-  For production-shaped, multi-tenant exposure on gVisor (which breaks
-  `kubectl port-forward` to a pod), use the sandbox-router pattern shown in
-  [`../vscode-sandbox/scripts/apply.sh`](../vscode-sandbox/scripts/apply.sh)
-  with [`clients/python/agentic-sandbox-client/sandbox-router`](../../clients/python/agentic-sandbox-client/sandbox-router/).
+- **`kubectl port-forward` does not work under gVisor.** The application binds
+  inside gVisor's user-space netstack; `kubectl port-forward` enters the host
+  kernel's view of the pod's network namespace and finds nothing listening.
+  Use a Service path (NodePort on kind, IAP tunnel on GKE) instead.
+- **Exposure is environment-specific.** `kind-service.yaml` only works locally
+  with the kind port mapping; `gke-service.yaml` provisions a public IP on GKE
+  and costs money while it's up.
 - **SSH access is in the container but not exposed.** sshd runs inside the pod
-  but the Service only forwards 18789. Add a second port to the Service if you
-  need SSH from outside. -->
+  but the Services only forward 18789. Add a second port to the Service if you
+  need SSH from outside.

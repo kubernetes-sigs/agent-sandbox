@@ -1784,7 +1784,8 @@ func (r *SandboxClaimReconciler) recordClientClaimStartupLatency(ctx context.Con
 	}
 	requestTime, err := time.Parse(time.RFC3339Nano, clientRequestTime)
 	if err != nil {
-		logger.Error(err, "Failed to parse client request time", "value", clientRequestTime)
+		// Debug level: user-controlled annotation, avoid log spam on every reconcile.
+		logger.V(1).Info("Failed to parse client request time", "value", clientRequestTime, "error", err)
 		return
 	}
 	asmetrics.RecordClientClaimStartupLatency(ctx, requestTime, launchType, templateName)

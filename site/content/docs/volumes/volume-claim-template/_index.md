@@ -154,7 +154,7 @@ kubectl exec -it my-stateful-sandbox -- cat /data/evidence.txt
 
 ### Python SDK
 
-If you want to use `volumeClaimTemplates` with `k8s_agent_sandbox`, you need to make sure that you re-use the existing sandbox and delete it manually. To run the following an example Python script, you need to build a custom Docker image, apply the SandboxTemplate from [here](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/volumes/volume-claim-template/source), and create a SandboxWarmPool named `simple-sandbox-pool` that references it.
+If you want to use `volumeClaimTemplates` with `k8s_agent_sandbox`, you need to make sure that you re-use the existing sandbox and delete it manually. To run the following example Python script, you need to build a custom Docker image, apply the SandboxTemplate from [the example source folder](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/volumes/volume-claim-template/source), and create a SandboxWarmPool named `simple-sandbox-pool` that references it.
 
 Install `k8s_agent_sandbox`:
 

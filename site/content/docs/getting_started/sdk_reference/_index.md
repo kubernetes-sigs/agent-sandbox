@@ -332,7 +332,7 @@ Port the sandbox container listens on.
 class SandboxTracerConfig(BaseModel)
 ```
 
-Configuration for tracer level information
+Configuration for tracer-level information
 
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig.enable_tracing"></a>
 

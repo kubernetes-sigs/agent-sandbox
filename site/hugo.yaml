@@ -11,7 +11,7 @@ disableKinds:
 
 menu:
   main:
-    - name: "Github"
+    - name: "GitHub"
       weight: 99
       pre: "<i class='fab fa-github pe-2'></i>"
       url: "https://github.com/kubernetes-sigs/agent-sandbox"

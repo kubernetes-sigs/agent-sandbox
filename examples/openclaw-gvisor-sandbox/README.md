@@ -244,8 +244,7 @@ bypasses the warm pool entirely and cold-starts a fresh sandbox.
   kernel's view of the pod's network namespace and finds nothing listening.
   Use a Service path (NodePort on kind, IAP tunnel on GKE) instead.
 - **Exposure is environment-specific.** `kind-service.yaml` only works locally
-  with the kind port mapping; `gke-service.yaml` provisions a public IP on GKE
-  and costs money while it's up.
+  with the kind port mapping; `gke-service.yaml` provisions a public IP on GKE.
 - **SSH access is in the container but not exposed.** sshd runs inside the pod
   but the Services only forward 18789. Add a second port to the Service if you
   need SSH from outside.

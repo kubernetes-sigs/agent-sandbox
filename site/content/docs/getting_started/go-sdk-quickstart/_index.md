@@ -17,7 +17,7 @@ Agent Sandbox is a quick and easy way to start secure containers that will let a
 
 ## Connection Modes
 
-In this example the client is in the *Port-Forward mode* which is suitable for local development and testing. Learn more about the other modes in the [Go Client's main pageee]({{< ref "/docs/go-client/_index.md" >}}).
+In this example the client is in the *Port-Forward mode* which is suitable for local development and testing. Learn more about the other modes in the [Go Client's main page]({{< ref "/docs/go-client/_index.md" >}}).
 
 
 ## Usage

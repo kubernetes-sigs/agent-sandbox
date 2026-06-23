@@ -22,7 +22,6 @@ Requires the ``async`` optional dependencies::
 import atexit
 import asyncio
 import logging
-import re
 import sys
 import time
 import uuid
@@ -31,6 +30,7 @@ from typing import Generic, TypeVar
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
+from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
@@ -137,6 +137,8 @@ class AsyncSandboxClient(Generic[T]):
         labels: dict[str, str] | None = None,
         *,
         shutdown_after_seconds: int | None = None,
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
     ) -> T:
         """Provisions a new Sandbox claim and returns an async Sandbox handle.
 
@@ -144,12 +146,19 @@ class AsyncSandboxClient(Generic[T]):
             warmpool: Name of the SandboxWarmPool to use.
             namespace: Kubernetes namespace for the claim.
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
-            labels: Optional Kubernetes labels to attach to the claim.
+            labels: Optional Kubernetes labels to attach to the claim object
+                (``SandboxClaim.metadata.labels``).
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
                 of ``"Delete"``, so the controller auto-deletes the claim on
                 expiry. Must be a positive integer.
+            pod_labels: Optional labels stamped onto the running Sandbox **Pod**
+                via ``spec.additionalPodMetadata.labels``. Unlike ``labels``
+                (which land on the claim object), these are readable from inside
+                the sandbox through the Downward API.
+            pod_annotations: Optional annotations stamped onto the running
+                Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
 
         Example::
 
@@ -161,14 +170,16 @@ class AsyncSandboxClient(Generic[T]):
             raise ValueError("Warmpool name cannot be empty.")
 
         if labels:
-            self._validate_labels(labels)
+            validate_labels(labels)
+
+        pod_metadata = build_pod_metadata(pod_labels, pod_annotations)
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
         try:
-            await self._create_claim(claim_name, warmpool, namespace, labels=labels, lifecycle=lifecycle)
+            await self._create_claim(claim_name, warmpool, namespace, labels=labels, lifecycle=lifecycle, pod_metadata=pod_metadata)
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, sandbox_ready_timeout
@@ -375,54 +386,6 @@ class AsyncSandboxClient(Generic[T]):
                     file=sys.stderr,
                 )
 
-    # --- Label validation (shared with sync client) ---
-
-    _LABEL_NAME_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9]$|^[A-Za-z0-9]$")
-    _LABEL_PREFIX_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
-    _LABEL_NAME_MAX_LENGTH = 63
-    _LABEL_PREFIX_MAX_LENGTH = 253
-
-    @staticmethod
-    def _validate_label_name(name: str, context: str):
-        if len(name) > AsyncSandboxClient._LABEL_NAME_MAX_LENGTH:
-            raise ValueError(
-                f"Label {context} '{name}' exceeds max length of "
-                f"{AsyncSandboxClient._LABEL_NAME_MAX_LENGTH} characters."
-            )
-        if not AsyncSandboxClient._LABEL_NAME_RE.match(name):
-            raise ValueError(
-                f"Label {context} '{name}' contains invalid characters. "
-                f"Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.]."
-            )
-
-    @staticmethod
-    def _validate_labels(labels: dict[str, str]):
-        for key, value in labels.items():
-            if not key:
-                raise ValueError("Label key cannot be empty.")
-
-            if "/" in key:
-                prefix, name = key.split("/", 1)
-                if not prefix or len(prefix) > AsyncSandboxClient._LABEL_PREFIX_MAX_LENGTH:
-                    raise ValueError(
-                        f"Label key prefix '{prefix}' is invalid or exceeds "
-                        f"{AsyncSandboxClient._LABEL_PREFIX_MAX_LENGTH} characters."
-                    )
-                if not AsyncSandboxClient._LABEL_PREFIX_RE.match(prefix):
-                    raise ValueError(
-                        f"Label key prefix '{prefix}' must be a valid DNS subdomain."
-                    )
-                if not name:
-                    raise ValueError(f"Label key '{key}' has an empty name after prefix.")
-                AsyncSandboxClient._validate_label_name(name, f"key name in '{key}'")
-            else:
-                AsyncSandboxClient._validate_label_name(key, f"key '{key}'")
-
-            if value:
-                AsyncSandboxClient._validate_label_name(
-                    value, f"value '{value}' for key '{key}'"
-                )
-
     @async_trace_span("create_claim")
     async def _create_claim(
         self,
@@ -431,6 +394,7 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str,
         labels: dict[str, str] | None = None,
         lifecycle: dict | None = None,
+        pod_metadata: dict | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():
@@ -446,7 +410,7 @@ class AsyncSandboxClient(Generic[T]):
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
         await self.k8s_helper.create_sandbox_claim(
-            claim_name, warmpool_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle
+            claim_name, warmpool_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle, pod_metadata=pod_metadata
         )
 
     @async_trace_span("wait_for_sandbox_ready")

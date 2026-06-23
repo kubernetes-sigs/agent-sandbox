@@ -17,6 +17,8 @@ By default the controller watches all namespaces. Use `--namespace` (or the `WAT
 
 * `--namespace` (default: `""`, cluster-scoped): Comma-separated list of namespaces to watch. When set, the controller only caches and reconciles resources in those namespaces. Falls back to the `WATCH_NAMESPACE` environment variable when the flag is not provided.
 
+> **Webhooks are disabled in namespaced mode.** Webhook certificate generation, CRD CA-bundle patching, and the conversion webhooks are all skipped when `--namespace` (or `WATCH_NAMESPACE`) is set. These operate on cluster-scoped resources (`CustomResourceDefinition`s and their conversion webhooks), which a namespace-scoped deployment cannot manage. As a result the controller needs **no cluster-scoped RBAC** and can run with only a `Role`/`RoleBinding`. The CRDs and their conversion webhooks must instead be installed and managed cluster-wide — by a cluster admin or a separate cluster-scoped controller instance.
+
 ### Single-namespace mode
 
 ```yaml

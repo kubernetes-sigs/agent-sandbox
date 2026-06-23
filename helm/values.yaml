@@ -83,3 +83,17 @@ containerSecurityContext: null
 
 # Name of the webhook service.
 webhookServiceName: agent-sandbox-webhook-service
+
+metrics:
+  # serviceMonitor creates a Prometheus Operator ServiceMonitor that scrapes the
+  # controller's /metrics endpoint via the controller Service. Requires the
+  # prometheus-operator CRDs (monitoring.coreos.com/v1) to be installed.
+  serviceMonitor:
+    enabled: false
+    # additionalLabels are added to the ServiceMonitor. Most Prometheus instances
+    # only select ServiceMonitors matching their serviceMonitorSelector, e.g.:
+    #   release: kube-prometheus-stack
+    additionalLabels: {}
+    interval: 30s
+    # scrapeTimeout is omitted unless set (Prometheus defaults apply).
+    scrapeTimeout: ""

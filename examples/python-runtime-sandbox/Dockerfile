@@ -3,6 +3,11 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
+# Install OpenMP runtime required by lightgbm (not included in the slim image).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Installation of dependencies for python runtime sandbox.
 COPY requirements.txt .
 

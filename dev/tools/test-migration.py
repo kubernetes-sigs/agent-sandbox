@@ -47,6 +47,18 @@ spec:
         image: registry.k8s.io/pause:3.10
 ---
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: upgrade-template-cold
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxWarmPool
 metadata:
   name: upgrade-pool
@@ -89,8 +101,8 @@ metadata:
   namespace: default
 spec:
   sandboxTemplateRef:
-    name: upgrade-template
-  warmpool: "default" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template)
+    name: upgrade-template-cold
+  warmpool: "default" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template-cold)
 ---
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxClaim
@@ -109,8 +121,8 @@ metadata:
   namespace: default
 spec:
   sandboxTemplateRef:
-    name: upgrade-template
-  warmpool: "none" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template)
+    name: upgrade-template-cold
+  warmpool: "none" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template-cold)
 ---
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: Sandbox
@@ -403,9 +415,9 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
     
     # Verify shadow pool was created
     print("Verifying shadow pool creation...")
-    res = run_cmd(["kubectl", "get", "sandboxwarmpool", "shadow-pool-upgrade-template", "-n", "default", "-o", "json"], capture_output=True)
+    res = run_cmd(["kubectl", "get", "sandboxwarmpool", "shadow-pool-upgrade-template-cold", "-n", "default", "-o", "json"], capture_output=True)
     shadow_pool = json.loads(res.stdout)
-    assert shadow_pool["spec"]["sandboxTemplateRef"]["name"] == "upgrade-template", "Shadow pool template mismatch!"
+    assert shadow_pool["spec"]["sandboxTemplateRef"]["name"] == "upgrade-template-cold", "Shadow pool template mismatch!"
     print("Shadow pool successfully verified!")
 
     # 3. Upgrade Controller & CRDs
@@ -482,8 +494,8 @@ def validate_migration(active_pod_info):
     
     print("Validating upgrade-claim conversion...")
     assert "warmPoolRef" in claim1["spec"], f"upgrade-claim missing warmPoolRef! spec: {claim1['spec']}"
-    assert claim1["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template", \
-        f"Expected warmPoolRef name shadow-pool-upgrade-template, got {claim1['spec']['warmPoolRef']['name']}"
+    assert claim1["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template-cold", \
+        f"Expected warmPoolRef name shadow-pool-upgrade-template-cold, got {claim1['spec']['warmPoolRef']['name']}"
     assert "agents.x-k8s.io/storage-migrated-at" in claim1["metadata"]["annotations"], \
         "upgrade-claim missing storage-migrated-at annotation!"
     print("upgrade-claim validation PASSED.")
@@ -507,8 +519,8 @@ def validate_migration(active_pod_info):
     claim_none = claim_by_name["upgrade-claim-none"]
     print("Validating upgrade-claim-none conversion...")
     assert "warmPoolRef" in claim_none["spec"], f"upgrade-claim-none missing warmPoolRef! spec: {claim_none['spec']}"
-    assert claim_none["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template", \
-        f"Expected warmPoolRef name shadow-pool-upgrade-template, got {claim_none['spec']['warmPoolRef']['name']}"
+    assert claim_none["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template-cold", \
+        f"Expected warmPoolRef name shadow-pool-upgrade-template-cold, got {claim_none['spec']['warmPoolRef']['name']}"
     assert "agents.x-k8s.io/storage-migrated-at" in claim_none["metadata"]["annotations"], \
         "upgrade-claim-none missing storage-migrated-at annotation!"
     print("upgrade-claim-none validation PASSED.")

@@ -334,7 +334,8 @@ def install_v1alpha1(method, version):
                 "helm", "install", "agent-sandbox", extracted_helm_path,
                 "-n", "agent-sandbox-system", "--create-namespace",
                 "--set", "namespace.create=false",
-                "--set", f"image.tag={version}"
+                "--set", f"image.tag={version}",
+                "--set", "controller.extensions=true"
             ])
         finally:
             # Clean up the downloaded and extracted files
@@ -353,8 +354,28 @@ def create_v1alpha1_objects():
     print("\n=== Phase 2: Creating v1alpha1 objects ===")
     run_cmd(["kubectl", "apply", "-f", "-"], input_data=V1ALPHA1_RESOURCES)
     
+    # Explicitly patch the Sandbox with the owner reference pointing to upgrade-claim-warm
+    res = run_cmd(["kubectl", "get", "sandboxclaim", "upgrade-claim-warm", "-n", "default", "-o", "jsonpath={.metadata.uid}"], capture_output=True)
+    claim_uid = res.stdout.strip()
+    owner_patch = {
+        "metadata": {
+            "ownerReferences": [
+                {
+                    "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+                    "kind": "SandboxClaim",
+                    "name": "upgrade-claim-warm",
+                    "uid": claim_uid,
+                    "controller": True,
+                    "blockOwnerDeletion": True
+                }
+            ]
+        }
+    }
+    run_cmd(["kubectl", "patch", "sandbox", "upgrade-pool-warm-a1b2c", "-n", "default", "--type=merge", "-p", json.dumps(owner_patch)])
+
     # Explicitly patch the status of upgrade-claim-warm since subresources.status drops status fields on normal apply
     run_cmd(["kubectl", "patch", "sandboxclaim", "upgrade-claim-warm", "-n", "default", "--subresource=status", "--type=merge", "-p", '{"status":{"sandbox":{"name":"upgrade-pool-warm-a1b2c"}}}'])
+
     
     print("Waiting for upgrade-sandbox-running Pod to be created...")
     pod_exists = False
@@ -388,9 +409,6 @@ def create_v1alpha1_objects():
     pod_creation = pod_data["metadata"]["creationTimestamp"]
     print(f"Captured active pod info - Name: upgrade-sandbox-running, UID: {pod_uid}, CreatedAt: {pod_creation}")
     
-    print("Waiting for v1alpha1 claims to be bound...")
-    # Give a short sleep for claims to reconcile
-    time.sleep(10)
     # Check claim exists and status has reconciled
     run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "-n", "default"])
     

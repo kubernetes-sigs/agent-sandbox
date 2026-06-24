@@ -35,6 +35,7 @@ import {
   MAX_RECONNECT_ATTEMPTS,
   MAX_RETRIES,
   PER_ATTEMPT_TIMEOUT_MS,
+  REDIRECT_STATUS_CODES,
   RETRY_STATUS_CODES,
   SANDBOX_API_GROUP,
   SANDBOX_API_VERSION,
@@ -1009,6 +1010,7 @@ export class Sandbox {
         method,
         headers,
         body: options.body,
+        redirect: "manual",
       };
 
       try {
@@ -1022,7 +1024,18 @@ export class Sandbox {
           options.signal,
           options.perAttemptTimeoutMs ?? this.perAttemptTimeoutMs,
         );
-        if (!response.ok) {
+        if (REDIRECT_STATUS_CODES.includes(response.status)) {
+          response.body?.cancel().catch(() => {});
+          throw new SandboxRequestError(
+            `Redirection is not allowed (status code ${response.status}).`,
+            {
+              statusCode: response.status,
+              response,
+              operation: `${method} ${endpoint}`,
+            },
+          );
+        }
+        if (response.status >= 400) {
           // Bounded read so a hostile server cannot force arbitrarily large
           // payloads into memory via the error path.
           const body = await readBoundedErrorBody(

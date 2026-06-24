@@ -87,6 +87,7 @@ import {
   MAX_RETRIES,
   MAX_UPLOAD_SIZE,
   PER_ATTEMPT_TIMEOUT_MS,
+  REDIRECT_STATUS_CODES,
   RETRY_STATUS_CODES,
 } from "../constants.js";
 import {
@@ -124,6 +125,10 @@ class TestableSandbox extends Sandbox {
   }
   set testReconnectPromise(value: Promise<void> | null) {
     this._reconnectPromise = value;
+  }
+
+  callRequest(method: string, endpoint: string): Promise<Response> {
+    return this.request(method, endpoint, {});
   }
 }
 
@@ -2253,6 +2258,59 @@ describe("Sandbox", () => {
       expect(opts.headers["X-Sandbox-ID"]).toBe("test-sandbox");
       expect(opts.headers["X-Sandbox-Namespace"]).toBe("default");
       expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
+    });
+  });
+
+  // ===== redirect blocking (SSRF mitigation) =====
+
+  describe("redirect blocking (SSRF mitigation)", () => {
+    it.each(
+      REDIRECT_STATUS_CODES,
+    )("throws SandboxRequestError on %i redirect without following it", async (status) => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response("", {
+          status,
+          headers: { Location: "http://evil.example.com/" },
+        }),
+      );
+
+      const err = await sandbox.commands.run("ls").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(err.statusCode).toBe(status);
+      expect(err.message).toContain(`status code ${status}`);
+      // fetch must have been called exactly once — no redirect following
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const [, opts] = (fetch as Mock).mock.calls[0];
+      expect(opts.redirect).toBe("manual");
+    });
+
+    it("does not throw SandboxRequestError on 304 Not Modified", async () => {
+      const sandbox = createReadySandbox();
+      // 304 is a null-body status; passing a non-null body (e.g. "") would fail.
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(null, { status: 304 }),
+      );
+
+      const result = await sandbox
+        .callRequest("GET", "/health")
+        .catch((e) => e);
+
+      expect(result).not.toBeInstanceOf(SandboxRequestError);
+      expect((result as Response).status).toBe(304);
+    });
+
+    it("still throws SandboxRequestError on 4xx after redirect check", async () => {
+      const sandbox = createReadySandbox();
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response('{"error":"not found"}', { status: 404 }),
+      );
+
+      const err = await sandbox.commands.run("missing").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(err.statusCode).toBe(404);
     });
   });
 });

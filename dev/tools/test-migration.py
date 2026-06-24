@@ -355,8 +355,19 @@ def create_v1alpha1_objects():
     run_cmd(["kubectl", "apply", "-f", "-"], input_data=V1ALPHA1_RESOURCES)
     
     # Explicitly patch the Sandbox with the owner reference pointing to upgrade-claim-warm
-    res = run_cmd(["kubectl", "get", "sandboxclaim", "upgrade-claim-warm", "-n", "default", "-o", "jsonpath={.metadata.uid}"], capture_output=True)
-    claim_uid = res.stdout.strip()
+    # Use a retry loop to tolerate API server discovery cache lag or transient NotFound errors
+    claim_uid = ""
+    for i in range(10):
+        res = run_cmd([
+            "kubectl", "get", "sandboxclaims.extensions.agents.x-k8s.io", "upgrade-claim-warm",
+            "-n", "default", "-o", "jsonpath={.metadata.uid}"
+        ], check=False, capture_output=True)
+        if res.returncode == 0 and res.stdout.strip() != "":
+            claim_uid = res.stdout.strip()
+            break
+        print(f"Waiting for API server to serve sandboxclaim (attempt {i+1}/10)...")
+        time.sleep(1)
+    assert claim_uid != "", "Failed to get UID of upgrade-claim-warm!"
     owner_patch = {
         "metadata": {
             "ownerReferences": [
@@ -466,6 +477,36 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
         if image_tag:
             upgrade_cmd.extend(["--set", f"image.tag={image_tag}"])
         run_cmd(upgrade_cmd)
+
+    # Re-apply the owner reference patch and status binding to protect against the old controller having overwritten it during Phase 2
+    print("Re-applying ownerReference and status patch to secure warm claim binding...")
+    claim_uid = ""
+    for i in range(10):
+        res = run_cmd([
+            "kubectl", "get", "sandboxclaims.extensions.agents.x-k8s.io", "upgrade-claim-warm",
+            "-n", "default", "-o", "jsonpath={.metadata.uid}"
+        ], check=False, capture_output=True)
+        if res.returncode == 0 and res.stdout.strip() != "":
+            claim_uid = res.stdout.strip()
+            break
+        time.sleep(1)
+    if claim_uid != "":
+        owner_patch = {
+            "metadata": {
+                "ownerReferences": [
+                    {
+                        "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+                        "kind": "SandboxClaim",
+                        "name": "upgrade-claim-warm",
+                        "uid": claim_uid,
+                        "controller": True,
+                        "blockOwnerDeletion": True
+                    }
+                ]
+            }
+        }
+        run_cmd(["kubectl", "patch", "sandbox", "upgrade-pool-warm-a1b2c", "-n", "default", "--type=merge", "-p", json.dumps(owner_patch)])
+        run_cmd(["kubectl", "patch", "sandboxclaim", "upgrade-claim-warm", "-n", "default", "--subresource=status", "--type=merge", "-p", '{"status":{"sandbox":{"name":"upgrade-pool-warm-a1b2c"}}}'])
 
     print("Waiting for upgraded controller deployment...")
     run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])

@@ -117,7 +117,7 @@ module:
   proxy: direct
   hugoVersion:
     extended: true
-    min: 0.73.0
+    min: 0.163.3
   mounts:
   - disableWatch: false
     source: content

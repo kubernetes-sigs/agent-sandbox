@@ -1834,7 +1834,7 @@ func TestReconcileActiveSyncsExistingSandboxPersistentVolumeClaimRetentionPolicy
 				Kind:       "SandboxClaim",
 				Name:       claim.Name,
 				UID:        claim.UID,
-				Controller: ptr.To(true),
+				Controller: new(true),
 			}},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{

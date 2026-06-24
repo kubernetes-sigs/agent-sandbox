@@ -16,6 +16,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
@@ -118,5 +119,8 @@ type SandboxWarmPoolList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxWarmPool{}, &SandboxWarmPoolList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxWarmPool{}, &SandboxWarmPoolList{})
+		return nil
+	})
 }

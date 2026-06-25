@@ -26,12 +26,12 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream" //nolint:staticcheck
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	discoveryv1client "k8s.io/client-go/kubernetes/typed/discovery/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
+	"k8s.io/streaming/pkg/httpstream"
 )
 
 const maxStderrSize = 64 << 10 // 64 KB
@@ -69,7 +69,7 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// trackingDialer wraps an httpstream.Dialer to track the SPDY connection so it
+// trackingDialer wraps an httpstream.Dialer to track the streaming connection so it
 // can be forcefully closed when the stop channel alone does not unblock ForwardPorts.
 type trackingDialer struct {
 	inner  httpstream.Dialer
@@ -166,7 +166,7 @@ func (t *tunnelStrategy) Connect(ctx context.Context) (string, error) {
 			return http.ErrUseLastResponse
 		},
 	}
-	td := &trackingDialer{inner: spdy.NewDialer(upgrader, spdyClient, http.MethodPost, reqURL)}
+	td := &trackingDialer{inner: spdy.NewDialerForStreaming(upgrader, spdyClient, http.MethodPost, reqURL)}
 
 	t.mu.Lock()
 	if t.spdyUpgradeClient != nil {
@@ -179,7 +179,7 @@ func (t *tunnelStrategy) Connect(ctx context.Context) (string, error) {
 	stopChan := make(chan struct{})
 	readyChan := make(chan struct{})
 	var stderrBuf syncBuffer
-	fw, err := portforward.New(td, []string{"0:8080"}, stopChan, readyChan, io.Discard, &stderrBuf)
+	fw, err := portforward.NewForStreaming(td, []string{"0:8080"}, stopChan, readyChan, io.Discard, &stderrBuf)
 	if err != nil {
 		recordError(span, err)
 		return "", fmt.Errorf("sandbox: failed to create port forwarder: %w", err)

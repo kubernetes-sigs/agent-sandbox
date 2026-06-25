@@ -1996,6 +1996,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		expectedAdoptedSandbox  string
 		expectedAnnotations     map[string]string
 		expectedPodAnnotations  map[string]string
+		expectedLabels          map[string]string
+		expectedPodLabels       map[string]string
 		expectNewSandboxCreated bool
 		simulateConflicts       int
 	}{
@@ -2189,8 +2191,37 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					return sb
 				}(),
 			},
-			expectSandboxAdoption:   false,
-			expectNewSandboxCreated: true,
+		},
+		{
+			name: "propagates and overwrites created-by label during adoption",
+			existingObjects: []client.Object{
+				template,
+				func() client.Object {
+					cCopy := claim.DeepCopy()
+					if cCopy.Labels == nil {
+						cCopy.Labels = make(map[string]string)
+					}
+					cCopy.Labels[sandboxv1beta1.SandboxCreatedByLabel] = "go-client"
+					return cCopy
+				}(),
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					if sb.Labels == nil {
+						sb.Labels = make(map[string]string)
+					}
+					sb.Labels[sandboxv1beta1.SandboxCreatedByLabel] = "controller"
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedLabels: map[string]string{
+				sandboxv1beta1.SandboxCreatedByLabel: "go-client",
+			},
+			expectedPodLabels: map[string]string{
+				sandboxv1beta1.SandboxCreatedByLabel: "go-client",
+			},
+			expectNewSandboxCreated: false,
 		},
 	}
 
@@ -2305,6 +2336,14 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 
 				for key, expected := range tc.expectedAnnotations {
 					require.Equal(t, expected, adoptedSandbox.Annotations[key])
+				}
+
+				for key, expected := range tc.expectedLabels {
+					require.Equal(t, expected, adoptedSandbox.Labels[key])
+				}
+
+				for key, expected := range tc.expectedPodLabels {
+					require.Equal(t, expected, adoptedSandbox.Spec.PodTemplate.ObjectMeta.Labels[key])
 				}
 
 				// 5. Verify the claim records the assigned sandbox annotation
@@ -2696,7 +2735,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		// Verify metric
-		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeCold, "test-warmpool", "not_ready"))
+		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeCold, "test-warmpool", "not_ready", "unknown"))
 		if val != 1 {
 			t.Errorf("expected metric count 1, got %v", val)
 		}
@@ -2760,7 +2799,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		// Verify metric
-		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeWarm, "test-warmpool", "ready"))
+		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeWarm, "test-warmpool", "ready", "unknown"))
 		if val != 1 {
 			t.Errorf("expected metric count 1, got %v", val)
 		}

@@ -5,15 +5,14 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   labels:
-    app.kubernetes.io/name: agent-sandbox-operator
+    app: agent-sandbox-controller
     app.kubernetes.io/managed-by: kustomize
   name: allow-metrics-traffic
-  namespace: system
+  namespace: agent-sandbox-system
 spec:
   podSelector:
     matchLabels:
-      control-plane: controller-manager
-      app.kubernetes.io/name: agent-sandbox-operator
+      app: agent-sandbox-controller
   policyTypes:
     - Ingress
   ingress:

@@ -7,113 +7,17 @@ Operator Lifecycle Manager (OLM) packaging for [Agent Sandbox](https://agent-san
 
 The operator packages the upstream Agent Sandbox controller (including extension reconcilers) for **Operator Lifecycle Manager**: CRDs, RBAC, metrics Service, and Deployment are kept in sync with the main project’s `k8s/` manifests via `hack/sync-k8s-manifests`, then published as an OLM bundle (`make bundle`) for installation on OpenShift, OperatorHub, or any OLM-enabled cluster. After install, you create and manage `Sandbox` and extension resources the same way as with a plain manifest deploy—see the [project docs](https://agent-sandbox.sigs.k8s.io/docs/) and [examples](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples) for API usage and samples.
 
-## Getting Started
+## Installation
 
-### Prerequisites
-- go version v1.26.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+This directory packages Agent Sandbox for **OLM** (OperatorHub, OpenShift, and other catalog-driven installs). It is not the primary install path for most clusters.
 
-### To Deploy on the cluster
+| Method | Where to start |
+| --- | --- |
+| Release manifests (`kubectl apply`) | [Installation](../README.md#installation) in the repo root README (generated from [`k8s/`](../k8s/)) |
+| Helm | [`helm/README.md`](../helm/README.md) |
+| OLM bundle | Published operator catalog, or [Releasing a new operator version](#releasing-a-new-operator-version) / [Testing a bundle locally](#testing-a-bundle-locally) below |
 
-This module does not ship its own controller binary. It installs the
-`agent-sandbox-controller` image built from the parent repo.
-
-**Build and push the controller image** (from `agent-sandbox-operator/`; uses `../Dockerfile`):
-
-```sh
-make docker-build docker-push IMG=<some-registry>/agent-sandbox-controller:tag
-```
-
-`docker-build` is an alias for `controller-image-build`, which runs `docker build` against the repo root Dockerfile.
-
-**Install the CRDs into the cluster:**
-
-```sh
-make install
-```
-
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
-```sh
-make deploy IMG=<some-registry>/agent-sandbox-controller:tag
-```
-
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/agent-sandbox-controller:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/agent-sandbox-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-operator-sdk edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+For controller development (local kind cluster, image build), see [docs/development.md](../docs/development.md).
 
 ## Maintaining operator manifests
 

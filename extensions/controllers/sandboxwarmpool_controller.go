@@ -149,7 +149,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	activeSandboxes = healthySandboxes
 
-	desiredReplicas := warmPool.Spec.Replicas
+	desiredReplicas := int32(1)
+	if warmPool.Spec.Replicas != nil {
+		desiredReplicas = *warmPool.Spec.Replicas
+	}
 	currentReplicas := int32(len(activeSandboxes))
 
 	logger.Info("Pool status",

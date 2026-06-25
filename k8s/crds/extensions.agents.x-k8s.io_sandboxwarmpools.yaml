@@ -35,6 +35,7 @@ spec:
           spec:
             properties:
               replicas:
+                default: 1
                 format: int32
                 minimum: 0
                 type: integer
@@ -55,7 +56,6 @@ spec:
                     type: string
                 type: object
             required:
-            - replicas
             - sandboxTemplateRef
             type: object
           status:

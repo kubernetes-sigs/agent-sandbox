@@ -128,7 +128,7 @@ to the bound pod:
 ```python
 ant = anthropic.Anthropic(auth_token=os.environ["ANTHROPIC_ENVIRONMENT_KEY"])
 sbx = SandboxClient(
-    connection_config=SandboxInClusterConnectionConfig(use_pod_ip=True, server_port=8080)
+    connection_config=SandboxInClusterConnectionConfig(server_port=8080)
 )
 
 while True:

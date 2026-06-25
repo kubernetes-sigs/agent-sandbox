@@ -95,6 +95,16 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         body = call_kwargs["body"]
         self.assertNotIn("additionalPodMetadata", body["spec"])
 
+    async def test_created_by_label_override_rejected(self):
+        await self.helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace",
+            labels={"agent": "test", "agents.x-k8s.io/created-by": "foo"},
+        )
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        body = call_kwargs["body"]
+        self.assertEqual(body["metadata"]["labels"], {"agent": "test", "agents.x-k8s.io/created-by": "python-client"})
+
 
 class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
 

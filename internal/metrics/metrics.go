@@ -159,7 +159,18 @@ func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType,
 	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
 }
 
+// NormalizeCreatedBy returns the createdBy label normalized to a known allow-list
+// (go-client, python-client, controller) or "unknown" for anything else.
+func NormalizeCreatedBy(createdBy string) string {
+	switch createdBy {
+	case "go-client", "python-client", "controller":
+		return createdBy
+	default:
+		return "unknown"
+	}
+}
+
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.
 func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition, createdBy string) {
-	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition, createdBy).Inc()
+	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition, NormalizeCreatedBy(createdBy)).Inc()
 }

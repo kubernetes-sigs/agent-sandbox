@@ -26,7 +26,7 @@ LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 
 .PHONY: build
 build:
-	go build -ldflags "$(LD_FLAGS)" -o bin/manager cmd/agent-sandbox-controller/main.go
+	go build -ldflags "$(LD_FLAGS)" -o bin/manager ./cmd/agent-sandbox-controller
 
 KIND_CLUSTER=agent-sandbox
 

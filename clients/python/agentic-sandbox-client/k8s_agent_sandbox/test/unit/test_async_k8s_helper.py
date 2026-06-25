@@ -73,6 +73,27 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["metadata"]["labels"], {"agent": "test"})
         self.assertEqual(body["metadata"]["annotations"], {"key": "val"})
 
+    async def test_pod_metadata_included_in_manifest(self):
+        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        await self.helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
+        )
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        body = call_kwargs["body"]
+        self.assertEqual(
+            body["spec"]["additionalPodMetadata"]["labels"]["client-id"], "tenant-a"
+        )
+
+    async def test_no_pod_metadata_omits_key(self):
+        await self.helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace"
+        )
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        body = call_kwargs["body"]
+        self.assertNotIn("additionalPodMetadata", body["spec"])
+
 
 class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
 

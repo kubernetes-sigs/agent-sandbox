@@ -239,7 +239,7 @@ jobs:
           GCP_LOCATION: "us-central1"
           GEMINI_MODEL: gemini-2.5-flash
         run: |
-          pip install google-genai==1.30.0 pyopenssl==25.1.0
+          pip install google-genai==1.30.0 pyopenssl==25.1.0 pyyaml==6.0.2
 
           # This finally publishes the draft for your review
           make release-publish TAG="${{ needs.promote-images.outputs.new_tag }}"

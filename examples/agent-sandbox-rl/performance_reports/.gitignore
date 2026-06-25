@@ -1,0 +1,5 @@
+# Generated run reports embed live cluster metadata (k8s version, node pools,
+# region, …) and churn — don't commit them. The one redacted sample + README
+# are already tracked and stay; any new .txt/.json here is ignored.
+*.txt
+*.json

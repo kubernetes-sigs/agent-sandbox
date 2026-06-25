@@ -17,6 +17,7 @@ package v1beta1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // ConditionType is a type of condition for a resource.
@@ -146,7 +147,7 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
-// SandboxBlueprint defines the configuration shared between a live Sandbox and a SandboxTemplate.
+// SandboxBlueprint defines the configuration shared between Sandbox and SandboxTemplate.
 // It deliberately excludes runtime-only fields (operatingMode, lifecycle).
 type SandboxBlueprint struct {
 	// podTemplate describes the pod spec that will be used to create the sandbox pod.
@@ -162,12 +163,11 @@ type SandboxBlueprint struct {
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
 	// service controls whether the controller should automatically create a
-	// headless Service for the sandbox.
+	// headless Service for Sandboxes created from this template.
 	// When unset, the controller preserves existing Services for backward
 	// compatibility but does not create new ones. Set to true to enable or false
 	// to explicitly disable and remove the Service.
-	//nolint:kubeapilinter
-	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
 }
@@ -252,6 +252,8 @@ type SandboxStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
+// +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`
@@ -279,5 +281,8 @@ type SandboxList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&Sandbox{}, &SandboxList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &Sandbox{}, &SandboxList{})
+		return nil
+	})
 }

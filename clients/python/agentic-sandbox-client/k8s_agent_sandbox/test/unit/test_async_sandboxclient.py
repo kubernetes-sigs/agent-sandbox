@@ -46,7 +46,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.config = SandboxDirectConnectionConfig(
             api_url="http://test-router:8080", server_port=8888
         )
-        self.client = AsyncSandboxClient(connection_config=self.config)
+        # cleanup=False keeps tests hermetic; the new default (True) registers a global atexit hook.
+        self.client = AsyncSandboxClient(connection_config=self.config, cleanup=False)
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
@@ -65,7 +66,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             sandbox = await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-warmpool", "test-namespace", labels=None, lifecycle=None
+                ANY, "test-warmpool", "test-namespace", labels=None, lifecycle=None, pod_metadata=None
             )
             self.assertEqual(sandbox, mock_sandbox_instance)
 
@@ -202,6 +203,12 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             AsyncSandboxClient(connection_config=None)
         self.assertIn("connection_config is required", str(ctx.exception))
 
+    def test_cleanup_default_registers_atexit(self):
+        """Constructing without cleanup= should default to True and register the hook."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            client = AsyncSandboxClient(connection_config=self.config)
+            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+
     def test_cleanup_true_registers_atexit(self):
         """cleanup=True should register the _atexit_cleanup method as an atexit handler."""
         with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
@@ -209,7 +216,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
 
     def test_cleanup_false_does_not_register_atexit(self):
-        """cleanup=False (default) should not register any atexit handler."""
+        """cleanup=False should opt out and not register any atexit handler."""
         with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
             AsyncSandboxClient(connection_config=self.config, cleanup=False)
             mock_atexit.register.assert_not_called()
@@ -260,6 +267,34 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_validate_labels_rejects_empty_key(self):
         with self.assertRaises(ValueError):
             await self.client.create_sandbox("t", labels={"": "v"})
+
+    async def test_create_sandbox_with_pod_metadata(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            await self.client.create_sandbox(
+                "test-warmpool", "test-namespace",
+                pod_labels={"client-id": "tenant-a"},
+                pod_annotations={"note": "owned-by-tenant-a"},
+            )
+
+            call_kwargs = mock_create.call_args[1]
+            self.assertEqual(
+                call_kwargs["pod_metadata"],
+                {
+                    "labels": {"client-id": "tenant-a"},
+                    "annotations": {"note": "owned-by-tenant-a"},
+                },
+            )
+
+    async def test_create_sandbox_rejects_invalid_pod_label(self):
+        with self.assertRaises(ValueError):
+            await self.client.create_sandbox("t", pod_labels={"bad key!": "v"})
 
     async def test_create_sandbox_with_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
@@ -330,13 +365,13 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
     async def test_in_cluster_config_accepted(self):
         config = SandboxInClusterConnectionConfig()
-        client = AsyncSandboxClient(connection_config=config)
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
 
     async def test_use_pod_ip_not_passed_as_kwarg(self):
         """AsyncSandbox derives use_pod_ip from connection_config internally."""
         config = SandboxInClusterConnectionConfig(use_pod_ip=True)
-        client = AsyncSandboxClient(connection_config=config)
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
         mock_k8s_helper = client.k8s_helper
         mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
 
@@ -718,7 +753,8 @@ class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
 
         self.config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
-        self.client = AsyncSandboxClient(connection_config=self.config)
+        # cleanup=False keeps tests hermetic; the new default (True) registers a global atexit hook.
+        self.client = AsyncSandboxClient(connection_config=self.config, cleanup=False)
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
@@ -757,7 +793,7 @@ class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_passes_connection_config_for_non_incluster(self):
         """Verify connection_config is passed through for non-InCluster configs."""
         config = SandboxDirectConnectionConfig(api_url="http://test", server_port=8888)
-        client = AsyncSandboxClient(connection_config=config)
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
         client.k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         client.k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 

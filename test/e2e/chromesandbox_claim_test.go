@@ -82,7 +82,8 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	warmPool.Name = "chrome-warmpool"
 	warmPool.Namespace = ns.Name
-	warmPool.Spec.Replicas = int32(warmPoolSize)
+	replicas := int32(warmPoolSize)
+	warmPool.Spec.Replicas = &replicas
 	warmPool.Spec.TemplateRef.Name = template.Name
 	tc.MustCreateWithCleanup(warmPool)
 

@@ -26,6 +26,7 @@ from urllib3.util.retry import Retry
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.pod_metadata import validate_labels
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxInClusterConnectionConfig,
@@ -65,7 +66,7 @@ class TestSandboxClient(unittest.TestCase):
             
             sandbox = self.client.create_sandbox("test-warmpool", "test-namespace")
             
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-warmpool", "test-namespace", labels=None, lifecycle=None)
+            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-warmpool", "test-namespace", labels=None, lifecycle=None, pod_metadata=None)
             self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
             mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
             self.assertEqual(sandbox, mock_sandbox_instance)
@@ -207,7 +208,40 @@ class TestSandboxClient(unittest.TestCase):
                 "sandbox-claim-1234abcd", "test-warmpool", "test-namespace",
                 labels={"agent": "code-agent", "team": "platform"},
                 lifecycle=None,
+                pod_metadata=None,
             )
+
+    @patch('uuid.uuid4')
+    def test_create_sandbox_with_pod_metadata(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+
+            self.client.create_sandbox(
+                "test-warmpool", "test-namespace",
+                pod_labels={"client-id": "tenant-a"},
+                pod_annotations={"note": "owned-by-tenant-a"},
+            )
+
+            mock_create_claim.assert_called_once_with(
+                "sandbox-claim-1234abcd", "test-warmpool", "test-namespace",
+                labels=None,
+                lifecycle=None,
+                pod_metadata={
+                    "labels": {"client-id": "tenant-a"},
+                    "annotations": {"note": "owned-by-tenant-a"},
+                },
+            )
+
+    def test_create_sandbox_rejects_invalid_pod_label(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-warmpool", pod_labels={"bad key!": "value"})
+        self.assertIn("invalid characters", str(ctx.exception))
 
     def test_create_claim_with_labels(self):
         self.client.tracing_manager = MagicMock()
@@ -221,19 +255,38 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels={"agent": "code-agent"},
             lifecycle=None,
+            pod_metadata=None,
         )
 
-    def test_create_claim(self):
+    def test_create_claim_with_pod_metadata(self):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
-        
-        self.client._create_claim("test-claim", "test-warmpool", "test-namespace")
-        
+
+        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        self.client._create_claim(
+            "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
+        )
+
         self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
             "test-claim", "test-warmpool", "test-namespace",
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels=None,
             lifecycle=None,
+            pod_metadata={"labels": {"client-id": "tenant-a"}},
+        )
+
+    def test_create_claim(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
+
+        self.client._create_claim("test-claim", "test-warmpool", "test-namespace")
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-warmpool", "test-namespace",
+            annotations={"opentelemetry.io/trace-context": "trace-data"},
+            labels=None,
+            lifecycle=None,
+            pod_metadata=None,
         )
 
     def test_validate_labels_rejects_invalid_value(self):
@@ -262,7 +315,7 @@ class TestSandboxClient(unittest.TestCase):
         self.assertIn("exceeds max length", str(ctx.exception))
 
     def test_validate_labels_accepts_prefixed_key(self):
-        SandboxClient._validate_labels({"app.kubernetes.io/name": "my-app"})
+        validate_labels({"app.kubernetes.io/name": "my-app"})
 
     def test_validate_labels_rejects_invalid_prefix(self):
         with self.assertRaises(ValueError) as ctx:
@@ -270,13 +323,13 @@ class TestSandboxClient(unittest.TestCase):
         self.assertIn("valid DNS subdomain", str(ctx.exception))
 
     def test_validate_labels_accepts_single_char_prefix(self):
-        SandboxClient._validate_labels({"a/name": "value"})
+        validate_labels({"a/name": "value"})
 
     def test_validate_labels_accepts_empty_value(self):
-        SandboxClient._validate_labels({"key": ""})
+        validate_labels({"key": ""})
 
     def test_validate_labels_accepts_valid(self):
-        SandboxClient._validate_labels({"agent": "code-agent", "team": "platform-123"})
+        validate_labels({"agent": "code-agent", "team": "platform-123"})
 
     def test_wait_for_sandbox_ready(self):
         self.client._wait_for_sandbox_ready("sandbox-id", "test-namespace", 45)
@@ -345,6 +398,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=lifecycle,
+            pod_metadata=None,
         )
 
     def test_create_claim_without_lifecycle(self):
@@ -358,6 +412,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=None,
+            pod_metadata=None,
         )
 
     def test_shutdown_after_seconds_validation_zero(self):

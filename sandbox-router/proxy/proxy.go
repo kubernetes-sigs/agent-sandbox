@@ -173,6 +173,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Bearer-protected service. Matches the Python router, which
 			// strips Authorization right next to Host.
 			pr.Out.Header.Del("Authorization")
+			// SetXForwarded uses Set() for Host + Proto (overwrites,
+			// safe) but APPENDS to any existing X-Forwarded-For — so a
+			// client-supplied "X-Forwarded-For: 1.2.3.4" would land
+			// at the upstream as "1.2.3.4, <real_client_ip>", letting
+			// the client poison the chain to claim a different source.
+			// Strip the inbound value first so SetXForwarded writes a
+			// single trusted entry: the actual client IP the router
+			// observed. If a trusted upstream proxy needs to preserve
+			// its own X-Forwarded-For, that trust should be wired
+			// explicitly rather than blanket-trusting whatever the
+			// inbound connection carries.
+			pr.Out.Header.Del("X-Forwarded-For")
 			// X-Forwarded-{For,Host,Proto} so the upstream sandbox can
 			// reconstruct the client-visible URL for self-links and
 			// redirects. SetXForwarded is the canonical helper —
@@ -264,13 +276,22 @@ func isUpgradeRequest(r *http.Request) bool {
 }
 
 // defaultTransport builds the shared *http.Transport used for upstream
-// requests. Values mirror Go's DefaultTransport plus a configurable
-// ResponseHeaderTimeout and disabled HTTP/2 to backends (sandboxes are
-// h1 today; opting in to h2 to backends would require negotiation we don't
-// want to introduce silently).
+// requests. Values mirror Go's DefaultTransport (minus Proxy — see
+// below) plus a configurable ResponseHeaderTimeout and disabled HTTP/2
+// to backends (sandboxes are h1 today; opting in to h2 to backends
+// would require negotiation we don't want to introduce silently).
+//
+// Note Proxy is deliberately unset (nil), NOT http.ProxyFromEnvironment.
+// The router only dials cluster-internal addresses: Pod IPs from the
+// cache / X-Sandbox-Pod-IP header, or "<id>.<ns>.svc.<cluster-domain>"
+// DNS names. If a deployment has HTTP_PROXY / HTTPS_PROXY set in the
+// router pod's env without a matching NO_PROXY covering the cluster's
+// Pod CIDR and DNS suffix, ProxyFromEnvironment would route those
+// internal dials through an external proxy — connectivity breaks and
+// in the worst case Pod-IP traffic leaves the cluster. Defaulting to
+// no proxy makes "router goes direct to the sandbox" the guarantee.
 func defaultTransport(cfg *config.Config) *http.Transport {
 	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,

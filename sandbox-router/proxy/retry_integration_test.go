@@ -36,19 +36,9 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 )
 
-// pickFreePort returns a port that was free at call time. There is a small
-// race between Close and the caller binding to the same port, but for tests
-// in a controlled environment this is acceptable.
-func pickFreePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-	return port
-}
+// pickFreePort moved to helpers_test.go so non-integration tests
+// (authz_test.go) can use it for "deterministically-dead destination"
+// setup as well.
 
 // startDelayedBackend brings up an HTTP listener on port after delay. It
 // returns a stop func that the test must call to shut down the server. The

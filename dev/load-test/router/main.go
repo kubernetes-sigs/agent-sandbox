@@ -35,6 +35,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -126,6 +127,17 @@ func main() {
 			flag.Usage()
 			os.Exit(2)
 		}
+	}
+
+	// Parse the target once so a malformed --router-url fails here with
+	// a clear message rather than crashing every worker goroutine on a
+	// nil http.Request later. The in-process path always produces a
+	// valid URL (httptest.NewServer.URL), so this just guards the
+	// external-mode case.
+	if _, err := url.Parse(target + "/load"); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid target URL %q: %v\n", target, err)
+		flag.Usage()
+		os.Exit(2)
 	}
 
 	results := run(target, *concurrency, *duration, *warmup, *bodySize, *backendHost, *backendPort)
@@ -251,7 +263,13 @@ func buildReq(target, backendHost, backendPort string, body []byte) *http.Reques
 		bodyReader = newRepeatingReader(body)
 		method = http.MethodPost
 	}
-	req, _ := http.NewRequest(method, target+"/load", bodyReader)
+	// target was pre-validated in main(); a NewRequest error here would
+	// mean the inputs changed under us — a panic gives an immediate
+	// stack trace rather than a worker silently looping on nil.
+	req, err := http.NewRequest(method, target+"/load", bodyReader)
+	if err != nil {
+		panic(fmt.Sprintf("buildReq: unexpected http.NewRequest error for target %q: %v", target, err))
+	}
 	req.Header.Set("X-Sandbox-Id", "loadtest")
 	req.Header.Set("X-Sandbox-Namespace", "loadtest")
 	req.Header.Set("X-Sandbox-Pod-Ip", backendHost)

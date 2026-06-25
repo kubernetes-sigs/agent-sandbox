@@ -227,12 +227,14 @@ func TestIntegration_UpstreamConnectErrorReturns502(t *testing.T) {
 	router := httptest.NewServer(newRouter(t))
 	defer router.Close()
 
-	// Point at a port that nothing is listening on.
+	// Point at a port that nothing is listening on — reserved-and-
+	// closed so we're not assuming port 1 happens to be free on the
+	// CI host.
 	h := http.Header{}
 	h.Set(HeaderSandboxID, "ghost")
 	h.Set(HeaderSandboxNamespace, "test")
 	h.Set(HeaderSandboxPodIP, "127.0.0.1")
-	h.Set(HeaderSandboxPort, "1") // privileged port nothing listens on
+	h.Set(HeaderSandboxPort, pickFreePortStr(t))
 
 	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
 	for k, vs := range h {
@@ -303,14 +305,14 @@ func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 	}))
 	defer router.Close()
 
-	// Dial 127.0.0.1:1 — nothing listens there, so the proxy will hit a
-	// dial-class error and the ErrorHandler must invalidate the cache
-	// entry for the UID we passed in.
+	// Dial a guaranteed-closed port — the proxy will hit a dial-class
+	// error and the ErrorHandler must invalidate the cache entry for
+	// the UID we passed in.
 	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
 	req.Header.Set(HeaderSandboxID, "s")
 	req.Header.Set(HeaderSandboxUID, "sandbox-uid-xyz")
 	req.Header.Set(HeaderSandboxNamespace, "ns")
-	req.Header.Set(HeaderSandboxPort, "1")
+	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -356,7 +358,7 @@ func TestIntegration_NoInvalidationOnDNSDialError(t *testing.T) {
 	req.Header.Set(HeaderSandboxUID, "some-uid")
 	req.Header.Set(HeaderSandboxNamespace, "ns")
 	req.Header.Set(HeaderSandboxPodIP, "127.0.0.1")
-	req.Header.Set(HeaderSandboxPort, "1")
+	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

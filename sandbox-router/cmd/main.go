@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -318,8 +319,19 @@ func loadRESTConfig(kubeconfigPath string) (*rest.Config, error) {
 		return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 			loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
 	}
-	if cfg, err := rest.InClusterConfig(); err == nil {
+	cfg, err := rest.InClusterConfig()
+	if err == nil {
 		return cfg, nil
+	}
+	// Only fall through to local-dev config when InClusterConfig
+	// reports "not in a Pod". Any other error (broken SA token
+	// mount, malformed CA file, etc.) means we ARE in a Pod but the
+	// in-cluster credentials are unusable — silently switching to
+	// ~/.kube/config in that case would either authenticate against
+	// the wrong cluster or surface a confusing "no kubeconfig found"
+	// error instead of the real cause. Fail loud.
+	if !errors.Is(err, rest.ErrNotInCluster) {
+		return nil, fmt.Errorf("in-cluster config failed: %w", err)
 	}
 	// Local dev fallback: $KUBECONFIG, then ~/.kube/config.
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(

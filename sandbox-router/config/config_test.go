@@ -328,8 +328,18 @@ func TestValidate(t *testing.T) {
 			wantErr: "authz-tokenreview-ttl",
 		},
 		{
+			name:    "negative tokenreview ttl",
+			mut:     func(c *Config) { c.AuthzTokenReviewTTL = -1 * time.Second },
+			wantErr: "authz-tokenreview-ttl",
+		},
+		{
 			name:    "zero tokenreview cache size",
 			mut:     func(c *Config) { c.AuthzTokenReviewCacheSize = 0 },
+			wantErr: "authz-tokenreview-cache-size",
+		},
+		{
+			name:    "negative tokenreview cache size",
+			mut:     func(c *Config) { c.AuthzTokenReviewCacheSize = -1 },
 			wantErr: "authz-tokenreview-cache-size",
 		},
 		{

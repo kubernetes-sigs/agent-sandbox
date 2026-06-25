@@ -91,7 +91,7 @@ func TestAuthzAllowedByDefault(t *testing.T) {
 	req.Header.Set(HeaderSandboxID, "s")
 	req.Header.Set(HeaderSandboxNamespace, "ns")
 	req.Header.Set(HeaderSandboxPodIP, "127.0.0.1")
-	req.Header.Set(HeaderSandboxPort, "1")
+	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t)) // guaranteed-closed
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
@@ -130,9 +130,12 @@ func TestAuthzDenialMapsToStatus(t *testing.T) {
 			req, _ := http.NewRequest("GET", router.URL+"/x", nil)
 			req.Header.Set(HeaderSandboxID, "abc")
 			req.Header.Set(HeaderSandboxNamespace, "team")
-			// Pod-IP irrelevant — request must be rejected before dialing.
+			// Pod-IP / port irrelevant — request must be rejected before
+			// dialing — but use a real free port so a future regression
+			// that lets the request through dial-fails instead of
+			// hanging on whatever happens to be at port 1.
 			req.Header.Set(HeaderSandboxPodIP, "127.0.0.1")
-			req.Header.Set(HeaderSandboxPort, "1")
+			req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
 			req.Header.Set("Authorization", "Bearer test-token")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -178,7 +181,7 @@ func TestAuthzPassesNamespaceAndID(t *testing.T) {
 	req.Header.Set(HeaderSandboxID, "sandbox-7")
 	req.Header.Set(HeaderSandboxNamespace, "team-a")
 	req.Header.Set(HeaderSandboxPodIP, "127.0.0.1")
-	req.Header.Set(HeaderSandboxPort, "1")
+	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)

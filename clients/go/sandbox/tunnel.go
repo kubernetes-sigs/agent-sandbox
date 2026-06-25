@@ -26,7 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
+	"k8s.io/apimachinery/pkg/util/httpstream" //nolint:staticcheck
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	discoveryv1client "k8s.io/client-go/kubernetes/typed/discovery/v1"
 	"k8s.io/client-go/rest"

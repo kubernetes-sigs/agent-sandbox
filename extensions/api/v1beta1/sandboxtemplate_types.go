@@ -17,6 +17,7 @@ package v1beta1
 import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
@@ -153,8 +154,7 @@ type SandboxTemplateSpec struct {
 	// When unset, the controller preserves existing Services for backward
 	// compatibility but does not create new ones. Set to true to enable or false
 	// to explicitly disable and remove the Service.
-	//nolint:kubeapilinter
-	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
 }
@@ -162,6 +162,8 @@ type SandboxTemplateSpec struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
+// +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // SandboxTemplate is the Schema for the sandbox template API.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
@@ -184,5 +186,8 @@ type SandboxTemplateList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxTemplate{}, &SandboxTemplateList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxTemplate{}, &SandboxTemplateList{})
+		return nil
+	})
 }

@@ -93,6 +93,31 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertNotIn("lifecycle", body["spec"])
 
+    def test_pod_metadata_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(
+            body["spec"]["additionalPodMetadata"]["labels"]["client-id"], "tenant-a"
+        )
+
+    def test_no_pod_metadata_omits_key(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim("test-claim", "test-warmpool", "test-namespace")
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertNotIn("additionalPodMetadata", body["spec"])
+
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")

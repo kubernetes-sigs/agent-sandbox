@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -246,7 +247,7 @@ func createWarmPoolForVCT(t *testing.T, tc *framework.TestContext, namespace, na
 			Namespace: namespace,
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas:    1,
+			Replicas:    ptr.To[int32](1),
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
 		},
 	}

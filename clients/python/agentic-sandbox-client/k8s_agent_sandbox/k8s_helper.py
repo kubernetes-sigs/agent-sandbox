@@ -49,8 +49,17 @@ class K8sHelper:
         labels: dict | None = None,
         lifecycle: dict | None = None,
         volume_claim_templates: list[dict] | None = None,
+        pod_metadata: dict | None = None
     ):
-        """Creates a SandboxClaim custom resource."""
+        """
+        Creates a SandboxClaim custom resource.
+        
+        Args:
+            pod_metadata: Optional ``{"labels": {...}, "annotations": {...}}``
+                dict emitted as ``spec.additionalPodMetadata`` so the labels and
+                annotations propagate onto the running Sandbox Pod (as opposed to
+                ``labels``, which only land on the SandboxClaim object).
+        """
         metadata = {
             "name": name,
             "annotations": annotations or {},
@@ -67,7 +76,8 @@ class K8sHelper:
             spec["lifecycle"] = lifecycle
         if volume_claim_templates:
             spec["volumeClaimTemplates"] = volume_claim_templates
-
+        if pod_metadata:
+            spec["additionalPodMetadata"] = pod_metadata
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",

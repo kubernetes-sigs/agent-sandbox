@@ -61,6 +61,11 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
         f"--output=type={args.docker_build_output_type}",
     ]
     if args.docker_build_output_type == "registry":
+        cache_ref = utils.get_full_image_name(args, service_name, tag="buildcache")
+        build_cmd.extend([
+            f"--cache-from=type=registry,ref={cache_ref}",
+            f"--cache-to=type=registry,ref={cache_ref},mode=max",
+        ])
         build_cmd.append("--platform=" + platforms)
     image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
     build_cmd.extend(["-t", image_name])

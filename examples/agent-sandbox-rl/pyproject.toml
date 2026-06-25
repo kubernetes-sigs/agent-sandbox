@@ -1,0 +1,58 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-sandbox-rl"
+version = "0.1.0.dev0"
+description = "Generic, multi-cluster batch orchestration for RL on Agent Sandbox (SWE-bench and beyond)."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "k8s-agent-sandbox",
+    "kubernetes",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+swebench = ["datasets"]
+# Prometheus is optional: the always-on RunReport needs no third-party deps, and
+# importing the package registers no collectors. Install this to export asrl_*.
+metrics = ["prometheus-client"]
+# R2E-Gym (for adapters.r2egym) is not on PyPI — install it from its checkout
+# (`pip install -e path/to/R2E-Gym`); the adapter raises a clear error if it's
+# missing. So there's intentionally no `r2egym` extra here.
+async = ["k8s-agent-sandbox[async]", "kubernetes_asyncio<34.0.0"]
+tracing = [
+    "opentelemetry-api~=1.39",
+    "opentelemetry-sdk~=1.39",
+    "opentelemetry-exporter-otlp~=1.39",
+]
+test = ["agent-sandbox-rl[metrics]", "pytest", "pytest-asyncio", "pytest-xdist"]
+
+[tool.setuptools.packages.find]
+include = ["agent_sandbox_rl*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

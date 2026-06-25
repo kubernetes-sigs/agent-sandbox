@@ -48,8 +48,7 @@ Before running this test, ensure the following prerequisites are met:
           - --enable-tracing
           - --zap-log-level=debug
           - --zap-encoder=json
-          - --kube-api-qps=1000
-          - --kube-api-burst=1000
+          - --kube-api-qps=-1
           - --sandbox-concurrent-workers=1000
           - --sandbox-claim-concurrent-workers=1000
           - --sandbox-warm-pool-concurrent-workers=1000

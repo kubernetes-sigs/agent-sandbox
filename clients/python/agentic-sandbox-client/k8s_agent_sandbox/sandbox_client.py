@@ -17,7 +17,6 @@ It handles lifecycle management (claiming, waiting) and interaction (execution,
 file I/O) via the Sandbox resource handle.
 """
 
-import re
 import uuid
 import atexit
 import sys
@@ -36,6 +35,7 @@ from .models import (
     SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
+from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .exceptions import SandboxNotFoundError
 
@@ -100,6 +100,8 @@ class SandboxClient(Generic[T]):
         *,
         shutdown_after_seconds: int | None = None,
         volume_claim_templates: list[dict] | None = None,
+        pod_labels: dict[str, str] | None = None, 
+        pod_annotations: dict[str, str] | None = None
     ) -> T:
         """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
            the underlying infrastructure.
@@ -108,7 +110,8 @@ class SandboxClient(Generic[T]):
             warmpool: Name of the SandboxWarmPool to use.
             namespace: Kubernetes namespace for the claim.
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
-            labels: Optional Kubernetes labels to attach to the claim.
+            labels: Optional Kubernetes labels to attach to the claim object
+                (``SandboxClaim.metadata.labels``).
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -116,9 +119,15 @@ class SandboxClient(Generic[T]):
                 expiry. Must be a positive integer.
             volume_claim_templates: Optional list of volume claim templates
                 to override/merge with the sandbox template.
+            pod_labels: Optional labels stamped onto the running Sandbox **Pod**
+                via ``spec.additionalPodMetadata.labels``. Unlike ``labels``
+                (which land on the claim object), these are readable from inside
+                the sandbox through the Downward API.
+            pod_annotations: Optional annotations stamped onto the running
+                Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
 
         Example:
-        
+
             >>> client = SandboxClient()
             >>> sandbox = client.create_sandbox(warmpool="python-sandbox-pool")
             >>> sandbox.commands.run("echo 'Hello World'")
@@ -127,12 +136,14 @@ class SandboxClient(Generic[T]):
             raise ValueError("Warmpool name cannot be empty.")
 
         if labels:
-            self._validate_labels(labels)
+            validate_labels(labels)
+
+        pod_metadata = build_pod_metadata(pod_labels, pod_annotations)
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
-        
+
         try:
             self._create_claim(
                 claim_name,
@@ -141,6 +152,7 @@ class SandboxClient(Generic[T]):
                 labels=labels,
                 lifecycle=lifecycle,
                 volume_claim_templates=volume_claim_templates,
+                pod_metadata=pod_metadata,
             )
             # Resolve the sandbox id from the sandbox claim object.
             # In case of warmpool, sandbox id is not the same as claim name.
@@ -303,53 +315,6 @@ class SandboxClient(Generic[T]):
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
 
-    # Kubernetes label validation: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
-    _LABEL_NAME_RE = re.compile(r'^[A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9]$|^[A-Za-z0-9]$')
-    _LABEL_PREFIX_RE = re.compile(r'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
-    _LABEL_NAME_MAX_LENGTH = 63
-    _LABEL_PREFIX_MAX_LENGTH = 253
-
-    @staticmethod
-    def _validate_label_name(name: str, context: str):
-        """Validates a label name segment (key or value) against k8s constraints."""
-        if len(name) > SandboxClient._LABEL_NAME_MAX_LENGTH:
-            raise ValueError(
-                f"Label {context} '{name}' exceeds max length of {SandboxClient._LABEL_NAME_MAX_LENGTH} characters."
-            )
-        if not SandboxClient._LABEL_NAME_RE.match(name):
-            raise ValueError(
-                f"Label {context} '{name}' contains invalid characters. "
-                f"Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.]."
-            )
-
-    @staticmethod
-    def _validate_labels(labels: dict[str, str]):
-        """Validates label keys and values against Kubernetes constraints."""
-        for key, value in labels.items():
-            if not key:
-                raise ValueError("Label key cannot be empty.")
-
-            # Keys can have an optional prefix: "prefix/name"
-            if '/' in key:
-                prefix, name = key.split('/', 1)
-                if not prefix or len(prefix) > SandboxClient._LABEL_PREFIX_MAX_LENGTH:
-                    raise ValueError(
-                        f"Label key prefix '{prefix}' is invalid or exceeds {SandboxClient._LABEL_PREFIX_MAX_LENGTH} characters."
-                    )
-                if not SandboxClient._LABEL_PREFIX_RE.match(prefix):
-                    raise ValueError(
-                        f"Label key prefix '{prefix}' must be a valid DNS subdomain."
-                    )
-                if not name:
-                    raise ValueError(f"Label key '{key}' has an empty name after prefix.")
-                SandboxClient._validate_label_name(name, f"key name in '{key}'")
-            else:
-                SandboxClient._validate_label_name(key, f"key '{key}'")
-
-            # Values can be empty, but if non-empty must match the same name constraints
-            if value:
-                SandboxClient._validate_label_name(value, f"value '{value}' for key '{key}'")
-
     @trace_span("create_claim")
     def _create_claim(
         self,
@@ -359,6 +324,7 @@ class SandboxClient(Generic[T]):
         labels: dict[str, str] | None = None,
         lifecycle: dict | None = None,
         volume_claim_templates: list[dict] | None = None,
+        pod_metadata: dict | None = None,
     ):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
@@ -382,6 +348,7 @@ class SandboxClient(Generic[T]):
             labels=labels,
             lifecycle=lifecycle,
             volume_claim_templates=volume_claim_templates,
+            pod_metadata=pod_metadata,
         )
 
     @trace_span("wait_for_sandbox_ready")

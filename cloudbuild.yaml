@@ -16,7 +16,7 @@ steps:
 options:
   enableStructuredLogging: true
   # Using a more powerful machine type can speed up docker builds.
-  machineType: "E2_HIGHCPU_8"
+  machineType: "E2_HIGHCPU_32"
   substitution_option: "ALLOW_LOOSE"
 substitutions:
   _GIT_TAG: "12345"

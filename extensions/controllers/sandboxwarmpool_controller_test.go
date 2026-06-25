@@ -129,6 +129,7 @@ func TestReconcilePool(t *testing.T) {
 	poolNamespace := "default"
 	templateName := "test-template"
 	replicas := int32(3)
+	zeroReplicas := int32(0)
 
 	template := createTemplate(poolNamespace)
 
@@ -139,7 +140,7 @@ func TestReconcilePool(t *testing.T) {
 			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: replicas,
+			Replicas: &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 				Name: templateName,
 			},
@@ -151,16 +152,25 @@ func TestReconcilePool(t *testing.T) {
 
 	testCases := []struct {
 		name             string
+		replicas         *int32
 		initialObjs      []runtime.Object
 		expectedReplicas int32
 	}{
 		{
+			name:             "nil replicas defaults to 1",
+			replicas:         nil,
+			initialObjs:      []runtime.Object{template},
+			expectedReplicas: 1,
+		},
+		{
 			name:             "creates sandboxes when pool is empty",
+			replicas:         &replicas,
 			initialObjs:      []runtime.Object{template},
 			expectedReplicas: replicas,
 		},
 		{
-			name: "creates additional sandboxes when under-provisioned",
+			name:     "creates additional sandboxes when under-provisioned",
+			replicas: &replicas,
 			initialObjs: []runtime.Object{
 				template,
 				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
@@ -168,7 +178,8 @@ func TestReconcilePool(t *testing.T) {
 			expectedReplicas: replicas,
 		},
 		{
-			name: "deletes excess sandboxes when over-provisioned",
+			name:     "deletes excess sandboxes when over-provisioned",
+			replicas: &replicas,
 			initialObjs: []runtime.Object{
 				template,
 				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
@@ -179,7 +190,8 @@ func TestReconcilePool(t *testing.T) {
 			expectedReplicas: replicas,
 		},
 		{
-			name: "maintains correct replica count",
+			name:     "maintains correct replica count",
+			replicas: &replicas,
 			initialObjs: []runtime.Object{
 				template,
 				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
@@ -188,10 +200,22 @@ func TestReconcilePool(t *testing.T) {
 			},
 			expectedReplicas: replicas,
 		},
+		{
+			name:     "zero replicas deletes all sandboxes (empty pool)",
+			replicas: &zeroReplicas,
+			initialObjs: []runtime.Object{
+				template,
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-abc123"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-def456"),
+				createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-ghi789"),
+			},
+			expectedReplicas: zeroReplicas,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			warmPool.Spec.Replicas = tc.replicas
 			r := SandboxWarmPoolReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(scheme).
@@ -246,7 +270,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: replicas,
+			Replicas: &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 				Name: templateName,
 			},
@@ -415,7 +439,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 				UID:       "warmpool-uid-123",
 			},
 			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-				Replicas: replicas,
+				Replicas: &replicas,
 				TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 					Name: templateName,
 				},
@@ -465,6 +489,7 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"
 	templateName := "test-template"
+	replicas := int32(1)
 
 	ctx := context.Background()
 	scheme := newTestScheme()
@@ -516,7 +541,7 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 			UID:       "warmpool-uid-vct",
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: 1,
+			Replicas: &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 				Name: templateName,
 			},
@@ -552,6 +577,7 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"
 	templateName := "test-template"
+	replicas := int32(1)
 
 	ctx := context.Background()
 	scheme := newTestScheme()
@@ -617,7 +643,7 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 					UID:       "warmpool-uid-secure-defaults",
 				},
 				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-					Replicas:    1,
+					Replicas:    &replicas,
 					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
 				},
 			}
@@ -668,7 +694,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: replicas,
+			Replicas: &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 				Name: templateName,
 			},
@@ -757,6 +783,46 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusClearsZeroValues(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pool",
+			Namespace: "default",
+		},
+		Status: extensionsv1beta1.SandboxWarmPoolStatus{
+			Replicas:      3,
+			ReadyReplicas: 2,
+			Selector:      "agents.x-k8s.io/warm-pool=test",
+		},
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(warmPool.DeepCopy()).
+			WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+			Build(),
+		Scheme: scheme,
+	}
+
+	desired := warmPool.DeepCopy()
+	desired.Status.Replicas = 0
+	desired.Status.ReadyReplicas = 0
+
+	oldStatus := warmPool.Status
+	err := r.updateStatus(ctx, &oldStatus, desired)
+	require.NoError(t, err)
+
+	var updated extensionsv1beta1.SandboxWarmPool
+	err = r.Get(ctx, types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}, &updated)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), updated.Status.Replicas)
+	require.Equal(t, int32(0), updated.Status.ReadyReplicas)
+	require.Equal(t, desired.Status.Selector, updated.Status.Selector)
+}
+
 func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"
@@ -772,7 +838,7 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: replicas,
+			Replicas: &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 				Name: templateName,
 			},
@@ -921,7 +987,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					UID:       "warmpool-uid-123",
 				},
 				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-					Replicas: replicas,
+					Replicas: &replicas,
 					TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 						Name: templateName,
 					},
@@ -1067,7 +1133,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: replicas,
+			Replicas: &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 				Name: templateName1,
 			},
@@ -1335,7 +1401,7 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 			UID:       "warmpool-uid-123",
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: replicas,
+			Replicas: &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 				Name: templateName,
 			},
@@ -1609,7 +1675,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 					UID:       "warmpool-uid-123",
 				},
 				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-					Replicas: replicas,
+					Replicas: &replicas,
 					TemplateRef: extensionsv1beta1.SandboxTemplateRef{
 						Name: templateName,
 					},

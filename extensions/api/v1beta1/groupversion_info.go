@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package v1beta1 contains API Schema definitions for the agents v1beta1 API group.
+// Package v1beta1 contains API Schema definitions for the extensions.agents v1beta1 API group.
 // +kubebuilder:object:generate=true
 // +groupName=extensions.agents.x-k8s.io
 package v1beta1
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
 const (
@@ -35,7 +36,10 @@ var (
 	SchemeGroupVersion = GroupVersion
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
-	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+	SchemeBuilder = runtime.NewSchemeBuilder(func(scheme *runtime.Scheme) error {
+		metav1.AddToGroupVersion(scheme, GroupVersion)
+		return nil
+	})
 
 	// AddToScheme adds the types in this group-version to the given scheme.
 	AddToScheme = SchemeBuilder.AddToScheme

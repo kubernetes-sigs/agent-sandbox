@@ -16,6 +16,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
@@ -159,6 +160,12 @@ type SandboxStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="Sandbox",type="string",JSONPath=".status.sandbox.name"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`
@@ -185,5 +192,8 @@ type SandboxClaimList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxClaim{}, &SandboxClaimList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxClaim{}, &SandboxClaimList{})
+		return nil
+	})
 }

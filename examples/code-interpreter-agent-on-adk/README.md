@@ -34,7 +34,7 @@ The guide walks you through the process of creating a simple [ADK](https://googl
    
    def execute_python(code: str):
        sb = SandboxClient()
-       sandbox = sb.create_sandbox(template="python-sandbox-template", namespace="default")
+       sandbox = sb.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
        try:
         sandbox.files.write("run.py", code)
         result = sandbox.commands.run("python3 run.py")

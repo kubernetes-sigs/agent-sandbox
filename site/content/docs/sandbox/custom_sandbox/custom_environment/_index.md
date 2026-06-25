@@ -15,7 +15,7 @@ By extending the sandbox's FastAPI runtime, you can accept a dynamic `env` dicti
 
 - A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster, configured to use your custom FastAPI server as its entrypoint. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
+- A `SandboxWarmPool` named `simple-sandbox-pool` (backed by a `SandboxTemplate` named `simple-sandbox-template`) applied to your cluster, configured to use your custom FastAPI server as its entrypoint. The matching `SandboxTemplate` lives in this page's [source folder](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/sandbox/custom_sandbox/custom_environment/source); pair it with a `SandboxWarmPool` whose `spec.sandboxTemplateRef.name` is `simple-sandbox-template`.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
 
 ### 1. The Custom Sandbox Runtime (Server-Side)
@@ -74,7 +74,7 @@ def execute_command(req: ExecuteRequest):
         }
 ```
 
-> Note: you can find the rest of the Sandbox Docker image [here](https://github.com/volatilemolotov/agent-sandbox/tree/main/site/content/docs/sandbox/custom_sandbox/custom_environment/source)
+> Note: the rest of the Sandbox Docker image lives in the [custom-environment example source folder](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/sandbox/custom_sandbox/custom_environment/source).
 
 ### 2. Client Execution Workflow
 
@@ -88,8 +88,8 @@ from k8s_agent_sandbox import SandboxClient
 # 1. Initialize the client
 client = SandboxClient()
 
-# 2. Create the sandbox using your custom runtime template
-sandbox = client.create_sandbox("simple-sandbox-template")
+# 2. Create the sandbox using your custom runtime warm pool
+sandbox = client.create_sandbox("simple-sandbox-pool")
 
 # 3. Run a command and inject environment variables via the payload
 # The FastAPI server parses this into the ExecuteRequest model

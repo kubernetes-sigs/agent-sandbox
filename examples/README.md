@@ -2,6 +2,7 @@
 
 This directory contains examples of how to use the Agent Sandbox. Each subdirectory contains a different example.
 
+- [**agent-sandbox-rl**](./agent-sandbox-rl): Generic, multi-cluster batch orchestration for running SWE-bench-style RL/eval workloads on Agent Sandbox warm pools.
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).

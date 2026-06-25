@@ -388,6 +388,25 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await sandbox.get_pod_ip(), "10.244.0.42")
 
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncFilesystem")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncCommandExecutor")
+    @patch("k8s_agent_sandbox.async_sandbox.create_tracer_manager")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncSandboxConnector")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncK8sHelper")
+    async def test_in_cluster_passes_pod_ip_callback(self, mock_k8s_helper, mock_connector, mock_create_tracer_manager, mock_command_executor, mock_filesystem):
+        config = SandboxInClusterConnectionConfig()
+        mock_create_tracer_manager.return_value = (MagicMock(), MagicMock())
+
+        sandbox = AsyncSandbox(
+            claim_name="test-claim",
+            sandbox_id="test-id",
+            connection_config=config,
+        )
+
+        callback = mock_connector.call_args.kwargs["get_pod_ip"]
+        self.assertIs(callback.__self__, sandbox)
+        self.assertIs(callback.__func__, AsyncSandbox.get_pod_ip)
+
 
 class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
@@ -401,9 +420,8 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
 
-    async def test_use_pod_ip_not_passed_as_kwarg(self):
-        """AsyncSandbox derives use_pod_ip from connection_config internally."""
-        config = SandboxInClusterConnectionConfig(use_pod_ip=True)
+    async def test_in_cluster_connection_config_passed_to_sandbox(self):
+        config = SandboxInClusterConnectionConfig()
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
         mock_k8s_helper = client.k8s_helper
         mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
@@ -417,8 +435,7 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
             await client.create_sandbox("my-warmpool")
 
         call_kwargs = mock_sandbox_class.call_args.kwargs
-        self.assertNotIn("use_pod_ip", call_kwargs,
-                        "use_pod_ip should not be passed; AsyncSandbox derives it from connection_config")
+        self.assertEqual(call_kwargs["connection_config"], config)
 
 
 class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
@@ -445,7 +462,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(url, "http://my-sandbox.dev.svc.cluster.local:8888")
 
     async def test_in_cluster_resolves_pod_ip_via_callable(self):
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(
             sandbox_id="my-sandbox",
             namespace="dev",
@@ -458,7 +475,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
 
     async def test_in_cluster_resolves_ipv6_pod_ip(self):
         """IPv6 pod IPs must be bracketed in the base URL (RFC 3986)."""
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(
             sandbox_id="my-sandbox",
             namespace="dev",
@@ -824,23 +841,21 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             await connector.close()
 
 
-class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
-    """Tests that use_pod_ip is NOT passed as a kwarg — AsyncSandbox derives it internally."""
+class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         patcher = patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
         self.MockAsyncK8sHelper = patcher.start()
         self.addCleanup(patcher.stop)
 
-        self.config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        self.config = SandboxInClusterConnectionConfig(server_port=8888)
         # cleanup=False keeps tests hermetic; the new default (True) registers a global atexit hook.
         self.client = AsyncSandboxClient(connection_config=self.config, cleanup=False)
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
 
-    async def test_create_sandbox_does_not_pass_use_pod_ip(self):
-        """AsyncSandbox derives use_pod_ip from connection_config internally."""
+    async def test_create_sandbox_passes_connection_config(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         self.mock_k8s_helper.wait_for_sandbox_ready = AsyncMock(return_value="10.244.0.5")
 
@@ -851,12 +866,9 @@ class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
             await self.client.create_sandbox("test-template", "default")
 
         call_kwargs = self.mock_sandbox_class.call_args.kwargs
-        self.assertNotIn("use_pod_ip", call_kwargs,
-                        "use_pod_ip should not be passed; AsyncSandbox derives it from connection_config")
         self.assertEqual(call_kwargs["connection_config"], self.config)
 
-    async def test_get_sandbox_does_not_pass_use_pod_ip(self):
-        """get_sandbox should not pass use_pod_ip — AsyncSandbox derives it."""
+    async def test_get_sandbox_passes_connection_config(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -866,8 +878,6 @@ class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
         await self.client.get_sandbox("test-claim", "default")
 
         call_kwargs = self.mock_sandbox_class.call_args.kwargs
-        self.assertNotIn("use_pod_ip", call_kwargs,
-                        "use_pod_ip should not be passed; AsyncSandbox derives it from connection_config")
         self.assertEqual(call_kwargs["connection_config"], self.config)
 
     async def test_get_sandbox_passes_connection_config_for_non_incluster(self):
@@ -883,7 +893,6 @@ class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
         await client.get_sandbox("test-claim", "default")
 
         call_kwargs = client.sandbox_class.call_args.kwargs
-        self.assertNotIn("use_pod_ip", call_kwargs)
         self.assertEqual(call_kwargs["connection_config"], config)
 
 
@@ -892,7 +901,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
 
     async def test_http_status_error_clears_pod_ip_cache(self):
         """Verify HTTPStatusError (4xx/5xx) clears pod IP cache (Bug Fix #2)."""
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
 
         # Mock get_pod_ip to track how many times it's called
         call_count = [0]
@@ -946,7 +955,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
 
     async def test_http_error_clears_pod_ip_cache(self):
         """Verify HTTPError (connection failures) also clears pod IP cache."""
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
 
         async def mock_get_pod_ip():
             return "10.244.0.5"

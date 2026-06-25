@@ -166,6 +166,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		"sandbox.name":      sandbox.Name,
 		"sandbox.namespace": sandbox.Namespace,
 	}
+	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxCreatedByLabel]; ok {
+		initialAttrs[sandboxv1beta1.SandboxCreatedByLabel] = val
+	}
 	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
 	defer end()
 
@@ -866,6 +869,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 	}
 
+	// Propagate the created-by label directly from the Sandbox CR labels to the Pod if present.
+	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxCreatedByLabel]; ok {
+		podLabels[sandboxv1beta1.SandboxCreatedByLabel] = val
+	}
+
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
@@ -1011,6 +1019,20 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		// If the Sandbox is no longer owned by a SandboxWarmPool, remove the warm pool label.
 		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
 			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
+			updated = true
+		}
+	}
+
+	// Ensure the created-by label is present on the Pod if it is present on the Sandbox.
+	expectedCreatedBy := sandbox.Labels[sandboxv1beta1.SandboxCreatedByLabel]
+	if expectedCreatedBy != "" {
+		if pod.Labels[sandboxv1beta1.SandboxCreatedByLabel] != expectedCreatedBy {
+			pod.Labels[sandboxv1beta1.SandboxCreatedByLabel] = expectedCreatedBy
+			updated = true
+		}
+	} else {
+		if _, exists := pod.Labels[sandboxv1beta1.SandboxCreatedByLabel]; exists {
+			delete(pod.Labels, sandboxv1beta1.SandboxCreatedByLabel)
 			updated = true
 		}
 	}

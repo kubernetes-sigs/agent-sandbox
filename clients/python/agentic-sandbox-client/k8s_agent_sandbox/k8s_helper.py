@@ -27,6 +27,7 @@ from .constants import (
     SANDBOX_API_GROUP,
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
+    CREATED_BY_LABEL,
 )
 from .utils import select_pod_ip
 
@@ -53,9 +54,11 @@ class K8sHelper:
         metadata = {
             "name": name,
             "annotations": annotations or {},
+            "labels": {
+                CREATED_BY_LABEL: "python-client",
+                **(labels or {}),
+            }
         }
-        if labels:
-            metadata["labels"] = labels
 
         spec = {
             "warmPoolRef": {

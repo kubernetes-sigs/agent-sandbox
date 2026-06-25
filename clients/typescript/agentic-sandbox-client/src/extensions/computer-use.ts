@@ -38,10 +38,6 @@ export class ComputerUseSandbox extends Sandbox {
           );
         }
 
-        if (span.isRecording()) {
-          span.setAttribute("sandbox.agent.query", query);
-        }
-
         const response = await this.request("POST", "agent", {
           body: JSON.stringify({ query }),
           headers: { "Content-Type": "application/json" },

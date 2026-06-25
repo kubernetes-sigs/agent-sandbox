@@ -571,6 +571,39 @@ describe("Sandbox", () => {
       expect(opts.headers["X-Sandbox-ID"]).toBe("test-sandbox");
       expect(opts.headers["X-Sandbox-Namespace"]).toBe("default");
       expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
+      expect(opts.headers["X-Sandbox-Timeout"]).toBe(
+        String(Math.ceil(PER_ATTEMPT_TIMEOUT_MS / 1000)),
+      );
+    });
+
+    it("sends X-Sandbox-Timeout header with per-attempt timeout in seconds", async () => {
+      const sandbox = createReadySandbox({ perAttemptTimeoutMs: 30_000 });
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await sandbox.commands.run("ls");
+
+      const [, opts] = (fetch as Mock).mock.calls[0];
+      expect(opts.headers["X-Sandbox-Timeout"]).toBe("30");
+    });
+
+    it("rounds up sub-second perAttemptTimeoutMs to the next whole second", async () => {
+      const sandbox = createReadySandbox({ perAttemptTimeoutMs: 1_500 });
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await sandbox.commands.run("ls");
+
+      const [, opts] = (fetch as Mock).mock.calls[0];
+      expect(opts.headers["X-Sandbox-Timeout"]).toBe("2");
     });
 
     it("throws when sandbox is not connected", async () => {

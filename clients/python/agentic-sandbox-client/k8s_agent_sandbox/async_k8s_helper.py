@@ -83,8 +83,8 @@ class AsyncK8sHelper:
             "name": name,
             "annotations": annotations or {},
             "labels": {
-                CREATED_BY_LABEL: "python-client",
                 **(labels or {}),
+                CREATED_BY_LABEL: "python-client",
             }
         }
 

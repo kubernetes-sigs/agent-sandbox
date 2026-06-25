@@ -66,6 +66,19 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         self.assertEqual(body["metadata"]["annotations"], {})
         self.assertEqual(body["metadata"]["labels"], {"agents.x-k8s.io/created-by": "python-client"})
 
+    def test_created_by_label_override_rejected(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace",
+            labels={"agent": "code-agent", "agents.x-k8s.io/created-by": "foo"},
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body["metadata"]["labels"], {"agent": "code-agent", "agents.x-k8s.io/created-by": "python-client"})
+
     def test_lifecycle_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api

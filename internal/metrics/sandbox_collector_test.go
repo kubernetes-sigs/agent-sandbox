@@ -315,6 +315,32 @@ func TestSandboxCollector(t *testing.T) {
 				"created_by:python-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
+		{
+			name: "untrusted created_by label normalized to unknown",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-untrusted",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxCreatedByLabel: "hacker-client",
+						},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+			},
+		},
 	}
 
 	for _, tc := range testCases {

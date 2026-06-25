@@ -975,6 +975,7 @@ export class Sandbox {
         "X-Sandbox-ID": this.sandboxName,
         "X-Sandbox-Namespace": this.namespace,
         "X-Sandbox-Port": String(this.serverPort),
+        "X-Sandbox-Timeout": String(Math.ceil(this.perAttemptTimeoutMs / 1000)),
         [HEADER_REQUEST_ID]: requestId,
       };
 

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { posix } from "node:path";
 import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
 import { SandboxRequestError } from "../exceptions.js";
 import { parseExecutionResult, readBoundedText } from "../response-utils.js";
@@ -33,6 +34,16 @@ function normalizeCallOptions(
     timeout: arg.timeout ?? defaultTimeoutSec,
     signal: arg.signal,
   };
+}
+
+/** @internal — exported for unit testing only; not part of the public API. */
+export function extractExecutable(command: string): string {
+  if (!command) return "";
+  for (const field of command.split(/\s+/)) {
+    if (!field || field.includes("=")) continue;
+    return posix.basename(field);
+  }
+  return "";
 }
 
 export class CommandExecutor {
@@ -64,7 +75,10 @@ export class CommandExecutor {
       "run",
       async (span) => {
         if (span.isRecording()) {
-          span.setAttribute("sandbox.command", command);
+          span.setAttribute(
+            "sandbox.command.executable",
+            extractExecutable(command),
+          );
         }
 
         const response = await this.requestFn("POST", "execute", {

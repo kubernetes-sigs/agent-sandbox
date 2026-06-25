@@ -14,6 +14,7 @@
 
 import type { Mock } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Span, Tracer } from "../trace-manager.js";
 
 // ---------- hoisted mock fns ----------
 
@@ -176,6 +177,45 @@ describe("ComputerUseSandbox (handle)", () => {
         query: "open the browser and search for cats",
       });
       expect(opts.headers["X-Sandbox-Port"]).toBe("8888");
+    });
+
+    it("does not record sandbox.agent.query on the span", async () => {
+      const spans: Array<{ setAttribute: Mock }> = [];
+      const fakeTracer = {
+        startActiveSpan: vi.fn((_name: string, fn: (span: Span) => unknown) => {
+          const span = {
+            isRecording: () => true,
+            setAttribute: vi.fn(),
+            recordException: vi.fn(),
+            setStatus: vi.fn(),
+            end: vi.fn(),
+          };
+          spans.push(span);
+          return fn(span);
+        }),
+        startSpan: vi.fn(),
+      } as unknown as Tracer;
+
+      const sandbox = new TestableComputerUseSandbox({
+        ...makeBaseInit(),
+        tracer: fakeTracer,
+      });
+      sandbox._baseUrl = "http://localhost:7777";
+
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await sandbox.agent("do something");
+
+      expect(spans.length).toBeGreaterThan(0);
+      for (const span of spans) {
+        const calls = span.setAttribute.mock.calls.map((c: unknown[]) => c[0]);
+        expect(calls).not.toContain("sandbox.agent.query");
+      }
     });
 
     it("throws when sandbox is not connected (no baseUrl)", async () => {

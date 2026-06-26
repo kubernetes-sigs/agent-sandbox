@@ -1264,7 +1264,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxProvisioned", "Provisioning", "Created Sandbox %q", sandbox.Name)
 	}
 
-	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, "none", "not_ready")
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, claim.Spec.WarmPoolRef.Name, "not_ready")
 
 	return sandbox, nil
 }

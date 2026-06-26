@@ -11,7 +11,7 @@ Currently, it uses a Docker-based setup. However, it is intended to align with t
 Below is an example of running Playwright inside a Sandbox resource:
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: playwright-sandbox

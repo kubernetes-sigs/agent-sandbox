@@ -720,8 +720,9 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("closeLocal() is called (not close()) when getSandbox connect fails", async () => {
-      // Simulate a scenario where getSandbox finds a claim but connect() fails.
-      // The test verifies that the SandboxClaim delete API is never called.
+      // Simulate getSandbox finding a ready claim but connect() failing.
+      // getSandbox must call closeLocal() (not close()), so the SandboxClaim
+      // must NOT be deleted.
       mockGetNamespacedCustomObject.mockResolvedValue({
         metadata: { name: "my-claim", annotations: {} },
         status: {
@@ -731,43 +732,23 @@ describe("SandboxClient (registry)", () => {
         },
       });
 
-      // watch for sandbox name resolution: resolves immediately
-      // (These watch mocks are now unused because the initial GET resolves both
-      //  resolveSandboxName and watchForSandboxReady directly, but are left in
-      //  place as documentation of the intended fallback behavior.)
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-        ) => {
-          callback("MODIFIED", { status: { sandbox: { name: "my-sandbox" } } });
-          return Promise.resolve(new AbortController());
-        },
-      );
+      // Force connect() to reject so the catch branch (closeLocal) is exercised.
+      const connectSpy = vi
+        .spyOn(Sandbox.prototype, "connect")
+        .mockRejectedValueOnce(new Error("simulated connect failure"));
 
-      // watch for sandbox ready: resolves immediately
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-        ) => {
-          callback("MODIFIED", {
-            metadata: { name: "my-sandbox", annotations: {} },
-            status: { conditions: [{ type: "Ready", status: "True" }] },
-          });
-          return Promise.resolve(new AbortController());
-        },
-      );
+      try {
+        const client = new SandboxClient({ apiUrl: "http://api:8080" });
 
-      // Use direct-URL mode — connect() will succeed
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
-      const sandbox = await client.getSandbox("my-claim");
+        await expect(client.getSandbox("my-claim")).rejects.toThrow(
+          "simulated connect failure",
+        );
 
-      expect(sandbox).toBeInstanceOf(Sandbox);
-      // Claim was never deleted
-      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+        // closeLocal() releases local resources but does NOT delete the SandboxClaim.
+        expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+      } finally {
+        connectSpy.mockRestore();
+      }
     });
   });
 

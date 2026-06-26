@@ -87,6 +87,9 @@ function loadOtel(): Promise<OtelApi | null> {
 
 let tracerProviderInitialized = false;
 let tracerProviderServiceName: string | null = null;
+// Cache the in-flight SDK initialization so concurrent callers share one Promise
+// and provider.register() is never called more than once.
+let tracerInitPromise: Promise<void> | null = null;
 
 export async function initializeTracer(serviceName: string): Promise<void> {
   const api = await loadOtel();
@@ -110,58 +113,70 @@ export async function initializeTracer(serviceName: string): Promise<void> {
     return;
   }
 
-  try {
-    // @ts-expect-error -- optional peer dependency resolved at runtime
-    const sdkTraceNode = await import("@opentelemetry/sdk-trace-node");
-    // @ts-expect-error -- optional peer dependency resolved at runtime
-    const resources = await import("@opentelemetry/resources");
-    // @ts-expect-error -- optional peer dependency resolved at runtime
-    const sdkTraceBase = await import("@opentelemetry/sdk-trace-base");
-    const exporterOtlpGrpc = await import(
-      // @ts-expect-error -- optional peer dependency resolved at runtime
-      "@opentelemetry/exporter-trace-otlp-grpc"
-    );
+  if (!tracerInitPromise) {
+    tracerInitPromise = (async () => {
+      // Double-check: a concurrent caller may have finished while we awaited.
+      if (tracerProviderInitialized) {
+        return;
+      }
+      try {
+        // @ts-expect-error -- optional peer dependency resolved at runtime
+        const sdkTraceNode = await import("@opentelemetry/sdk-trace-node");
+        // @ts-expect-error -- optional peer dependency resolved at runtime
+        const resources = await import("@opentelemetry/resources");
+        // @ts-expect-error -- optional peer dependency resolved at runtime
+        const sdkTraceBase = await import("@opentelemetry/sdk-trace-base");
+        const exporterOtlpGrpc = await import(
+          // @ts-expect-error -- optional peer dependency resolved at runtime
+          "@opentelemetry/exporter-trace-otlp-grpc"
+        );
 
-    const Resource = resources.Resource as new (
-      attrs: Record<string, string>,
-    ) => unknown;
-    const NodeTracerProvider = sdkTraceNode.NodeTracerProvider as new (opts: {
-      resource: unknown;
-    }) => {
-      addSpanProcessor(processor: unknown): void;
-      register(): void;
-      shutdown(): Promise<void>;
-    };
-    const BatchSpanProcessor = sdkTraceBase.BatchSpanProcessor as new (
-      exporter: unknown,
-    ) => unknown;
-    const OTLPTraceExporter =
-      exporterOtlpGrpc.OTLPTraceExporter as new () => unknown;
+        const Resource = resources.Resource as new (
+          attrs: Record<string, string>,
+        ) => unknown;
+        const NodeTracerProvider =
+          sdkTraceNode.NodeTracerProvider as new (opts: {
+            resource: unknown;
+          }) => {
+            addSpanProcessor(processor: unknown): void;
+            register(): void;
+            shutdown(): Promise<void>;
+          };
+        const BatchSpanProcessor = sdkTraceBase.BatchSpanProcessor as new (
+          exporter: unknown,
+        ) => unknown;
+        const OTLPTraceExporter =
+          exporterOtlpGrpc.OTLPTraceExporter as new () => unknown;
 
-    const resource = new Resource({ "service.name": serviceName });
-    const provider = new NodeTracerProvider({ resource });
-    provider.addSpanProcessor(new BatchSpanProcessor(new OTLPTraceExporter()));
-    provider.register();
+        const resource = new Resource({ "service.name": serviceName });
+        const provider = new NodeTracerProvider({ resource });
+        provider.addSpanProcessor(
+          new BatchSpanProcessor(new OTLPTraceExporter()),
+        );
+        provider.register();
 
-    // Register shutdown hook to flush BatchSpanProcessor on process exit.
-    // Analogous to Python's atexit.register(_TRACER_PROVIDER.shutdown).
-    process.once("beforeExit", () => {
-      provider.shutdown().catch((err: unknown) => {
-        console.error("OpenTelemetry TracerProvider shutdown failed:", err);
-      });
-    });
+        // Register shutdown hook to flush BatchSpanProcessor on process exit.
+        // Analogous to Python's atexit.register(_TRACER_PROVIDER.shutdown).
+        process.once("beforeExit", () => {
+          provider.shutdown().catch((err: unknown) => {
+            console.error("OpenTelemetry TracerProvider shutdown failed:", err);
+          });
+        });
 
-    tracerProviderInitialized = true;
-    tracerProviderServiceName = serviceName;
-    console.info(
-      `Global OpenTelemetry TracerProvider configured for service '${serviceName}'.`,
-    );
-  } catch {
-    console.warn(
-      "OpenTelemetry SDK packages not installed; tracer provider not configured. " +
-        "Tracing spans will use the default no-op provider.",
-    );
+        tracerProviderInitialized = true;
+        tracerProviderServiceName = serviceName;
+        console.info(
+          `Global OpenTelemetry TracerProvider configured for service '${serviceName}'.`,
+        );
+      } catch {
+        console.warn(
+          "OpenTelemetry SDK packages not installed; tracer provider not configured. " +
+            "Tracing spans will use the default no-op provider.",
+        );
+      }
+    })();
   }
+  return tracerInitPromise;
 }
 
 function recordSpanError(span: Span, err: unknown): void {

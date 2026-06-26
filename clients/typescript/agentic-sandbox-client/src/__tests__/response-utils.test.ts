@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  isK8s404,
   SandboxRequestError,
   SandboxResponseTooLargeError,
 } from "../exceptions.js";
@@ -22,6 +23,7 @@ import {
   parseExistsResult,
   parseFileEntries,
   readBoundedBuffer,
+  readBoundedErrorBody,
   readBoundedText,
 } from "../response-utils.js";
 
@@ -254,5 +256,82 @@ describe("parseExistsResult", () => {
   it("returns false when exists is not a boolean", () => {
     expect(parseExistsResult({ exists: "yes" })).toBe(false);
     expect(parseExistsResult({ exists: 1 })).toBe(false);
+  });
+});
+
+// --- readBoundedErrorBody ---
+
+describe("readBoundedErrorBody", () => {
+  it("returns the full body when it is within maxBytes", async () => {
+    const response = new Response("hello world", { status: 500 });
+    expect(await readBoundedErrorBody(response, 100)).toBe("hello world");
+  });
+
+  it("truncates the body to maxBytes", async () => {
+    const response = new Response("hello world", { status: 500 });
+    expect(await readBoundedErrorBody(response, 5)).toBe("hello");
+  });
+
+  it("returns empty string when the stream errors", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.error(new Error("simulated read failure"));
+      },
+    });
+    const response = new Response(stream, { status: 500 });
+    expect(await readBoundedErrorBody(response, 100)).toBe("");
+  });
+
+  it("falls back to arrayBuffer when body has no readable stream", async () => {
+    const mockResponse = {
+      body: null,
+      headers: { get: (_name: string) => null },
+      arrayBuffer: async () => new TextEncoder().encode("oops").buffer,
+    };
+    expect(
+      await readBoundedErrorBody(mockResponse as unknown as Response, 100),
+    ).toBe("oops");
+  });
+
+  it("returns empty string when body is null and content-length exceeds maxBytes", async () => {
+    const mockResponse = {
+      body: null,
+      headers: {
+        get: (name: string) => (name === "content-length" ? "500" : null),
+      },
+      arrayBuffer: async () => new ArrayBuffer(0),
+    };
+    expect(
+      await readBoundedErrorBody(mockResponse as unknown as Response, 10),
+    ).toBe("");
+  });
+});
+
+// --- isK8s404 ---
+
+describe("isK8s404", () => {
+  it("returns true when error has code 404", () => {
+    expect(isK8s404({ code: 404 })).toBe(true);
+  });
+
+  it("returns true when error has statusCode 404", () => {
+    expect(isK8s404({ statusCode: 404 })).toBe(true);
+  });
+
+  it("returns false when code is not 404", () => {
+    expect(isK8s404({ code: 403 })).toBe(false);
+    expect(isK8s404({ statusCode: 500 })).toBe(false);
+  });
+
+  it("returns false for non-object values", () => {
+    expect(isK8s404(null)).toBe(false);
+    expect(isK8s404("404 Not Found")).toBe(false);
+    expect(isK8s404(404)).toBe(false);
+    expect(isK8s404(undefined)).toBe(false);
+  });
+
+  it("returns false when object has no code or statusCode", () => {
+    expect(isK8s404({})).toBe(false);
+    expect(isK8s404({ message: "not found" })).toBe(false);
   });
 });

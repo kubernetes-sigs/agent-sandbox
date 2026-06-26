@@ -49,6 +49,10 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
+// testNetworkedPodIP is a placeholder Pod IP used by warm-pool sandbox
+// fixtures to mark "backing Pod exists and is networked".
+const testNetworkedPodIP = "10.244.0.5"
+
 func TestSandboxClaimReconcile(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
@@ -1943,6 +1947,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Reason: "DependenciesReady",
 					},
 				},
+				// PodIPs marks that the backing Pod exists and is networked.
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 	}
@@ -1985,6 +1991,14 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		now := metav1.Now()
 		sb.DeletionTimestamp = &now
 		sb.Finalizers = []string{"test-finalizer"}
+		return sb
+	}
+
+	// createRotatingSandbox simulates a warm-pool sandbox whose backing Pod has
+	// been deleted or is not networked yet while its queue entry is still present.
+	createRotatingSandbox := func(name string, creationTime metav1.Time) *sandboxv1beta1.Sandbox {
+		sb := createWarmPoolSandbox(name, creationTime, false)
+		sb.Status.PodIPs = nil
 		return sb
 	}
 
@@ -2078,6 +2092,29 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "not-ready-1",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "skips warm pool sandboxes with no backing pod and falls through to cold creation",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createRotatingSandbox("rotating-sb-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
+				createRotatingSandbox("rotating-sb-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
+		},
+		{
+			name: "adopts not-ready sandbox with backing pod, skipping rotating sandboxes without pods",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createRotatingSandbox("rotating-sb", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
+				createWarmPoolSandbox("not-ready-with-pod", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "not-ready-with-pod",
 			expectNewSandboxCreated: false,
 		},
 		{
@@ -2212,16 +2249,18 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			// 1. Initialize the Queue
 			warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
-			// 2. Seed the Queue with the existing objects from the test case
+			// 2. Seed stale queue entries too; production can retain keys after
+			//    a sandbox stops being adoptable, and pop-side validation must
+			//    reject them.
 			for _, obj := range tc.existingObjects {
 				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok {
-					// Only add valid, adoptable sandboxes to the queue
-					if isAdoptable(sb) == nil {
-						warmPoolName := getWarmPoolName(sb)
-						namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sb.Namespace, warmPoolName)
-						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
-						warmSandboxQueue.Add(namespacedWarmPoolName, key)
+					warmPoolName := getWarmPoolName(sb)
+					if warmPoolName == "" {
+						continue
 					}
+					namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sb.Namespace, warmPoolName)
+					key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
+					warmSandboxQueue.Add(namespacedWarmPoolName, key)
 				}
 			}
 
@@ -3384,6 +3423,9 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{testNetworkedPodIP},
+		},
 	}
 
 	// 2. Invalid Sandbox (Different Namespace, but identical hash)
@@ -3401,6 +3443,9 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				Name:       "test-warmpool",
 				Controller: ptr.To(true), // nolint:modernize
 			}},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{testNetworkedPodIP},
 		},
 	}
 

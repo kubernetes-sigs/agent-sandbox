@@ -53,6 +53,9 @@ This image includes:
 ### Deploy to Kubernetes
 
 ```bash
+# Define the image reference (replace with your registry)
+export IMAGE=registry.example.com/playwright-sandbox:latest
+
 # Build and push the image to your registry
 docker build -t ${IMAGE} .
 docker push ${IMAGE}
@@ -71,7 +74,7 @@ kubectl logs ${POD} -c playwright
 ```
 
 You should see output similar to:
-```
+```text
 title: Example Domain
 screenshot saved at: /home/playwright/screenshot.png
 content snippet: Example Domain This domain is for use in illustrative examples in documents...

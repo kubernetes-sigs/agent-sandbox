@@ -65,7 +65,7 @@ func main() {
 	fmt.Printf("file content: %s\n", string(data))
 
 	// List files.
-	entries, err := sb.List(ctx, "./")
+	entries, err := sb.List(ctx, ".")
 	if err != nil {
 		log.Fatal(err)
 	}

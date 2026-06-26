@@ -128,6 +128,7 @@ export class TestContext {
           input: manifestText,
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
+          timeout: 30_000,
         },
       );
       if (result) {
@@ -188,12 +189,12 @@ export class TestContext {
           const desc = execFileSync(
             "kubectl",
             ["describe", resourceType, name, "-n", namespace],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
           );
           const pods = execFileSync(
             "kubectl",
             ["get", "pods", "-n", namespace, "-o", "wide"],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
           );
           console.error(
             `[waitForObject timeout ${name}] describe:\n${desc}`,

@@ -48,6 +48,8 @@ export interface CallOptions {
   /** External cancellation signal. When aborted, the in-flight request is
    *  cancelled immediately without retrying. */
   signal?: AbortSignal;
+  /** Skip path sanitisation for write/read/list/exists. Mirrors Python's allow_unsafe_paths. */
+  allowUnsafePaths?: boolean;
 }
 
 export interface CreateSandboxOptions {

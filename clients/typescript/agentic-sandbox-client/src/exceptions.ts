@@ -90,13 +90,12 @@ export class SandboxResponseTooLargeError extends SandboxRequestError {}
 
 /**
  * Returns true if the error is a Kubernetes 404 (Not Found).
- * Handles both @kubernetes/client-node ApiException (.code) and
- * older-style errors that include "404" in the message.
+ * Handles both @kubernetes/client-node ApiException (.code / .statusCode).
  */
 export function isK8s404(err: unknown): boolean {
   if (typeof err === "object" && err !== null) {
-    // @kubernetes/client-node ApiException has a numeric .code property
-    if ((err as { code?: number }).code === 404) return true;
+    const candidate = err as { code?: number; statusCode?: number };
+    if (candidate.code === 404 || candidate.statusCode === 404) return true;
   }
-  return err instanceof Error && err.message.includes("404");
+  return false;
 }

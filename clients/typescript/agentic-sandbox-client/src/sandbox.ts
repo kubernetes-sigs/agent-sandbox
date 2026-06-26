@@ -575,13 +575,14 @@ export class Sandbox {
       // Initial GET: resolve immediately if the gateway already has an address
       const existingAddress = await getExistingAddress();
       if (existingAddress) {
-        this.baseUrl = `http://${formatGatewayAddress(existingAddress)}`;
-        console.info(
-          `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
-        );
+        const candidateUrl = `http://${formatGatewayAddress(existingAddress)}`;
         await this.probeGatewayConnectivity(
           existingAddress,
           timeoutMs - (Date.now() - startTime),
+        );
+        this.baseUrl = candidateUrl;
+        console.info(
+          `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
         );
         return;
       }
@@ -604,12 +605,13 @@ export class Sandbox {
         const result = await this.watchGatewayOnce(remainingMs);
 
         if (result.type === "resolved") {
-          this.baseUrl = `http://${formatGatewayAddress(result.address)}`;
-          console.info(`Gateway is ready. Base URL set to: ${this.baseUrl}`);
+          const candidateUrl = `http://${formatGatewayAddress(result.address)}`;
           await this.probeGatewayConnectivity(
             result.address,
             timeoutMs - (Date.now() - startTime),
           );
+          this.baseUrl = candidateUrl;
+          console.info(`Gateway is ready. Base URL set to: ${this.baseUrl}`);
           return;
         }
 
@@ -625,13 +627,14 @@ export class Sandbox {
         );
         const relistAddress = await getExistingAddress();
         if (relistAddress) {
-          this.baseUrl = `http://${formatGatewayAddress(relistAddress)}`;
-          console.info(
-            `Gateway is ready (after re-list). Base URL set to: ${this.baseUrl}`,
-          );
+          const candidateUrl = `http://${formatGatewayAddress(relistAddress)}`;
           await this.probeGatewayConnectivity(
             relistAddress,
             timeoutMs - (Date.now() - startTime),
+          );
+          this.baseUrl = candidateUrl;
+          console.info(
+            `Gateway is ready (after re-list). Base URL set to: ${this.baseUrl}`,
           );
           return;
         }
@@ -755,7 +758,8 @@ export class Sandbox {
     address: string,
     remainingMs: number,
   ): Promise<void> {
-    const host = formatGatewayAddress(address);
+    // net.createConnection expects a raw IP (no brackets), unlike HTTP URLs.
+    const host = address;
     // Derive port from the base URL (defaults to 80 for http).
     const port = 80;
     const probeTimeoutMs = Math.min(
@@ -887,6 +891,7 @@ export class Sandbox {
               );
             }
             this.baseUrl = `http://127.0.0.1:${localPort}`;
+            this._portForwardEverConnected = true;
             console.info(
               `Dev Mode ready. Tunneled to Router at ${this.baseUrl}`,
             );
@@ -940,8 +945,11 @@ export class Sandbox {
       if (this._reconnectPromise) {
         await this._reconnectPromise; // may throw SandboxPortForwardError
       } else if (
-        this.portForwardProcess &&
-        (this.portForwardProcess.exitCode !== null ||
+        !this.apiUrl &&
+        !this.gatewayName &&
+        this._portForwardEverConnected &&
+        (!this.portForwardProcess ||
+          this.portForwardProcess.exitCode !== null ||
           this.portForwardProcess.signalCode !== null)
       ) {
         await this.reconnect();
@@ -1122,6 +1130,7 @@ export class Sandbox {
   }
 
   protected _reconnectPromise: Promise<void> | null = null;
+  protected _portForwardEverConnected = false;
 
   private _podIp: string | null = null;
   private _podIpResolved = false;

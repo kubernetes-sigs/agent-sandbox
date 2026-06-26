@@ -86,6 +86,16 @@ function validateLabels(labels: Record<string, string>): void {
           `Label key prefix '${prefix}' must be a valid DNS subdomain.`,
         );
       }
+      if (prefix.includes("..")) {
+        throw new Error(
+          `Label key prefix '${prefix}' must be a valid DNS subdomain.`,
+        );
+      }
+      if (prefix.split(".").some((seg) => seg.length > 63)) {
+        throw new Error(
+          `Label key prefix '${prefix}' has a DNS label segment exceeding 63 characters.`,
+        );
+      }
       if (!name) {
         throw new Error(`Label key '${key}' has an empty name after prefix.`);
       }
@@ -199,7 +209,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       ["portForwardReadyTimeout", options.portForwardReadyTimeout],
       ["perAttemptTimeoutMs", options.perAttemptTimeoutMs],
     ] as [string, number | undefined][]) {
-      if (value !== undefined && value <= 0) {
+      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
         throw new SandboxError(
           `${key} must be a positive number, got: ${value}`,
         );
@@ -616,7 +626,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
    * Lists all SandboxClaim names in the cluster for the given namespace.
    */
   async listAllSandboxes(namespace?: string): Promise<string[]> {
-    const ns = namespace ?? this.defaultNamespace;
+    const ns = namespace || this.defaultNamespace;
     const response = await this.customObjectsApi.listNamespacedCustomObject({
       group: CLAIM_API_GROUP,
       version: CLAIM_API_VERSION,
@@ -639,7 +649,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     claimName: string,
     namespace?: string,
   ): Promise<string> {
-    const ns = namespace ?? this.defaultNamespace;
+    const ns = namespace || this.defaultNamespace;
     let claimObj: unknown;
     try {
       claimObj = await this.customObjectsApi.getNamespacedCustomObject({
@@ -674,7 +684,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
    * Closes the sandbox handle (if tracked) and deletes the Kubernetes resources.
    */
   async deleteSandbox(claimName: string, namespace?: string): Promise<void> {
-    const ns = namespace ?? this.defaultNamespace;
+    const ns = namespace || this.defaultNamespace;
     const key = `${ns}/${claimName}`;
 
     const sandbox = this.registry.get(key);

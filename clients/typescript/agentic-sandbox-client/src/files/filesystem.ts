@@ -97,6 +97,12 @@ function safeUploadPath(filePath: string): string {
     throw new Error(`Upload path '${filePath}' does not name a file.`);
   }
 
+  if (normalized.endsWith("/")) {
+    throw new Error(
+      `Upload path '${filePath}' is a directory path, not a file.`,
+    );
+  }
+
   if (normalized.split("/").some((part) => part === "..")) {
     throw new Error(`Upload path '${filePath}' escapes the sandbox root.`);
   }

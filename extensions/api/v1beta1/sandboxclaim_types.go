@@ -110,18 +110,21 @@ type EnvVar struct {
 // force the workspace container request and limit to the same value.
 type WorkspaceResources struct {
 	// cpuMillicores is the desired CPU request/limit for the workspace container.
+	// Zero leaves the CPU resources from the SandboxTemplate unchanged.
 	// +optional
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Minimum=0
 	CPUMillicores int32 `json:"cpuMillicores,omitempty"`
 
 	// memoryMiB is the desired memory request/limit for the workspace container, in mebibytes (1 MiB = 1024*1024 B).
+	// Zero leaves the memory resources from the SandboxTemplate unchanged.
 	// +optional
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Minimum=0
 	MemoryMiB int32 `json:"memoryMiB,omitempty"`
 
 	// diskGiB is the desired ephemeral-storage request/limit for the workspace container, in gibibytes (1 GiB = 1024*1024*1024 B).
+	// Zero leaves the ephemeral-storage resources from the SandboxTemplate unchanged.
 	// +optional
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Minimum=0
 	DiskGiB int32 `json:"diskGiB,omitempty"`
 }
 

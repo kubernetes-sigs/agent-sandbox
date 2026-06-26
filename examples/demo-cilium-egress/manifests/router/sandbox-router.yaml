@@ -1,0 +1,83 @@
+# agent-sandbox sandbox-router (HTTP ingress proxy to sandbox pods).
+# Adapted from clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml
+# and pinned to the demo namespace. __ROUTER_IMAGE__ is substituted by
+# scripts/optional-gateway-routing.sh after building + pushing the image.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  namespace: sandbox-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: sandbox-router
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router-deployment
+  namespace: sandbox-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: sandbox-router
+      containers:
+        - name: router
+          image: __ROUTER_IMAGE__
+          env:
+            - name: PROXY_TIMEOUT_SECONDS
+              value: "180"
+            # ⚠️ DANGER (demo only): with the public L7 Gateway in gateway.yaml,
+            # this exposes the sandbox /execute endpoint to the internet with NO
+            # auth = unauthenticated remote code execution. Only use on a
+            # throwaway cluster. For real use set this to "false" and supply
+            # ROUTER_AUTH_TOKEN from a Secret (see the commented block below).
+            - name: ALLOW_UNAUTHENTICATED_ROUTER
+              value: "true"
+            # - name: ROUTER_AUTH_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: sandbox-router-auth
+            #       key: auth-token
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000

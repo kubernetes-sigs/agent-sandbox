@@ -1,0 +1,19 @@
+# Demo namespace and two distinct Kubernetes identities (ServiceAccounts).
+# Each sandbox runs as one of these SAs and carries a matching `demo.identity` pod
+# label that the CiliumNetworkPolicies select on.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-team-a
+  namespace: sandbox-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-team-b
+  namespace: sandbox-demo

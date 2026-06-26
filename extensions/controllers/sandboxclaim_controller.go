@@ -702,9 +702,9 @@ func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *ext
 	}
 }
 
-func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1beta1.SandboxClaim) {
-	if claim.Spec.WorkspaceResources == nil {
-		return
+func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1beta1.SandboxClaim) error {
+	if !hasWorkspaceResourceOverrides(claim) {
+		return nil
 	}
 	for i := range spec.Containers {
 		container := &spec.Containers[i]
@@ -712,8 +712,9 @@ func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensio
 			continue
 		}
 		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
-		break
+		return nil
 	}
+	return fmt.Errorf("workspaceResources requires a container named %q in the SandboxTemplate", workspaceContainerName)
 }
 
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, error) {
@@ -1318,7 +1319,10 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
 	// Apply per-claim workspace container resource overrides (fork extension)
-	applyClaimWorkspaceResourcesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim)
+	if err := applyClaimWorkspaceResourcesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim); err != nil {
+		logger.Error(err, "Workspace resource override rejected", "claimName", claim.Name)
+		return nil, err
+	}
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
@@ -1589,9 +1593,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	// fall through to cold creation. Warm-pool sandboxes have a backing Pod
 	// already running with the pool's default sizing; adopting and mutating only
 	// Sandbox.Spec.PodTemplate would leave the running Pod at the wrong size
-	// until restart. Cold creation gives correct sizing from day one. A separate
-	// follow-up will lift this restriction by recreating Pods on PodTemplate
-	// drift in the sandbox controller.
+	// until restart. Cold creation is the supported path for per-claim sizing.
 	if hasWorkspaceResourceOverrides(claim) {
 		logger.Info("Skipping warm-pool adoption for claim with WorkspaceResources override", "claim", claim.Name)
 		return nil, nil

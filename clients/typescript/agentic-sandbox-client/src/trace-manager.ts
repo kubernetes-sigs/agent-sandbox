@@ -62,24 +62,27 @@ class NoOpTracer implements Tracer {
 }
 
 let otelApi: OtelApi | null = null;
-let otelLoaded = false;
+let otelLoadPromise: Promise<OtelApi | null> | null = null;
 
-async function loadOtel(): Promise<OtelApi | null> {
-  if (otelLoaded) return otelApi;
-  otelLoaded = true;
-  try {
-    const api = await import("@opentelemetry/api");
-    otelApi = {
-      SpanStatusCode:
-        api.SpanStatusCode as unknown as OtelApi["SpanStatusCode"],
-      trace: api.trace as unknown as OtelApi["trace"],
-      context: api.context as unknown as OtelApi["context"],
-      propagation: api.propagation as unknown as OtelApi["propagation"],
-    };
-    return otelApi;
-  } catch {
-    return null;
+function loadOtel(): Promise<OtelApi | null> {
+  if (!otelLoadPromise) {
+    otelLoadPromise = (async () => {
+      try {
+        const api = await import("@opentelemetry/api");
+        otelApi = {
+          SpanStatusCode:
+            api.SpanStatusCode as unknown as OtelApi["SpanStatusCode"],
+          trace: api.trace as unknown as OtelApi["trace"],
+          context: api.context as unknown as OtelApi["context"],
+          propagation: api.propagation as unknown as OtelApi["propagation"],
+        };
+        return otelApi;
+      } catch {
+        return null;
+      }
+    })();
   }
+  return otelLoadPromise;
 }
 
 let tracerProviderInitialized = false;
@@ -142,8 +145,10 @@ export async function initializeTracer(serviceName: string): Promise<void> {
 
     // Register shutdown hook to flush BatchSpanProcessor on process exit.
     // Analogous to Python's atexit.register(_TRACER_PROVIDER.shutdown).
-    process.once("beforeExit", async () => {
-      await provider.shutdown();
+    process.once("beforeExit", () => {
+      provider.shutdown().catch((err: unknown) => {
+        console.error("OpenTelemetry TracerProvider shutdown failed:", err);
+      });
     });
 
     tracerProviderInitialized = true;

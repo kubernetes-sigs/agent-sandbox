@@ -63,7 +63,7 @@ vi.mock("node:child_process", () => ({
 
 // ---------- import SUT ----------
 
-import { POD_NAME_ANNOTATION } from "../constants.js";
+import { MAX_ERROR_BODY_BYTES, POD_NAME_ANNOTATION } from "../constants.js";
 import { SandboxRequestError } from "../exceptions.js";
 import {
   ComputerUseSandbox,
@@ -301,6 +301,36 @@ describe("ComputerUseSandbox (handle)", () => {
 
       expect(err).toBeInstanceOf(SandboxRequestError);
       expect(err.message).toMatch(/expected object/i);
+    });
+
+    it("truncates body >MAX_ERROR_BODY_BYTES in the error message on JSON decode failure", async () => {
+      const longBody = "x".repeat(MAX_ERROR_BODY_BYTES + 1);
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(longBody, { status: 200 }),
+      );
+
+      const err = await sandbox.agent("do something").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(err.message).toContain("…");
+      expect(err.message).not.toContain(longBody);
+    });
+
+    it("does not truncate body <=MAX_ERROR_BODY_BYTES in the error message on JSON decode failure", async () => {
+      const shortBody = "x".repeat(MAX_ERROR_BODY_BYTES);
+      const sandbox = new TestableComputerUseSandbox(makeBaseInit());
+      sandbox._baseUrl = "http://localhost:7777";
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(shortBody, { status: 200 }),
+      );
+
+      const err = await sandbox.agent("do something").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxRequestError);
+      expect(err.message).toContain(shortBody);
+      expect(err.message).not.toContain("…");
     });
 
     it("returns ExecutionResult without throwing on non-zero exit_code and stderr", async () => {

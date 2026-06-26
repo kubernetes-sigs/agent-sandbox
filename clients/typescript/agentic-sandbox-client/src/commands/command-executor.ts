@@ -13,7 +13,10 @@
 // limitations under the License.
 
 import { posix } from "node:path";
-import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
+import {
+  MAX_ERROR_BODY_BYTES,
+  MAX_EXECUTION_RESPONSE_SIZE,
+} from "../constants.js";
 import { SandboxRequestError } from "../exceptions.js";
 import { parseExecutionResult, readBoundedText } from "../response-utils.js";
 import type { Tracer } from "../trace-manager.js";
@@ -40,7 +43,8 @@ function normalizeCallOptions(
 export function extractExecutable(command: string): string {
   if (!command) return "";
   for (const field of command.split(/\s+/)) {
-    if (!field || field.includes("=")) continue;
+    if (!field || (field.includes("=") && !field.split("=")[0].includes("/")))
+      continue;
     return posix.basename(field);
   }
   return "";
@@ -75,10 +79,10 @@ export class CommandExecutor {
       "run",
       async (span) => {
         if (span.isRecording()) {
-          span.setAttribute(
-            "sandbox.command.executable",
-            extractExecutable(command),
-          );
+          const executable = extractExecutable(command);
+          if (executable) {
+            span.setAttribute("sandbox.command.executable", executable);
+          }
         }
 
         const response = await this.requestFn("POST", "execute", {
@@ -98,9 +102,13 @@ export class CommandExecutor {
         try {
           data = JSON.parse(rawText);
         } catch (err) {
+          const preview =
+            rawText.length > MAX_ERROR_BODY_BYTES
+              ? `${[...rawText].slice(0, MAX_ERROR_BODY_BYTES).join("")}…`
+              : rawText;
           throw new SandboxRequestError(
-            `Failed to decode JSON response from sandbox: ${rawText}`,
-            { cause: err },
+            `Failed to decode JSON response from sandbox: ${preview}`,
+            { cause: err, operation: "execute" },
           );
         }
         const result = parseExecutionResult(data);

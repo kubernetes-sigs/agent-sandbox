@@ -13,12 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import os
 import platform
 import shutil
 import subprocess
 import tarfile
 import urllib.request
+
+# SHA256 digests from https://nodejs.org/dist/<version>/SHASUMS256.txt.
+# Update both the version constant below and this table whenever Node.js is bumped.
+_KNOWN_SHASUMS: dict[tuple[str, str, str], str] = {
+    ("v22.22.0", "linux",  "x64"):   "c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744",
+    ("v22.22.0", "linux",  "arm64"): "25ba95dfb96871fa2ef977f11f95ea90818c8fa15c0f2110771db08d4ba423be",
+    ("v22.22.0", "darwin", "x64"):   "5ea50c9d6dea3dfa3abb66b2656f7a4e1c8cef23432b558d45fb538c7b5dedce",
+    ("v22.22.0", "darwin", "arm64"): "5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640",
+}
+
+
+def _verify_sha256(path: str, expected_hex: str) -> None:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
+    if actual != expected_hex:
+        raise ValueError(
+            f"SHA256 mismatch for {path!r}:\n"
+            f"  expected: {expected_hex}\n"
+            f"  got:      {actual}"
+        )
 
 
 def _safe_extractall(tar, install_dir):
@@ -103,6 +127,18 @@ def install_node(install_dir):
     except Exception as e:
         print(f"Failed to download Node.js: {e}")
         return None
+
+    # Verify digest before extraction to guard against a tampered archive.
+    expected_sha256 = _KNOWN_SHASUMS.get((version, os_name, arch))
+    if expected_sha256 is None:
+        print(f"Error: no known SHA256 for {filename}; update _KNOWN_SHASUMS in node.py")
+        return None
+    try:
+        _verify_sha256(tar_path, expected_sha256)
+    except ValueError as e:
+        print(f"SHA256 verification failed: {e}")
+        return None
+    print("SHA256 verified.")
 
     print(f"Extracting {tar_path}...")
     try:

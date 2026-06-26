@@ -46,38 +46,6 @@ func TestSimpleSandboxQueue_BasicOperations(t *testing.T) {
 	}
 }
 
-func TestSimpleSandboxQueue_Get_FallbackWhenNamespacedQueueExistsButIsEmpty(t *testing.T) {
-	q := NewSimpleSandboxQueue()
-	legacyIndex := "index-1"
-	namespace := "my-ns"
-	namespacedIndex := GetNamespacedWarmPoolName(namespace, legacyIndex)
-
-	keyLegacy := SandboxKey{Namespace: namespace, Name: "sb-legacy"}
-	keyNamespaced := SandboxKey{Namespace: namespace, Name: "sb-namespaced"}
-
-	// Add to legacy queue
-	q.Add(legacyIndex, keyLegacy)
-
-	// Add to namespaced queue to make it exist
-	q.Add(namespacedIndex, keyNamespaced)
-
-	// Pop from namespaced queue to make it empty
-	got, ok := q.Get(namespacedIndex)
-	if !ok || got != keyNamespaced {
-		t.Fatalf("Setup failed: expected to pop %v from namespaced queue, got %v (ok: %v)", keyNamespaced, got, ok)
-	}
-
-	// Now the namespaced queue exists but is empty.
-	// Get should fallback to the legacy queue and return keyLegacy.
-	gotFallback, okFallback := q.Get(namespacedIndex)
-	if !okFallback {
-		t.Errorf("Expected to get item from legacy queue fallback, but got !ok")
-	}
-	if gotFallback != keyLegacy {
-		t.Errorf("Expected %v from legacy queue fallback, got %v", keyLegacy, gotFallback)
-	}
-}
-
 func TestSimpleSandboxQueue_RemoveItem_GhostPodFix(t *testing.T) {
 	q := NewSimpleSandboxQueue()
 	hash := "template-hash-1"
@@ -211,102 +179,6 @@ func TestSimpleSandboxQueue_GetWithStrategy(t *testing.T) {
 	}
 }
 
-func TestSimpleSandboxQueue_GetWithStrategyFallback(t *testing.T) {
-	q := NewSimpleSandboxQueue()
-	legacyIndex := "my-legacy-index"
-	namespace := "my-ns"
-	namespacedWarmPoolName := GetNamespacedWarmPoolName(namespace, legacyIndex)
-
-	key1 := SandboxKey{Namespace: namespace, Name: "sb-1"}
-	key2 := SandboxKey{Namespace: namespace, Name: "sb-2"}
-
-	// 1. Add items to the legacy queue
-	q.Add(legacyIndex, key1)
-	q.Add(legacyIndex, key2)
-
-	// Custom strategy to pick key2 specifically
-	pickKey2 := func(items []SandboxKey) (SandboxKey, bool) {
-		for _, item := range items {
-			if item.Name == "sb-2" {
-				return item, true
-			}
-		}
-		return SandboxKey{}, false
-	}
-
-	// 2. Call GetWithStrategy with namespaced index (which should fall back to legacy)
-	got, ok := q.GetWithStrategy(namespacedWarmPoolName, pickKey2)
-	if !ok || got != key2 {
-		t.Errorf("Expected to pick %v via fallback, got %v (ok: %v)", key2, got, ok)
-	}
-
-	// 3. Verify key2 was removed from legacy queue by checking remaining items
-	// Standard Get with namespaced index should still fall back to legacy and get key1
-	got1, ok1 := q.Get(namespacedWarmPoolName)
-	if !ok1 || got1 != key1 {
-		t.Errorf("Expected to get %v via fallback, got %v (ok: %v)", key1, got1, ok1)
-	}
-
-	// Queue should now be empty
-	_, okEmpty := q.Get(namespacedWarmPoolName)
-	if okEmpty {
-		t.Errorf("Expected queue to be empty")
-	}
-}
-
-func TestSimpleSandboxQueue_KeyFallbackBehavior(t *testing.T) {
-	q := NewSimpleSandboxQueue()
-	legacyIndex := "my-index-1"
-	namespace := "my-ns"
-	namespacedWarmPoolName := GetNamespacedWarmPoolName(namespace, legacyIndex)
-
-	key1 := SandboxKey{Namespace: namespace, Name: "sb-1"}
-
-	// Test that the namespace-agnostic legacy value can still be referenced by using the namespace-aware value to interact with the queues
-	q.Add(legacyIndex, key1)
-	got1, ok := q.Get(namespacedWarmPoolName)
-	if !ok || got1 != key1 {
-		t.Errorf("Expected %v from Get fallback, got %v (ok: %v)", key1, got1, ok)
-	}
-
-	// Test RemoveItem fallback
-	q.RemoveItem(namespacedWarmPoolName, key1)
-	_, ok = q.Get(legacyIndex)
-	if ok {
-		t.Errorf("Expected legacy queue to be empty after RemoveItem with fallback")
-	}
-
-	// Test RemoveQueue fallback (add item back first)
-	q.Add(legacyIndex, key1)
-	q.RemoveQueue(namespacedWarmPoolName)
-	_, ok = q.queues.Load(legacyIndex)
-	if ok {
-		t.Errorf("Expected legacy queue to be deleted after RemoveQueue with fallback")
-	}
-
-	// Test reverse is false: that namespace-aware value cannot be referenced by using the legacy value
-	q.Add(namespacedWarmPoolName, key1)
-	_, ok = q.Get(legacyIndex)
-	if ok {
-		t.Errorf("Expected legacy Get to NOT find namespaced item")
-	}
-
-	// Test RemoveItem does nothing with legacy index
-	q.RemoveItem(legacyIndex, key1)
-	got2, ok := q.Get(namespacedWarmPoolName)
-	if !ok || got2 != key1 {
-		t.Errorf("Expected item %v to still be in queue after RemoveItem with legacy index, got %v", key1, got2)
-	}
-
-	// Test RemoveQueue does nothing with legacy index (add item back first)
-	q.Add(namespacedWarmPoolName, key1)
-	q.RemoveQueue(legacyIndex)
-	got3, ok := q.Get(namespacedWarmPoolName)
-	if !ok || got3 != key1 {
-		t.Errorf("Expected item %v to still be in namespaced queue after RemoveQueue with legacy index, got %v", key1, got3)
-	}
-}
-
 func TestGetNamespacedWarmPoolName(t *testing.T) {
 	namespace := "my-ns"
 	wp := "my-wp"
@@ -317,110 +189,47 @@ func TestGetNamespacedWarmPoolName(t *testing.T) {
 	}
 }
 
-func TestGetWarmPoolNameIfNamespaced(t *testing.T) {
-	testCases := []struct {
-		name          string
-		input         string
-		expectedValue string
-		expectedOk    bool
-	}{
-		{
-			name:          "namespace-aware index",
-			input:         "my-ns/my-index",
-			expectedValue: "my-index",
-			expectedOk:    true,
-		},
-		{
-			name:          "namespace-agnostic (legacy) index",
-			input:         "my-index",
-			expectedValue: "",
-			expectedOk:    false,
-		},
-		{
-			name:          "empty string",
-			input:         "",
-			expectedValue: "",
-			expectedOk:    false,
-		},
-		{
-			name:          "unexpected format (multiple slashes)",
-			input:         "ns/dir/index",
-			expectedValue: "dir/index",
-			expectedOk:    true,
-		},
-		{
-			name:          "malformed (nothing after namespace)",
-			input:         "ns/",
-			expectedValue: "",
-			expectedOk:    false,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			warmPoolName, ok := GetWarmPoolNameIfNamespaced(tc.input)
-			if ok != tc.expectedOk {
-				t.Errorf("Expected ok %v, got %v", tc.expectedOk, ok)
-			}
-			if warmPoolName != tc.expectedValue {
-				t.Errorf("Expected warmPoolName %q, got %q", tc.expectedValue, warmPoolName)
-			}
-		})
-	}
-}
-
-func TestSimpleSandboxQueue_RemoveItem_BothQueuesExist(t *testing.T) {
+func TestSimpleSandboxQueue_NoLegacyFallback(t *testing.T) {
 	q := NewSimpleSandboxQueue()
-	legacyIndex := "template-index-1"
 	namespace := "my-ns"
-	namespacedIndex := GetNamespacedWarmPoolName(namespace, legacyIndex)
+	wpName := "my-wp"
+	namespacedName := GetNamespacedWarmPoolName(namespace, wpName)
 
-	key := SandboxKey{Namespace: namespace, Name: "sb-1"}
+	key1 := SandboxKey{Namespace: namespace, Name: "sb-1"}
 
-	// Add the same item to both queues
-	q.Add(legacyIndex, key)
-	q.Add(namespacedIndex, key)
+	// Store queue with namespace-aware warm pool name
+	q.Add(namespacedName, key1)
 
-	// Remove the item using namespacedIndex.
-	// It should be removed from both namespaced and legacy queues.
-	q.RemoveItem(namespacedIndex, key)
-
-	// Verify legacy queue is empty
-	_, ok := q.Get(legacyIndex)
+	// Verify that namespace-agnostic warm pool name does NOT work to Get
+	_, ok := q.Get(wpName)
 	if ok {
-		t.Errorf("Expected legacy queue to be empty after RemoveItem")
+		t.Errorf("Expected Get with namespace-agnostic name to fail")
 	}
 
-	// Verify namespaced queue is also empty
-	_, ok = q.Get(namespacedIndex)
+	// Verify that namespace-agnostic warm pool name does NOT work to GetWithStrategy
+	_, ok = q.GetWithStrategy(wpName, func(items []SandboxKey) (SandboxKey, bool) {
+		return items[0], true
+	})
 	if ok {
-		t.Errorf("Expected namespaced queue to be empty after RemoveItem")
+		t.Errorf("Expected GetWithStrategy with namespace-agnostic name to fail")
 	}
-}
 
-func TestSimpleSandboxQueue_RemoveQueue_BothQueuesExist(t *testing.T) {
-	q := NewSimpleSandboxQueue()
-	legacyIndex := "template-index-1"
-	namespace := "my-ns"
-	namespacedIndex := GetNamespacedWarmPoolName(namespace, legacyIndex)
-
-	keyLegacy := SandboxKey{Namespace: namespace, Name: "sb-legacy"}
-	keyNamespaced := SandboxKey{Namespace: namespace, Name: "sb-namespaced"}
-
-	// Add to both queues
-	q.Add(legacyIndex, keyLegacy)
-	q.Add(namespacedIndex, keyNamespaced)
-
-	// Remove namespaced queue. It should also remove legacy queue.
-	q.RemoveQueue(namespacedIndex)
-
-	// Verify both are removed from sync.Map
-	_, ok := q.queues.Load(namespacedIndex)
-	if ok {
-		t.Errorf("Expected namespaced queue to be deleted")
+	// Verify that namespace-agnostic warm pool name does NOT work to RemoveItem
+	q.RemoveItem(wpName, key1)
+	// We use GetWithStrategy without popping, or check queue length by standard Get.
+	// Since Get pops, let's check that Get(namespacedName) still succeeds and returns key1.
+	got, ok := q.Get(namespacedName)
+	if !ok || got != key1 {
+		t.Errorf("Expected item to still be in queue after RemoveItem with namespace-agnostic name")
 	}
-	_, ok = q.queues.Load(legacyIndex)
-	if ok {
-		t.Errorf("Expected legacy queue to be deleted")
+
+	// Re-add item since Get popped it
+	q.Add(namespacedName, key1)
+
+	// Verify that namespace-agnostic warm pool name does NOT work to RemoveQueue
+	q.RemoveQueue(wpName)
+	_, ok = q.Get(namespacedName)
+	if !ok {
+		t.Errorf("Expected queue to still exist after RemoveQueue with namespace-agnostic name")
 	}
 }

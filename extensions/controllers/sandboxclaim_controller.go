@@ -766,8 +766,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	warmPoolNameForQueue := claim.Spec.WarmPoolRef.Name
-	namespacedWarmPoolNameForQueue := queue.GetNamespacedWarmPoolName(claim.Namespace, warmPoolNameForQueue)
+	namespacedWarmPoolNameForQueue := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
 	for range 3 {
@@ -1914,7 +1913,7 @@ func (h *sandboxEventHandler) Delete(ctx context.Context, e event.DeleteEvent, _
 
 		// Actively delete the Ghost Pod from the memory queue
 		logger := log.FromContext(ctx)
-		logger.V(1).Info("Removing deleted sandbox from warm pool queue", "sandbox", key)
+		logger.V(1).Info("Removing deleted sandbox from warm pool queue", "namespace", sandbox.Namespace, "sandbox", key)
 		h.sandboxQueue.RemoveItem(namespacedWarmPoolName, key)
 	}
 }
@@ -1938,7 +1937,7 @@ func (h *warmPoolEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 
 	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(warmPool.Namespace, warmPool.Name)
 	logger := log.FromContext(ctx)
-	logger.Info("SandboxWarmPool deleted, cleaning up memory queue", "warmPool", warmPool.Name)
+	logger.Info("SandboxWarmPool deleted, cleaning up memory queue", "namespace", warmPool.Namespace, "warmPool", warmPool.Name)
 
 	// Actively drop the entire queue from memory
 	h.sandboxQueue.RemoveQueue(namespacedWarmPoolName)

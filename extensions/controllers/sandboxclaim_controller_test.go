@@ -4238,7 +4238,7 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 					},
 				}
 				existingObjects = append(existingObjects, readyWarmSandbox)
-				warmSandboxQueue.Add("vct-warmpool", queue.SandboxKey{Namespace: "default", Name: "warm-sandbox"})
+				warmSandboxQueue.Add(queue.GetNamespacedWarmPoolName("default", "vct-warmpool"), queue.SandboxKey{Namespace: "default", Name: "warm-sandbox"})
 			}
 
 			fakeClient := fake.NewClientBuilder().

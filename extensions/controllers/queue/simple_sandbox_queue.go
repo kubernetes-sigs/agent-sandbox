@@ -15,7 +15,6 @@
 package queue
 
 import (
-	"strings"
 	"sync"
 )
 
@@ -60,14 +59,6 @@ func (s *SimpleSandboxQueue) Get(namespacedWarmPoolName string) (SandboxKey, boo
 			return item, true
 		}
 	}
-
-	// Remain compatible with the legacy namespace-agnostic index
-	if warmPoolName, ok := GetWarmPoolNameIfNamespaced(namespacedWarmPoolName); ok {
-		if q, ok := s.queues.Load(warmPoolName); ok {
-			return q.(*synchronizedQueue).Pop()
-		}
-	}
-
 	return SandboxKey{}, false
 }
 
@@ -78,14 +69,6 @@ func (s *SimpleSandboxQueue) GetWithStrategy(namespacedWarmPoolName string, pick
 			return item, true
 		}
 	}
-
-	// Remain compatible with the legacy namespace-agnostic index
-	if warmPoolName, ok := GetWarmPoolNameIfNamespaced(namespacedWarmPoolName); ok {
-		if q, ok := s.queues.Load(warmPoolName); ok {
-			return q.(*synchronizedQueue).PopWithStrategy(pick)
-		}
-	}
-
 	return SandboxKey{}, false
 }
 
@@ -94,13 +77,6 @@ func (s *SimpleSandboxQueue) RemoveItem(namespacedWarmPoolName string, item Sand
 	if q, ok := s.queues.Load(namespacedWarmPoolName); ok {
 		sq := q.(*synchronizedQueue)
 		sq.Remove(item)
-	}
-	// Remain compatible with the legacy namespace-agnostic hash
-	if warmPoolName, ok := GetWarmPoolNameIfNamespaced(namespacedWarmPoolName); ok {
-		if q, ok := s.queues.Load(warmPoolName); ok {
-			sq := q.(*synchronizedQueue)
-			sq.Remove(item)
-		}
 	}
 }
 
@@ -241,24 +217,9 @@ func (s *SimpleSandboxQueue) RemoveQueue(namespacedWarmPoolName string) {
 	if _, ok := s.queues.Load(namespacedWarmPoolName); ok {
 		s.queues.Delete(namespacedWarmPoolName)
 	}
-	// Remain compatible with the legacy namespace-agnostic index
-	if warmPoolName, ok := GetWarmPoolNameIfNamespaced(namespacedWarmPoolName); ok {
-		if _, ok := s.queues.Load(warmPoolName); ok {
-			s.queues.Delete(warmPoolName)
-		}
-	}
 }
 
 // GetNamespacedWarmPoolName forms the namespace-aware index value to use as a key to a SimpleSandboxQueue type.
 func GetNamespacedWarmPoolName(namespace, warmPoolName string) string {
 	return namespace + "/" + warmPoolName
-}
-
-// GetWarmPoolNameIfNamespaced extracts the warmPoolName value if the parameter is namespace-aware.
-func GetWarmPoolNameIfNamespaced(warmPoolName string) (string, bool) {
-	parts := strings.SplitN(warmPoolName, "/", 2)
-	if len(parts) == 2 && parts[1] != "" {
-		return parts[1], true
-	}
-	return "", false
 }

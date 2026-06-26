@@ -150,7 +150,7 @@ const (
 // SandboxBlueprint defines the configuration shared between Sandbox and SandboxTemplate.
 // It deliberately excludes runtime-only fields (operatingMode, lifecycle).
 type SandboxBlueprint struct {
-	// podTemplate describes the pod spec that will be used to create the sandbox pod.
+	// podTemplate describes the pod that will be created in the sandbox.
 	// +required
 	PodTemplate PodTemplate `json:"podTemplate"`
 
@@ -163,7 +163,7 @@ type SandboxBlueprint struct {
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
 	// service controls whether the controller should automatically create a
-	// headless Service for Sandboxes created from this template.
+	// headless Service for the Sandbox workload.
 	// When unset, the controller preserves existing Services for backward
 	// compatibility but does not create new ones. Set to true to enable or false
 	// to explicitly disable and remove the Service.
@@ -177,8 +177,10 @@ type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// SandboxBlueprint defines the pod template, storage, and service configuration
-	// shared with SandboxTemplate.
+	// SandboxBlueprint defines the workload configuration shared with SandboxTemplate.
+	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
+	// Since moving fields out is breaking, if unsure whether a new field should be shared,
+	// define it in SandboxSpec (or SandboxTemplateSpec) first and promote it here later.
 	SandboxBlueprint `json:",inline"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.

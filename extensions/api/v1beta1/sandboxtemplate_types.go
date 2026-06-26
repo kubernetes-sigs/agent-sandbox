@@ -87,12 +87,10 @@ type NetworkPolicySpec struct {
 
 // SandboxTemplateSpec defines the desired state of Sandbox.
 type SandboxTemplateSpec struct {
-	// SandboxBlueprint defines the pod template, storage, and service configuration
-	// for the Sandboxes created from this template. It is the single source of truth
-	// shared with SandboxSpec: any field of the blueprint (podTemplate,
-	// volumeClaimTemplates, service, and future fields) is configurable here and
-	// flows through to the Sandboxes a SandboxWarmPool or SandboxClaim creates from
-	// this template, without requiring per-field duplication.
+	// SandboxBlueprint defines the workload configuration shared with SandboxSpec.
+	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
+	// Since moving fields out is breaking, if unsure whether a new field should be shared,
+	// define it in SandboxTemplateSpec (or SandboxSpec) first and promote it here later.
 	// If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false
 	// to ensure a secure-by-default environment.
 	sandboxv1beta1.SandboxBlueprint `json:",inline"`

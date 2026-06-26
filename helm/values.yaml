@@ -61,6 +61,18 @@ tolerations: []
 
 affinity: {}
 
+# topologySpreadConstraints spread the controller pods across topology domains
+# (e.g. nodes, zones). Default [] — only rendered when set. Useful with
+# replicaCount > 1 to keep replicas off the same node/zone for availability.
+topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: kubernetes.io/hostname
+  #   whenUnsatisfiable: ScheduleAnyway
+  #   labelSelector:
+  #     matchLabels:
+  #       app.kubernetes.io/name: agent-sandbox
+  #       app.kubernetes.io/instance: agent-sandbox
+
 # Pod-level securityContext (spec.template.spec.securityContext). Default null — omitted unless set.
 # Example for Kyverno / restricted Pod Security:
 # podSecurityContext:

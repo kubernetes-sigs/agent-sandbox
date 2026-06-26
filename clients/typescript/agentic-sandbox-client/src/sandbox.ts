@@ -35,7 +35,6 @@ import {
   MAX_RECONNECT_ATTEMPTS,
   MAX_RETRIES,
   PER_ATTEMPT_TIMEOUT_MS,
-  REDIRECT_STATUS_CODES,
   RETRY_STATUS_CODES,
   SANDBOX_API_GROUP,
   SANDBOX_API_VERSION,
@@ -975,7 +974,11 @@ export class Sandbox {
         "X-Sandbox-ID": this.sandboxName,
         "X-Sandbox-Namespace": this.namespace,
         "X-Sandbox-Port": String(this.serverPort),
-        "X-Sandbox-Timeout": String(Math.ceil(this.perAttemptTimeoutMs / 1000)),
+        "X-Sandbox-Timeout": String(
+          Math.ceil(
+            (options.perAttemptTimeoutMs ?? this.perAttemptTimeoutMs) / 1000,
+          ),
+        ),
         [HEADER_REQUEST_ID]: requestId,
       };
 
@@ -1025,7 +1028,7 @@ export class Sandbox {
           options.signal,
           options.perAttemptTimeoutMs ?? this.perAttemptTimeoutMs,
         );
-        if (REDIRECT_STATUS_CODES.includes(response.status)) {
+        if (response.status >= 300 && response.status < 400) {
           response.body?.cancel().catch(() => {});
           throw new SandboxRequestError(
             `Redirection is not allowed (status code ${response.status}).`,

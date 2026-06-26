@@ -41,7 +41,6 @@ export const BACKOFF_FACTOR = 0.5;
 // rarely helps and exceeds most callers' overall timeout budget.
 export const MAX_BACKOFF_MS = 8000;
 export const RETRY_STATUS_CODES = [500, 502, 503, 504];
-export const REDIRECT_STATUS_CODES = [301, 302, 303, 307, 308];
 
 // Maximum bytes to drain from a response body before retrying (allows TCP connection reuse)
 export const MAX_DRAIN_BYTES = 4096;

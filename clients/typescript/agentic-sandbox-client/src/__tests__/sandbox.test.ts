@@ -87,7 +87,6 @@ import {
   MAX_RETRIES,
   MAX_UPLOAD_SIZE,
   PER_ATTEMPT_TIMEOUT_MS,
-  REDIRECT_STATUS_CODES,
   RETRY_STATUS_CODES,
 } from "../constants.js";
 import {
@@ -2297,12 +2296,12 @@ describe("Sandbox", () => {
   // ===== redirect blocking (SSRF mitigation) =====
 
   describe("redirect blocking (SSRF mitigation)", () => {
-    it.each(
-      REDIRECT_STATUS_CODES,
-    )("throws SandboxRequestError on %i redirect without following it", async (status) => {
+    it.each([
+      300, 301, 302, 303, 304, 307, 308,
+    ])("throws SandboxRequestError on %i redirect without following it", async (status) => {
       const sandbox = createReadySandbox();
       (fetch as Mock).mockResolvedValueOnce(
-        new Response("", {
+        new Response(null, {
           status,
           headers: { Location: "http://evil.example.com/" },
         }),
@@ -2317,21 +2316,6 @@ describe("Sandbox", () => {
       expect(fetch).toHaveBeenCalledTimes(1);
       const [, opts] = (fetch as Mock).mock.calls[0];
       expect(opts.redirect).toBe("manual");
-    });
-
-    it("does not throw SandboxRequestError on 304 Not Modified", async () => {
-      const sandbox = createReadySandbox();
-      // 304 is a null-body status; passing a non-null body (e.g. "") would fail.
-      (fetch as Mock).mockResolvedValueOnce(
-        new Response(null, { status: 304 }),
-      );
-
-      const result = await sandbox
-        .callRequest("GET", "/health")
-        .catch((e) => e);
-
-      expect(result).not.toBeInstanceOf(SandboxRequestError);
-      expect((result as Response).status).toBe(304);
     });
 
     it("still throws SandboxRequestError on 4xx after redirect check", async () => {

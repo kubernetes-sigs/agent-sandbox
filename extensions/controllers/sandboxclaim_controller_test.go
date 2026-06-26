@@ -3338,6 +3338,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				Conditions: []metav1.Condition{{
 					Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 				}},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 
@@ -4205,6 +4206,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			},
 		}},
 		},
+		Status: sandboxv1beta1.SandboxStatus{PodIPs: []string{testNetworkedPodIP}},
 	}
 
 	// Another sandbox in the warm pool that we want to make sure doesn't get adopted
@@ -4230,6 +4232,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			Conditions: []metav1.Condition{{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 			}},
+			PodIPs: []string{testNetworkedPodIP},
 		},
 	}
 
@@ -5217,6 +5220,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 				sandboxTemplateRefHash: templateHash,
 			},
 		},
+		Status: sandboxv1beta1.SandboxStatus{PodIPs: []string{testNetworkedPodIP}},
 	}
 
 	// 3. Verify it is rejected
@@ -5327,6 +5331,7 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			},
 			Status: sandboxv1beta1.SandboxStatus{
 				NodeName: nodeName,
+				PodIPs:   []string{testNetworkedPodIP},
 				Conditions: []metav1.Condition{
 					{
 						Type:   string(sandboxv1beta1.SandboxConditionReady),
@@ -5610,6 +5615,7 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 							Type:   string(sandboxv1beta1.SandboxConditionReady),
 							Status: metav1.ConditionTrue,
 						}},
+						PodIPs: []string{testNetworkedPodIP},
 					},
 				}
 				existingObjects = append(existingObjects, readyWarmSandbox)

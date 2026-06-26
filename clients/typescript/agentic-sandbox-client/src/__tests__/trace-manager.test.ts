@@ -257,6 +257,51 @@ describe("initializeTracer — parallel call safety", () => {
       expect.stringContaining("OpenTelemetry not installed"),
     );
   });
+
+  it("provider.register() is called exactly once when initializeTracer runs in parallel with full SDK mocked", async () => {
+    const registerMock = vi.fn();
+
+    vi.doMock("@opentelemetry/api", () => ({
+      SpanStatusCode: { ERROR: 2 },
+      trace: {
+        getTracer: vi.fn(),
+        setSpanInContext: vi.fn((_s: unknown, ctx: unknown) => ctx),
+        getSpan: vi.fn(),
+      },
+      context: {
+        active: vi.fn(() => ({})),
+        with: vi.fn((_: unknown, fn: () => unknown) => fn()),
+        bind: vi.fn(),
+      },
+      propagation: { inject: vi.fn() },
+    }));
+    vi.doMock("@opentelemetry/sdk-trace-node", () => ({
+      NodeTracerProvider: class {
+        addSpanProcessor() {}
+        register = registerMock;
+        async shutdown() {}
+      },
+    }));
+    vi.doMock("@opentelemetry/resources", () => ({ Resource: class {} }));
+    vi.doMock("@opentelemetry/sdk-trace-base", () => ({
+      BatchSpanProcessor: class {},
+    }));
+    vi.doMock("@opentelemetry/exporter-trace-otlp-grpc", () => ({
+      OTLPTraceExporter: class {},
+    }));
+
+    // Fresh import after doMock so module-level state (tracerInitPromise) is clean.
+    const { initializeTracer } = await import("../trace-manager.js");
+
+    await Promise.all([
+      initializeTracer("my-service"),
+      initializeTracer("my-service"),
+    ]);
+
+    // Without the tracerInitPromise cache, both concurrent calls would each
+    // create a NodeTracerProvider and call register(), resulting in 2 invocations.
+    expect(registerMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ===== initializeTracer — beforeExit shutdown error handling =====

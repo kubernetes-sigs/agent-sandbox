@@ -33,11 +33,85 @@ def _fleet(registry, **cfg):
   return SandboxFleet(FleetConfig(**cfg), registry=registry)
 
 
+def test_naive_epochs_reuse_pools(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1", "i2"])
+  res = f.run(lambda t, h: t.image, strategy="naive", epochs=3)
+  # epochs>1 -> one task-ordered list per pass
+  assert len(res) == 3
+  assert all(sorted(r) == ["i1", "i2"] for r in res)
+  # pools created once and REUSED across epochs (2 images, not 2*3)
+  assert c.resources.create_warmpool.call_count == 2
+  assert f.handles() == []
+  assert c.active_replicas == 0          # torn down once, at the end
+
+
+def test_keep_warm_persists_then_explicit_teardown(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1", "i2"])
+  f.run(lambda t, h: t.image, strategy="naive", keep_warm=True)
+  # pools left resident (no final teardown) for caller-driven reuse
+  assert c.active_replicas == 2
+  assert set(f._warmed) == {"i1", "i2"}
+  # a second keep_warm run reuses them — no new pools, no double-reserve
+  f.run(lambda t, h: t.image, strategy="naive", keep_warm=True)
+  assert c.resources.create_warmpool.call_count == 2
+  assert c.active_replicas == 2
+  # explicit teardown fully cleans up
+  f.teardown()
+  assert c.active_replicas == 0
+  assert f._warmed == {}
+
+
+def test_epochs_must_be_positive(make_cluster):
+  f = _fleet(ClusterRegistry([make_cluster("solo")]))
+  f.load_tasks(["i1"])
+  with pytest.raises(ValueError):
+    f.run(lambda t, h: t.image, strategy="naive", epochs=0)
+
+
 def test_load_tasks_and_counts(two_cluster_registry):
   f = _fleet(two_cluster_registry)
   f.load_tasks(["imgA", "imgA", "imgB"])
   assert len(f.tasks) == 3
   assert dict(f.image_counts()) == {"imgA": 2, "imgB": 1}
+
+
+def test_warm_per_task_sizes_replicas_to_task_count(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1, warm_per_task=True)
+  f.load_tasks(["i1", "i1", "i1", "i2"])           # i1: 3 tasks, i2: 1 task
+  reps = {e.image: e.replicas for e in f.plan().entries}
+  assert reps == {"i1": 3, "i2": 1}                # one replica per task
+
+
+def test_warm_per_task_clamps_to_max_pool_and_warns(make_cluster, caplog):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1, warm_per_task=True,
+             max_warmpool_size=2)
+  f.load_tasks(["i1", "i1", "i1"])                  # 3 tasks, cap 2
+  with caplog.at_level("WARNING"):
+    reps = {e.image: e.replicas for e in f.plan().entries}
+  assert reps == {"i1": 2}                          # clamped to max_warmpool_size
+  assert any("warm_per_task" in r.message for r in caplog.records)
+
+
+def test_pipelined_plus_warm_per_task_warns(make_cluster, caplog):
+  # the documented anti-pattern (window shrinkage) is guarded at runtime
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4, warm_per_task=True)
+  f.load_tasks(["i1", "i1", "i2", "i2"])
+  with caplog.at_level("WARNING"):
+    f.recommended_window(pipelined=True)
+  assert any("pipelined" in r.message and "warm_per_task" in r.message
+             for r in caplog.records)
+  # sliding (non-pipelined) does NOT warn
+  caplog.clear()
+  with caplog.at_level("WARNING"):
+    f.recommended_window(pipelined=False)
+  assert not any("pipelined" in r.message for r in caplog.records)
 
 
 def test_preflight_ok(two_cluster_registry):

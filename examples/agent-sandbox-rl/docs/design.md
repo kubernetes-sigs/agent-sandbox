@@ -95,6 +95,13 @@ examples/agent-sandbox-rl/
 - **Sizing across clusters:** the global `max_concurrent` budget is split across
   clusters by weight/capacity; per-`(cluster, image)` replicas use the existing
   `sizing.compute_replicas` on that cluster's share.
+- **Eval vs RL sizing (added):** the concurrency-proportional default fits **eval**
+  (1:1 image:task). For **RL** (G rollouts share one problem image), opt into
+  `FleetConfig.warm_per_task` (replicas = `min(tasks_image, max_warmpool_size)`, one
+  per rollout) + `TemplateSpec.colocate_replicas` (pack a pool's replicas on one node
+  via soft `podAffinity`, so only the first pulls the image). Both default off; pair
+  with `naive`/`sliding` (not `pipelined`). Rationale + measurements:
+  [eval vs RL](../README.md#eval-vs-rl--recommended-recipes).
 - **Connectivity caveat (documented, not magic):** a sandbox is reachable from
   *within its own cluster*. A single learner spanning clusters needs per-cluster
   routable endpoints (Gateway/LoadBalancer per cluster, or VPC peering/VPN), or

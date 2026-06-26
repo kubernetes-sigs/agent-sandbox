@@ -184,6 +184,14 @@ per-cluster routable endpoints (Gateway/LoadBalancer).
 - **Cleanup safety.** Everything is labeled `app=agent-sandbox-rl`; teardown
   sweeps stray claims before pools/templates so a leaked claim can't keep its
   adopted sandbox alive.
+- **Two sizing modes for two workloads.** The default `compute_replicas` sizes each
+  pool to its *share of the concurrency budget* — optimal for **eval** (a 1:1 sweep
+  where each image has one task). `FleetConfig.warm_per_task` switches to
+  *one replica per task* (`min(tasks_image, max_warmpool_size)`) for **RL**, where the
+  same problem image is claimed by *G* rollouts at once. `TemplateSpec.colocate_replicas`
+  then keeps those *G* replicas on one node (soft `podAffinity` on the shared
+  `sandbox=<template>` label) so only the first pulls the image. Both default off and
+  compose with any strategy; see [eval vs RL](../README.md#eval-vs-rl--recommended-recipes).
 
 ## Optimization findings (from the rl-sandbox-scripts example)
 
@@ -194,3 +202,22 @@ are sub-second; image **layer sharing** makes pre-pull pay off per repo-family;
 concurrency-aware sizing slashes idle footprint; parallel claim+exec scales the
 task region ~linearly; the SWE-Bench-Verified set is 500 images / 12 families
 (django ≈ 46%).
+
+Since image pull dominates wall-clock at scale, the `pipelined` strategy overlaps
+the next window's pull with the current window's execution, and `epochs`/`keep_warm`
++ `imagePullPolicy: IfNotPresent` amortize pulls across passes via the node layer
+cache. The GKE-side levers (in-region Artifact Registry mirror via the
+`image_rewrite` hook, Image Streaming, larger/secondary boot disk, disk-aware
+window sizing) are documented in [`gke.md`](gke.md).
+
+A later load-test sweep (`tests/loadtest.py`, recorded under `performance_reports/`)
+added the **instant-claim** findings: `warm_per_task` + `colocate_replicas` cut the
+per-rollout claim *tail* (e.g. 10 s → 3 s) but not batch wall — wall is bounded by
+`max_concurrent`, which the default sizing already saturates, so the benefit is
+straggler latency in synchronous RL steps, not throughput. One caveat the sweep
+surfaced: combining `warm_per_task` with `pipelined` shrinks the prefetch window
+(deeper per-image footprint ⇒ fewer images per window), serializing problems and
+underfilling concurrency once rollouts do real work — so RL should pair
+`warm_per_task` with `naive`/`sliding`, and reserve `pipelined` for pull-bound 1:1
+eval. (Follow-up: pipelined window sizing should weigh concurrency utilization, not
+just footprint.)

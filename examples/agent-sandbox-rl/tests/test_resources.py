@@ -46,6 +46,55 @@ def test_ensure_template_creates_when_absent():
   assert pod["runtimeClassName"] == "gvisor"
   assert pod["nodeSelector"] == {"k": "v"}
   assert pod["imagePullSecrets"] == [{"name": "ps"}]
+  # default pull policy reuses the node layer cache across runs/epochs
+  assert pod["containers"][0]["imagePullPolicy"] == "IfNotPresent"
+
+
+def test_template_manifest_pull_policy_override():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(image_pull_policy="Always"))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert pod["containers"][0]["imagePullPolicy"] == "Always"
+
+
+def test_template_manifest_colocate_emits_pod_affinity():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(colocate_replicas=True))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  term = pod["affinity"]["podAffinity"][
+      "preferredDuringSchedulingIgnoredDuringExecution"][0]
+  assert term["weight"] == 100
+  assert term["podAffinityTerm"]["topologyKey"] == "kubernetes.io/hostname"
+  # packs replicas of THIS pool together (they share the sandbox=<template> label)
+  assert term["podAffinityTerm"]["labelSelector"]["matchLabels"] == {"sandbox": TNAME}
+
+
+def test_template_manifest_no_affinity_by_default():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  assert "affinity" not in kwargs["body"]["spec"]["podTemplate"]["spec"]
+
+
+def test_colocate_composes_with_extra_pod_spec_affinity():
+  # colocate_replicas + a user-supplied affinity (e.g. nodeAffinity) must COMPOSE,
+  # not silently clobber the colocation podAffinity via the shallow update().
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  node_aff = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+      "nodeSelectorTerms": [{"matchExpressions": [
+          {"key": "gpu", "operator": "Exists"}]}]}}}
+  r.ensure_template(IMG, TNAME, TemplateSpec(
+      colocate_replicas=True, extra_pod_spec={"affinity": node_aff}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  aff = kwargs["body"]["spec"]["podTemplate"]["spec"]["affinity"]
+  assert "nodeAffinity" in aff                 # user's affinity preserved
+  assert "podAffinity" in aff                  # colocation NOT clobbered
 
 
 def test_ensure_template_noop_when_present():

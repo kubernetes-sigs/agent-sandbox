@@ -8,6 +8,62 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 Initial implementation (design phases 1–7), live-verified on GKE against Agent
 Sandbox `v0.5.0rc1` (v1beta1).
 
+### Added (performance & scale)
+- **`pipelined` strategy** (`strategies.py`, `async_fleet.py`): double-buffered
+  sliding window — prefetch window N+1's pools (background thread / `asyncio.Task`)
+  while window N's tasks run, so image pull overlaps execution. Footprint bounded
+  ≤ 2 windows; new `prefetch` phase in the `RunReport`.
+- **Cross-epoch warm cache** (`fleet.py`, `async_fleet.py`): `run(..., epochs=N)`
+  runs N passes keeping pools resident between them (re-pulls hit the node layer
+  cache), tearing down once at the end (returns `list[list]`); `keep_warm=True`
+  leaves pools up for a caller-driven loop. `warm_image`/`start_warmpools` gained a
+  reuse guard so reuse never re-creates or double-reserves.
+- **Async fleet dedicated thread pool** (`async_fleet.py`): `AsyncSandboxFleet` runs
+  all blocking k8s calls on its own `ThreadPoolExecutor` sized to `max_concurrent`
+  (`min(1024, max(64, max_concurrent + 2×window + 16))`) instead of
+  `asyncio.to_thread`'s shared default pool (`min(32, cpu+4)`). The default pool is
+  tied to the driver's CPU count, not concurrency: under `pipelined` (which overlaps
+  prefetch + process + unwarm, and `wait_for_pool_ready` holds a thread) it starved
+  teardown and **deadlocked** at scale. Fixes that; live-validated (100/100 where it
+  previously hung). `close()` shuts the pool down (called from `__aexit__`).
+- **Parallel pool warming** (`fleet.py`): `start_warmpools` now warms pools
+  **concurrently** (bounded by `max_concurrent`) instead of one-at-a-time, so each
+  pool's `wait_pool_ready` (image pull) overlaps the others. Removes the `naive`
+  prep bottleneck (was O(#images) serial — measured ~7× slower than `sliding`).
+- **Instant-claim mode for RL** (`config.py`, `sizing.py`, `fleet.py`,
+  `resources.py`): two opt-in levers (both default off) that trade resources for
+  near-zero claim latency. **`FleetConfig.warm_per_task`** sizes each pool to
+  `min(tasks_image, max_warmpool_size)` (one warm replica per task), so every task
+  claims immediately (`compute_replicas(..., per_task=True)`, threaded through the
+  window/disk sizing so windows shrink for the deeper pools; warns+clamps when an
+  image has more tasks than `max_warmpool_size`). **`TemplateSpec.colocate_replicas`**
+  adds a soft `podAffinity` (`topologyKey: kubernetes.io/hostname` on the shared
+  `sandbox=<template>` label) so a pool's replicas prefer one node — only the first
+  pulls the image, the rest start from the node layer cache. These target **RL**
+  (G rollouts per problem image); for **1:1 eval** they're no-ops. They cut the
+  per-rollout claim *tail* (the synchronous straggler), not batch wall. Pair with
+  `naive`/`sliding`, **not** `pipelined` (deep replicas shrink its window and
+  serialize problems). See the README "Eval vs RL" recipes.
+- **`TemplateSpec.image_pull_policy`** (`config.py`, `resources.py`): default
+  `IfNotPresent` so the node layer cache is reused across runs/epochs.
+- **Disk-aware window sizing** (`sizing.py`, `config.py`, `fleet.py`):
+  `recommend_window_disk` / `recommend_window_pipelined`, with
+  `FleetConfig.avg_image_gb` / `node_ephemeral_gb` / `disk_headroom`; caps the auto
+  window so resident images fit node disk.
+- **Image rewriting** (`registry_rewrite.py`): `rewrite_image` / `make_rewriter`
+  + a `load_tasks(image_rewrite=...)` hook to redirect images at an in-region
+  mirror / pull-through cache (original kept in `metadata['original_image']`).
+- **Load-test harness** (`tests/loadtest.py`): parameterized SWE-bench-style load
+  test — `--images N --tasks-per-image K --strategies all|… --image-template …
+  [--task-duration S]` against a live cluster — emitting a self-explanatory report:
+  a **methodology** section, cluster/nodes, image list, warm-pool plan, a per-stage
+  benchmark per strategy (prep create+wait, pool-ready avg/max, **claim latency
+  avg/max = time-to-sandbox**, claims, net task time, warm-pool peak/total/created,
+  wall, efficiency), and a **metric glossary** for the raw RunReport phases. Pure
+  helpers unit-tested in `tests/test_loadtest.py`.
+- **Docs**: `docs/gke.md` GKE tuning guide (Image Streaming, AR mirror, secondary
+  boot disk); README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
+
 ### Changed / hardening (from PR #1000 review)
 - **Prometheus is now an optional `metrics` extra** (`pyproject.toml`,
   `observability.py`): moved off the core deps, and the `asrl_*` collectors are
@@ -93,7 +149,7 @@ Sandbox `v0.5.0rc1` (v1beta1).
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).
 - **Docs**: README, `docs/architecture.md`, this changelog.
-- **Tests**: 114 mocked unit tests (sizing, config, resources incl. watch-based
+- **Tests**: 188 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
   pool readiness + fail-fast on terminal errors, cluster, sources, placement,
   fleet incl. 2-cluster routing + acquire rollback + idempotent release,
   strategies/parallel, preflight, prepull, async, swebench incl. `keep_row`,

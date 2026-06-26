@@ -27,6 +27,9 @@ def test_defaults_single_cluster_simple():
   assert cfg.labels == constants.DEFAULT_LABELS
   assert cfg.template.keepalive_command == constants.KEEPALIVE_COMMAND
   assert cfg.template.resources.cpu == "250m"
+  # RL instant-claim levers default off (current behavior unchanged)
+  assert cfg.warm_per_task is False
+  assert cfg.template.colocate_replicas is False
 
 
 def test_template_name_is_stable_and_prefixed():

@@ -85,6 +85,7 @@ class Resources:
         "containers": [{
             "name": "agent-runtime",
             "image": image,
+            "imagePullPolicy": template.image_pull_policy,
             "command": list(template.keepalive_command),
             "stdin": True,
             "tty": True,
@@ -100,8 +101,33 @@ class Resources:
       pod_spec["nodeSelector"] = dict(template.node_selector)
     if template.image_pull_secret:
       pod_spec["imagePullSecrets"] = [{"name": template.image_pull_secret}]
+    if template.colocate_replicas:
+      # Soft: prefer co-locating this pool's replicas (all share the
+      # `sandbox=<template>` pod label) on one node so only the first pulls the
+      # image and the rest start from the node layer cache. preferred (not
+      # required) so it spills instead of dead-locking when a node fills up.
+      pod_spec["affinity"] = {
+          "podAffinity": {
+              "preferredDuringSchedulingIgnoredDuringExecution": [{
+                  "weight": 100,
+                  "podAffinityTerm": {
+                      "labelSelector": {
+                          "matchLabels": {"sandbox": template_name}},
+                      "topologyKey": "kubernetes.io/hostname",
+                  },
+              }],
+          },
+      }
     if template.extra_pod_spec:
-      pod_spec.update(template.extra_pod_spec)
+      extra = template.extra_pod_spec
+      # Compose the escape hatch with the colocation affinity instead of letting a
+      # shallow update() clobber the whole `affinity` key: merge the two affinity
+      # blocks (extra_pod_spec wins per sub-key, e.g. its nodeAffinity is added
+      # while our podAffinity is preserved unless the user explicitly overrides it).
+      if "affinity" in extra and "affinity" in pod_spec:
+        merged_affinity = {**pod_spec["affinity"], **extra["affinity"]}
+        extra = {**extra, "affinity": merged_affinity}
+      pod_spec.update(extra)
 
     return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",

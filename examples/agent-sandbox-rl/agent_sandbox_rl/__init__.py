@@ -53,8 +53,15 @@ from .placement import (
 )
 from .preflight import PreflightReport, preflight_cluster
 from .prepull import prepull, prepull_delete
+from .registry_rewrite import make_rewriter, rewrite_image
 from .resources import Resources
-from .sizing import compute_replicas, plan, recommend_window
+from .sizing import (
+    compute_replicas,
+    plan,
+    recommend_window,
+    recommend_window_disk,
+    recommend_window_pipelined,
+)
 from .sources import JsonlSource, ListSource, Task, TaskSource, to_tasks
 from .strategies import STRATEGIES, process_parallel
 
@@ -69,6 +76,8 @@ __all__ = [
     # sizing
     "compute_replicas",
     "recommend_window",
+    "recommend_window_disk",
+    "recommend_window_pipelined",
     "plan",
     # sources
     "Task",
@@ -110,6 +119,9 @@ __all__ = [
     "preflight_cluster",
     "prepull",
     "prepull_delete",
+    # registry rewrite
+    "rewrite_image",
+    "make_rewriter",
     # exceptions
     "FleetError",
     "PreflightError",

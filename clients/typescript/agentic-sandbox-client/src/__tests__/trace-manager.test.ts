@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import type { Mock } from "vitest";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span, Tracer } from "../trace-manager.js";
 import { NoOpSpan, TracerManager, withSpan } from "../trace-manager.js";
 
@@ -209,5 +209,132 @@ describe("TracerManager (no-op mode — otelApi === null)", () => {
 
     // After end, parentContext is null → getTraceContextJson returns ""
     expect(mgr.getTraceContextJson()).toBe("");
+  });
+});
+
+// ===== initializeTracer — parallel call safety =====
+//
+// Verifies that concurrent loadOtel() calls share a single in-flight Promise,
+// so the second caller never receives null while the first import is pending.
+
+describe("initializeTracer — parallel call safety", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it("concurrent calls share the in-flight loadOtel promise and do not race on otelApi", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    vi.doMock("@opentelemetry/api", () => ({
+      SpanStatusCode: { ERROR: 2 },
+      trace: {
+        getTracer: vi.fn(),
+        setSpanInContext: vi.fn((_s: unknown, ctx: unknown) => ctx),
+        getSpan: vi.fn(),
+      },
+      context: {
+        active: vi.fn(() => ({})),
+        with: vi.fn((_: unknown, fn: () => unknown) => fn()),
+        bind: vi.fn(),
+      },
+      propagation: { inject: vi.fn() },
+    }));
+
+    // Fresh import after doMock so module-level state (otelLoadPromise) is clean.
+    const { initializeTracer } = await import("../trace-manager.js");
+
+    // Fire in parallel. With the race bug, the second call sees otelLoaded=true
+    // with otelApi still null and emits console.error("OpenTelemetry not installed").
+    await Promise.all([
+      initializeTracer("my-service"),
+      initializeTracer("my-service"),
+    ]);
+
+    expect(consoleErrorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("OpenTelemetry not installed"),
+    );
+  });
+});
+
+// ===== initializeTracer — beforeExit shutdown error handling =====
+//
+// Verifies that a provider.shutdown() rejection is caught and logged rather than
+// propagating as an unhandled rejection from the beforeExit handler.
+
+describe("initializeTracer — beforeExit shutdown error handling", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it("shutdown failure is caught and logged, not thrown as unhandled rejection", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    // Use an object so TypeScript does not narrow the property type to null via
+    // control-flow analysis (local let variables assigned inside callbacks are
+    // narrowed to their initialiser type at subsequent reads).
+    const captured: { beforeExit: (() => void) | null } = { beforeExit: null };
+    vi.spyOn(process, "once").mockImplementation(
+      (event: string | symbol, handler: (...args: unknown[]) => void) => {
+        if (event === "beforeExit") {
+          captured.beforeExit = handler as () => void;
+        }
+        return process;
+      },
+    );
+
+    const shutdownMock = vi
+      .fn()
+      .mockRejectedValue(new Error("shutdown failed"));
+
+    vi.doMock("@opentelemetry/api", () => ({
+      SpanStatusCode: { ERROR: 2 },
+      trace: {
+        getTracer: vi.fn(),
+        setSpanInContext: vi.fn((_s: unknown, ctx: unknown) => ctx),
+        getSpan: vi.fn(),
+      },
+      context: {
+        active: vi.fn(() => ({})),
+        with: vi.fn((_: unknown, fn: () => unknown) => fn()),
+        bind: vi.fn(),
+      },
+      propagation: { inject: vi.fn() },
+    }));
+    vi.doMock("@opentelemetry/sdk-trace-node", () => ({
+      NodeTracerProvider: class {
+        addSpanProcessor() {}
+        register() {}
+        shutdown = shutdownMock;
+      },
+    }));
+    vi.doMock("@opentelemetry/resources", () => ({
+      Resource: class {},
+    }));
+    vi.doMock("@opentelemetry/sdk-trace-base", () => ({
+      BatchSpanProcessor: class {},
+    }));
+    vi.doMock("@opentelemetry/exporter-trace-otlp-grpc", () => ({
+      OTLPTraceExporter: class {},
+    }));
+
+    const { initializeTracer } = await import("../trace-manager.js");
+    await initializeTracer("my-service");
+
+    expect(captured.beforeExit).not.toBeNull();
+
+    // Trigger the handler manually and flush microtasks.
+    captured.beforeExit?.();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("shutdown failed"),
+      expect.any(Error),
+    );
   });
 });

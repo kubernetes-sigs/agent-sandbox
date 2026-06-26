@@ -126,6 +126,10 @@ class TestableSandbox extends Sandbox {
     this._reconnectPromise = value;
   }
 
+  setPortForwardEverConnected(value: boolean): void {
+    this._portForwardEverConnected = value;
+  }
+
   callRequest(method: string, endpoint: string): Promise<Response> {
     return this.request(method, endpoint, {});
   }
@@ -1040,6 +1044,7 @@ describe("Sandbox", () => {
         createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 1 }),
       );
       sandbox._baseUrl = "http://127.0.0.1:12345";
+      sandbox.setPortForwardEverConnected(true);
 
       // Simulate port-forward process death
       const deadProc = {
@@ -1961,6 +1966,7 @@ describe("Sandbox", () => {
         createTestInit({ apiUrl: undefined, portForwardReadyTimeout: 5 }),
       );
       sandbox._baseUrl = "http://127.0.0.1:12345";
+      sandbox.setPortForwardEverConnected(true);
 
       // Dead process triggers reconnect on next request()
       const deadProc = {

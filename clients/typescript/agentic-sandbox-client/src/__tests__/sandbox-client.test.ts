@@ -493,7 +493,7 @@ describe("SandboxClient (registry)", () => {
 
     it("throws when claim not found in Kubernetes", async () => {
       mockGetNamespacedCustomObject.mockRejectedValueOnce(
-        new Error("HTTP 404"),
+        Object.assign(new Error("Not Found"), { code: 404 }),
       );
 
       const client = new SandboxClient({ apiUrl: "http://api:8080" });
@@ -607,7 +607,7 @@ describe("SandboxClient (registry)", () => {
 
     it("does not throw when claim is already 404", async () => {
       mockDeleteNamespacedCustomObject.mockRejectedValueOnce(
-        new Error("HTTP 404"),
+        Object.assign(new Error("Not Found"), { code: 404 }),
       );
 
       const client = new SandboxClient({ apiUrl: "http://api:8080" });
@@ -1208,7 +1208,7 @@ describe("SandboxClient (registry)", () => {
       });
       // 2nd GET: Sandbox CR returns 404
       mockGetNamespacedCustomObject.mockRejectedValueOnce(
-        new Error("HTTP 404"),
+        Object.assign(new Error("Not Found"), { code: 404 }),
       );
 
       await expect(client.getSandbox(sandbox1.claimName)).rejects.toThrow(

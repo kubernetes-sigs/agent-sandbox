@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -56,6 +57,9 @@ import (
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
+const workspaceContainerName = "workspace"
+const bytesPerMiB = 1024 * 1024
+const bytesPerGiB = 1024 * 1024 * 1024
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -652,6 +656,66 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 	return labels
 }
 
+// hasWorkspaceResourceOverrides reports whether the claim asks for any actual
+// override of the workspace container's resources. Returns false when the
+// struct is nil or all its fields are unset (e.g. `workspaceResources: {}`),
+// so callers can distinguish "user explicitly asked for sizing" from "user
+// included an empty struct that would be a no-op".
+func hasWorkspaceResourceOverrides(claim *extensionsv1beta1.SandboxClaim) bool {
+	r := claim.Spec.WorkspaceResources
+	if r == nil {
+		return false
+	}
+	return r.CPUMillicores > 0 || r.MemoryMiB > 0 || r.DiskGiB > 0
+}
+
+func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *extensionsv1beta1.WorkspaceResources) {
+	if overrides == nil {
+		return
+	}
+	// No-op when the override struct exists but has no positive values
+	// (e.g. user submitted `workspaceResources: {}`). Avoid initialising empty
+	// Requests/Limits maps on the container when nothing is going to be set.
+	if overrides.CPUMillicores <= 0 && overrides.MemoryMiB <= 0 && overrides.DiskGiB <= 0 {
+		return
+	}
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	if overrides.CPUMillicores > 0 {
+		qty := *resource.NewMilliQuantity(int64(overrides.CPUMillicores), resource.DecimalSI)
+		container.Resources.Requests[corev1.ResourceCPU] = qty
+		container.Resources.Limits[corev1.ResourceCPU] = qty
+	}
+	if overrides.MemoryMiB > 0 {
+		qty := *resource.NewQuantity(int64(overrides.MemoryMiB)*bytesPerMiB, resource.BinarySI)
+		container.Resources.Requests[corev1.ResourceMemory] = qty
+		container.Resources.Limits[corev1.ResourceMemory] = qty
+	}
+	if overrides.DiskGiB > 0 {
+		qty := *resource.NewQuantity(int64(overrides.DiskGiB)*bytesPerGiB, resource.BinarySI)
+		container.Resources.Requests[corev1.ResourceEphemeralStorage] = qty
+		container.Resources.Limits[corev1.ResourceEphemeralStorage] = qty
+	}
+}
+
+func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1beta1.SandboxClaim) {
+	if claim.Spec.WorkspaceResources == nil {
+		return
+	}
+	for i := range spec.Containers {
+		container := &spec.Containers[i]
+		if container.Name != workspaceContainerName {
+			continue
+		}
+		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
+		break
+	}
+}
+
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, error) {
 	logger := log.FromContext(ctx)
 
@@ -817,7 +881,11 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				return false, err
 			}
 
-			// Call helper to complete adoption (patch sandbox)
+			// Call helper to complete adoption (patch sandbox).
+			// Note: we deliberately do not call applyClaimWorkspaceResourcesToPodSpec here.
+			// Per-claim workspaceResources cause warm-pool adoption to be skipped earlier
+			// in getOrCreateSandbox (see hasWorkspaceResourceOverrides), so this code path
+			// is only reached for claims without overrides.
 			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
 				if k8errors.IsNotFound(err) {
 					return false, nil
@@ -1249,6 +1317,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
+	// Apply per-claim workspace container resource overrides (fork extension)
+	applyClaimWorkspaceResourcesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim)
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
@@ -1511,6 +1582,18 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	// If len(claim.Spec.Env) > 0 or len(claim.Spec.VolumeClaimTemplates) > 0, the controller immediately bypasses the warm pool queue.
 	if len(claim.Spec.Env) > 0 || len(claim.Spec.VolumeClaimTemplates) > 0 {
 		logger.Info("Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)", "claim", claim.Name)
+		return nil, nil
+	}
+
+	// When the claim overrides workspace resources, skip warm-pool adoption and
+	// fall through to cold creation. Warm-pool sandboxes have a backing Pod
+	// already running with the pool's default sizing; adopting and mutating only
+	// Sandbox.Spec.PodTemplate would leave the running Pod at the wrong size
+	// until restart. Cold creation gives correct sizing from day one. A separate
+	// follow-up will lift this restriction by recreating Pods on PodTemplate
+	// drift in the sandbox controller.
+	if hasWorkspaceResourceOverrides(claim) {
+		logger.Info("Skipping warm-pool adoption for claim with WorkspaceResources override", "claim", claim.Name)
 		return nil, nil
 	}
 

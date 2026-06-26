@@ -14,6 +14,8 @@
 
 import type { Mock } from "vitest";
 import { describe, expect, it, vi } from "vitest";
+import { MAX_ERROR_BODY_BYTES } from "../constants.js";
+import { SandboxRequestError } from "../exceptions.js";
 import { Filesystem } from "../files/filesystem.js";
 import type { Span, Tracer } from "../trace-manager.js";
 
@@ -65,6 +67,64 @@ function makeFilesystem(tracer: Tracer | null): Filesystem {
 }
 
 // ---------- tests ----------
+
+describe("Filesystem — JSON decode error truncation", () => {
+  it("list(): truncates body >MAX_ERROR_BODY_BYTES in the error message", async () => {
+    const longBody = "x".repeat(MAX_ERROR_BODY_BYTES + 1);
+    const requestFn = vi
+      .fn()
+      .mockResolvedValue(new Response(longBody, { status: 200 }));
+    const fs = new Filesystem(requestFn, () => null, "svc");
+
+    const err = await fs.list("/tmp").catch((e) => e);
+
+    expect(err).toBeInstanceOf(SandboxRequestError);
+    expect(err.message).toContain("…");
+    expect(err.message).not.toContain(longBody);
+  });
+
+  it("list(): does not truncate body <=MAX_ERROR_BODY_BYTES in the error message", async () => {
+    const shortBody = "x".repeat(MAX_ERROR_BODY_BYTES);
+    const requestFn = vi
+      .fn()
+      .mockResolvedValue(new Response(shortBody, { status: 200 }));
+    const fs = new Filesystem(requestFn, () => null, "svc");
+
+    const err = await fs.list("/tmp").catch((e) => e);
+
+    expect(err).toBeInstanceOf(SandboxRequestError);
+    expect(err.message).toContain(shortBody);
+    expect(err.message).not.toContain("…");
+  });
+
+  it("exists(): truncates body >MAX_ERROR_BODY_BYTES in the error message", async () => {
+    const longBody = "x".repeat(MAX_ERROR_BODY_BYTES + 1);
+    const requestFn = vi
+      .fn()
+      .mockResolvedValue(new Response(longBody, { status: 200 }));
+    const fs = new Filesystem(requestFn, () => null, "svc");
+
+    const err = await fs.exists("/tmp/file.txt").catch((e) => e);
+
+    expect(err).toBeInstanceOf(SandboxRequestError);
+    expect(err.message).toContain("…");
+    expect(err.message).not.toContain(longBody);
+  });
+
+  it("exists(): does not truncate body <=MAX_ERROR_BODY_BYTES in the error message", async () => {
+    const shortBody = "x".repeat(MAX_ERROR_BODY_BYTES);
+    const requestFn = vi
+      .fn()
+      .mockResolvedValue(new Response(shortBody, { status: 200 }));
+    const fs = new Filesystem(requestFn, () => null, "svc");
+
+    const err = await fs.exists("/tmp/file.txt").catch((e) => e);
+
+    expect(err).toBeInstanceOf(SandboxRequestError);
+    expect(err.message).toContain(shortBody);
+    expect(err.message).not.toContain("…");
+  });
+});
 
 describe("Filesystem.write — sandbox.file.size trace attribute", () => {
   it("records byte length for ASCII string content", async () => {

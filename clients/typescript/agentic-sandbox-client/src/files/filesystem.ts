@@ -15,6 +15,7 @@
 import * as path from "node:path";
 import {
   MAX_DOWNLOAD_SIZE,
+  MAX_ERROR_BODY_BYTES,
   MAX_METADATA_RESPONSE_SIZE,
   MAX_UPLOAD_SIZE,
 } from "../constants.js";
@@ -220,9 +221,13 @@ export class Filesystem {
         try {
           data = JSON.parse(rawText);
         } catch (err) {
+          const preview =
+            rawText.length > MAX_ERROR_BODY_BYTES
+              ? `${[...rawText].slice(0, MAX_ERROR_BODY_BYTES).join("")}…`
+              : rawText;
           throw new SandboxRequestError(
-            `Failed to decode JSON response from sandbox: ${rawText}`,
-            { cause: err },
+            `Failed to decode JSON response from sandbox: ${preview}`,
+            { cause: err, operation: "list" },
           );
         }
         const fileEntries = parseFileEntries(data);
@@ -270,9 +275,13 @@ export class Filesystem {
         try {
           data = JSON.parse(rawText);
         } catch (err) {
+          const preview =
+            rawText.length > MAX_ERROR_BODY_BYTES
+              ? `${[...rawText].slice(0, MAX_ERROR_BODY_BYTES).join("")}…`
+              : rawText;
           throw new SandboxRequestError(
-            `Failed to decode JSON response from sandbox: ${rawText}`,
-            { cause: err },
+            `Failed to decode JSON response from sandbox: ${preview}`,
+            { cause: err, operation: "exists" },
           );
         }
         const exists = parseExistsResult(data);

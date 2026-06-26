@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { MAX_EXECUTION_RESPONSE_SIZE } from "../constants.js";
+import {
+  MAX_ERROR_BODY_BYTES,
+  MAX_EXECUTION_RESPONSE_SIZE,
+} from "../constants.js";
 import { SandboxNotReadyError, SandboxRequestError } from "../exceptions.js";
 import { parseExecutionResult, readBoundedText } from "../response-utils.js";
 import type { SandboxInit } from "../sandbox.js";
@@ -54,9 +57,13 @@ export class ComputerUseSandbox extends Sandbox {
         try {
           data = JSON.parse(rawText);
         } catch (err) {
+          const preview =
+            rawText.length > MAX_ERROR_BODY_BYTES
+              ? `${[...rawText].slice(0, MAX_ERROR_BODY_BYTES).join("")}…`
+              : rawText;
           throw new SandboxRequestError(
-            `Failed to decode JSON response from sandbox: ${rawText}`,
-            { cause: err },
+            `Failed to decode JSON response from sandbox: ${preview}`,
+            { cause: err, operation: "agent" },
           );
         }
         const result = parseExecutionResult(data);

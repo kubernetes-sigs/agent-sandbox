@@ -299,16 +299,6 @@ def main(args):
     if not setup_python_sdk(repo_root, env):
         return 1
 
-    ts_ok, npm_path, npx_path = setup_typescript_sdk(repo_root, env)
-    if not ts_ok:
-        return 1
-
-    # SDK tests (Python + TypeScript) use SandboxClaim and SandboxWarmPool,
-    # which require --extensions to be set on the controller.
-    if not ensure_extensions_enabled():
-        print("Failed to enable extensions on controller. Aborting.")
-        return 1
-
     exit_code = 0
 
     go_test_result = 0
@@ -317,10 +307,20 @@ def main(args):
     typescript_test_result = 0
 
     if args.suite in ["all", "tests"]:
+        ts_ok, npm_path, npx_path = setup_typescript_sdk(repo_root, env)
+        if not ts_ok:
+            return 1
+
+        # SDK tests (Python + TypeScript) use SandboxClaim and SandboxWarmPool,
+        # which require --extensions to be set on the controller.
+        if not ensure_extensions_enabled():
+            print("Failed to enable extensions on controller. Aborting.")
+            return 1
+
         go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
         python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
         typescript_test_result = run_typescript_e2e_tests(repo_root, artifact_dir, env, npm_path, npx_path)
-        
+
     if args.suite in ["all", "benchmarks"]:
         go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
 

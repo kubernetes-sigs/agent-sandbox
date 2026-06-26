@@ -653,17 +653,14 @@ describe("Sandbox", () => {
     });
 
     it.each([
-      ["sub/foo.txt"],
-      ["./foo.txt"],
       ["../foo.txt"],
-      ["/abs/foo.txt"],
       ["."],
       [".."],
       ["/"],
-    ])("rejects non-plain filename: %s", async (filePath) => {
+    ])("rejects unsafe path: %s", async (filePath) => {
       const sandbox = createReadySandbox();
       await expect(sandbox.files.write(filePath, "data")).rejects.toThrow(
-        /is not a plain filename/,
+        /(escapes the sandbox root|does not name a file)/,
       );
       expect(fetch).not.toHaveBeenCalled();
     });

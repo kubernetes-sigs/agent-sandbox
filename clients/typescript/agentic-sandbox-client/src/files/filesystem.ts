@@ -30,16 +30,17 @@ import type { CallOptions, FileEntry, RequestFn } from "../types.js";
 function normalizeCallOptions(
   arg: number | CallOptions | undefined,
   defaultTimeoutSec: number,
-): { timeout: number; signal?: AbortSignal } {
+): { timeout: number; signal?: AbortSignal; allowUnsafePaths: boolean } {
   if (typeof arg === "number") {
-    return { timeout: arg };
+    return { timeout: arg, allowUnsafePaths: false };
   }
-  if (arg === undefined) {
-    return { timeout: defaultTimeoutSec };
+  if (arg == null) {
+    return { timeout: defaultTimeoutSec, allowUnsafePaths: false };
   }
   return {
     timeout: arg.timeout ?? defaultTimeoutSec,
     signal: arg.signal,
+    allowUnsafePaths: arg.allowUnsafePaths ?? false,
   };
 }
 
@@ -54,6 +55,65 @@ function encodePathSegment(s: string): string {
     /[!'()*]/g,
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
   );
+}
+
+/**
+ * path.posix.normalize preserves embedded NULs; a NUL in the filename
+ * truncates at the C/syscall layer, so "foo\x00../etc/passwd" would survive
+ * the ".." split yet resolve unexpectedly on the server.
+ *
+ * path.posix.normalize treats '\' as a literal character (legal on Linux),
+ * so '..\\etc\\passwd' splits as ['..\\etc\\passwd'] with no '..' component —
+ * the traversal check would be silently bypassed on Windows-originated input.
+ */
+function validatePathSafety(filePath: string, label: string): void {
+  for (let i = 0; i < filePath.length; i++) {
+    const code = filePath.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) {
+      throw new Error(
+        `${label} contains ASCII control characters: ${JSON.stringify(filePath)}`,
+      );
+    }
+  }
+
+  if (filePath.includes("\\")) {
+    throw new Error(
+      `${label} must use forward slashes: ${JSON.stringify(filePath)}`,
+    );
+  }
+
+  if (filePath !== filePath.trim()) {
+    throw new Error(
+      `${label} has leading or trailing whitespace: ${JSON.stringify(filePath)}`,
+    );
+  }
+}
+
+function safeUploadPath(filePath: string): string {
+  validatePathSafety(filePath, "Upload path");
+
+  const normalized = path.posix.normalize(filePath).replace(/^\/+/, "");
+  if (!normalized || normalized === ".") {
+    throw new Error(`Upload path '${filePath}' does not name a file.`);
+  }
+
+  if (normalized.split("/").some((part) => part === "..")) {
+    throw new Error(`Upload path '${filePath}' escapes the sandbox root.`);
+  }
+
+  return normalized;
+}
+
+function safeDirPath(dirPath: string): string {
+  validatePathSafety(dirPath, "Directory path");
+
+  const normalized = path.posix.normalize(dirPath).replace(/^\/+/, "") || ".";
+
+  if (normalized.split("/").some((part) => part === "..")) {
+    throw new Error(`Directory path '${dirPath}' escapes the sandbox root.`);
+  }
+
+  return normalized;
 }
 
 import { SandboxRequestError } from "../exceptions.js";
@@ -83,7 +143,10 @@ export class Filesystem {
     content: Buffer | string,
     options?: number | CallOptions,
   ): Promise<void> {
-    const { timeout, signal } = normalizeCallOptions(options, 60);
+    const { timeout, signal, allowUnsafePaths } = normalizeCallOptions(
+      options,
+      60,
+    );
     await withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -94,21 +157,14 @@ export class Filesystem {
           span.setAttribute("sandbox.file.size", Buffer.byteLength(content));
         }
 
-        if (!filePath) {
+        if (!filePath?.trim()) {
           throw new Error("write: file path cannot be empty");
         }
 
-        const base = path.basename(filePath);
-        if (
-          base === "." ||
-          base === ".." ||
-          base === "/" ||
-          base !== filePath
-        ) {
-          throw new Error(
-            `write: "${filePath}" is not a plain filename (resolved to "${base}"); ` +
-              `pass only the filename, not a path with directories`,
-          );
+        const safePath = allowUnsafePaths ? filePath : safeUploadPath(filePath);
+
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.file.path", safePath);
         }
 
         const contentBytes: Uint8Array<ArrayBuffer> =
@@ -129,7 +185,7 @@ export class Filesystem {
 
         const blob = new Blob([contentBytes]);
         const formData = new FormData();
-        formData.append("file", blob, base);
+        formData.append("file", blob, safePath);
 
         await this.requestFn("POST", "upload", {
           body: formData,
@@ -138,7 +194,7 @@ export class Filesystem {
           maxRetries: 1, // file upload is non-idempotent; never retry
         });
 
-        console.info(`File '${base}' uploaded successfully.`);
+        console.info(`File '${safePath}' uploaded successfully.`);
       },
       this.getParentContext(),
     );
@@ -148,7 +204,10 @@ export class Filesystem {
     filePath: string,
     options?: number | CallOptions,
   ): Promise<Buffer> {
-    const { timeout, signal } = normalizeCallOptions(options, 60);
+    const { timeout, signal, allowUnsafePaths } = normalizeCallOptions(
+      options,
+      60,
+    );
     return withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -158,11 +217,17 @@ export class Filesystem {
           span.setAttribute("sandbox.file.path", filePath);
         }
 
-        if (!filePath) {
+        if (!filePath?.trim()) {
           throw new Error("read: file path cannot be empty");
         }
 
-        const encodedPath = encodePathSegment(filePath);
+        const safePath = allowUnsafePaths ? filePath : safeUploadPath(filePath);
+
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.file.path", safePath);
+        }
+
+        const encodedPath = encodePathSegment(safePath);
         const response = await this.requestFn(
           "GET",
           `download/${encodedPath}`,
@@ -192,7 +257,10 @@ export class Filesystem {
     dirPath: string,
     options?: number | CallOptions,
   ): Promise<FileEntry[]> {
-    const { timeout, signal } = normalizeCallOptions(options, 60);
+    const { timeout, signal, allowUnsafePaths } = normalizeCallOptions(
+      options,
+      60,
+    );
     return withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -202,11 +270,17 @@ export class Filesystem {
           span.setAttribute("sandbox.file.path", dirPath);
         }
 
-        if (!dirPath) {
+        if (!dirPath?.trim()) {
           throw new Error("list: directory path cannot be empty");
         }
 
-        const encodedPath = encodePathSegment(dirPath);
+        const safePath = allowUnsafePaths ? dirPath : safeDirPath(dirPath);
+
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.file.path", safePath);
+        }
+
+        const encodedPath = encodePathSegment(safePath);
         const response = await this.requestFn("GET", `list/${encodedPath}`, {
           timeout,
           signal,
@@ -246,7 +320,10 @@ export class Filesystem {
     filePath: string,
     options?: number | CallOptions,
   ): Promise<boolean> {
-    const { timeout, signal } = normalizeCallOptions(options, 60);
+    const { timeout, signal, allowUnsafePaths } = normalizeCallOptions(
+      options,
+      60,
+    );
     return withSpan(
       this.getTracer(),
       this.traceServiceName,
@@ -256,11 +333,19 @@ export class Filesystem {
           span.setAttribute("sandbox.file.path", filePath);
         }
 
-        if (!filePath) {
+        if (!filePath?.trim()) {
           throw new Error("exists: file path cannot be empty");
         }
 
-        const encodedPath = encodePathSegment(filePath);
+        // safeDirPath is used because exists() applies to both files and
+        // directories; "." (sandbox root) is a valid target.
+        const safePath = allowUnsafePaths ? filePath : safeDirPath(filePath);
+
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.file.path", safePath);
+        }
+
+        const encodedPath = encodePathSegment(safePath);
         const response = await this.requestFn("GET", `exists/${encodedPath}`, {
           timeout,
           signal,

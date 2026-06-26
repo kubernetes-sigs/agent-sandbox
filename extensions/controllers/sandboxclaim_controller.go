@@ -1264,7 +1264,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxProvisioned", "Provisioning", "Created Sandbox %q", sandbox.Name)
 	}
 
-	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, "none", "not_ready")
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, claim.Spec.WarmPoolRef.Name, "not_ready")
 
 	return sandbox, nil
 }
@@ -1721,7 +1721,7 @@ func getLaunchType(sandbox *v1beta1.Sandbox) string {
 }
 
 // recordClaimStartupLatency records the startup latency based on webhook annotation.
-func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string) {
+func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string, warmpoolName string) {
 	logger := log.FromContext(ctx)
 	webhookSeenTimeStr := claim.Annotations[asmetrics.WebhookAnnotation]
 	if webhookSeenTimeStr == "" {
@@ -1738,11 +1738,11 @@ func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, 
 		logger.Error(errors.New("negative duration"), "Webhook seen time is in the future", "duration", duration, "webhookSeenTime", webhookSeenTime)
 		return
 	}
-	asmetrics.RecordClaimStartupLatency(webhookSeenTime, launchType, templateName)
+	asmetrics.RecordClaimStartupLatency(webhookSeenTime, launchType, templateName, warmpoolName)
 }
 
 // recordControllerStartupLatency records the controller startup latency based on observed time.
-func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string) {
+func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string, warmpoolName string) {
 	logger := log.FromContext(ctx)
 	if observedTimeString := claim.Annotations[asmetrics.ObservabilityAnnotation]; observedTimeString != "" {
 		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
@@ -1753,7 +1753,7 @@ func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Cont
 			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
 			return
 		}
-		asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, templateName)
+		asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, templateName, warmpoolName)
 	}
 }
 
@@ -1806,11 +1806,12 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	}
 
 	templateName := r.resolveTemplateName(sandbox)
+	warmpoolName := claim.Spec.WarmPoolRef.Name
 
 	logger.V(1).Info("SandboxClaim is marked as Ready", "claim", claim.Name, "sandbox", sandboxName, "duration", time.Since(claim.CreationTimestamp.Time))
 
-	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
-	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
+	r.recordClaimStartupLatency(ctx, claim, launchType, templateName, warmpoolName)
+	r.recordControllerStartupLatency(ctx, claim, launchType, templateName, warmpoolName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
 }
 

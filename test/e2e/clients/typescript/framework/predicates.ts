@@ -41,7 +41,15 @@ export function warmPoolReady(): (
     const status = obj?.status ?? {};
     const readyReplicas = status.readyReplicas ?? 0;
     const replicas = obj?.spec?.replicas ?? 0;
-    return readyReplicas === replicas;
+    if (readyReplicas !== replicas) return false;
+    // When replicas is 0, the above condition is trivially true even before the
+    // controller has processed the object (all fields absent → 0 === 0). Guard
+    // using status.selector, which the controller unconditionally sets on first
+    // reconcile and is never empty.
+    if (replicas === 0) {
+      return typeof status.selector === "string" && status.selector.length > 0;
+    }
+    return true;
   };
 }
 

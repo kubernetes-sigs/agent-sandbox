@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
+import fetch, { type RequestInit } from "node-fetch";
 import {
   deploymentReady,
   gatewayAddressReady,
@@ -153,37 +154,50 @@ export class TestContext {
     timeout: number = DEFAULT_TIMEOUT_SECONDS,
   ): Promise<boolean> {
     const watcher = new k8s.Watch(this.kubeConfig);
+    const startMs = Date.now();
     const timeoutMs = timeout * 1000;
 
     // Initial GET: check if already satisfied and capture resourceVersion to
     // avoid missing events that occur between the GET and watch establishment.
     let watchResourceVersion: string | undefined;
+    let initialObj: (T & { metadata?: { resourceVersion?: string } }) | undefined;
     try {
       const cluster = this.kubeConfig.getCurrentCluster();
       if (cluster?.server) {
+        const serverBase = cluster.server.replace(/\/$/, "");
         const fetchOpts = (await this.kubeConfig.applyToFetchOptions(
           {},
         )) as RequestInit;
-        fetchOpts.signal = AbortSignal.timeout(10_000);
+        const timeoutSignal = AbortSignal.timeout(10_000);
+        fetchOpts.signal = fetchOpts.signal
+          ? AbortSignal.any([fetchOpts.signal as AbortSignal, timeoutSignal])
+          : timeoutSignal;
         const resp = await fetch(
-          `${cluster.server}${watchPath}/${name}`,
+          `${serverBase}${watchPath}/${name}`,
           fetchOpts,
         );
         if (resp.ok) {
-          const obj = (await resp.json()) as T & {
+          initialObj = (await resp.json()) as T & {
             metadata?: { resourceVersion?: string };
           };
-          watchResourceVersion = obj.metadata?.resourceVersion;
-          if (predicateFn(obj)) {
-            console.log(
-              `Object ${name} already satisfied predicate (initial GET).`,
-            );
-            return true;
-          }
+          watchResourceVersion = initialObj.metadata?.resourceVersion;
+        } else {
+          // Drain the body to release the TCP socket back to the keep-alive pool.
+          resp.body?.resume();
         }
       }
     } catch {
-      // Transient error on initial GET — fall through to watch.
+      // Transient network/HTTP error — fall through to watch.
+    }
+
+    // Evaluate the predicate outside the network catch block so that
+    // errors thrown by predicateFn propagate to the caller rather than
+    // being silently swallowed as if they were transient GET failures.
+    if (initialObj != null && predicateFn(initialObj)) {
+      console.log(
+        `Object ${name} already satisfied predicate (initial GET).`,
+      );
+      return true;
     }
 
     return new Promise<boolean>((resolve, reject) => {
@@ -210,6 +224,8 @@ export class TestContext {
         abortWatch();
       };
 
+      const elapsed = Date.now() - startMs;
+      const remainingMs = Math.max(0, timeoutMs - elapsed);
       timer = setTimeout(() => {
         if (settled) return;
         settled = true;
@@ -220,12 +236,12 @@ export class TestContext {
           const desc = execFileSync(
             "kubectl",
             ["describe", resourceType, name, "-n", namespace],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 },
           );
           const pods = execFileSync(
             "kubectl",
             ["get", "pods", "-n", namespace, "-o", "wide"],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 },
           );
           console.error(
             `[waitForObject timeout ${name}] describe:\n${desc}`,
@@ -244,22 +260,38 @@ export class TestContext {
             `Object ${name} did not satisfy predicate within ${timeout} seconds.`,
           ),
         );
-      }, timeoutMs);
+      }, remainingMs);
 
       watcher
         .watch(
           watchPath,
           {
             fieldSelector: `metadata.name=${name}`,
-            ...(watchResourceVersion !== undefined
-              ? { resourceVersion: watchResourceVersion }
-              : {}),
+            // Pass the captured resourceVersion to ensure no events are missed
+            // between the initial GET and watch establishment. Fall back to "0"
+            // (replay from the API server's watch cache) when the GET failed or
+            // returned a non-ok status — "0" ensures an ADDED event is delivered
+            // for objects that already exist.
+            resourceVersion: watchResourceVersion ?? "0",
           },
           (type: string, obj: T) => {
             console.log(
               `[watch ${name}] event=${type} status=${JSON.stringify((obj as { status?: unknown })?.status)}`,
             );
-            if (!settled && predicateFn(obj)) {
+            if (settled) return;
+            let matched: boolean;
+            try {
+              matched = predicateFn(obj);
+            } catch (predicateErr) {
+              // predicateFn threw — propagate to the caller. Without this guard
+              // the k8s Watch library's own try/catch would silently discard the
+              // exception, leaving the Promise to hang until the timeout fires.
+              settled = true;
+              cleanup();
+              reject(predicateErr);
+              return;
+            }
+            if (matched) {
               console.log(
                 `Object ${name} satisfied predicate on event type ${type}.`,
               );
@@ -294,9 +326,9 @@ export class TestContext {
         )
         .then((ac) => {
           abortController = ac;
-          // If the timeout already fired before the watch was established,
-          // abort immediately so the connection doesn't linger.
-          if (timedOut) {
+          // Abort if already settled (timeout or predicate satisfied) before
+          // the watch's AbortController was returned to us.
+          if (timedOut || settled) {
             abortWatch();
           }
         })

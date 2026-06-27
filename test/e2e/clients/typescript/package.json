@@ -10,6 +10,8 @@
   "devDependencies": {
     "@kubernetes/client-node": "^1.0.0",
     "@types/node": "^22.0.0",
+    "@types/node-fetch": "^2.6.13",
+    "node-fetch": "^2.7.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.8"
   },

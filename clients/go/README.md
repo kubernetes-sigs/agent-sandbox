@@ -109,6 +109,8 @@ If your sandbox runtime listens on a port other than 8888, specify `ServerPort`.
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName: "my-sandbox-warmpool",
+    Namespace:    "default",
     ServerPort: 3000,
 })
 ```
@@ -136,6 +138,8 @@ If your Gateway uses HTTPS with a private CA, provide a custom transport:
 ```go
 tlsConfig := &tls.Config{RootCAs: myCAPool}
 client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName:  "my-sandbox-warmpool",
+    Namespace:     "default",
     GatewayName:   "external-https-gateway",
     GatewayScheme: "https",
     HTTPTransport: &http.Transport{TLSClientConfig: tlsConfig},
@@ -145,13 +149,16 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{
 ### Multi-Sandbox Management
 
 ```go
-client, err := sandbox.NewClient(ctx, sandbox.Options{})
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName: "my-sandbox-warmpool",
+    Namespace:    "default",
+})
 stop := client.EnableAutoCleanup() // cleanup on SIGINT/SIGTERM
 defer stop()
 defer client.DeleteAll(ctx)
 
-sb1, _ := client.CreateSandbox(ctx, "python-pool", "default")
-sb2, _ := client.CreateSandbox(ctx, "node-pool", "default")
+sb1, _ := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
+sb2, _ := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
 
 // List tracked sandboxes
 for _, key := range client.ListActiveSandboxes() {

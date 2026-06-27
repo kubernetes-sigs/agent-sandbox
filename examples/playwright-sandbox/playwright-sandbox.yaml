@@ -45,4 +45,5 @@ spec:
 
           asyncio.run(run())
           PY
+          sleep infinity
       restartPolicy: Never

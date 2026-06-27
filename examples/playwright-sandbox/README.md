@@ -32,6 +32,7 @@ spec:
           python3 - <<'PY'
           # Playwright script to browse, screenshot, and print page content
           PY
+          sleep infinity
       restartPolicy: Never
 ```
 
@@ -81,6 +82,11 @@ content snippet: Example Domain This domain is for use in illustrative examples 
 ```
 
 ### Retrieve the Screenshot
+
+The manifest appends `sleep infinity` to the command so the container stays
+running after the script finishes. This keeps the Sandbox alive and lets you
+use `kubectl cp` / `kubectl exec` to retrieve files from the container's
+filesystem.
 
 ```bash
 # Find the pod name

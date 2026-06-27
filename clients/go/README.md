@@ -42,13 +42,15 @@ discovers the Gateway address.
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName:     "my-sandbox-warmpool",
+    Namespace:        "default",
     GatewayName:      "external-http-gateway",
     GatewayNamespace: "default",
 })
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
 
-sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
+sb, err := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
 if err != nil { log.Fatal(err) }
 
 result, err := sb.Run(ctx, "echo 'Hello from Cloud!'")
@@ -62,11 +64,14 @@ Use this for local development or CI. If you omit `GatewayName` and `APIURL`, th
 automatically establishes an SPDY port-forward tunnel to the Router Service.
 
 ```go
-client, err := sandbox.NewClient(ctx, sandbox.Options{})
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName: "my-sandbox-warmpool",
+    Namespace:    "default",
+})
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
 
-sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
+sb, err := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
 if err != nil { log.Fatal(err) }
 
 result, err := sb.Run(ctx, "echo 'Hello from Local!'")
@@ -83,12 +88,14 @@ Use `APIURL` to bypass discovery entirely. Useful for:
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
-    APIURL: "http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080",
+    WarmPoolName: "my-sandbox-warmpool",
+    Namespace:    "default",
+    APIURL:       "http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080",
 })
 if err != nil { log.Fatal(err) }
 defer client.DeleteAll(ctx)
 
-sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
+sb, err := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
 if err != nil { log.Fatal(err) }
 
 entries, err := sb.List(ctx, ".")
@@ -102,6 +109,8 @@ If your sandbox runtime listens on a port other than 8888, specify `ServerPort`.
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName: "my-sandbox-warmpool",
+    Namespace:    "default",
     ServerPort: 3000,
 })
 ```
@@ -129,6 +138,8 @@ If your Gateway uses HTTPS with a private CA, provide a custom transport:
 ```go
 tlsConfig := &tls.Config{RootCAs: myCAPool}
 client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName:  "my-sandbox-warmpool",
+    Namespace:     "default",
     GatewayName:   "external-https-gateway",
     GatewayScheme: "https",
     HTTPTransport: &http.Transport{TLSClientConfig: tlsConfig},
@@ -138,13 +149,16 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{
 ### Multi-Sandbox Management
 
 ```go
-client, err := sandbox.NewClient(ctx, sandbox.Options{})
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName: "my-sandbox-warmpool",
+    Namespace:    "default",
+})
 stop := client.EnableAutoCleanup() // cleanup on SIGINT/SIGTERM
 defer stop()
 defer client.DeleteAll(ctx)
 
-sb1, _ := client.CreateSandbox(ctx, "python-pool", "default")
-sb2, _ := client.CreateSandbox(ctx, "node-pool", "default")
+sb1, _ := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
+sb2, _ := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
 
 // List tracked sandboxes
 for _, key := range client.ListActiveSandboxes() {

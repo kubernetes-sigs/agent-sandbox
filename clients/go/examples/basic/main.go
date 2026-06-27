@@ -28,7 +28,8 @@ func main() {
 
 	// Create client with shared configuration.
 	client, err := sandbox.NewClient(ctx, sandbox.Options{
-		Namespace: "default",
+		WarmPoolName: "my-sandbox-warmpool",
+		Namespace:    "default",
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -38,7 +39,7 @@ func main() {
 	defer client.DeleteAll(ctx)
 
 	// Create a sandbox.
-	sb, err := client.CreateSandbox(ctx, "my-warmpool", "default")
+	sb, err := client.CreateSandbox(ctx, "my-sandbox-warmpool", "default")
 	if err != nil {
 		log.Fatal(err)
 	}

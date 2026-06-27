@@ -2366,6 +2366,139 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxClaimPreservesAssignedWarmPoolSandboxWithoutPodIPs(t *testing.T) {
+	scheme := newScheme(t)
+	ctx := context.Background()
+	warmPoolUID := types.UID("warmpool-uid-123")
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+			},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: warmPoolUID},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       types.UID("claim-uid"),
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "rotating-sb",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name}},
+	}
+	rotatingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rotating-sb",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash(template.Name),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       warmPool.Name,
+				UID:        warmPoolUID,
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: "PodRecreating",
+			}},
+			PodIPs: nil,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, rotatingSandbox).
+		WithStatusSubresource(claim).
+		Build()
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	_, err := reconciler.getOrCreateSandbox(ctx, claim, template)
+	require.Error(t, err, "completing an in-progress assignment should ask reconcile to retry")
+
+	var updatedClaim extensionsv1beta1.SandboxClaim
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, &updatedClaim))
+	require.Equal(t, rotatingSandbox.Name, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+
+	var updatedSandbox sandboxv1beta1.Sandbox
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: rotatingSandbox.Name, Namespace: rotatingSandbox.Namespace}, &updatedSandbox))
+	require.True(t, metav1.IsControlledBy(&updatedSandbox, claim))
+}
+
+func TestGetCandidateRequeuesUnnetworkedWarmPoolSandboxes(t *testing.T) {
+	scheme := newScheme(t)
+	ctx := context.Background()
+	warmPoolUID := types.UID("warmpool-uid-123")
+	poolName := "test-pool"
+	key := queue.SandboxKey{Namespace: "default", Name: "rotating-sb"}
+	rotatingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash(poolName),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       poolName,
+				UID:        warmPoolUID,
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Status: sandboxv1beta1.SandboxStatus{PodIPs: nil},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: key.Namespace, UID: types.UID("claim-uid")},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: poolName}},
+	}
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	warmSandboxQueue.Add(poolName, key)
+	reconciler := &SandboxClaimReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithObjects(rotatingSandbox).Build(),
+		Scheme:           scheme,
+		WarmSandboxQueue: warmSandboxQueue,
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	candidate, _, err := reconciler.getCandidate(ctx, claim)
+	require.NoError(t, err)
+	require.Nil(t, candidate)
+
+	requeued, ok := warmSandboxQueue.Get(poolName)
+	require.True(t, ok, "unnetworked candidate should be returned to the queue")
+	require.Equal(t, key, requeued)
+}
+
 func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 	q := queue.NewSimpleSandboxQueue()
 	handler := &sandboxEventHandler{sandboxQueue: q}

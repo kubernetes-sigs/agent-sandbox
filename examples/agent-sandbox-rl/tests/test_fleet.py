@@ -79,6 +79,48 @@ def test_load_tasks_and_counts(two_cluster_registry):
   assert dict(f.image_counts()) == {"imgA": 2, "imgB": 1}
 
 
+def test_warm_images_warms_in_parallel(make_cluster):
+  import time
+  c = make_cluster("solo")
+
+  def _slow_ready(*a, **k):
+    time.sleep(0.1)
+    return True
+  c.resources.wait_for_pool_ready.side_effect = _slow_ready
+
+  f = _fleet(ClusterRegistry([c]), max_concurrent=10)
+  imgs = [f"img{i}" for i in range(10)]
+  f.load_tasks(imgs)
+  start = time.monotonic()
+  f.warm_images(imgs, wait=True)            # 10 pools, each 0.1s ready
+  elapsed = time.monotonic() - start
+  assert elapsed < 0.6                       # parallel; serial would be ~1.0s
+  assert c.resources.create_warmpool.call_count == 10
+
+
+def test_warm_images_surfaces_warm_error(make_cluster):
+  from agent_sandbox_rl.exceptions import FleetError
+  c = make_cluster("solo")
+  c.resources.wait_for_pool_ready.return_value = False   # never ready -> FleetError
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4, ready_timeout=0)
+  f.load_tasks(["i1", "i2", "i3"])
+  with pytest.raises(FleetError):
+    f.warm_images(["i1", "i2", "i3"], wait=True)
+
+
+def test_recommended_window_uses_cluster_nodes(make_cluster):
+  # disk-aware window should span the whole pool when cluster_nodes is set
+  imgs = [f"img{i}" for i in range(100)]
+  f1 = _fleet(ClusterRegistry([make_cluster("a")]), max_concurrent=500,
+              avg_image_gb=10, node_ephemeral_gb=339)            # nodes unknown -> 1 node
+  f1.load_tasks(imgs)
+  f2 = _fleet(ClusterRegistry([make_cluster("b")]), max_concurrent=500,
+              avg_image_gb=10, node_ephemeral_gb=339, cluster_nodes=30)
+  f2.load_tasks(imgs)
+  assert f1.recommended_window() < f2.recommended_window()       # 25 (1 node) < 100 (pool)
+  assert f2.recommended_window() == 100                          # all fit across the pool
+
+
 def test_warm_per_task_sizes_replicas_to_task_count(make_cluster):
   c = make_cluster("solo")
   f = _fleet(ClusterRegistry([c]), max_concurrent=1, warm_per_task=True)

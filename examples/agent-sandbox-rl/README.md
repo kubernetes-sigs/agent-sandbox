@@ -302,8 +302,11 @@ caller's concern (see the integration guide).
 (8), `warm_per_task` (False — one warm replica per task for instant claims),
 `window_size` (None=auto), `ready_timeout` (900), `template` (`TemplateSpec`),
 `template_name_prefix` (`r2e-img-`), `labels`. Disk-aware sizing (optional):
-`avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25) — when set, the auto
-window for `sliding`/`pipelined` is also capped so resident images fit node disk.
+`avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
+(None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
+images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct images
+spread across nodes) instead of a single node's (None = conservative single-node
+bound; the capacity planner sets it from the probed node count).
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,
 `node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`.
@@ -417,6 +420,28 @@ For **RL** (G rollouts per problem), the lever is instant claims —
 [`warm_per_task` + `colocate_replicas`](#eval-vs-rl--recommended-recipes) with
 `naive`/`sliding`, which minimize the per-rollout claim tail (the synchronous
 straggler) rather than batch wall.
+
+### Capacity-aware planning (full batches)
+
+`tests/run_full_swebench_benchmark.py` reads a node pool's CPU + ephemeral storage
+and computes the **optimal preload plan** for running all *N* tasks — max concurrency,
+strategy, and per-image replicas/window — so every image is pulled + *uncompressed* and
+the sandboxes are warm **before** the task phase starts. It's **plan-only by default**
+(read-only; no pools created); `--execute` runs it and reports **preload vs task** wall
+time separately.
+
+```bash
+# read the cluster + print the recommended plan (no mutation)
+PYTHONPATH=. python tests/run_full_swebench_benchmark.py \
+  --context <ctx> --namespace <ns> \
+  --node-selector cloud.google.com/gke-nodepool=<pool> \
+  --n-images 500 --avg-image-gb 10
+```
+
+It picks `naive` (warm everything = full preload) when the whole set fits the pool's
+disk/CPU/pods, else a disk-bounded `pipelined` window, and reports the binding
+bottleneck (cpu / disk / pods). For RL shapes (`--tasks-per-image G`) it turns on
+`warm_per_task` + `colocate_replicas`.
 
 ## Troubleshooting
 

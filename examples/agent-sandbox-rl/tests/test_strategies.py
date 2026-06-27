@@ -93,6 +93,26 @@ def test_naive_warms_pools_concurrently(make_cluster):
   assert f.handles() == []
 
 
+def test_sliding_warms_window_concurrently(make_cluster):
+  # the windowed strategies must warm a window's images in PARALLEL too (not 1/s):
+  # 10 images in one window, each 0.1s ready -> ~0.1s, not ~1.0s sequential.
+  from agent_sandbox_rl import ClusterRegistry
+  c = make_cluster("solo")
+
+  def _slow_ready(*a, **k):
+    time.sleep(0.1)
+    return True
+  c.resources.wait_for_pool_ready.side_effect = _slow_ready
+
+  f = _fleet(ClusterRegistry([c]), max_concurrent=10)   # window auto -> 10 (all fit)
+  f.load_tasks([f"img{i}" for i in range(10)])
+  start = time.monotonic()
+  res = f.run(lambda t, h: h.pod_name, strategy="sliding", concurrency=10)
+  elapsed = time.monotonic() - start
+  assert elapsed < 0.6      # parallel window warm; >=1.0s if serialized
+  assert len(res) == 10 and f.handles() == []
+
+
 def test_parallel_actually_overlaps(make_cluster):
   # With concurrency=4 and a 0.1s process, 4 tasks finish in ~0.1s not ~0.4s.
   from agent_sandbox_rl import ClusterRegistry

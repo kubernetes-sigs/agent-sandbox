@@ -26,10 +26,19 @@ Sandbox `v0.5.0rc1` (v1beta1).
   prefetch + process + unwarm, and `wait_for_pool_ready` holds a thread) it starved
   teardown and **deadlocked** at scale. Fixes that; live-validated (100/100 where it
   previously hung). `close()` shuts the pool down (called from `__aexit__`).
-- **Parallel pool warming** (`fleet.py`): `start_warmpools` now warms pools
-  **concurrently** (bounded by `max_concurrent`) instead of one-at-a-time, so each
-  pool's `wait_pool_ready` (image pull) overlaps the others. Removes the `naive`
-  prep bottleneck (was O(#images) serial — measured ~7× slower than `sliding`).
+- **Parallel pool warming, all strategies** (`fleet.py`, `strategies.py`):
+  `start_warmpools` and the **windowed strategies** (`sliding`/`pipelined`) now warm
+  pools **concurrently** (bounded by `max_concurrent`). Extracted the fan-out into
+  `fleet._warm_entries` and added `fleet.warm_images(images)` (a window warmed in
+  parallel); `_run_windowed`/`_run_pipelined` use it instead of warming one image at a
+  time. Measured at 500 images: `sliding` dropped **2556s → 279s (9.2×)**, making the
+  windowed strategies competitive with `naive` (the async path was already concurrent).
+- **Node-aware disk window sizing** (`sizing.py`, `config.py`, `fleet.py`):
+  `recommend_window_disk` / `recommend_window_pipelined` gained a `nodes` arg so the
+  disk budget is the **whole pool's** usable disk (distinct images spread across nodes),
+  not a single node's. New `FleetConfig.cluster_nodes` feeds it (None = conservative
+  single-node bound). On a 30-node pool this lifted the auto window from 25 → 500 images;
+  the capacity planner sets it from the probed node count.
 - **Instant-claim mode for RL** (`config.py`, `sizing.py`, `fleet.py`,
   `resources.py`): two opt-in levers (both default off) that trade resources for
   near-zero claim latency. **`FleetConfig.warm_per_task`** sizes each pool to
@@ -61,6 +70,14 @@ Sandbox `v0.5.0rc1` (v1beta1).
   avg/max = time-to-sandbox**, claims, net task time, warm-pool peak/total/created,
   wall, efficiency), and a **metric glossary** for the raw RunReport phases. Pure
   helpers unit-tested in `tests/test_loadtest.py`.
+- **Capacity-aware preload planner** (`tests/run_full_swebench_benchmark.py`): reads a
+  node pool's allocatable CPU + ephemeral storage + pod density and computes the optimal
+  plan for the full N-task batch — strategy (`naive` warm-all when it fits, else a
+  disk-bounded `pipelined` window), `max_concurrent`, per-image replicas, and the binding
+  bottleneck (cpu/disk/pods) — so all images are pulled + uncompressed and warm **before**
+  the task phase. Plan-only by default (read-only); `--execute` runs it and reports
+  **preload vs task** wall time separately. Pure planner helpers (`parse_cpu_milli`,
+  `parse_quantity_bytes`, `probe_capacity`, `plan_benchmark`) unit-tested.
 - **Docs**: `docs/gke.md` GKE tuning guide (Image Streaming, AR mirror, secondary
   boot disk); README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
@@ -149,7 +166,7 @@ Sandbox `v0.5.0rc1` (v1beta1).
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).
 - **Docs**: README, `docs/architecture.md`, this changelog.
-- **Tests**: 188 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
+- **Tests**: 204 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
   pool readiness + fail-fast on terminal errors, cluster, sources, placement,
   fleet incl. 2-cluster routing + acquire rollback + idempotent release,
   strategies/parallel, preflight, prepull, async, swebench incl. `keep_row`,

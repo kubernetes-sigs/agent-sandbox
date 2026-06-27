@@ -87,11 +87,15 @@ def recommend_window_disk(
     pipeline_factor: float = 1.0,
     buffer: int = 0,
     per_task: bool = False,
+    nodes: int = 1,
 ) -> int:
   """Largest window whose resident image bytes fit the usable node disk.
 
-  Conservative co-location bound: the window's replicas may all land on one node,
-  so ``pipeline_factor · sum(window replicas) · avg_image_gb ≤ usable_disk_gb``.
+  Disk budget = ``usable_disk_gb · nodes`` (the cluster's usable ephemeral disk):
+  distinct images **spread across the node pool**, so the resident set is bounded by
+  total cluster disk, not a single node's. With the default ``nodes=1`` this reduces
+  to the conservative single-node bound (a window's replicas might all co-locate);
+  pass the real node count to use the pool's full capacity.
   ``pipeline_factor`` accounts for keeping up to N windows resident at once (2 for
   the pipelined strategy). Returns ≥ 1 (always allow at least one image)."""
   if not image_totals:
@@ -99,7 +103,7 @@ def recommend_window_disk(
   if not avg_image_gb or not usable_disk_gb:
     return len(image_totals)               # disk-unbounded
   total = sum(image_totals.values()) or 1
-  budget_gb = usable_disk_gb / max(1e-9, pipeline_factor)
+  budget_gb = (usable_disk_gb * max(1, nodes)) / max(1e-9, pipeline_factor)
   used_gb = 0.0
   window = 0
   for cnt in image_totals.values():
@@ -121,12 +125,14 @@ def recommend_window_pipelined(
     usable_disk_gb: float | None = None,
     buffer: int = 0,
     per_task: bool = False,
+    nodes: int = 1,
 ) -> int:
   """Window for the pipelined (double-buffered) strategy.
 
   The pipeline keeps up to **two** windows resident at once, so halve the
   concurrency window to keep peak ~ ``max_concurrent``; then, if disk hints are
-  given, cap by disk with a 2× factor (each cap applies its factor exactly once)."""
+  given, cap by disk with a 2× factor (each cap applies its factor exactly once).
+  ``nodes`` lets the disk cap use the whole pool's disk (distinct images spread)."""
   conc_win = max(1, recommend_window(
       image_totals, max_concurrent, max_pool, per_task=per_task) // 2)
   if avg_image_gb is None or usable_disk_gb is None:
@@ -134,7 +140,7 @@ def recommend_window_pipelined(
   disk_win = recommend_window_disk(
       image_totals, max_concurrent, max_pool, avg_image_gb=avg_image_gb,
       usable_disk_gb=usable_disk_gb, pipeline_factor=2.0, buffer=buffer,
-      per_task=per_task)
+      per_task=per_task, nodes=nodes)
   return max(1, min(conc_win, disk_win))
 
 

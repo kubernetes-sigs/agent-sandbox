@@ -70,6 +70,18 @@ def test_per_task_warms_one_replica_per_task():
   assert compute_replicas(0, 100, 8, 32, per_task=True) == 0     # no tasks -> none
 
 
+def test_disk_window_is_node_aware():
+  # distinct images spread across the pool: a single node's disk caps small, but the
+  # cluster-wide budget (nodes x per-node) uses the whole pool.
+  totals = OrderedDict((f"img{i}", 1) for i in range(500))
+  assert recommend_window_disk(totals, 500, 64, avg_image_gb=10, usable_disk_gb=254) == 25
+  assert recommend_window_disk(totals, 500, 64, avg_image_gb=10, usable_disk_gb=254,
+                               nodes=30) == 500       # capped only by concurrency now
+  # pipelined halves the concurrency window (250), node-aware disk no longer the limit
+  assert recommend_window_pipelined(totals, 500, 64, avg_image_gb=10,
+                                    usable_disk_gb=254, nodes=30) == 250
+
+
 def test_per_task_window_packs_fewer_images():
   totals = OrderedDict((f"img{i}", 4) for i in range(8))   # 4 tasks each
   # share path: each image rounds to 1 replica at budget 8 -> window 8.

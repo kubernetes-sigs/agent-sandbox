@@ -107,8 +107,7 @@ def _run_windowed(fleet, process_fn, concurrency, window, replicas_override=None
   try:
     for start in range(0, len(images), window):
       batch = images[start:start + window]
-      for img in batch:
-        fleet.warm_image(img, replicas_override=replicas_override, wait=True)
+      fleet.warm_images(batch, replicas_override=replicas_override, wait=True)
       batch_pairs = [(i, t) for img in batch for (i, t) in by_image[img]]
       batch_tasks = [t for _i, t in batch_pairs]
       logger.info("window [%d..%d): %d image(s), %d task(s)",
@@ -147,9 +146,8 @@ def _run_pipelined(fleet, process_fn, concurrency, window,
   results = [None] * len(fleet.tasks)
   batches = [images[s:s + window] for s in range(0, len(images), window)]
 
-  def _warm(batch):
-    for img in batch:
-      fleet.warm_image(img, replicas_override=replicas_override, wait=True)
+  def _warm(batch):                         # warm the whole window in parallel
+    fleet.warm_images(batch, replicas_override=replicas_override, wait=True)
 
   def _prefetch(batch):                     # background warm, timed as "prefetch"
     with fleet._obs.phase("prefetch"):

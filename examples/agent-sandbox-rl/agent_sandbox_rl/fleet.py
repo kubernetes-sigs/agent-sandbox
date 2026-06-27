@@ -187,6 +187,7 @@ class SandboxFleet:
     counts = self.image_counts()
     avg, usable = self._disk_spec()
     per_task = self.config.warm_per_task
+    nodes = self.config.cluster_nodes or 1   # spread distinct images across the pool
     if pipelined and per_task:
       logger.warning(
           "pipelined + warm_per_task: deep per-image replicas shrink the prefetch "
@@ -195,7 +196,7 @@ class SandboxFleet:
     if pipelined:
       return sizing.recommend_window_pipelined(
           counts, self.config.max_concurrent, self.config.max_warmpool_size,
-          avg_image_gb=avg, usable_disk_gb=usable, per_task=per_task)
+          avg_image_gb=avg, usable_disk_gb=usable, per_task=per_task, nodes=nodes)
     win = sizing.recommend_window(
         counts, self.config.max_concurrent, self.config.max_warmpool_size,
         per_task=per_task)
@@ -203,7 +204,7 @@ class SandboxFleet:
       win = min(win, sizing.recommend_window_disk(
           counts, self.config.max_concurrent, self.config.max_warmpool_size,
           avg_image_gb=avg, usable_disk_gb=usable, pipeline_factor=1.0,
-          per_task=per_task))
+          per_task=per_task, nodes=nodes))
     return max(1, win)
 
   # --- preflight / plan -------------------------------------------------- #
@@ -333,21 +334,24 @@ class SandboxFleet:
               f"warm pool '{e.pool}' on cluster '{e.cluster}' did not become "
               f"ready within {self.config.ready_timeout}s")
 
-  def start_warmpools(self, wait: bool = True) -> None:
-    """Warm every planned pool. Pools are warmed **concurrently** (bounded by
-    ``max_concurrent``): each pool's ``wait_for_pool_ready`` blocks on the image
-    pull, so serializing them made ``naive`` prep O(#images) slow — this mirrors
-    the parallel warm the windowed strategies already do."""
-    entries = (self.plan_ or self.plan()).entries
+  def _warm_entries(self, entries, wait: bool,
+                    replicas_override: int | None = None) -> None:
+    """Warm a set of plan entries **concurrently** (bounded by ``max_concurrent``).
+    Each entry's ``wait_for_pool_ready`` blocks on the image pull, so serializing
+    them is O(#images) slow; this fans out across a thread pool and raises the first
+    error (teardown cleans up partial state). Shared by ``start_warmpools`` (all
+    pools) and ``warm_images`` (a window) — both warm one entry per distinct image,
+    which ``_warm_entry`` is safe for."""
     if not entries:
       return
     workers = max(1, min(len(entries), self.config.max_concurrent))
     if workers == 1 or len(entries) == 1:
       for e in entries:
-        self._warm_entry(e, wait)
+        self._warm_entry(e, wait, replicas_override=replicas_override)
       return
     with ThreadPoolExecutor(max_workers=workers) as ex:
-      futures = [ex.submit(self._warm_entry, e, wait) for e in entries]
+      futures = [ex.submit(self._warm_entry, e, wait, replicas_override)
+                 for e in entries]
       err = None
       for f in as_completed(futures):
         try:
@@ -356,6 +360,23 @@ class SandboxFleet:
           err = err or exc
       if err is not None:
         raise err
+
+  def start_warmpools(self, wait: bool = True) -> None:
+    """Warm every planned pool, concurrently (bounded by ``max_concurrent``)."""
+    self._warm_entries((self.plan_ or self.plan()).entries, wait)
+
+  def warm_images(self, images, *, replicas_override: int | None = None,
+                  wait: bool = True) -> None:
+    """Warm a subset of images' pools **concurrently** (used by sliding/pipelined to
+    warm a whole window in parallel instead of one image at a time)."""
+    plan = self.plan_ or self.plan()
+    resolved = [(img, plan.for_image(img)) for img in images]
+    entries = [e for _img, e in resolved if e is not None]
+    missing = [img for img, e in resolved if e is None]
+    if missing:                              # callers pass planned images; None = a bug
+      logger.warning("warm_images: %d image(s) not in the plan, skipped: %s",
+                     len(missing), missing[:5])
+    self._warm_entries(entries, wait, replicas_override=replicas_override)
 
   def warm_image(self, image: str, *, replicas_override: int | None = None,
                  wait: bool = True) -> None:

@@ -129,6 +129,10 @@ class FleetConfig(BaseModel):
   avg_image_gb: float | None = None
   node_ephemeral_gb: float | None = None
   disk_headroom: float = 0.25
+  # Node count of the target pool. Lets disk-aware window sizing use the *cluster's*
+  # usable disk (distinct images spread across nodes) instead of a single node's.
+  # None => conservative single-node bound (safe when the pool size is unknown).
+  cluster_nodes: int | None = None
 
   @field_validator("max_concurrent", "max_warmpool_size")
   @classmethod
@@ -151,11 +155,11 @@ class FleetConfig(BaseModel):
       raise ValueError("disk_headroom must be in [0, 1)")
     return v
 
-  @field_validator("window_size")
+  @field_validator("window_size", "cluster_nodes")
   @classmethod
   def _window_positive(cls, v: int | None) -> int | None:
     if v is not None and v < 1:
-      raise ValueError("window_size must be >= 1 or None (auto)")
+      raise ValueError("must be >= 1 or None")
     return v
 
   @field_validator("template_name_prefix")

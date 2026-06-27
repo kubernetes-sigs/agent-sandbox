@@ -762,8 +762,11 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 		// PodIPs is the adoption boundary: without it, the backing Pod is missing
 		// or not networked yet. Keep the candidate in the queue so it can be
-		// retried once networking completes.
+		// retried once networking completes. Normalize NodeName from the latest
+		// Sandbox status before requeueing so a stale queue key does not erase
+		// placement information used by pickSmart.
 		if len(adopted.Status.PodIPs) == 0 {
+			adoptedKey.NodeName = adopted.Status.NodeName
 			skipped = append(skipped, adoptedKey)
 			continue
 		}

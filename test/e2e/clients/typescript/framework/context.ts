@@ -155,6 +155,37 @@ export class TestContext {
     const watcher = new k8s.Watch(this.kubeConfig);
     const timeoutMs = timeout * 1000;
 
+    // Initial GET: check if already satisfied and capture resourceVersion to
+    // avoid missing events that occur between the GET and watch establishment.
+    let watchResourceVersion: string | undefined;
+    try {
+      const cluster = this.kubeConfig.getCurrentCluster();
+      if (cluster?.server) {
+        const fetchOpts = (await this.kubeConfig.applyToFetchOptions(
+          {},
+        )) as RequestInit;
+        fetchOpts.signal = AbortSignal.timeout(10_000);
+        const resp = await fetch(
+          `${cluster.server}${watchPath}/${name}`,
+          fetchOpts,
+        );
+        if (resp.ok) {
+          const obj = (await resp.json()) as T & {
+            metadata?: { resourceVersion?: string };
+          };
+          watchResourceVersion = obj.metadata?.resourceVersion;
+          if (predicateFn(obj)) {
+            console.log(
+              `Object ${name} already satisfied predicate (initial GET).`,
+            );
+            return true;
+          }
+        }
+      }
+    } catch {
+      // Transient error on initial GET — fall through to watch.
+    }
+
     return new Promise<boolean>((resolve, reject) => {
       // Track whether the promise has been settled (resolved or rejected)
       // to prevent duplicate resolve/reject calls.
@@ -218,7 +249,12 @@ export class TestContext {
       watcher
         .watch(
           watchPath,
-          { fieldSelector: `metadata.name=${name}` },
+          {
+            fieldSelector: `metadata.name=${name}`,
+            ...(watchResourceVersion !== undefined
+              ? { resourceVersion: watchResourceVersion }
+              : {}),
+          },
           (type: string, obj: T) => {
             console.log(
               `[watch ${name}] event=${type} status=${JSON.stringify((obj as { status?: unknown })?.status)}`,

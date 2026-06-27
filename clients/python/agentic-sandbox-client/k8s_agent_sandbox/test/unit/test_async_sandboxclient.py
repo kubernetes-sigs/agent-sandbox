@@ -375,7 +375,6 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             pod_metadata=None,
         )
 
-
     async def test_create_sandbox_without_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
         mock_sandbox_instance = MagicMock()

@@ -536,7 +536,7 @@ if __name__ == "__main__":
                         help="Namespace to create sandbox in")
     parser.add_argument("--server-port", type=int, default=8888,
                         help="Port the sandbox container listens on")
-    parser.add_argument("--router-namespace", default="agent-sandbox-system",
+    parser.add_argument("--router-namespace", default="default",
                         help="Namespace where the Router service resides")
     parser.add_argument("--enable-tracing",
                         action="store_true",

@@ -351,7 +351,6 @@ class TestSandboxClient(unittest.TestCase):
             pod_metadata=None,
         )
 
-
     def test_validate_labels_rejects_invalid_value(self):
         with self.assertRaises(ValueError) as ctx:
             self.client.create_sandbox("test-warmpool", labels={"agent": "invalid value!"})
@@ -479,7 +478,6 @@ class TestSandboxClient(unittest.TestCase):
             volume_claim_templates=None,
             pod_metadata=None,
         )
-
 
     def test_shutdown_after_seconds_validation_zero(self):
         with self.assertRaises(ValueError) as ctx:

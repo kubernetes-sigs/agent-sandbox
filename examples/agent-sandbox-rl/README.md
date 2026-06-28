@@ -423,25 +423,80 @@ straggler) rather than batch wall.
 
 ### Capacity-aware planning (full batches)
 
-`tests/run_full_swebench_benchmark.py` reads a node pool's CPU + ephemeral storage
-and computes the **optimal preload plan** for running all *N* tasks — max concurrency,
-strategy, and per-image replicas/window — so every image is pulled + *uncompressed* and
-the sandboxes are warm **before** the task phase starts. It's **plan-only by default**
-(read-only; no pools created); `--execute` runs it and reports **preload vs task** wall
-time separately.
+The planner reads a node pool's CPU + ephemeral storage + pod density and computes the
+**optimal preload plan** for running all *N* tasks — strategy, `max_concurrent`, and
+per-image replicas/window — so every image is pulled + *uncompressed* and the sandboxes
+are warm **before** the task phase. It picks `naive` (warm everything) when the whole set
+fits the pool's disk/CPU/pods, else a disk-bounded `pipelined` window, and reports the
+binding bottleneck (cpu / disk / pods). For RL shapes (`tasks_per_image > 1`) it enables
+`warm_per_task` + `colocate_replicas`. Three ways to use it:
+
+**1. Importable API** (`agent_sandbox_rl.capacity`):
+
+```python
+from agent_sandbox_rl import (Cluster, ClusterConfig, probe_capacity,
+                              plan_benchmark, render_plan)
+core = Cluster(ClusterConfig(context="my-ctx")).core_api
+cap  = probe_capacity(core, "cloud.google.com/gke-nodepool=my-pool")
+plan = plan_benchmark(cap, n_images=500, tasks_per_image=1, avg_image_gb=10)
+print(render_plan(cap, plan))      # capacity + recommended strategy/concurrency/replicas
+# -> plan.strategy, plan.max_concurrent, plan.replicas_per_image, plan.bottleneck ...
+```
+
+**2. Interactive wizard** — consults you (cluster, node pool, batch shape), prints the
+plan, and offers to run it. Plan-only/read-only by default:
 
 ```bash
-# read the cluster + print the recommended plan (no mutation)
+python examples/plan_capacity.py            # prompts; or pass flags + --non-interactive
+```
+
+**3. Benchmark CLI** — plan + optional timed run (preload vs task), writes a report:
+
+```bash
 PYTHONPATH=. python tests/run_full_swebench_benchmark.py \
   --context <ctx> --namespace <ns> \
   --node-selector cloud.google.com/gke-nodepool=<pool> \
-  --n-images 500 --avg-image-gb 10
+  --n-images 500 --avg-image-gb 10            # add --execute to actually run
 ```
 
-It picks `naive` (warm everything = full preload) when the whole set fits the pool's
-disk/CPU/pods, else a disk-bounded `pipelined` window, and reports the binding
-bottleneck (cpu / disk / pods). For RL shapes (`--tasks-per-image G`) it turns on
-`warm_per_task` + `colocate_replicas`.
+## Setting your controller to high scale
+
+The fleet can fan out hundreds–thousands of concurrent claims, but throughput is
+ultimately bounded by the **Agent Sandbox controller's** reconcile concurrency, not
+this package. The controller ships with conservative defaults: the **Sandbox**
+controller reconciles at **1 worker** and **SandboxClaim** at **50** — so a
+1000-wide `max_concurrent` run still has its sandbox state transitions serialized
+one at a time. For large eval/RL batches, raise the controller's worker flags (on
+the controller Deployment's container args, namespace `agent-sandbox-system`):
+
+| flag | default | recommended (high scale) | why |
+|---|---:|---:|---|
+| `--kube-api-qps` | `-1` | **`-1`** (leave) | `-1` disables client-side rate limiting entirely — already optimal. |
+| `--kube-api-burst` | `10` | n/a | **Moot while `qps=-1`** (burst is only consulted when QPS > 0). Only raise if you set a positive QPS. |
+| `--sandbox-concurrent-workers` | `1` | **`1000`** | Sandbox reconciles (claim binding → Ready) are the main serializer; match your peak concurrent sandboxes. |
+| `--sandbox-claim-concurrent-workers` | `50` | **`1000`** | Concurrent `SandboxClaim` reconciles; match peak in-flight claims. |
+| `--sandbox-warm-pool-concurrent-workers` | `1` | **`1000`** | Parallel warm-pool reconciles (one per image pool); raise so many pools warm at once. |
+| `--sandbox-template-concurrent-workers` | `1` | **`1000`** | Parallel template reconciles. |
+| `--sandbox-warm-pool-max-batch-size` | `300` | **`1000`** | Parallel pod create/delete *within* one warm-pool reconcile. |
+
+**Key point:** `--kube-api-qps`/`--kube-api-burst` are *not* the lever — the
+controller's API client is already uncapped at `qps=-1`. The **worker concurrency**
+flags are what unblock high-scale claims. Size them to your `max_concurrent`. Also
+size this package's client pool (`build_api_client` defaults the urllib3
+`connection_pool_maxsize` to 1000) to match — otherwise the driver throttles before
+the controller does.
+
+Example patch:
+
+```bash
+kubectl -n agent-sandbox-system patch deploy agent-sandbox-controller --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-claim-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-template-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-max-batch-size=1000"}
+]'
+```
 
 ## Troubleshooting
 

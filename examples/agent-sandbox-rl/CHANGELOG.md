@@ -70,14 +70,17 @@ Sandbox `v0.5.0rc1` (v1beta1).
   avg/max = time-to-sandbox**, claims, net task time, warm-pool peak/total/created,
   wall, efficiency), and a **metric glossary** for the raw RunReport phases. Pure
   helpers unit-tested in `tests/test_loadtest.py`.
-- **Capacity-aware preload planner** (`tests/run_full_swebench_benchmark.py`): reads a
-  node pool's allocatable CPU + ephemeral storage + pod density and computes the optimal
-  plan for the full N-task batch — strategy (`naive` warm-all when it fits, else a
-  disk-bounded `pipelined` window), `max_concurrent`, per-image replicas, and the binding
-  bottleneck (cpu/disk/pods) — so all images are pulled + uncompressed and warm **before**
-  the task phase. Plan-only by default (read-only); `--execute` runs it and reports
-  **preload vs task** wall time separately. Pure planner helpers (`parse_cpu_milli`,
-  `parse_quantity_bytes`, `probe_capacity`, `plan_benchmark`) unit-tested.
+- **Capacity-aware preload planner** (`agent_sandbox_rl/capacity.py`): a first-class,
+  importable API — `probe_capacity` (reads a pool's allocatable CPU + ephemeral storage +
+  pod density), `plan_benchmark` (optimal plan: strategy `naive` warm-all when it fits, else
+  a disk-bounded `pipelined` window; `max_concurrent`; per-image replicas; binding
+  bottleneck cpu/disk/pods), and `render_plan` (no extra deps). Exposed via
+  `from agent_sandbox_rl import probe_capacity, plan_benchmark, render_plan`. Three entry
+  points: the API, an **interactive wizard** (`examples/plan_capacity.py` — prompts for
+  cluster/pool/batch, prints the plan, offers to run; plan-only/read-only by default), and
+  the benchmark CLI (`tests/run_full_swebench_benchmark.py`, plan-only by default;
+  `--execute` runs it and reports **preload vs task** wall separately). Pure helpers
+  unit-tested in `tests/test_capacity.py`.
 - **Docs**: `docs/gke.md` GKE tuning guide (Image Streaming, AR mirror, secondary
   boot disk); README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
@@ -166,7 +169,7 @@ Sandbox `v0.5.0rc1` (v1beta1).
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).
 - **Docs**: README, `docs/architecture.md`, this changelog.
-- **Tests**: 204 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
+- **Tests**: 206 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
   pool readiness + fail-fast on terminal errors, cluster, sources, placement,
   fleet incl. 2-cluster routing + acquire rollback + idempotent release,
   strategies/parallel, preflight, prepull, async, swebench incl. `keep_row`,

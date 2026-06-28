@@ -26,6 +26,13 @@ See README.md, docs/architecture.md, and docs/design.md.
 
 from . import constants
 from .adapters.swebench import SWEBENCH_PROBE, SweBenchSource, swebench_probe
+from .capacity import (
+    BenchmarkPlan,
+    ClusterCapacity,
+    plan_benchmark,
+    probe_capacity,
+    render_plan,
+)
 from .cluster import Cluster, ClusterRegistry, build_api_client
 from .config import (
     ClusterConfig,
@@ -79,6 +86,12 @@ __all__ = [
     "recommend_window_disk",
     "recommend_window_pipelined",
     "plan",
+    # capacity planning
+    "probe_capacity",
+    "plan_benchmark",
+    "render_plan",
+    "ClusterCapacity",
+    "BenchmarkPlan",
     # sources
     "Task",
     "TaskSource",

@@ -12,116 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the pure helpers of the full-SWE-bench capacity planner."""
-
-from types import SimpleNamespace
-
-import pytest
+"""CLI-glue tests for the full-SWE-bench runner. The planner itself is covered by
+``test_capacity.py``; here we test the runner's preload/task report rendering."""
 
 import run_full_swebench_benchmark as bench
 
 GiB = 1024 ** 3
 
 
-# --- quantity parsing ------------------------------------------------------ #
-def test_parse_cpu_milli():
-  assert bench.parse_cpu_milli("31850m") == 31850
-  assert bench.parse_cpu_milli("16") == 16000
-  assert bench.parse_cpu_milli("1500m") == 1500
-  assert bench.parse_cpu_milli("0") == 0
-
-
-def test_parse_quantity_bytes():
-  assert bench.parse_quantity_bytes("364209683290") == 364209683290     # plain bytes
-  assert bench.parse_quantity_bytes("339Gi") == int(339 * GiB)
-  assert bench.parse_quantity_bytes("1000Ki") == 1000 * 1024            # binary before 'K'
-  assert bench.parse_quantity_bytes("1G") == 1000 ** 3                  # decimal
-  assert bench.parse_quantity_bytes("110") == 110
-
-
-# --- capacity probe (fake CoreV1Api) --------------------------------------- #
-def _fake_node():
-  return SimpleNamespace(
-      status=SimpleNamespace(allocatable={
-          "cpu": "31850m", "ephemeral-storage": "364209683290", "pods": "110"}),
-      metadata=SimpleNamespace(labels={
-          "node.kubernetes.io/instance-type": "e2-standard-32",
-          "cloud.google.com/gke-nodepool": "gvisor-pool-500"}))
-
-
-def test_probe_capacity_sums_allocatable():
-  nodes = [_fake_node(), _fake_node()]
-  core = SimpleNamespace(list_node=lambda label_selector=None: SimpleNamespace(items=nodes))
-  cap = bench.probe_capacity(core, node_selector="cloud.google.com/gke-nodepool=gvisor-pool-500")
-  assert cap.nodes == 2
-  assert cap.cpu_milli_total == 2 * 31850
-  assert cap.pods_total == 220
-  assert cap.machine_types == ["e2-standard-32"]
-  assert cap.pool == "gvisor-pool-500"
-  assert cap.disk_gb_per_node == pytest.approx(364209683290 / GiB, rel=1e-3)
-
-
-def test_probe_capacity_raises_on_no_nodes():
-  core = SimpleNamespace(list_node=lambda label_selector=None: SimpleNamespace(items=[]))
-  with pytest.raises(ValueError):
-    bench.probe_capacity(core, node_selector="nope=nope")
-
-
-# --- the planner ----------------------------------------------------------- #
-def _cap(nodes=30, vcpu=31.85, disk_gib=339.2, pods=110, pool="gvisor-pool-500"):
+def _cap(nodes=30, vcpu=31.85, disk_gib=339.2, pods=110):
   return bench.ClusterCapacity(
-      pool=pool, nodes=nodes, machine_types=["e2-standard-32"],
+      pool="gvisor-pool-500", nodes=nodes, machine_types=["e2-standard-32"],
       cpu_milli_total=int(nodes * vcpu * 1000),
       disk_gb_total=round(nodes * disk_gib, 1), pods_total=nodes * pods)
 
 
-def test_plan_big_cluster_fits_all_naive():
-  plan = bench.plan_benchmark(_cap(), n_images=500, tasks_per_image=1, avg_image_gb=10)
-  assert plan.strategy == "naive"
-  assert plan.window_size is None
-  assert plan.max_concurrent == 500          # all tasks at once
-  assert plan.replicas_per_image == 1
-  assert plan.total_warm_pods == 500
-  assert plan.bottleneck == "none"
-  assert plan.resident_disk_per_node_gb <= plan.usable_disk_per_node_gb
-
-
-def test_plan_disk_bound_falls_back_to_pipelined():
-  # tiny disk per node -> can't warm 500 images -> pipelined, disk-bottlenecked
-  cap = _cap(nodes=3, disk_gib=50)
-  plan = bench.plan_benchmark(cap, n_images=500, tasks_per_image=1, avg_image_gb=10)
-  assert plan.strategy == "pipelined"
-  assert plan.bottleneck == "disk"
-  assert plan.window_size is not None and plan.window_size >= 1
-  assert plan.max_concurrent >= 1
-
-
-def test_plan_cpu_bound_falls_back_to_pipelined():
-  # plenty of disk/pods but too little CPU to warm all 500 pods at 250m
-  cap = _cap(nodes=30, vcpu=4, disk_gib=1000)      # 120 vCPU total < 500*0.25
-  plan = bench.plan_benchmark(cap, n_images=500, tasks_per_image=1,
-                              avg_image_gb=1, cpu_request_milli=250)
-  assert plan.strategy == "pipelined"
-  assert plan.bottleneck == "cpu"
-  assert plan.max_concurrent <= 120_000 // 250    # bounded by cpu_cap
-
-
-def test_plan_rl_shape_enables_instant_claim():
-  plan = bench.plan_benchmark(_cap(), n_images=50, tasks_per_image=8, avg_image_gb=10)
-  assert plan.warm_per_task is True
-  assert plan.colocate is True
-  assert plan.replicas_per_image == 8
-  assert plan.n_tasks == 400
-
-
-def test_plan_rejects_bad_counts():
-  with pytest.raises(ValueError):
-    bench.plan_benchmark(_cap(), n_images=0)
-  with pytest.raises(ValueError):
-    bench.plan_benchmark(_cap(), n_images=10, tasks_per_image=0)
-
-
-# --- report rendering ------------------------------------------------------ #
 def test_format_report_plan_only():
   cap = _cap()
   plan = bench.plan_benchmark(cap, 500, 1, avg_image_gb=10)

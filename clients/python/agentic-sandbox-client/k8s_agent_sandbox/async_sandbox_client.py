@@ -132,7 +132,7 @@ class AsyncSandboxClient(Generic[T]):
         async with self._lock:
             for sandbox in self._active_connection_sandboxes.values():
                 try:
-                    await sandbox._close_connection()
+                    await sandbox.close_connection()
                 except Exception as e:
                     logger.error(f"Failed to close sandbox connection: {e}")
             self._active_connection_sandboxes.clear()

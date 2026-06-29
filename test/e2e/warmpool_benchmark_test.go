@@ -155,13 +155,14 @@ func runWarmPoolParallelClaim(t *framework.TestContext, warmPoolSize int) {
 		})
 	}()
 
+	replicas := int32(warmPoolSize)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "warmpool",
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas:    int32(warmPoolSize),
+			Replicas:    &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
 		},
 	}

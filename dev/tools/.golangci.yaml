@@ -27,6 +27,8 @@ linters:
           deny:
             - pkg: sort
               desc: Should be replaced with slices package
+    misspell:
+      mode: default
   exclusions:
     generated: lax
     presets:

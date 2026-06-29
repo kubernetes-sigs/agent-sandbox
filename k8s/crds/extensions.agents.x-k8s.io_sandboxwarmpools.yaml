@@ -19,6 +19,9 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -35,6 +38,7 @@ spec:
           spec:
             properties:
               replicas:
+                default: 1
                 format: int32
                 minimum: 0
                 type: integer
@@ -55,7 +59,6 @@ spec:
                     type: string
                 type: object
             required:
-            - replicas
             - sandboxTemplateRef
             type: object
           status:
@@ -83,6 +86,9 @@ spec:
   - additionalPrinterColumns:
     - jsonPath: .status.readyReplicas
       name: Ready
+      type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age

@@ -53,10 +53,16 @@ class AsyncSandboxClient(Generic[T]):
     ``connection_config`` is required — the async client does not support
     ``SandboxLocalTunnelConnectionConfig``.
 
-    Pass ``cleanup=True`` to register an atexit hook that deletes all tracked
-    sandboxes on program termination::
+    By default (``cleanup=True``) an atexit hook is registered that deletes
+    all tracked sandboxes on program termination, so sandboxes are not leaked
+    if the program exits without explicit cleanup. Pass ``cleanup=False`` to
+    opt out of this behavior::
 
-        client = AsyncSandboxClient(connection_config=config, cleanup=True)
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
+
+    Note that this default differs from the synchronous ``SandboxClient``,
+    which defaults to ``cleanup=False``; the async client opts in to safer
+    out-of-the-box cleanup.
 
     Alternatively, use the ``async with`` context manager or explicitly call
     ``await client.delete_all()`` followed by ``await client.close()`` to
@@ -69,7 +75,7 @@ class AsyncSandboxClient(Generic[T]):
         self,
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
-        cleanup: bool = False,
+        cleanup: bool = True,
     ):
         """
         Args:
@@ -84,7 +90,10 @@ class AsyncSandboxClient(Generic[T]):
                 resources in a new event loop, so it is safe to call after
                 the main event loop has exited. Cleanup is best-effort —
                 per-claim and top-level failures emit warnings to
-                ``sys.stderr`` rather than raising. Defaults to False.
+                ``sys.stderr`` rather than raising. Defaults to True so that
+                sandboxes are not leaked when a caller forgets to clean up;
+                pass ``cleanup=False`` to opt out. Note this differs from the
+                synchronous ``SandboxClient``, which defaults to False.
         """
         if connection_config is None:
             raise ValueError(

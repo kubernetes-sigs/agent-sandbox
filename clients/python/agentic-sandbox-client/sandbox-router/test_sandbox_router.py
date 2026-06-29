@@ -494,6 +494,52 @@ class TestProxyRouting:
                 request_obj.url
             )
 
+    def test_target_url_ipv6_pod_ip_construction(self, client):
+        """IPv6 pod IPs must be bracketed in the upstream URL (RFC 3986)."""
+        with patch.object(
+            sandbox_router.client,
+            "send",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("expected"),
+        ) as mock_send:
+            client.post(
+                "/some/path",
+                headers={
+                    "X-Sandbox-ID": "test-box",
+                    "X-Sandbox-Namespace": "prod",
+                    "X-Sandbox-Port": "9999",
+                    "X-Sandbox-Pod-IP": "2001:db8::1",
+                },
+            )
+            built_request = mock_send.call_args
+            request_obj = built_request[0][0]
+            assert "[2001:db8::1]:9999/some/path" in str(
+                request_obj.url
+            )
+
+    def test_target_url_ipv6_full_form_pod_ip_construction(self, client):
+        """Full-form IPv6 addresses are normalized and bracketed."""
+        with patch.object(
+            sandbox_router.client,
+            "send",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("expected"),
+        ) as mock_send:
+            client.post(
+                "/some/path",
+                headers={
+                    "X-Sandbox-ID": "test-box",
+                    "X-Sandbox-Namespace": "prod",
+                    "X-Sandbox-Port": "9999",
+                    "X-Sandbox-Pod-IP": "2001:0db8:0000:0000:0000:0000:0000:0001",
+                },
+            )
+            built_request = mock_send.call_args
+            request_obj = built_request[0][0]
+            assert "[2001:db8::1]:9999/some/path" in str(
+                request_obj.url
+            )
+
     def test_target_url_uses_custom_cluster_domain(self, client):
         """Module-level cluster_domain should be used when constructing the target URL."""
         with patch.object(sandbox_router, "cluster_domain", "custom.domain"):

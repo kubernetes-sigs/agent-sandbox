@@ -155,5 +155,10 @@ kubectl rollout status deployment agent-sandbox-controller --namespace agent-san
 # Run the benchmarks
 echo "Running benchmarks..."
 dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
-
 echo "Benchmark completed successfully."
+
+
+# Run the stress test
+echo "Running stress test"
+go run ./test/stress --sandbox-count 1000 --create-concurrency 100 --output-dir="${ARTIFACTS:-.}/stress-test/"
+echo "Stress test completed successfully."

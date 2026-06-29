@@ -119,7 +119,7 @@ def _is_integer_label(label: str) -> bool:
         return True
     if label.lower().startswith("0x"):
         val = label[2:]
-        return len(val) > 0 and all(c in "0123456789abcdef" for c in val.lower())
+        return len(val) == 0 or all(c in "0123456789abcdef" for c in val.lower())
     return False
 
 

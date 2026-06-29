@@ -68,12 +68,9 @@ PIDS+=($!)
 (
   echo "ts,current_replicas,desired_replicas,current_metric,target_metric"
   while true; do
-    JSON=$(kubectl get hpa -n "$MONITOR_NAMESPACE" -o json 2>/dev/null)
+    JSON=$(kubectl get hpa "${WARMPOOL}-hpa" -n "$MONITOR_NAMESPACE" -o json 2>/dev/null)
     if [ -n "$JSON" ]; then
-      echo "$JSON" | jq -r --arg ts "$(date +%s)" '.items[0] // empty |
-        [$ts, (.status.currentReplicas // 0), (.status.desiredReplicas // 0),
-         (.status.currentMetrics[0].external.current.value // "na"),
-         (.spec.metrics[0].external.target.value // "na")] | @csv'
+      echo "$JSON" | jq -r --arg ts "$(date +%s)" '[$ts, (.status.currentReplicas // 0), (.status.desiredReplicas // 0), (.status.currentMetrics[0].external.current.value // "na"), (.spec.metrics[0].external.target.value // "na")] | @csv'
     fi
     sleep 5
   done

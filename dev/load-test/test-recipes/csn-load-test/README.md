@@ -39,9 +39,7 @@ cost — savings concentrated in the steady-state and downsizing/idle phases.
 - A Custom ComputeClass pinning the machine type (`nodePoolAutoCreation: enabled`);
   the sandbox template's `nodeSelector` targets it. (The runner applies the
   ComputeClass + template + warmpool + HPA + CSN/ASN buffers itself.)
-- `python3 -m pip install kubernetes` (driver); `matplotlib` for `cost_graph.py`
-  PNGs; `envsubst` (gettext-base) for rendering `manifests/` — `apt-get install
-gettext-base`. `kubectl` + `gcloud` configured for the cluster.
+- `python3 -m pip install kubernetes` (driver); `matplotlib` for `cost_graph.py` PNGs; `envsubst` (gettext-base) for rendering `manifests/` — `apt-get install gettext-base`. `kubectl` + `gcloud` configured for the cluster.
 
 ## Quick start
 

@@ -111,7 +111,7 @@ PYTHONPATH="$(pwd)" python tests/loadtest.py \
 | `claims` | Total `SandboxClaim`s created during the run (one per task here). |
 | `tasks NNok/MMerr` | Tasks whose `process_fn` returned (`ok`) vs raised (`err`). A per-task failure is captured, not fatal. |
 | `warm_replicas total` | Cumulative warm replicas created across the whole run (sums every pool ever warmed). |
-| `warm_replicas peak` | Max warm replicas alive **at once** — the real idle footprint. This is where strategies differ: `naive` keeps every pool warm (peak ≈ total), `sliding` bounds it to the window (peak < total), `none` ≈ the window of size-1 pools. |
+| `warm_replicas peak` | Max warm replicas alive **at once** — the real idle footprint. This is where strategies differ: `naive` keeps every pool warm (peak ≈ total), `sliding` bounds it to the window (peak < total), `pipelined` bounds it to ≤ 2 windows (one running + one prefetching), `none` ≈ the window of size-1 pools. |
 
 ## Environment block
 

@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from kubernetes import client, config
 
 # Configuration
-NAMESPACE = "keda-test"
-WARMPOOL = "python-sdk-warmpool"
+NAMESPACE = os.getenv("NAMESPACE", "keda-test")
+WARMPOOL = os.getenv("WARM_POOL_NAME", "python-sdk-warmpool")
 RATE_PER_SECOND = 5
 TEST_DURATION_MINUTES = 10
 CLAIM_TTL_SECONDS = 60
@@ -27,8 +28,11 @@ CLAIM_TTL_SECONDS = 60
 # Initialize K8s Client
 try:
     config.load_kube_config()
-except Exception:
-    config.load_incluster_config()
+except config.ConfigException as e:
+    if "KUBERNETES_SERVICE_HOST" in os.environ:
+        config.load_incluster_config()
+    else:
+        raise e
 
 custom_api = client.CustomObjectsApi()
 

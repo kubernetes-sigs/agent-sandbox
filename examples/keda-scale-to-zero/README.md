@@ -90,17 +90,25 @@ The **Steps to Run** below use the recommended Prometheus variant. If you prefer
 
 2. **Set up the Agent Sandbox resources**:
 
+   Define the names and namespace for your resources:
    ```bash
-   kubectl create namespace keda-test
-   kubectl apply -f python-sandbox-template.yaml
-   kubectl apply -f sandboxwarmpool.yaml
+   export NAMESPACE="keda-test"
+   export TEMPLATE_NAME="python-sandbox-template"
+   export WARM_POOL_NAME="python-sdk-warmpool"
+   ```
+
+   Create the namespace and apply the configured template and warmpool manifests using `envsubst`:
+   ```bash
+   kubectl create namespace $NAMESPACE
+   envsubst < python-sandbox-template.yaml | kubectl apply -f -
+   envsubst < sandboxwarmpool.yaml | kubectl apply -f -
    ```
 
    The warm pool starts at `replicas: 0` — KEDA takes ownership of this field.
 
 3. **Expose the controller metric via GKE Managed Service for Prometheus**:
    Apply the `pod-monitoring.yaml` to scrape the controller's `/metrics` endpoint. This exposes
-   `agent_sandbox_claim_creation_total{sandbox_template="..."}` into GMP.
+   `agent_sandbox_claim_creation_total{warmpool_name="..."}` into GMP.
 
    ```bash
    kubectl apply -f pod-monitoring.yaml
@@ -115,14 +123,14 @@ The **Steps to Run** below use the recommended Prometheus variant. If you prefer
    ```bash
    curl -s https://raw.githubusercontent.com/GoogleCloudPlatform/prometheus-engine/v0.15.3/examples/frontend.yaml \
      | sed "s/\$PROJECT_ID/$(gcloud config get-value project)/g" \
-     | kubectl apply -n keda-test -f -
+     | kubectl apply -n $NAMESPACE -f -
    ```
 
    This creates a `frontend` Deployment and a headless `frontend` Service. The `ScaledObject`
-   reaches it at `http://frontend.keda-test.svc:9090`. Confirm the pods are running:
+   reaches it at `http://frontend.${NAMESPACE}.svc:9090`. Confirm the pods are running:
 
    ```bash
-   kubectl get pods -n keda-test -l app=frontend
+   kubectl get pods -n $NAMESPACE -l app=frontend
    ```
 
    > [!NOTE]
@@ -131,17 +139,17 @@ The **Steps to Run** below use the recommended Prometheus variant. If you prefer
    > Artifact Registry (matching your cluster's region, e.g. `us-central1`):
    >
    > ```bash
-   > kubectl set image deployment/frontend frontend=us-central1-artifactregistry.gcr.io/gke-release/gke-release/prometheus-engine/frontend:v0.18.0-gke.2 -n keda-test
+   > kubectl set image deployment/frontend frontend=us-central1-artifactregistry.gcr.io/gke-release/gke-release/prometheus-engine/frontend:v0.18.0-gke.2 -n $NAMESPACE
    > ```
 
    **Authorize the frontend proxy via GKE Workload Identity.** The proxy runs as the `default`
-   Kubernetes Service Account (KSA) in `keda-test`; authorize it to read Cloud Monitoring:
+   Kubernetes Service Account (KSA) in the namespace; authorize it to read Cloud Monitoring:
 
    ```bash
    PROJECT_ID=$(gcloud config get-value project)
    GSA_NAME="gmp-frontend-sa"
    KSA_NAME="default"
-   NAMESPACE="keda-test"
+   NAMESPACE="${NAMESPACE:-keda-test}"
 
    # 1. Create a Google Service Account (GSA)
    gcloud iam service-accounts create $GSA_NAME \
@@ -172,7 +180,7 @@ The **Steps to Run** below use the recommended Prometheus variant. If you prefer
 5. **Apply the ScaledObject**:
 
    ```bash
-   kubectl apply -f scaledobject-prometheus.yaml
+   envsubst < scaledobject-prometheus.yaml | kubectl apply -f -
    ```
 
    The `ScaledObject` connects the claim-creation metric to the warm pool. The key guardrails
@@ -189,20 +197,21 @@ The **Steps to Run** below use the recommended Prometheus variant. If you prefer
    ```bash
    python3 create-claim.py
    ```
+   *(Note: `create-claim.py` will read the `NAMESPACE` and `WARM_POOL_NAME` environment variables you exported earlier).*
 
 7. **Verify scale-to-zero** in both directions:
 
    ```bash
    # The ScaledObject and (once active) the KEDA-managed HPA:
-   kubectl get scaledobject -n keda-test
-   kubectl get hpa -n keda-test -w        # the HPA only exists while replicas >= 1
+   kubectl get scaledobject -n $NAMESPACE
+   kubectl get hpa -n $NAMESPACE -w        # the HPA only exists while replicas >= 1
 
    # The warm pool itself:
-   kubectl get swp -n keda-test -w
+   kubectl get swp -n $NAMESPACE -w
    ```
 
    You should see the pool go `0 -> N` shortly after the load starts, and return to `0` after the
-   load stops and the `cooldownPeriod` (60s) elapses.
+   load stops and the `cooldownPeriod` (300s) elapses.
 
 ## Alternative: GCP Stackdriver scaler (GCP-only, deprecated)
 
@@ -234,7 +243,7 @@ To use it, **replace steps 4–5** with the following:
 3. **Apply it** (instead of `scaledobject-prometheus.yaml`):
 
    ```bash
-   kubectl apply -f scaledobject-stackdriver.yaml
+   envsubst < scaledobject-stackdriver.yaml | kubectl apply -f -
    ```
 
    This variant uses `targetValue`/`activationTargetValue` instead of
@@ -253,11 +262,8 @@ Then continue with **Generate load** and **Verify** (steps 6–7 above).
   increments whenever a `SandboxClaim` is created — regardless of how many warm sandboxes exist. So
   even with the pool at 0, a new claim raises the rate, KEDA activates the pool, and the pool scales
   up to absorb subsequent demand.
-- **Why filter on `sandbox_template`, not `warmpool_name`**: when the pool is at 0, an incoming
-  claim can't be served warm, so the controller records it as a _cold_ launch with
-  `warmpool_name="none"`. A `warmpool_name`-scoped query would therefore never increment at zero and
-  the pool would never wake. The `sandbox_template` label is recorded on both warm and cold paths,
-  so it reliably captures activity from zero.
+- **Filter on `warmpool_name`**: the controller records `warmpool_name` from `spec.warmPoolRef.name` on both warm and cold launches, so a `warmpool_name`-scoped query still increments even when the pool is at 0.
+  This is what enables KEDA to observe claim activity and activate the pool from zero.
 - **Idle is free**: with no claim activity the rate falls to 0, KEDA scales the pool back to 0, and
   the warm pool consumes no compute at rest.
 - **Expect ~1–2 min to wake up.** The metric is a _rate_ over a ~1 minute window
@@ -268,7 +274,7 @@ Then continue with **Generate load** and **Verify** (steps 6–7 above).
 ## Troubleshooting
 
 - **Pool never scales up from 0.** Confirm the metric is actually present:
-  `kubectl describe scaledobject -n keda-test agent-warmpool-scaledobject` (look at the
+  `kubectl describe scaledobject -n $NAMESPACE agent-warmpool-scaledobject` (look at the
   `ScaledObjectReady` / `ActiveScalers` conditions), and check the operator logs:
   `kubectl logs -n keda deploy/keda-operator`. A `metric-not-found` / empty-result usually means the
   query labels don't match — verify you filtered on `sandbox_template` and generated at least one
@@ -279,9 +285,9 @@ Then continue with **Generate load** and **Verify** (steps 6–7 above).
   service account `get/list/watch` on `sandboxwarmpools` and `get/update/patch` on
   `sandboxwarmpools/scale` via a `ClusterRole`/`ClusterRoleBinding`.
 - **Prometheus variant returns no data.** Check the GMP frontend pods are `Running`
-  (`kubectl get pods -n keda-test -l app=frontend`) and that the frontend's KSA was authorized with
+  (`kubectl get pods -n $NAMESPACE -l app=frontend`) and that the frontend's KSA was authorized with
   `roles/monitoring.viewer` (step 4). Port-forward and query it directly to confirm:
-  `kubectl port-forward -n keda-test svc/frontend 9090` then browse `http://localhost:9090`.
+  `kubectl port-forward -n $NAMESPACE svc/frontend 9090` then browse `http://localhost:9090`.
 - **Stackdriver variant: the HPA briefly shows a huge negative value**
   (`-9223372036854775808m`, i.e. `MinInt64`). This is the sentinel KEDA emits when a poll returns
   **no value** — usually because Cloud Monitoring returned a transient `code = Internal` error on
@@ -296,7 +302,7 @@ Then continue with **Generate load** and **Verify** (steps 6–7 above).
   still works. The `fallback` block in `scaledobject-stackdriver.yaml` keeps the 1 → N range stable
   through these blips. If it's most/all polls, the query is being rejected — test it in **Cloud
   Console → Metrics Explorer (PromQL)** with
-  `sum(rate(agent_sandbox_claim_creation_total{sandbox_template="python-sandbox-template"}[1m]))`.
+  `sum(rate(agent_sandbox_claim_creation_total{sandbox_template="$TEMPLATE_NAME"}[1m]))`.
   Either way, the **Prometheus variant avoids this entirely** (it never calls the Cloud Monitoring
   `timeSeries.list` API).
 

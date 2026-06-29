@@ -115,7 +115,7 @@ fleet = SandboxFleet(FleetConfig(
     max_concurrent=8, max_warmpool_size=32, placement="image-affinity"))
 fleet.load_tasks(SweBenchSource(limit=8))
 
-# strategy: none | naive | sliding   (concurrency defaults to max_concurrent)
+# strategy: none | naive | sliding | pipelined   (concurrency defaults to max_concurrent)
 results = fleet.run(swebench_probe, strategy="sliding", concurrency=8)
 ```
 
@@ -164,7 +164,7 @@ python run_swebench_fleet.py
 | **SandboxFleet** / **AsyncSandboxFleet** | The orchestrator (sync / async). |
 | **SandboxHandle** | A claimed sandbox: `hostname`, `pod_name`, `pod_ip`, `endpoint(port)`, `exec(cmd)`, `release()`. |
 | **Placement** | Which cluster serves an image: `round-robin`, `least-loaded`, `capacity-weighted`, `image-affinity`. |
-| **Strategy** | *When* pools exist: `none`, `naive`, `sliding`. |
+| **Strategy** | *When* pools exist: `none`, `naive`, `sliding`, `pipelined`. |
 | **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`). |
 
 ## Warm-pool strategies

@@ -13,8 +13,10 @@ execution.
         SandboxFleet / AsyncSandboxFleet        (orchestrator)
         ├── sources      Task / *Source         (what to run)
         ├── placement    image → Cluster        (where)
-        ├── sizing       replicas per image      (how many)
-        ├── strategies   none / naive / sliding  (when pools exist)
+        ├── sizing       replicas per image      (how many; concurrency/disk-aware)
+        ├── strategies   none/naive/sliding/pipelined  (when pools exist)
+        ├── capacity     probe → benchmark plan  (strategy/concurrency/replicas)
+        ├── registry_rewrite  image → mirror     (in-region pull-through)
         ├── preflight    per-cluster checks
         ├── prepull      DaemonSet image cache
         └── ClusterRegistry → Cluster(s)
@@ -41,7 +43,16 @@ injection (no SDK fork).
   `wait_for_pool_ready` (Kubernetes **watch** on the WarmPool — readiness detected
   at the `readyReplicas` event, no fixed poll grid; reconnects + short re-check
   fallback on drops), `delete_*`, `list_*` (label-scoped). The missing SDK piece.
-- **`sizing.py`** — `compute_replicas`, `recommend_window`, `plan`.
+- **`sizing.py`** — `compute_replicas` (concurrency-aware, `per_task` mode for
+  instant-claim), `recommend_window`, `recommend_window_disk` /
+  `recommend_window_pipelined` (disk- and pool-node-aware window caps), `plan`.
+- **`capacity.py`** — `probe_capacity` (a pool's allocatable CPU / ephemeral disk /
+  pod density), `plan_benchmark` (`naive` warm-all when it fits, else a disk-bounded
+  `pipelined` window; picks `max_concurrent`, per-image replicas, the binding
+  bottleneck, and the RL instant-claim levers), `render_plan`.
+- **`registry_rewrite.py`** — `rewrite_image` / `make_rewriter`: redirect images at
+  an in-region mirror / pull-through cache (Docker Hub → `<registry>/…`), host-
+  filtered + idempotent; wired via `load_tasks(image_rewrite=…)`.
 - **`sources.py`** — `Task`, `TaskSource`, `ListSource`, `JsonlSource`,
   `to_tasks`. **`adapters/swebench.py`** — `SweBenchSource` (+ `keep_row` for the
   full dataset row) + `swebench_probe`. **`adapters/r2egym.py`** —
@@ -58,8 +69,10 @@ injection (no SDK fork).
   (thread-safe).
 - **`preflight.py`** — `preflight_cluster` → `PreflightReport`.
 - **`prepull.py`** — DaemonSet pre-pull (`prepull` / `prepull_delete`).
-- **`fleet.py`** — `SandboxFleet`; **`strategies.py`** — `process_parallel` +
-  the three strategies; **`async_fleet.py`** — `AsyncSandboxFleet`.
+- **`fleet.py`** — `SandboxFleet` (incl. `epochs`/`keep_warm` reuse, parallel
+  windowed warming, disk-aware `recommended_window`); **`strategies.py`** —
+  `process_parallel` + the four strategies (`none`/`naive`/`sliding`/`pipelined`);
+  **`async_fleet.py`** — `AsyncSandboxFleet`.
 - **`observability.py`** — `Observer` (the sink the fleet holds), `RunReport`
   (always-on per-phase aggregates), `repo_family` (label-cardinality bound),
   `serve_metrics`. Each fleet phase is wrapped in `observer.phase(...)`, which
@@ -88,8 +101,12 @@ load_tasks ─▶ preflight ─▶ plan ─▶ [prepull] ─▶ start_warmpools 
 - **acquire**: SDK `create_sandbox(warmpool=…)` → resolve sandbox → `get_pod_name`
   → `SandboxHandle`. Claims are labeled for sweepable cleanup.
 - **strategies**: `naive` warms all then runs; `sliding` warms a rolling window;
-  `none` warms one size-1 pool per image. All run claim+exec in parallel up to
-  `concurrency` (threads sync, `asyncio.gather` async).
+  `pipelined` double-buffers the window (prefetch N+1 while N runs, footprint ≤ 2
+  windows); `none` warms one size-1 pool per image. Windowed strategies warm a
+  window's pools concurrently (bounded by `max_concurrent`). All run claim+exec in
+  parallel up to `concurrency` (threads sync, `asyncio.gather` async). `run(...,
+  epochs=N, keep_warm=…)` repeats passes, reusing resident pools (node-cache hits
+  via `imagePullPolicy: IfNotPresent`) and tearing down once at the end.
 
 ## SDK reuse (no fork)
 
@@ -175,9 +192,12 @@ per-cluster routable endpoints (Gateway/LoadBalancer).
   `K8sHelper`/`SandboxClient` at it. No SDK changes required; a native
   `K8sHelper(api_client=…)` param is a candidate upstream improvement.
 - **Async is a thread-backed wrapper.** `AsyncSandboxFleet` reuses the tested
-  sync core via `asyncio.to_thread` with real concurrency
-  (`gather` + `Semaphore`). The API is fully awaitable; a native
-  `kubernetes_asyncio` backend can replace the internals later.
+  sync core via a **dedicated `ThreadPoolExecutor`** (sized to `max_concurrent`,
+  not `asyncio.to_thread`'s shared default pool — which is tied to CPU count and
+  starved/deadlocked `pipelined` at scale) with real concurrency
+  (`gather` + `Semaphore`); `close()`/`__aexit__` shut the pool down. The API is
+  fully awaitable; a native `kubernetes_asyncio` backend can replace the internals
+  later.
 - **Thread-safety.** Fleet bookkeeping is lock-guarded; `handle.exec` uses a
   per-call `ApiClient` because kubernetes `stream()` (websocket) isn't safe
   across a shared client.

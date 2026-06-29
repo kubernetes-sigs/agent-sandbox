@@ -52,12 +52,14 @@ examples/agent-sandbox-rl/
     constants.py         # TEMPLATE/WARMPOOL group/version/plurals (missing from the SDK)
     resources.py         # SYNC SandboxTemplate + SandboxWarmPool CRUD + wait_for_pool_ready (watch-based, per-cluster)
     async_resources.py   # async variant
-    sizing.py            # compute_replicas, recommend_window, plan (ported)
+    sizing.py            # compute_replicas (+per_task), recommend_window(_disk/_pipelined), plan
+    capacity.py          # (added) probe_capacity + plan_benchmark + render_plan (capacity-aware planner)
+    registry_rewrite.py  # (added) rewrite_image/make_rewriter — in-region mirror redirect
     sources.py           # Task model + TaskSource protocol; ListSource, JsonlSource
     handles.py           # SandboxHandle (carries its owning Cluster + connection info)
     preflight.py         # per-cluster checks (reachable, CRDs+versions, runtimeclass, capacity, pull-secret)
     prepull.py           # optional DaemonSet image pre-pull per cluster (AppsV1Api), sync+async
-    strategies.py        # Strategy protocol + none/naive/sliding (cluster-aware, drive fleet primitives)
+    strategies.py        # Strategy protocol + none/naive/sliding/pipelined (cluster-aware, drive fleet primitives)
     fleet.py             # SandboxFleet (sync orchestrator: primitives + run())
     async_fleet.py       # AsyncSandboxFleet (parity; real concurrent claim/exec across clusters)
     exceptions.py        # FleetError, PreflightError, CapacityError, NoClusterAvailableError

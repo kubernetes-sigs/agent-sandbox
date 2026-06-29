@@ -50,8 +50,10 @@ flowchart TB
   class GWY,EXT opt;
 ```
 
-Each sandbox pod carries an identity label + ServiceAccount. Every egress packet
-is evaluated by the Cilium dataplane against
+Each sandbox pod carries a `demo.identity` label (and its own ServiceAccount).
+Cilium derives the pod's **security identity from the label, not the SA** — the
+SA is kept only for hygiene (see "A note on the ServiceAccount" below). Every
+egress packet is evaluated by the Cilium dataplane against
 the `CiliumNetworkPolicies`: DNS is allowed for both identities (and snooped by
 the L7 DNS proxy so `toFQDNs` can resolve `github.com`), but only the identity
 named in a `*-allow-github` policy may open 443 to github. The blue dashed path
@@ -91,13 +93,15 @@ raw Cilium policy — so we run **GKE Standard with self-managed upstream Cilium
 
 Cilium derives a label-based **security identity** for every pod, which is the
 natural carrier of "the identity a policy maps to": each sandbox pod carries a
-`demo.identity=<team>` label (plus its own ServiceAccount), and each policy's
-`endpointSelector` matches that label.
+`demo.identity=<team>` label, and each policy's `endpointSelector` matches that
+label. (The pod also has its own Kubernetes ServiceAccount, but that is *not*
+what Cilium keys on — see "A note on the ServiceAccount" below.)
 
 ## How "policy maps to identity" works here
 
-- Each Sandbox runs as its own **ServiceAccount** (`sa-team-a` / `sa-team-b`) and
-  carries a propagated pod label **`demo.identity: team-a|team-b`**.
+- Each Sandbox carries a propagated pod label **`demo.identity: team-a|team-b`**
+  (this is what Cilium turns into a security identity) and runs as its own
+  **ServiceAccount** (`sa-team-a` / `sa-team-b`).
 - `10-cilium-allow-dns.yaml` selects **both** identities. In Cilium, once any
   egress rule selects an endpoint it becomes **default-deny egress** — so this
   both (a) locks egress down to DNS only and (b) enables the L7 DNS proxy that
@@ -105,6 +109,25 @@ natural carrier of "the identity a policy maps to": each sandbox pod carries a
 - `20-cilium-team-a-allow-github.yaml` opens `github.com:443` for **team-a only**.
 - team-b has no such rule → its github traffic is dropped.
 - `40-cilium-team-b-allow-github.yaml` (phase 2) adds the same allow for team-b.
+
+### A note on the ServiceAccount
+
+The two ServiceAccounts (`sa-team-a` / `sa-team-b`) are **not required** for the
+egress demo. Cilium builds each pod's security identity from its **labels**, so
+the `CiliumNetworkPolicy` `endpointSelector` matches `demo.identity`, never the
+SA. The sandboxes also set `automountServiceAccountToken: false`, so no token is
+even mounted. You could delete the SAs and the allow/deny behavior would be
+unchanged.
+
+They're kept on purpose, for realism rather than function:
+
+- **Hygiene** — without `serviceAccountName`, the pods would run as the namespace
+  `default` SA. A dedicated SA per workload is good practice.
+- **Workload Identity anchor** — if a sandbox ever needs to call a Google Cloud
+  API (e.g. read a GCS bucket), this KSA is exactly what you'd map to an IAM
+  principal via Workload Identity Federation. The SA is the GCP-facing identity;
+  the label is the network-facing identity. They are independent layers that
+  happen to move together here.
 
 ## Requirements
 

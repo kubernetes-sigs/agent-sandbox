@@ -16,10 +16,16 @@
 set -euo pipefail
 
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agent-sandbox}"
-IMAGE="ghcr.io/openclaw/openclaw:2026.3.23"
 NODE_PORT="30789"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+
+# Derive the image tag from the template so the two never drift.
+IMAGE="$(grep -E '^\s+image:' openclaw-template.yaml | head -1 | awk '{print $2}')"
+if [ -z "${IMAGE}" ]; then
+  echo "ERROR: could not read image tag from openclaw-template.yaml" >&2
+  exit 1
+fi
 
 # --- Prechecks --------------------------------------------------------------
 
@@ -47,13 +53,6 @@ kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER_NAME}"
 echo "Generating gateway token..."
 TOKEN="$(openssl rand -hex 32)"
 
-echo "Applying manifests..."
-kubectl apply -f openclaw-config.yaml
-sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-template.yaml | kubectl apply -f -
-kubectl apply -f openclaw-warmpool.yaml
-kubectl apply -f openclaw-claim.yaml
-kubectl apply -f kind-service.yaml
-
 cleanup() {
   echo "Cleaning up..."
   kubectl delete --ignore-not-found -f kind-service.yaml
@@ -63,6 +62,13 @@ cleanup() {
   kubectl delete --ignore-not-found -f openclaw-config.yaml
 }
 trap cleanup EXIT
+
+echo "Applying manifests..."
+kubectl apply -f openclaw-config.yaml
+sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-template.yaml | kubectl apply -f -
+kubectl apply -f openclaw-warmpool.yaml
+kubectl apply -f openclaw-claim.yaml
+kubectl apply -f kind-service.yaml
 
 # --- Wait for the claim's pod ----------------------------------------------
 
@@ -77,15 +83,18 @@ if [ -z "${SANDBOX_NAME:-}" ]; then
   exit 1
 fi
 
-echo "Waiting for pod name annotation on Sandbox..."
-for i in $(seq 1 60); do
+# The agents.x-k8s.io/pod-name annotation is only set when the claim adopts
+# a warm-pool sandbox. For cold-started sandboxes the pod name matches the
+# Sandbox name itself, so fall back to that if the annotation never appears.
+echo "Resolving backing pod (annotation if warm-adopted, else Sandbox name)..."
+for i in $(seq 1 30); do
   POD="$(kubectl get sandbox "${SANDBOX_NAME}" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}' 2>/dev/null || true)"
   [ -n "${POD}" ] && break
   sleep 1
 done
 if [ -z "${POD:-}" ]; then
-  echo "ERROR: Pod name annotation never appeared on Sandbox ${SANDBOX_NAME}." >&2
-  exit 1
+  POD="${SANDBOX_NAME}"
+  echo "Pod-name annotation absent; using Sandbox name as pod name (cold-start path)."
 fi
 echo "Claimed pod: ${POD}"
 

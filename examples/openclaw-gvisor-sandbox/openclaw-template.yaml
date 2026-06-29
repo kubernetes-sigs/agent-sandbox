@@ -32,7 +32,7 @@ spec:
           image: ghcr.io/openclaw/openclaw:2026.3.23
           imagePullPolicy: IfNotPresent
           securityContext:
-            allowPrivilegeEscalation: false #true for kind
+            allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
             runAsNonRoot: false
           env:

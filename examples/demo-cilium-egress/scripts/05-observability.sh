@@ -59,7 +59,7 @@ echo '  sum by (source,destination) (rate(hubble_policy_verdicts_total{action="d
 echo
 echo "Query Managed Prometheus directly:"
 cat <<EOF
-  curl -s -H "Authorization: Bearer \$(gcloud auth print-access-token)" \\
+  curl -s -H "Authorization: Bearer \$(gcloud auth application-default print-access-token)" \\
     "https://monitoring.googleapis.com/v1/projects/${PROJECT}/location/global/prometheus/api/v1/query" \\
     --data-urlencode 'query=hubble_policy_verdicts_total{action="dropped",direction="egress"}'
 EOF

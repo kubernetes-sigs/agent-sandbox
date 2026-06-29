@@ -27,6 +27,11 @@ GW="$(kubectl -n "$NS" get gateway external-http-gateway -o jsonpath='{.status.a
 [ -n "$GW" ] || { echo "ERROR: gateway has no external address yet."; exit 1; }
 echo "Gateway address: $GW"
 
+# Auth: optional-gateway-routing.sh mints a Bearer token Secret by default. Read
+# it (empty in the opt-in unauthenticated mode) and send it on /execute calls.
+TOKEN="$(kubectl -n "$NS" get secret sandbox-router-auth -o jsonpath='{.data.auth-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")
+
 echo "Waiting for the gateway backend to pass health checks..."
 code=""
 for _ in $(seq 1 30); do
@@ -43,6 +48,7 @@ podip() { kubectl -n "$NS" get pod "$1" -o jsonpath='{.status.podIP}'; }
 gw_clone() {
   local sb="$1" ip; ip="$(podip "$sb")"
   curl -s --max-time 90 -X POST "http://$GW/execute" \
+    ${AUTH[@]+"${AUTH[@]}"} \
     -H "X-Sandbox-ID: $sb" -H "X-Sandbox-Namespace: $NS" -H "X-Sandbox-Pod-IP: $ip" \
     -H 'Content-Type: application/json' \
     -d "{\"command\":\"timeout 25 git clone --depth 1 $TEST_REPO_URL /tmp/r-$$-$RANDOM\"}" \

@@ -32,6 +32,7 @@ if kubectl get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then
   kubectl delete -f "$M/router/gateway.yaml" --ignore-not-found
 fi
 kubectl -n "$NAMESPACE" delete deploy/sandbox-router-deployment svc/sandbox-router-svc --ignore-not-found
+kubectl -n "$NAMESPACE" delete secret sandbox-router-auth --ignore-not-found
 kubectl delete -f "$M/40-cilium-team-b-allow-github.yaml" --ignore-not-found
 kubectl delete -f "$M/30-sandboxes.yaml" --ignore-not-found
 kubectl delete -f "$M/20-cilium-team-a-allow-github.yaml" --ignore-not-found

@@ -36,6 +36,12 @@ AR="${AR_LOC}-docker.pkg.dev/${PROJECT}/${AR_REPO}"
 ROUTER_IMAGE="${ROUTER_IMAGE:-$AR/sandbox-router:latest}"
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-$AR/exec-sandbox:latest}"
 
+# Router auth is on by default: we mint a random Bearer token into the
+# sandbox-router-auth Secret and the router requires it on /execute. To
+# deliberately expose an UNAUTHENTICATED /execute (public RCE) on a throwaway
+# cluster, run with ALLOW_UNAUTHENTICATED_ROUTER=true.
+ALLOW_UNAUTHENTICATED_ROUTER="${ALLOW_UNAUTHENTICATED_ROUTER:-false}"
+
 # 0. Ensure the GKE Gateway API controller is enabled on the cluster.
 if ! kubectl get gatewayclass gke-l7-global-external-managed >/dev/null 2>&1; then
   echo "Enabling GKE Gateway API on the cluster (one-time, a few minutes)..."
@@ -61,14 +67,29 @@ sed "s#__SANDBOX_IMAGE__#${SANDBOX_IMAGE}#g" "$DEMO/manifests/ingress/30-sandbox
 kubectl apply -f "$tmp"; rm -f "$tmp"
 kubectl wait --for=condition=Ready sandbox/sandbox-team-a sandbox/sandbox-team-b -n "$NAMESPACE" --timeout=180s
 
-# 3. Deploy router + GKE Gateway.
+# 3. Router auth. Secure by default: mint a token Secret the router enforces.
+if [ "$ALLOW_UNAUTHENTICATED_ROUTER" = "true" ]; then
+  echo "WARNING: deploying sandbox-router with NO auth. With the public Gateway this"
+  echo "         exposes /execute to the internet (unauthenticated RCE). Throwaway clusters only."
+  kubectl delete secret sandbox-router-auth -n "$NAMESPACE" --ignore-not-found
+else
+  ROUTER_AUTH_TOKEN="${ROUTER_AUTH_TOKEN:-$(openssl rand -hex 24)}"
+  kubectl create secret generic sandbox-router-auth -n "$NAMESPACE" \
+    --from-literal=auth-token="$ROUTER_AUTH_TOKEN" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "Router auth enabled; /execute requires a Bearer token (stored in Secret sandbox-router-auth)."
+fi
+
+# 4. Deploy router + GKE Gateway.
 tmp="$(mktemp)"
-sed "s#__ROUTER_IMAGE__#${ROUTER_IMAGE}#g" "$DEMO/manifests/router/sandbox-router.yaml" > "$tmp"
+sed -e "s#__ROUTER_IMAGE__#${ROUTER_IMAGE}#g" \
+    -e "s#__ALLOW_UNAUTHENTICATED_ROUTER__#${ALLOW_UNAUTHENTICATED_ROUTER}#g" \
+    "$DEMO/manifests/router/sandbox-router.yaml" > "$tmp"
 kubectl apply -f "$tmp"; rm -f "$tmp"
 kubectl apply -f "$DEMO/manifests/router/gateway.yaml"
 kubectl -n "$NAMESPACE" rollout status deploy/sandbox-router-deployment --timeout=180s
 
-# 4. Wait for the Gateway to get an external address (can take several minutes).
+# 5. Wait for the Gateway to get an external address (can take several minutes).
 echo "Waiting for the Gateway external address..."
 ip=""
 for _ in $(seq 1 40); do

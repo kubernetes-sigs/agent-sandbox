@@ -19,9 +19,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 
 version="$AGENT_SANDBOX_VERSION"
 if [ "$version" = "latest" ]; then
+  version=""
+  # Prefer gh, but it fails if installed-yet-unauthenticated; tolerate that and
+  # fall back to the redirect-based discovery rather than aborting under set -e.
   if command -v gh >/dev/null 2>&1; then
-    version="$(gh release view --repo kubernetes-sigs/agent-sandbox --json tagName -q .tagName)"
-  else
+    version="$(gh release view --repo kubernetes-sigs/agent-sandbox --json tagName -q .tagName 2>/dev/null || true)"
+  fi
+  if [ -z "$version" ]; then
     # Resolve the /releases/latest redirect to its tag.
     version="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
       https://github.com/kubernetes-sigs/agent-sandbox/releases/latest | sed 's#.*/tag/##')"

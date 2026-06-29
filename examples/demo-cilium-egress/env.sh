@@ -16,7 +16,9 @@
 # Shared configuration for the Cilium per-identity egress demo.
 # Override any value by exporting it before sourcing, e.g. `ZONE=us-west1-a ./scripts/setup-all.sh`.
 
-export PROJECT="${PROJECT:-gke-ai-eco-dev}"
+# Defaults to your active gcloud project; export PROJECT to override. There is no
+# baked-in project so the scripts never operate on an unexpected one.
+export PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 export ZONE="${ZONE:-us-central1-a}"
 export CLUSTER="${CLUSTER:-agent-sandbox-cilium-demo}"
 export MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-4}"

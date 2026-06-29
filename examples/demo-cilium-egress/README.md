@@ -212,16 +212,18 @@ The core demo proves egress via `kubectl exec`. To also exercise agent-sandbox's
 sandboxes to an HTTP exec-server image (same identities/policies), and deploys the
 router + Gateway.
 
-> ⚠️ **DEMO ONLY — do not run on a long-lived or shared cluster.** For
-> simplicity this add-on sets `ALLOW_UNAUTHENTICATED_ROUTER=true` and fronts the
-> sandbox-router with a **public** external L7 Gateway. That exposes the sandbox
-> `/execute` endpoint to the internet with **no authentication** — i.e.
-> unauthenticated remote code execution for anyone who finds the Gateway IP.
-> Use it only on a throwaway demo cluster, and tear it down when finished
-> (`./scripts/teardown.sh --all`). For any real use, enable the router's bearer
-> token (set `ALLOW_UNAUTHENTICATED_ROUTER=false` and provide `ROUTER_AUTH_TOKEN`
-> via a Secret — see `manifests/router/sandbox-router.yaml`) and/or restrict the
-> Gateway to an internal/allowlisted front end.
+> ⚠️ **DEMO ONLY — do not run on a long-lived or shared cluster.** This add-on
+> fronts the sandbox-router with a **public** external L7 Gateway, so the sandbox
+> `/execute` endpoint is reachable from the internet. By default the script mints
+> a random Bearer token into a `sandbox-router-auth` Secret and the router
+> **requires** it (`test-ingress.sh` reads the Secret and sends the token), so the
+> public endpoint is authenticated out of the box. You can still expose an
+> **unauthenticated** `/execute` — i.e. remote code execution for anyone who finds
+> the Gateway IP — only by deliberately opting in with
+> `ALLOW_UNAUTHENTICATED_ROUTER=true ./scripts/optional-gateway-routing.sh`. Even
+> with auth on, use a throwaway demo cluster and tear it down when finished
+> (`./scripts/teardown.sh --all`); for real use also restrict the Gateway to an
+> internal/allowlisted front end.
 
 ```bash
 ./scripts/optional-gateway-routing.sh   # build images, enable Gateway API, deploy router+Gateway

@@ -28,11 +28,11 @@ type SandboxKey struct {
 // SandboxQueue defines the interface for managing a thread-safe,
 // highly concurrent queue of adoptable warm pool sandboxes.
 type SandboxQueue interface {
-	Add(warmPoolName string, item SandboxKey)
-	Get(warmPoolName string) (SandboxKey, bool)
-	GetWithStrategy(warmPoolName string, pick func([]SandboxKey) (SandboxKey, bool)) (SandboxKey, bool)
-	RemoveQueue(warmPoolName string)
-	RemoveItem(warmPoolName string, item SandboxKey)
+	Add(namespacedWarmPoolName string, item SandboxKey)
+	Get(namespacedWarmPoolName string) (SandboxKey, bool)
+	GetWithStrategy(namespacedWarmPoolName string, pick func([]SandboxKey) (SandboxKey, bool)) (SandboxKey, bool)
+	RemoveQueue(namespacedWarmPoolName string)
+	RemoveItem(namespacedWarmPoolName string, item SandboxKey)
 }
 
 // SimpleSandboxQueue implements SandboxQueue using simple synchronized slices.
@@ -47,29 +47,27 @@ func NewSimpleSandboxQueue() *SimpleSandboxQueue {
 }
 
 // Add pushes an item to the specific warm pool's queue.
-func (s *SimpleSandboxQueue) Add(warmPoolName string, item SandboxKey) {
-	q, _ := s.queues.LoadOrStore(warmPoolName, newSynchronizedQueue())
+func (s *SimpleSandboxQueue) Add(namespacedWarmPoolName string, item SandboxKey) {
+	q, _ := s.queues.LoadOrStore(namespacedWarmPoolName, newSynchronizedQueue())
 	q.(*synchronizedQueue).Push(item)
 }
 
 // Get pops an item from the specific warm pool's queue.
 func (s *SimpleSandboxQueue) Get(namespacedWarmPoolName string) (SandboxKey, bool) {
-	if q, ok := s.queues.Load(namespacedWarmPoolName); ok {
-		if item, ok := q.(*synchronizedQueue).Pop(); ok {
-			return item, true
-		}
+	q, ok := s.queues.Load(namespacedWarmPoolName)
+	if !ok {
+		return SandboxKey{}, false
 	}
-	return SandboxKey{}, false
+	return q.(*synchronizedQueue).Pop()
 }
 
 // GetWithStrategy pops an item from the specific warm pool's queue using a custom strategy.
 func (s *SimpleSandboxQueue) GetWithStrategy(namespacedWarmPoolName string, pick func([]SandboxKey) (SandboxKey, bool)) (SandboxKey, bool) {
-	if q, ok := s.queues.Load(namespacedWarmPoolName); ok {
-		if item, ok := q.(*synchronizedQueue).PopWithStrategy(pick); ok {
-			return item, true
-		}
+	q, ok := s.queues.Load(namespacedWarmPoolName)
+	if !ok {
+		return SandboxKey{}, false
 	}
-	return SandboxKey{}, false
+	return q.(*synchronizedQueue).PopWithStrategy(pick)
 }
 
 // RemoveItem deletes a specific sandbox from a warm pool's queue.
@@ -105,7 +103,6 @@ func (q *synchronizedQueue) Remove(key SandboxKey) {
 	}
 }
 
-// TODO(vicentefb): Implement queue cleanup mechanism.
 // We should remove the queue from the sync.Map when the corresponding
 // SandboxWarmPool is deleted to prevent memory leaks.
 type synchronizedQueue struct {
@@ -214,9 +211,7 @@ func (q *synchronizedQueue) PopWithStrategy(pick func([]SandboxKey) (SandboxKey,
 // RemoveQueue completely deletes a warm pool's queue from the sync.Map
 // to prevent memory leaks when SandboxTemplates or WarmPools are deleted.
 func (s *SimpleSandboxQueue) RemoveQueue(namespacedWarmPoolName string) {
-	if _, ok := s.queues.Load(namespacedWarmPoolName); ok {
-		s.queues.Delete(namespacedWarmPoolName)
-	}
+	s.queues.Delete(namespacedWarmPoolName)
 }
 
 // GetNamespacedWarmPoolName forms the namespace-aware index value to use as a key to a SimpleSandboxQueue type.

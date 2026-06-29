@@ -48,7 +48,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	}
 
 	templateWithNP := &extensionsv1beta1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default", UID: "uid-custom"},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
 			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
@@ -70,7 +70,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	}
 
 	templateOptOut := &extensionsv1beta1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default", UID: "uid-optout"},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
 			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
 			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
@@ -79,13 +79,38 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 		},
 	}
 
+	isController := true
 	existingNPToDelete := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout-network-policy", Namespace: "default"},
-		Spec:       networkingv1.NetworkPolicySpec{},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template-optout-network-policy",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+					Kind:       "SandboxTemplate",
+					Name:       "test-template-optout",
+					Controller: &isController,
+					UID:        "uid-optout",
+				},
+			},
+		},
+		Spec: networkingv1.NetworkPolicySpec{},
 	}
 
 	outdatedNPToUpdate := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom-network-policy", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template-custom-network-policy",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+					Kind:       "SandboxTemplate",
+					Name:       "test-template-custom",
+					Controller: &isController,
+					UID:        "uid-custom",
+				},
+			},
+		},
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"old-label": "outdated"}}, // Will be overwritten
 		},

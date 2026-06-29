@@ -162,6 +162,14 @@ def _make_fleet(args, plan: BenchmarkPlan, cap: ClusterCapacity) -> SandboxFleet
 
 def run_benchmark(args, plan: BenchmarkPlan, cap: ClusterCapacity) -> dict:
     """Execute the plan: timed PRELOAD (warm all/window) then timed TASK phase."""
+    if args.tasks_per_image != 1:
+        # The SWE-bench source yields one task per image, so RL-style sizing would
+        # be planned (and reported) but never actually executed here. Use the
+        # general load-test harness for repeated-tasks-per-image batches.
+        raise ValueError(
+            "--tasks-per-image > 1 is not supported by the SWE-bench runner "
+            "(it executes one task per image); use tests/loadtest.py for "
+            "RL-style batches.")
     fleet = _make_fleet(args, plan, cap)
     rewrite = (make_rewriter(registry=args.registry, project=args.registry_project,
                              repo=args.registry_repo)

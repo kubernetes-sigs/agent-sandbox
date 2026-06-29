@@ -72,6 +72,44 @@ def test_epochs_must_be_positive(make_cluster):
     f.run(lambda t, h: t.image, strategy="naive", epochs=0)
 
 
+def test_warm_entry_reserves_only_delta_on_scale_up(make_cluster):
+  # Re-warming an image with MORE replicas must reserve only the delta (the pool
+  # is upserted, not recreated) so active_replicas isn't double-counted.
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=8)
+  f.load_tasks(["i1"])
+  f.warm_image("i1", replicas_override=2)
+  assert c.active_replicas == 2 and f._warmed["i1"] == 2
+  f.warm_image("i1", replicas_override=4)        # scale up 2 -> 4
+  assert c.active_replicas == 4 and f._warmed["i1"] == 4
+  # already satisfied -> no further reservation
+  f.warm_image("i1", replicas_override=4)
+  assert c.active_replicas == 4
+
+
+def test_warm_images_dedupes_input(make_cluster):
+  # Duplicates in the public helper must not warm the same image twice (unsafe).
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1", "i2"])
+  f.warm_images(["i1", "i1", "i2", "i1"], wait=True)
+  assert c.resources.create_warmpool.call_count == 2
+
+
+def test_epoch_failure_tears_down_when_not_keep_warm(make_cluster):
+  # A non-final epoch that raises (teardown=False) must still clean up, so warm
+  # pools / reserved replicas don't leak when keep_warm=False.
+  from agent_sandbox_rl.exceptions import FleetError
+  c = make_cluster("solo")
+  c.resources.wait_for_pool_ready.return_value = False    # warm never ready -> FleetError
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4, ready_timeout=0)
+  f.load_tasks(["i1", "i2"])
+  with pytest.raises(FleetError):
+    f.run(lambda t, h: t.image, strategy="naive", epochs=2)
+  assert c.active_replicas == 0          # epoch-1 failure still tore down
+  assert f._warmed == {}
+
+
 def test_load_tasks_and_counts(two_cluster_registry):
   f = _fleet(two_cluster_registry)
   f.load_tasks(["imgA", "imgA", "imgB"])

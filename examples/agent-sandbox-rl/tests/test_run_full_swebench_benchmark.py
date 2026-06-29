@@ -15,6 +15,10 @@
 """CLI-glue tests for the full-SWE-bench runner. The planner itself is covered by
 ``test_capacity.py``; here we test the runner's preload/task report rendering."""
 
+import types
+
+import pytest
+
 import run_full_swebench_benchmark as bench
 
 GiB = 1024 ** 3
@@ -57,3 +61,13 @@ def test_format_report_with_result_shows_preload_vs_task():
   assert "PRELOAD" in md and "TASK" in md
   assert "350.0s" in md and "50.0s" in md
   assert "## Metric glossary" in md
+
+
+def test_run_benchmark_rejects_tasks_per_image_gt_1():
+  # The SWE-bench source is 1 task/image, so RL-style sizing would be planned but
+  # never executed — the runner must refuse rather than silently mislead.
+  cap = _cap()
+  plan = bench.plan_benchmark(cap, 50, 8, avg_image_gb=10)
+  args = types.SimpleNamespace(tasks_per_image=8)
+  with pytest.raises(ValueError, match="tasks-per-image"):
+    bench.run_benchmark(args, plan, cap)

@@ -153,10 +153,40 @@ def test_validate_manifests_dry_runs_template_then_warmpool():
   assert calls[1].kwargs["dry_run"] == "All"
 
 
-def test_create_warmpool_swallows_409():
+def test_create_warmpool_reconcile_upserts_replicas_on_409():
+  # The warm path (reconcile=True) patches an existing pool (409) to the requested
+  # replica count so a reused/leftover pool converges instead of being pinned.
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.create_warmpool("pool-x", TNAME, 4, reconcile=True)  # no raise
+  _, kwargs = r.custom_api.patch_namespaced_custom_object.call_args
+  assert kwargs["name"] == "pool-x"
+  assert kwargs["plural"] == constants.WARMPOOLS_PLURAL
+  assert kwargs["body"] == {"spec": {"replicas": 4}}
+
+
+def test_create_warmpool_409_no_patch_without_reconcile():
+  # Default (the on-demand claim path): a 409 is a silent no-op, NOT a patch, so
+  # a hot reused size-1 pool isn't written to on every claim.
   r = _resources()
   r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
   r.create_warmpool("pool-x", TNAME, 1)  # no raise
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_create_warmpool_dry_run_409_does_not_patch():
+  # validation path: a 409 under dry-run must not mutate the live pool.
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.create_warmpool("pool-x", TNAME, 4, dry_run=True, reconcile=True)
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_create_warmpool_reraises_non_409():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=500)
+  with pytest.raises(client.ApiException):
+    r.create_warmpool("pool-x", TNAME, 1)
 
 
 def test_delete_swallows_404():

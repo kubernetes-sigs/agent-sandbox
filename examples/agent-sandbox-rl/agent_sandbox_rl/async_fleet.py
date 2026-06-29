@@ -240,17 +240,18 @@ class AsyncSandboxFleet:
     try:
       for start in range(0, len(images), window):
         batch = images[start:start + window]
-        await asyncio.gather(*(
-            self._to_thread(self._fleet.warm_image, img,
-                            replicas_override=replicas_override, wait=True)
-            for img in batch))
+        # Route through the bounded batch warmer (capped by max_concurrent) rather
+        # than one _to_thread per image, so a large window can't fan out hundreds
+        # of concurrent API watches at once.
+        await self._to_thread(self._fleet.warm_images, batch,
+                              replicas_override=replicas_override, wait=True)
         batch_pairs = [(i, t) for img in batch for (i, t) in by_image[img]]
         batch_tasks = [t for _i, t in batch_pairs]
         batch_results = await self._process_parallel(batch_tasks, process_fn, concurrency)
         for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
           results[i] = r
-        await asyncio.gather(*(
-            self._to_thread(self._fleet.unwarm_image, img) for img in batch))
+        for img in batch:
+          await self._to_thread(self._fleet.unwarm_image, img)
     finally:
       if teardown:
         await self.teardown()
@@ -272,10 +273,9 @@ class AsyncSandboxFleet:
     batches = [images[s:s + window] for s in range(0, len(images), window)]
 
     async def _warm(batch):
-      await asyncio.gather(*(
-          self._to_thread(self._fleet.warm_image, img,
-                          replicas_override=replicas_override, wait=True)
-          for img in batch))
+      # Bounded batch warm (capped by max_concurrent), not one task per image.
+      await self._to_thread(self._fleet.warm_images, batch,
+                            replicas_override=replicas_override, wait=True)
 
     async def _prefetch(batch):              # background warm, timed as "prefetch"
       with self._fleet._obs.phase("prefetch"):
@@ -293,8 +293,8 @@ class AsyncSandboxFleet:
         batch_results = await self._process_parallel(batch_tasks, process_fn, concurrency)
         for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
           results[i] = r
-        await asyncio.gather(*(
-            self._to_thread(self._fleet.unwarm_image, img) for img in batch))
+        for img in batch:
+          await self._to_thread(self._fleet.unwarm_image, img)
         if pending is not None:
           await pending                      # surface prefetch errors inside try
           pending = None
@@ -357,7 +357,12 @@ class AsyncSandboxFleet:
         for e in range(epochs):
           last = e == epochs - 1
           logger.info("epoch %d/%d", e + 1, epochs)
-          results.append(await self._run_once(
-              strategy, process_fn, conc, teardown=last and not keep_warm))
+          try:
+            results.append(await self._run_once(
+                strategy, process_fn, conc, teardown=last and not keep_warm))
+          except BaseException:               # a mid-run epoch never tore down
+            if not keep_warm and not last:
+              await self.teardown()
+            raise
     logger.info("\n%s", report.summary())
     return results

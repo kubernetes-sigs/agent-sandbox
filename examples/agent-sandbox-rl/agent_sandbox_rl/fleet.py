@@ -314,18 +314,22 @@ class SandboxFleet:
     across the released lock); the callers never do that — one entry per image."""
     reps = replicas_override if replicas_override is not None else e.replicas
     with self._lock:
-      if self._warmed.get(e.image, 0) >= reps:
+      already = self._warmed.get(e.image, 0)
+      if already >= reps:
         return                              # already warm (cross-epoch / keep_warm reuse)
     c = self.registry.get(e.cluster)
     fam = repo_family(e.image)
     with self._obs.phase("create_warmpool", cluster=e.cluster, family=fam):
       c.resources.ensure_template(
           e.image, e.template, c.template_spec(self.config.template))
-      c.resources.create_warmpool(e.pool, e.template, reps)
-    c.reserve_replicas(reps)
+      c.resources.create_warmpool(e.pool, e.template, reps, reconcile=True)
+    # Reserve only the delta when scaling an already-warm pool (create_warmpool
+    # upserts replicas on 409 under reconcile), so reuse never double-counts.
+    delta = reps - already
+    c.reserve_replicas(delta)
     with self._lock:
       self._warmed[e.image] = reps
-    self._obs.warm_add(e.cluster, reps)
+    self._obs.warm_add(e.cluster, delta)
     if wait:
       with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):
         if not c.resources.wait_for_pool_ready(
@@ -370,6 +374,9 @@ class SandboxFleet:
     """Warm a subset of images' pools **concurrently** (used by sliding/pipelined to
     warm a whole window in parallel instead of one image at a time)."""
     plan = self.plan_ or self.plan()
+    # Dedupe while preserving order: warming the same image from two threads at
+    # once is unsafe (see ``_warm_entry``), and this is a public helper.
+    images = list(dict.fromkeys(images))
     resolved = [(img, plan.for_image(img)) for img in images]
     entries = [e for _img, e in resolved if e is not None]
     missing = [img for img, e in resolved if e is None]
@@ -597,8 +604,13 @@ class SandboxFleet:
         for e in range(epochs):
           last = e == epochs - 1
           logger.info("epoch %d/%d", e + 1, epochs)
-          results.append(fn(self, process_fn, conc,
-                            teardown=last and not keep_warm))
+          try:
+            results.append(fn(self, process_fn, conc,
+                              teardown=last and not keep_warm))
+          except BaseException:               # a mid-run epoch never tore down
+            if not keep_warm and not last:
+              self.teardown()
+            raise
     logger.info("\n%s", report.summary())
     return results
 

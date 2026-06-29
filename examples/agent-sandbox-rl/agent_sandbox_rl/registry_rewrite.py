@@ -52,11 +52,12 @@ def rewrite_image(image: str, *, registry: str, project: str = "", repo: str = "
   effective = host or "docker.io"
   if only_hosts is not None and effective not in only_hosts:
     return image
-  # docker.io implicit library namespace ("ubuntu" -> "library/ubuntu"). Strip a
-  # tag (":tag") or digest ("@sha256:…") before testing for a "/" so a digest's
-  # own colon isn't mistaken for a namespace boundary.
+  # Docker Hub library namespace ("ubuntu" -> "library/ubuntu"), for both the
+  # implicit host and an explicit "docker.io/ubuntu" so they mirror to the same
+  # path. Strip a tag (":tag") or digest ("@sha256:…") before testing for a "/"
+  # so a digest's own colon isn't mistaken for a namespace boundary.
   name = rest.split("@", 1)[0].split(":", 1)[0]
-  if host is None and "/" not in name:
+  if effective in DOCKER_HOSTS and "/" not in name:
     rest = f"library/{rest}"
   prefix = "/".join(p for p in (registry, project, repo) if p)
   return f"{prefix}/{rest}"

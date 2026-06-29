@@ -131,7 +131,7 @@ def recommend_window_pipelined(
 
   The pipeline keeps up to **two** windows resident at once, so halve the
   concurrency window to keep peak ~ ``max_concurrent``; then, if disk hints are
-  given, cap by disk with a 2× factor (each cap applies its factor exactly once).
+  given, cap by disk with a 2x factor (each cap applies its factor exactly once).
   ``nodes`` lets the disk cap use the whole pool's disk (distinct images spread)."""
   conc_win = max(1, recommend_window(
       image_totals, max_concurrent, max_pool, per_task=per_task) // 2)

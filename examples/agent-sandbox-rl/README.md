@@ -271,7 +271,7 @@ images, one task each), **RL** is *claim-bound* per problem (one image, many rol
 
 | Job | Image : task | Strategy | Sizing levers | Why |
 | :-- | :-- | :-- | :-- | :-- |
-| **Eval** (SWE-bench sweep) | **1 : 1** | `pipelined` | default (concurrency-aware) + `epochs`/`keep_warm` + `IfNotPresent` + in-region mirror | Pull-bound. Overlap pulls and reuse the node cache. `warm_per_task` is a no-op (1 task/image). |
+| **Eval** (SWE-bench sweep) | **1 : 1** | `pipelined` | default (concurrency-aware) + `epochs`/`keep_warm` + `IfNotPresent` + in-region mirror | Pull-bound. Overlap pulls and reuse the node cache. `warm_per_task` *and* `colocate_replicas` are both no-ops at 1 task/image (one replica → nothing to co-locate). |
 | **RL rollouts** (GRPO / deepswe) | **1 : G** | `naive` or `sliding` | `warm_per_task=True` (+ `max_warmpool_size ≥ G`) + `colocate_replicas=True` | Every rollout claims instantly → lowest straggler tail. Avoid `pipelined` (window shrinks, serializes problems). |
 
 ```python

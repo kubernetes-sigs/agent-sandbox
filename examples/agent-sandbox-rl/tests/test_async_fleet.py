@@ -30,8 +30,23 @@ def _stub_preflight(monkeypatch):
   monkeypatch.setattr("agent_sandbox_rl.preflight.preflight_cluster", ok)
 
 
+_OPEN_FLEETS: list = []
+
+
 def _fleet(registry, **cfg):
-  return AsyncSandboxFleet(FleetConfig(**cfg), registry=registry)
+  # AsyncSandboxFleet.run() leaves its dedicated ThreadPoolExecutor alive until
+  # close(); track every fleet so the autouse fixture below shuts them down and
+  # the suite doesn't accumulate worker threads across tests.
+  f = AsyncSandboxFleet(FleetConfig(**cfg), registry=registry)
+  _OPEN_FLEETS.append(f)
+  return f
+
+
+@pytest.fixture(autouse=True)
+def _close_open_fleets():
+  yield
+  while _OPEN_FLEETS:
+    _OPEN_FLEETS.pop().close()        # idempotent; covers tests that don't close explicitly
 
 
 def test_async_thread_pool_scales_with_concurrency(make_cluster):
@@ -100,6 +115,20 @@ async def test_async_epochs_reuse_pools(make_cluster):
   assert c.resources.create_warmpool.call_count == 2   # reused across epochs
   assert f.handles() == []
   assert c.active_replicas == 0
+
+
+async def test_async_epoch_failure_tears_down_when_not_keep_warm(make_cluster):
+  # Mirror of the sync test: a non-final epoch that raises must still clean up.
+  from agent_sandbox_rl import ClusterRegistry
+  from agent_sandbox_rl.exceptions import FleetError
+  c = make_cluster("solo")
+  c.resources.wait_for_pool_ready.return_value = False    # warm never ready -> FleetError
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4, ready_timeout=0)
+  f.load_tasks(["i1", "i2"])
+  with pytest.raises(FleetError):
+    await f.run(lambda t, h: t.image, strategy="naive", epochs=2)
+  assert c.active_replicas == 0
+  assert f._fleet._warmed == {}
 
 
 async def test_async_pipelined_order_and_peak(make_cluster):

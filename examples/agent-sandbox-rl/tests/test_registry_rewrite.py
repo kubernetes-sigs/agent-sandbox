@@ -40,6 +40,13 @@ def test_rewrites_explicit_docker_io_host():
       "us-docker.pkg.dev/my-project/my-mirror/slimshetty/swebench-verified:t")
 
 
+def test_explicit_docker_io_official_image_normalized_like_implicit():
+  # docker.io/ubuntu and ubuntu must mirror to the SAME path (library/ubuntu),
+  # so explicit and implicit official refs don't pull from two locations.
+  assert _rw("docker.io/ubuntu:22.04") == _rw("ubuntu:22.04") == (
+      "us-docker.pkg.dev/my-project/my-mirror/library/ubuntu:22.04")
+
+
 def test_non_docker_host_left_untouched():
   gcr = "gcr.io/some/img:v1"
   assert _rw(gcr) == gcr

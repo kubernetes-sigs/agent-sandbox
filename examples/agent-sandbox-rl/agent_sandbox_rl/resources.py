@@ -166,9 +166,17 @@ class Resources:
     }
 
   def create_warmpool(self, name: str, template_name: str,
-                      replicas: int, *, dry_run: bool = False) -> None:
+                      replicas: int, *, dry_run: bool = False,
+                      reconcile: bool = False) -> None:
     """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
-    Idempotent on 409 (already exists). ``dry_run=True`` sends ``dryRun=All``."""
+
+    Idempotent on 409 (already exists). With ``reconcile=True`` a 409 instead
+    upserts — patch ``spec.replicas`` to the requested value so a reused/leftover
+    pool converges instead of being silently pinned at its old size (which would
+    make ``wait_for_pool_ready(expected)`` hang and over-count active replicas).
+    Only the warm path needs this; the on-demand claim path leaves it ``False``
+    so a hot, repeatedly-reused size-1 pool isn't patched on every claim.
+    ``dry_run=True`` sends ``dryRun=All`` and never patches (validation only)."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
@@ -177,10 +185,16 @@ class Resources:
           dry_run="All" if dry_run else None)
       logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
     except client.ApiException as e:
-      if e.status == 409:
-        logger.info("SandboxWarmPool '%s' already exists.", name)
-      else:
+      if e.status != 409:
         raise
+      if dry_run or not reconcile:
+        logger.info("SandboxWarmPool '%s' already exists.", name)
+        return
+      logger.info("SandboxWarmPool '%s' exists; patching replicas=%d.", name, replicas)
+      self.custom_api.patch_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+          name=name, body={"spec": {"replicas": replicas}})
 
   def validate_manifests(self, sample_image: str, template: TemplateSpec,
                          *, name: str = "asrl-validate") -> None:

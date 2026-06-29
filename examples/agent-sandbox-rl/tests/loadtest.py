@@ -177,7 +177,7 @@ Each line in a strategy's RunReport reads `phase  total_s  (n=count, max=slowest
 def _methodology(params: dict) -> str:
     imgs = params.get("images", "N")
     per = params.get("tasks_per_image", "K")
-    total = params.get("total_tasks", "N×K")
+    total = params.get("total_tasks", "NxK")
     mc = params.get("max_concurrent", "?")
     dur = params.get("task_duration_s", 0)
     work = (f"a no-op probe (`task_duration={dur}s`), so the table isolates "
@@ -335,12 +335,14 @@ async def _run_strategy(args, tasks, strategy):
         return handle.pod_name
 
     fleet = _make_fleet(args)
-    fleet.load_tasks(ListSource(tasks))
-    plan = await fleet.plan()              # capture the warm-pool plan
-    entries = [{"image": e.image, "pool": e.pool, "replicas": e.replicas,
-                "cluster": e.cluster} for e in plan.entries]
+    entries = []
     t0 = time.monotonic()
     try:
+        fleet.load_tasks(ListSource(tasks))
+        plan = await fleet.plan()          # capture the warm-pool plan
+        entries = [{"image": e.image, "pool": e.pool, "replicas": e.replicas,
+                    "cluster": e.cluster} for e in plan.entries]
+        t0 = time.monotonic()
         res = await fleet.run(probe, strategy=strategy, concurrency=args.max_concurrent)
         wall = time.monotonic() - t0
         ok = sum(1 for r in res if not isinstance(r, Exception))

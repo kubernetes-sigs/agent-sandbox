@@ -4,7 +4,7 @@ Per-run performance reports for the `agent-sandbox-rl` package (the `RunReport`
 produced by `SandboxFleet.run(...)`). Two emitters write here:
 
 - **`examples/run_swebench_fleet.py`** (when `REPORT_DIR` is set) — a single run:
-  ```
+  ```text
   <strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.txt    # human-readable summary table
   <strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.json   # same data (report.to_dict())
   ```

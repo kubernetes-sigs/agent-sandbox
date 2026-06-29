@@ -133,6 +133,8 @@ def main(argv=None):
     cmd = (f"PYTHONPATH=. python tests/run_full_swebench_benchmark.py{ctx_flag}"
            f" --namespace {namespace}{sel_flag} --n-images {n_images}"
            f" --tasks-per-image {tasks_per_image} --avg-image-gb {avg_image_gb}"
+           f" --cpu-request {cpu_request}"
+           f" --max-warmpool-size {args.max_warmpool_size}"
            f" --execute --limit {plan.n_tasks}")
     run = args.yes
     if interactive and not run:
@@ -148,6 +150,7 @@ def main(argv=None):
             *(["--node-selector", selector] if selector else []),
             "--n-images", str(n_images), "--tasks-per-image", str(tasks_per_image),
             "--avg-image-gb", str(avg_image_gb), "--cpu-request", str(cpu_request),
+            "--max-warmpool-size", str(args.max_warmpool_size),
             "--execute", "--limit", str(plan.n_tasks),
         ])
     else:

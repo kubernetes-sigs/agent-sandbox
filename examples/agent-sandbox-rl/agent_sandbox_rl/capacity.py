@@ -15,7 +15,7 @@
 """Capacity-aware preload planning.
 
 Probe a node pool's allocatable CPU / ephemeral disk / pod density, then compute the
-optimal preload plan for an *N*-image (× *K*-tasks) batch — strategy (``naive`` warm-all
+optimal preload plan for an *N*-image (x *K*-tasks) batch — strategy (``naive`` warm-all
 when it fits, else a disk-bounded ``pipelined`` window), ``max_concurrent``, per-image
 replicas, and the binding bottleneck — so every image is pulled + uncompressed and warm
 *before* the task phase starts.
@@ -231,7 +231,11 @@ def plan_benchmark(cap: ClusterCapacity, n_images: int, tasks_per_image: int = 1
             avg_image_gb=avg_image_gb, usable_disk_gb=usable_disk_per_node,
             per_task=warm_per_task, nodes=cap.nodes)
         max_concurrent = max(1, min(conc_cap, window_size * replicas))
-        resident = window_size * replicas * avg_image_gb     # per "double-buffer" footprint
+        # Per-node resident: the window's distinct images spread across the pool,
+        # x2 for the double-buffered (up to 2-window) pipeline footprint. Mirrors
+        # the naive branch's per-node accounting so the rendered disk/node is honest.
+        window_per_node = math.ceil(window_size / nodes)
+        resident = window_per_node * replicas * avg_image_gb * 2
         bottleneck = ("disk" if not disk_fits_all
                       else "pods" if not pods_fit_all else "cpu")
         why = []

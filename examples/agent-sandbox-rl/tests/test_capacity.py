@@ -95,6 +95,22 @@ def test_plan_disk_bound_falls_back_to_pipelined():
   assert plan.max_concurrent >= 1
 
 
+def test_pipelined_resident_disk_is_per_node_not_cluster_total():
+  # Disk-bound -> pipelined. The reported resident disk must be a PER-NODE figure
+  # (window spread across the pool, x2 for double-buffering), not a cluster total,
+  # so it stays consistent with the planner's own per-node fit budget.
+  cap = _cap(nodes=30, disk_gib=50)           # tiny disk/node -> pipelined
+  plan = capacity.plan_benchmark(cap, n_images=500, tasks_per_image=1, avg_image_gb=10)
+  assert plan.strategy == "pipelined"
+  import math
+  nodes = max(1, cap.nodes)
+  expected = math.ceil(plan.window_size / nodes) * plan.replicas_per_image * 10 * 2
+  assert plan.resident_disk_per_node_gb == round(expected, 1)
+  # the old (buggy) cluster-wide figure would be window*replicas*gb — far larger
+  cluster_total = plan.window_size * plan.replicas_per_image * 10
+  assert plan.resident_disk_per_node_gb < cluster_total
+
+
 def test_plan_cpu_bound_falls_back_to_pipelined():
   cap = _cap(nodes=30, vcpu=4, disk_gib=1000)  # 120 vCPU total < 500*0.25
   plan = capacity.plan_benchmark(cap, n_images=500, tasks_per_image=1,

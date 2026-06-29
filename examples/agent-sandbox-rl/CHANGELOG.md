@@ -84,6 +84,34 @@ Sandbox `v0.5.0rc1` (v1beta1).
 - **Docs**: `docs/gke.md` GKE tuning guide (Image Streaming, AR mirror, secondary
   boot disk); README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
+### Fixed (from PR #1049 review)
+- **Epoch teardown on failure** (`fleet.py`, `async_fleet.py`): a non-final
+  `epochs>1` pass that raised left warm pools/claims resident (only the last epoch
+  carried `teardown=True`). Both fleets now tear down on a mid-run epoch error when
+  `keep_warm=False`.
+- **Warm-pool replica reconcile + delta reserve** (`resources.py`, `fleet.py`):
+  `create_warmpool(..., reconcile=True)` upserts `spec.replicas` on 409 so a reused
+  pool that needs *more* replicas converges instead of being pinned at its old size
+  (which hung `wait_for_pool_ready`); `_warm_entry` reserves only the delta so reuse
+  never double-counts `active_replicas`. The on-demand claim path keeps the prior
+  idempotent-no-op behavior (no patch on every reused claim).
+- **Bounded async window warming** (`async_fleet.py`): `sliding`/`pipelined` warm a
+  window via `fleet.warm_images` (capped by `max_concurrent`) instead of one
+  `to_thread` per image, so a large window can't fan out hundreds of concurrent API
+  watches.
+- **Registry rewrite normalizes explicit Docker Hub official images**
+  (`registry_rewrite.py`): `docker.io/ubuntu` now mirrors to the same
+  `library/ubuntu` path as the implicit `ubuntu` form.
+- **`warm_images` de-duplicates** its input (`fleet.py`) so a caller's duplicate
+  image can't warm the same pool from two threads at once.
+- **Capacity pipelined disk estimate is per-node** (`capacity.py`): reports
+  `ceil(window/nodes) * replicas * gb * 2` (double-buffer) instead of a cluster
+  total, matching the planner's per-node fit budget.
+- **Tooling**: the capacity wizard forwards `--cpu-request`/`--max-warmpool-size`
+  to the runner (`plan_capacity.py`); the load-test harness closes its fleet even
+  if planning fails (`loadtest.py`); the SWE-bench runner rejects
+  `--tasks-per-image > 1` (it executes one task/image — use `loadtest.py`).
+
 ### Changed / hardening (from PR #1000 review)
 - **Prometheus is now an optional `metrics` extra** (`pyproject.toml`,
   `observability.py`): moved off the core deps, and the `asrl_*` collectors are
@@ -169,7 +197,7 @@ Sandbox `v0.5.0rc1` (v1beta1).
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).
 - **Docs**: README, `docs/architecture.md`, this changelog.
-- **Tests**: 206 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
+- **Tests**: 216 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
   pool readiness + fail-fast on terminal errors, cluster, sources, placement,
   fleet incl. 2-cluster routing + acquire rollback + idempotent release,
   strategies/parallel, preflight, prepull, async, swebench incl. `keep_row`,

@@ -22,6 +22,7 @@ import (
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 	v1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // GenericInformer is type of SharedIndexInformer which will locate and delegate to other
@@ -57,6 +58,14 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Extensions().V1alpha1().SandboxTemplates().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxwarmpools"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Extensions().V1alpha1().SandboxWarmPools().Informer()}, nil
+
+		// Group=extensions.agents.x-k8s.io, Version=v1beta1
+	case v1beta1.SchemeGroupVersion.WithResource("sandboxclaims"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Extensions().V1beta1().SandboxClaims().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("sandboxtemplates"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Extensions().V1beta1().SandboxTemplates().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("sandboxwarmpools"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Extensions().V1beta1().SandboxWarmPools().Informer()}, nil
 
 	}
 

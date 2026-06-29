@@ -17,6 +17,7 @@ package v1alpha1
 import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
@@ -77,7 +78,7 @@ type SandboxTemplateSpec struct {
 	// If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false
 	// to ensure a secure-by-default environment.
 	// +required
-	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate" protobuf:"bytes,3,opt,name=podTemplate"`
+	PodTemplate sandboxv1alpha1.PodTemplate `json:"podTemplate"`
 
 	// volumeClaimTemplates is a list of claims that pods created from this template
 	// are allowed to reference. When a SandboxClaim or SandboxWarmPool creates a sandbox
@@ -86,7 +87,7 @@ type SandboxTemplateSpec struct {
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
 	// +optional
 	// +listType=atomic
-	VolumeClaimTemplates []sandboxv1alpha1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" protobuf:"bytes,4,rep,name=volumeClaimTemplates"`
+	VolumeClaimTemplates []sandboxv1alpha1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
 	// networkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template. A single shared NetworkPolicy is created per Template.
@@ -126,16 +127,21 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:default=Disallowed
 	// +optional
 	EnvVarsInjectionPolicy EnvVarsInjectionPolicy `json:"envVarsInjectionPolicy,omitempty"`
-}
 
-// SandboxTemplateStatus defines the observed state of Sandbox.
-type SandboxTemplateStatus struct {
+	// service controls whether the controller should automatically create a
+	// headless Service for Sandboxes created from this template.
+	// When unset, the controller preserves existing Services for backward
+	// compatibility but does not create new ones. Set to true to enable or false
+	// to explicitly disable and remove the Service.
+	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	// +optional
+	Service *bool `json:"service,omitempty"`
 }
 
 // +genclient
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
+// +kubebuilder:deprecatedversion:warning="extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate is deprecated; use extensions.agents.x-k8s.io/v1beta1 SandboxTemplate instead"
 // SandboxTemplate is the Schema for the sandbox template API.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
@@ -147,10 +153,6 @@ type SandboxTemplate struct {
 	// spec defines the desired state of Sandbox
 	// +required
 	Spec SandboxTemplateSpec `json:"spec"`
-
-	// status defines the observed state of Sandbox
-	// +optional
-	Status SandboxTemplateStatus `json:"status,omitempty,omitzero"`
 }
 
 // +kubebuilder:object:root=true
@@ -163,5 +165,8 @@ type SandboxTemplateList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxTemplate{}, &SandboxTemplateList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxTemplate{}, &SandboxTemplateList{})
+		return nil
+	})
 }

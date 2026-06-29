@@ -1,0 +1,49 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: playwright-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: playwright-sandbox
+    spec:
+      containers:
+      - name: playwright
+        image: ${IMAGE}
+        env:
+        - name: TARGET_URL
+          value: "https://example.com"
+        command:
+        - bash
+        - -c
+        - |
+          python3 - <<'PY'
+          import asyncio
+          import os
+          from pathlib import Path
+          from playwright.async_api import async_playwright
+
+          URL = os.environ.get('TARGET_URL', 'https://example.com')
+          SCREENSHOT_PATH = Path('/home/playwright/screenshot.png')
+          SCREENSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+          async def run():
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+                  page = await browser.new_page()
+                  await page.goto(URL, wait_until='networkidle')
+                  title = await page.title()
+                  content = await page.text_content('body')
+                  await page.screenshot(path=str(SCREENSHOT_PATH), full_page=True)
+                  print('title:', title)
+                  print('screenshot saved at:', SCREENSHOT_PATH)
+                  if content:
+                      snippet = content.strip().replace('\n', ' ')
+                      print('content snippet:', snippet[:300])
+                  await browser.close()
+
+          asyncio.run(run())
+          PY
+          sleep infinity
+      restartPolicy: Never

@@ -26,16 +26,14 @@ import (
 	clientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1"
 	fakeagentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1/fake"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1"
+	fakeagentsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1/fake"
 )
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.
 // It's backed by a very simple object tracker that processes creates, updates and deletions as-is,
 // without applying any field management, validations and/or defaults. It shouldn't be considered a replacement
 // for a real clientset and is mostly useful in simple unit tests.
-//
-// Deprecated: NewClientset replaces this with support for field management, which significantly improves
-// server side apply testing. NewClientset is only available when apply configurations are generated (e.g.
-// via --with-applyconfig).
 func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 	o := testing.NewObjectTracker(scheme, codecs.UniversalDecoder())
 	for _, obj := range objects {
@@ -81,7 +79,7 @@ func (c *Clientset) Tracker() testing.ObjectTracker {
 	return c.tracker
 }
 
-// IsWatchListSemanticsSupported informs the reflector that this client
+// IsWatchListSemanticsUnSupported informs the reflector that this client
 // doesn't support WatchList semantics.
 //
 // This is a synthetic method whose sole purpose is to satisfy the optional
@@ -100,4 +98,9 @@ var (
 // AgentsV1alpha1 retrieves the AgentsV1alpha1Client
 func (c *Clientset) AgentsV1alpha1() agentsv1alpha1.AgentsV1alpha1Interface {
 	return &fakeagentsv1alpha1.FakeAgentsV1alpha1{Fake: &c.Fake}
+}
+
+// AgentsV1beta1 retrieves the AgentsV1beta1Client
+func (c *Clientset) AgentsV1beta1() agentsv1beta1.AgentsV1beta1Interface {
+	return &fakeagentsv1beta1.FakeAgentsV1beta1{Fake: &c.Fake}
 }

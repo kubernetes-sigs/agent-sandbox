@@ -32,26 +32,27 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	agentsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1"
 	extensionsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1alpha1"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
 type sandboxState struct {
 	SandboxName string
 	PodName     string
+	PodIP       string
 	Annotations map[string]string
 }
 
 // K8sHelper encapsulates all Kubernetes API interactions for sandbox lifecycle
 // management. It can be shared across multiple Sandbox instances.
 type K8sHelper struct {
-	AgentsClient     agentsv1alpha1.AgentsV1alpha1Interface
-	ExtensionsClient extensionsv1alpha1.ExtensionsV1alpha1Interface
+	AgentsClient     agentsv1beta1.AgentsV1beta1Interface
+	ExtensionsClient extensionsv1beta1.ExtensionsV1beta1Interface
 	DynamicClient    dynamic.Interface
 	CoreClient       corev1client.CoreV1Interface
 	DiscoveryClient  discoveryv1client.DiscoveryV1Interface
@@ -110,8 +111,8 @@ func NewK8sHelper(restConfig *rest.Config, log logr.Logger) (*K8sHelper, error) 
 	}
 
 	return &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1alpha1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		DynamicClient:    dynClient,
 		CoreClient:       coreClient,
 		DiscoveryClient:  discClient,
@@ -121,7 +122,7 @@ func NewK8sHelper(restConfig *rest.Config, log logr.Logger) (*K8sHelper, error) 
 }
 
 // createClaim creates a SandboxClaim and returns its generated name.
-func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName string, tracer trace.Tracer, svcName string) (string, error) {
+func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
 	defer span.End()
 
@@ -132,15 +133,15 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 		}
 	}
 
-	claim := &extv1alpha1.SandboxClaim{
+	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "sandbox-claim-",
 			Namespace:    namespace,
 			Annotations:  annotations,
 		},
-		Spec: extv1alpha1.SandboxClaimSpec{
-			TemplateRef: extv1alpha1.SandboxTemplateRef{
-				Name: templateName,
+		Spec: extv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
+				Name: warmPoolName,
 			},
 		},
 	}
@@ -148,7 +149,7 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, templateName str
 	created, err := h.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{})
 	if err != nil {
 		recordError(span, err)
-		return "", fmt.Errorf("%w: template=%s namespace=%s: %w", ErrClaimFailed, templateName, namespace, err)
+		return "", fmt.Errorf("%w: warmpool=%s namespace=%s: %w", ErrClaimFailed, warmPoolName, namespace, err)
 	}
 
 	name := created.Name
@@ -257,7 +258,7 @@ func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface
 			if event.Type == watch.Deleted {
 				return "", false, fmt.Errorf("%w: claim %s deleted during name resolution", ErrSandboxDeleted, claimName)
 			}
-			claim, ok := event.Object.(*extv1alpha1.SandboxClaim)
+			claim, ok := event.Object.(*extv1beta1.SandboxClaim)
 			if !ok {
 				continue
 			}
@@ -354,7 +355,7 @@ func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interfa
 			if event.Type == watch.Deleted {
 				return nil, false, ErrSandboxDeleted
 			}
-			sb, ok := event.Object.(*sandboxv1alpha1.Sandbox)
+			sb, ok := event.Object.(*sandboxv1beta1.Sandbox)
 			if !ok {
 				continue
 			}
@@ -403,16 +404,16 @@ func (h *K8sHelper) verifySandboxAlive(ctx context.Context, name, namespace stri
 	return extractState(sb), nil
 }
 
-func isSandboxReady(sb *sandboxv1alpha1.Sandbox) bool {
+func isSandboxReady(sb *sandboxv1beta1.Sandbox) bool {
 	for _, cond := range sb.Status.Conditions {
-		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+		if cond.Type == string(sandboxv1beta1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
 	return false
 }
 
-func extractState(sb *sandboxv1alpha1.Sandbox) *sandboxState {
+func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 	state := &sandboxState{
 		SandboxName: sb.Name,
 	}
@@ -425,6 +426,7 @@ func extractState(sb *sandboxv1alpha1.Sandbox) *sandboxState {
 	} else {
 		state.PodName = sb.Name
 	}
+	state.PodIP = selectPodIP(sb.Status.PodIPs)
 	return state
 }
 

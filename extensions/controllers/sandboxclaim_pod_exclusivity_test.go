@@ -31,9 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
@@ -49,10 +49,10 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	templateHash := sandboxcontrollers.NameHash("tpl")
 	warmPoolUID := types.UID("pool-uid")
 
-	template := &extensionsv1alpha1.SandboxTemplate{
+	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "c", Image: "img"}},
 				},
@@ -60,8 +60,8 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 		},
 	}
 
-	createPoolSandbox := func(name string) *sandboxv1alpha1.Sandbox {
-		return &sandboxv1alpha1.Sandbox{
+	createPoolSandbox := func(name string) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
 				Namespace:         "default",
@@ -71,24 +71,23 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 					sandboxTemplateRefHash: templateHash,
 				},
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
 					Kind:       "SandboxWarmPool",
 					Name:       "pool",
 					UID:        warmPoolUID,
 					Controller: new(true),
 				}},
 			},
-			Spec: sandboxv1alpha1.SandboxSpec{
-				Replicas: new(int32(1)),
-				PodTemplate: sandboxv1alpha1.PodTemplate{
+			Spec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "c", Image: "img"}},
 					},
 				},
 			},
-			Status: sandboxv1alpha1.SandboxStatus{
+			Status: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{{
-					Type:               string(sandboxv1alpha1.SandboxConditionReady),
+					Type:               string(sandboxv1beta1.SandboxConditionReady),
 					Status:             metav1.ConditionTrue,
 					Reason:             "DependenciesReady",
 					LastTransitionTime: metav1.NewTime(time.Now()),
@@ -101,32 +100,37 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	poolSb0 := createPoolSandbox("pool-sb-0")
 	poolSb1 := createPoolSandbox("pool-sb-1")
 
-	claims := make([]*extensionsv1alpha1.SandboxClaim, 3)
+	claims := make([]*extensionsv1beta1.SandboxClaim, 3)
 	for i := range claims {
-		claims[i] = &extensionsv1alpha1.SandboxClaim{
+		claims[i] = &extensionsv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("claim-%d", i),
 				Namespace: "default",
 				UID:       types.UID(fmt.Sprintf("claim-%d-uid", i)),
 			},
-			Spec: extensionsv1alpha1.SandboxClaimSpec{
-				TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "tpl"},
+			Spec: extensionsv1beta1.SandboxClaimSpec{
+				WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "pool"},
 			},
 		}
 	}
 
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}},
+	}
+
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(template, poolSb0, poolSb1).
-		WithStatusSubresource(&extensionsv1alpha1.SandboxClaim{})
+		WithObjects(template, warmPool, poolSb0, poolSb1).
+		WithStatusSubresource(&extensionsv1beta1.SandboxClaim{})
 	for _, cl := range claims {
 		builder = builder.WithObjects(cl)
 	}
 	fc := builder.Build()
 
 	testQueue := queue.NewSimpleSandboxQueue()
-	testQueue.Add(templateHash, queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
-	testQueue.Add(templateHash, queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
+	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
+	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
 
 	reconciler := &SandboxClaimReconciler{
 		Client: fc, Scheme: scheme,
@@ -144,7 +148,7 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	}
 
 	// Collect all sandboxes and build sandbox → []owning claims
-	var allSandboxes sandboxv1alpha1.SandboxList
+	var allSandboxes sandboxv1beta1.SandboxList
 	require.NoError(t, fc.List(ctx, &allSandboxes, client.InNamespace("default")))
 
 	sandboxToOwners := make(map[string][]string) // sandbox name → [claim names]

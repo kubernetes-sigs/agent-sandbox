@@ -6,7 +6,7 @@ Agent Sandbox is a quick and easy way to start secure containers that will let a
 
 - A running Kubernetes cluster with the [Agent Sandbox Controller](/README.md/#installation) installed.
 - The [Sandbox Router](/clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router) deployed in your cluster.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox](/examples/python-runtime-sandbox/README.md) guide for setup instructions.
+- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See the Python Runtime Sandbox guide for setup instructions.
 - The [Python SDK](/clients/python/agentic-sandbox-client/README.md) installed: `pip install k8s-agent-sandbox`.
 
 ## Connection Modes
@@ -31,7 +31,7 @@ from k8s_agent_sandbox import SandboxClient
 client = SandboxClient()
 
 sandbox = client.create_sandbox(
-    template="python-sandbox-template",
+    warmpool="python-sandbox-pool",
     namespace="default",
 )
 try:
@@ -46,7 +46,7 @@ Or write a file into the sandbox filesystem, then read it:
 
 ```python
 sandbox = client.create_sandbox(
-    template="python-sandbox-template",
+    warmpool="python-sandbox-pool",
     namespace="default",
 )
 try:

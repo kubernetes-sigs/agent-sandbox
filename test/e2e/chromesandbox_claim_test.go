@@ -26,8 +26,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -38,7 +38,7 @@ type ChromeSandboxClaimMetrics struct {
 }
 
 // BenchmarkChromeSandboxClaimStartup measures the time for Chrome to start in a sandbox claim.
-// Run with: go test -bench=BenchmarkChromeSandboxClaimStartup -benchtime=10x ./test/e2e/...
+// Run with: go test -v -run=^$ -bench=BenchmarkChromeSandboxClaimStartup -benchtime=10x ./test/e2e/...
 // To add parallelism, use the -cpu flag (e.g., -cpu=1,2,4).
 // Make sure that WARM_POOL_SIZE is set appropriately to account for the number of parallel
 // test iterations.
@@ -61,11 +61,11 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	tc.MustCreateWithCleanup(ns)
 
 	// 2. Setup SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{}
+	template := &extensionsv1beta1.SandboxTemplate{}
 	template.Name = "chrome-template"
 	template.Namespace = ns.Name
 	imageName := chromeSandboxImageName()
-	template.Spec.PodTemplate = sandboxv1alpha1.PodTemplate{
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -79,10 +79,11 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	tc.MustCreateWithCleanup(template)
 
 	// 3. Setup SandboxWarmPool
-	warmPool := &extensionsv1alpha1.SandboxWarmPool{}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	warmPool.Name = "chrome-warmpool"
 	warmPool.Namespace = ns.Name
-	warmPool.Spec.Replicas = int32(warmPoolSize)
+	replicas := int32(warmPoolSize)
+	warmPool.Spec.Replicas = &replicas
 	warmPool.Spec.TemplateRef.Name = template.Name
 	tc.MustCreateWithCleanup(warmPool)
 
@@ -104,7 +105,7 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			metrics := runChromeSandboxClaim(tc, ns.Name, template.Name)
+			metrics := runChromeSandboxClaim(tc, ns.Name, warmPool.Name)
 
 			mu.Lock()
 			totalClaimReadySec += metrics.ClaimReady.Seconds()
@@ -118,18 +119,18 @@ func BenchmarkChromeSandboxClaimStartup(b *testing.B) {
 	}
 }
 
-func runChromeSandboxClaim(tc *framework.TestContext, namespace, templateName string) *ChromeSandboxClaimMetrics {
+func runChromeSandboxClaim(tc *framework.TestContext, namespace, warmPoolName string) *ChromeSandboxClaimMetrics {
 	metrics := &ChromeSandboxClaimMetrics{}
 
 	// Unique name for this claim
 	claimName := fmt.Sprintf("claim-%d-%d", time.Now().UnixNano(), claimCounter.Add(1))
 
-	claim := &extensionsv1alpha1.SandboxClaim{}
+	claim := &extensionsv1beta1.SandboxClaim{}
 	claim.Name = claimName
 	claim.Namespace = namespace
-	claim.Spec.TemplateRef.Name = templateName
-	claim.Spec.Lifecycle = &extensionsv1alpha1.Lifecycle{
-		ShutdownPolicy: extensionsv1alpha1.ShutdownPolicyDelete,
+	claim.Spec.WarmPoolRef.Name = warmPoolName
+	claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
+		ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
 	}
 
 	startTime := time.Now()

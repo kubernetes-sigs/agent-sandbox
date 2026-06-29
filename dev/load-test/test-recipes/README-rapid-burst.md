@@ -48,8 +48,7 @@ Before running this test, ensure the following prerequisites are met:
           - --enable-tracing
           - --zap-log-level=debug
           - --zap-encoder=json
-          - --kube-api-qps=1000
-          - --kube-api-burst=1000
+          - --kube-api-qps=-1
           - --sandbox-concurrent-workers=1000
           - --sandbox-claim-concurrent-workers=1000
           - --sandbox-warm-pool-concurrent-workers=1000
@@ -81,6 +80,22 @@ artifacts.
 
 Note that you may need to first run `chmod +x run_rapid_burst.sh` once.
 
+### Running with HPA and CapacityBuffer Scaling
+
+You can enable Horizontal Pod Autoscaler (HPA) and GKE CapacityBuffer scaling by setting environment variables before running the script. This allows the system to dynamically scale the pre-warmed sandbox pool as demand spikes and ensure underlying standby node capacity is provisioned.
+
+**Prerequisites:** This mode requires additional cluster setup beyond the base test prerequisites. `ENABLE_HPA=true` requires the external/custom metric pipeline used by the SandboxWarmPool HPA to be available on the cluster (for example, GKE Managed Service for Prometheus plus the Custom Metrics Adapter, as described in the linked HPA example below). `ENABLE_CAPACITY_BUFFER=true` requires the GKE `CapacityBuffer` feature/CRD to be installed and enabled on the cluster; otherwise the resource creation will fail.
+
+```bash
+ENABLE_HPA=true ENABLE_CAPACITY_BUFFER=true WARMPOOL_SIZE=10 ./run_rapid_burst.sh
+```
+
+When `ENABLE_CAPACITY_BUFFER=true` is set, the test automatically introduces a 5-minute pause after creating the `CapacityBuffer` resource to allow GKE node auto-provisioning to spin up the required standby nodes before initiating the rapid burst loops.
+
+> [!NOTE]
+> **GKE Cluster Autoscaler CRD Version Caching Issue:**
+> If you recently upgraded `SandboxWarmPool` CRD versions in your cluster (e.g., from `v1alpha1` to `v1beta1`), the GKE Cluster Autoscaler (CA) may fail, resulting in `there is no pod template reference in buffer status` errors. This is a known GKE issue where the Cluster Autoscaler caches CRD schemas and versions. To resolve this, you may need to recreate or trigger a restart of the GKE Cluster Autoscaler to force a schema cache refresh.`
+
 ## Configuration
 
 The primary test parameters can be modified by editing the variables at the top of the
@@ -90,9 +105,23 @@ The primary test parameters can be modified by editing the variables at the top 
 - **`QPS`**: The maximum creation rate (Queries Per Second) for SandboxClaim objects.
 - **`TOTAL_BURSTS`**: The total number of burst cycles to run.
 - **`WARMPOOL_SIZE`**: The target number of pre-warmed sandboxes to maintain.
-- **`RUNTIME_CLASS`**: The RuntimeClassName for the SandboxTemplate such as `gvisor`.
+- **`RUNTIME_CLASS`**: The RuntimeClassName for the underlying SandboxTemplate linked to the pool, such as `gvisor`.
 
 The total number of claims created by the test will be `BURST_SIZE * TOTAL_BURSTS`.
+
+### Autoscaling & Capacity Buffer Parameters
+
+For more details on HPA configuration and scaling behavior, refer to the [HPA SandboxWarmPool Scaling Example](../../../examples/hpa-swp-scaling/README.md).
+
+- **`ENABLE_HPA`**: Set to `true` to deploy a HorizontalPodAutoscaler targeting the SandboxWarmPool (default: `false`). Note: The SandboxWarmPool is automatically provisioned under the name `warmpool-0` by this recipe, and both HPA and CapacityBuffer target this resource.
+- **`HPA_MIN_REPLICAS`**: The minimum number of pre-warmed sandboxes for the HPA (default: `1000`).
+- **`HPA_MAX_REPLICAS`**: The maximum ceiling for the HPA (default: `2000`).
+- **`HPA_TARGET_VALUE`**: The target creation rate of SandboxClaims per second (default: `0.5`).
+- **`HPA_METRIC_NAME`**: The external metric name queried by the HPA to perform scaling (default: `"prometheus.googleapis.com|agent_sandbox_claim_creation_total|counter"`).
+- **`ENABLE_CAPACITY_BUFFER`**: Set to `true` to deploy a GKE `CapacityBuffer` resource (default: `false`).
+- **`BUFFER_PERCENTAGE`**: The percentage of extra capacity to maintain in standby (default: `200`).
+- **`PROVISIONING_STRATEGY`**: The GKE provisioning strategy for standby capacity (default: `buffer.gke.io/standby-capacity`).
+- **`CAPACITY_BUFFER_PAUSE_DURATION`**: The cooldown/pause duration to sleep after deploying the GKE CapacityBuffer to allow node auto-provisioning to spin up standby capacity (default: `5m`).
 
 ## Output
 

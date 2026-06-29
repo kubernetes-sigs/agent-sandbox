@@ -27,10 +27,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gofrs/flock"
 	"k8s.io/klog/v2"
 )
 
@@ -159,6 +161,15 @@ func stateFilePath() (string, error) {
 	return filepath.Join(dir, "state.json"), nil
 }
 
+// stateLockFilePath returns the path to the local state lock file.
+func stateLockFilePath() (string, error) {
+	p, err := stateFilePath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(p), "state.lock"), nil
+}
+
 // readState reads the local state file.
 func readState() (*State, error) {
 	p, err := stateFilePath()
@@ -193,6 +204,30 @@ func writeState(state *State) error {
 		return fmt.Errorf("error writing state file: %v", err)
 	}
 	return nil
+}
+
+// updateState performs a locked read-modify-write of the state file. The state
+// file lock is held only for the duration of fn, so fn must not perform slow or
+// blocking operations (such as network I/O) while it runs.
+func updateState(fn func(*State) error) error {
+	lockPath, err := stateLockFilePath()
+	if err != nil {
+		return err
+	}
+	fileLock := flock.New(lockPath)
+	if err := fileLock.Lock(); err != nil {
+		return fmt.Errorf("error acquiring lock: %w", err)
+	}
+	defer fileLock.Unlock()
+
+	state, err := readState()
+	if err != nil {
+		return err
+	}
+	if err := fn(state); err != nil {
+		return err
+	}
+	return writeState(state)
 }
 
 // getBoskosHost returns the boskos host from the environment variable BOSKOS_HOST.
@@ -260,29 +295,60 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 		return fmt.Errorf("error decoding response: %v", err)
 	}
 
-	// Start heartbeat process
-	cmd := exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
-	// TODO: Log stdout/stderr of the heartbeat process
-	if err := cmd.Start(); err != nil {
-		// We will fail the test here, but we don't want a resource to be reclaimed mid test
-		return fmt.Errorf("error starting heartbeat process: %w", err)
-	}
+	// Record the resource under the state lock. We start the heartbeat process
+	// only once we hold the lock so that a process blocked waiting for the lock
+	// never leaves an orphaned heartbeat running if it is interrupted before the
+	// resource is persisted.
+	var cmd *exec.Cmd
+	if err := updateState(func(state *State) error {
+		// Start heartbeat process
+		cmd = exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+		// TODO: Log stdout/stderr of the heartbeat process
+		if err := cmd.Start(); err != nil {
+			// We will fail the test here, but we don't want a resource to be reclaimed mid test
+			return fmt.Errorf("error starting heartbeat process: %w", err)
+		}
 
-	state, err := readState()
-	if err != nil {
-		return err
-	}
+		state.BoskosResources = append(state.BoskosResources, BoskosResource{
+			Name:         resource.Name,
+			Type:         resourceType,
+			HeartbeatPID: cmd.Process.Pid,
+			Owner:        owner,
+			Key:          key,
+		})
+		return nil
+	}); err != nil {
+		if cmd != nil && cmd.Process != nil {
+			pgid := -cmd.Process.Pid
+			if killErr := syscall.Kill(pgid, syscall.SIGTERM); killErr != nil {
+				log.Error(killErr, "failed to send SIGTERM to heartbeat process group", "pgid", pgid)
+			}
 
-	state.BoskosResources = append(state.BoskosResources, BoskosResource{
-		Name:         resource.Name,
-		Type:         resourceType,
-		HeartbeatPID: cmd.Process.Pid,
-		Owner:        owner,
-		Key:          key,
-	})
+			done := make(chan error, 1)
+			go func() {
+				done <- cmd.Wait()
+			}()
 
-	if err := writeState(state); err != nil {
+			select {
+			case <-time.After(time.Second):
+				if killErr := syscall.Kill(pgid, syscall.SIGKILL); killErr != nil {
+					log.Error(killErr, "failed to send SIGKILL to heartbeat process group", "pgid", pgid)
+				}
+				<-done
+			case <-done:
+			}
+		}
+
+		// Local state persistence failed, so this resource is not recorded and
+		// runCleanup will never release it. Network connectivity to Boskos is
+		// likely still functional, so best-effort release it now rather than
+		// tying it up for 10-15 minutes until the reaper reclaims it.
+		br := BoskosResource{Name: resource.Name, Owner: owner}
+		if relErr := br.ReleaseFromBoskos(ctx); relErr != nil {
+			log.Error(relErr, "failed to release resource from boskos after state update failure", "name", resource.Name)
+		}
+
 		return err
 	}
 
@@ -295,13 +361,27 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 // runCleanup releases all resources that this resourcectl instance has
 // acquired from Boskos.
 func runCleanup(ctx context.Context) error {
-	state, err := readState()
-	if err != nil {
+	// Phase 1: under the lock, take ownership of the currently tracked resources
+	// and clear them from the state file. We release the lock immediately so the
+	// slow kill/release operations below do not block other resourcectl
+	// invocations from updating the state file.
+	var resources []BoskosResource
+	if err := updateState(func(state *State) error {
+		resources = state.BoskosResources
+		state.BoskosResources = nil
+		return nil
+	}); err != nil {
 		return err
 	}
+
+	// Phase 2: kill the heartbeat processes and release the resources from
+	// Boskos without holding the lock. Resources we fail to release are retained
+	// so a future cleanup can retry them.
 	var errs []error
-	for i := range state.BoskosResources {
-		r := &state.BoskosResources[i]
+	var remainingResources []BoskosResource
+
+	for i := range resources {
+		r := &resources[i]
 		if err := killHeartbeatProcess(ctx, r); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -310,14 +390,20 @@ func runCleanup(ctx context.Context) error {
 
 		if err := r.ReleaseFromBoskos(ctx); err != nil {
 			errs = append(errs, err)
-		} else {
-			r.Name = ""
-			r.Type = ""
+			remainingResources = append(remainingResources, *r)
 		}
 	}
 
-	if err := writeState(state); err != nil {
-		return err
+	// Phase 3: re-acquire the lock and put any resources we failed to release
+	// back into the state file. We re-read the state inside updateState so we do
+	// not clobber resources added concurrently while the lock was not held.
+	if len(remainingResources) > 0 {
+		if err := updateState(func(state *State) error {
+			state.BoskosResources = append(state.BoskosResources, remainingResources...)
+			return nil
+		}); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	return errors.Join(errs...)
@@ -329,18 +415,62 @@ func killHeartbeatProcess(ctx context.Context, r *BoskosResource) error {
 		return nil
 	}
 
+	log := klog.FromContext(ctx)
+
+	// Verify the process is actually the heartbeat process if we are on Linux.
+	// On non-Linux platforms (e.g., macOS), we currently skip this verification
+	// because /proc is not available. This leaves a small window for PID-recycling
+	// issues on those platforms.
+	if runtime.GOOS == "linux" {
+		if !isHeartbeatProcess(r.HeartbeatPID, r.Name) {
+			return nil
+		}
+	} else {
+		log.V(4).Info("skipping heartbeat process verification on non-linux platform", "goos", runtime.GOOS, "pid", r.HeartbeatPID)
+	}
+
 	process, err := os.FindProcess(r.HeartbeatPID)
 	if err != nil {
 		return fmt.Errorf("error finding heartbeat process: %w", err)
 	}
 
-	// TODO: Verify the process is actually the heartbeat process
-
 	if err := process.Kill(); err != nil {
+		// The heartbeat process is already gone (ESRCH on Unix, or ErrProcessDone
+		// from os.Process on Go's newer process-handle implementations); that's
+		// the desired end state, so treat it as success.
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
 		return fmt.Errorf("error killing heartbeat process: %w", err)
 	}
 
 	return nil
+}
+
+// isHeartbeatProcess verifies if the process with the given PID is actually our heartbeat process.
+func isHeartbeatProcess(pid int, resourceName string) bool {
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		return false
+	}
+
+	// The /proc/<pid>/cmdline file contains arguments separated by null bytes (\x00).
+	args := strings.Split(string(data), "\x00")
+
+	// Check if the arguments contain "heartbeat" and "--name" <resourceName>
+	hasHeartbeat := false
+	hasName := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "heartbeat" {
+			hasHeartbeat = true
+		}
+		if args[i] == "--name" && i+1 < len(args) && args[i+1] == resourceName {
+			hasName = true
+		}
+	}
+
+	return hasHeartbeat && hasName
 }
 
 // runHeartbeat sends periodic heartbeats to Boskos to keep the resource alive.

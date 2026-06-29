@@ -31,7 +31,8 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
 )
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .utils import select_pod_ip
 
 
 class AsyncK8sHelper:
@@ -60,14 +61,21 @@ class AsyncK8sHelper:
     async def create_sandbox_claim(
         self,
         name: str,
-        template: str,
+        warmpool: str,
         namespace: str,
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
-        warmpool: str | None = None,
+        pod_metadata: dict | None = None,
     ):
-        """Creates a SandboxClaim custom resource."""
+        """Creates a SandboxClaim custom resource.
+
+        Args:
+            pod_metadata: Optional ``{"labels": {...}, "annotations": {...}}``
+                dict emitted as ``spec.additionalPodMetadata`` so the labels and
+                annotations propagate onto the running Sandbox Pod (as opposed to
+                ``labels``, which only land on the SandboxClaim object).
+        """
         await self._ensure_initialized()
 
         metadata = {
@@ -78,14 +86,14 @@ class AsyncK8sHelper:
             metadata["labels"] = labels
 
         spec = {
-            "sandboxTemplateRef": {
-                "name": template,
+            "warmPoolRef": {
+                "name": warmpool,
             }
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
-        if warmpool:
-            spec["warmpool"] = warmpool
+        if pod_metadata:
+            spec["additionalPodMetadata"] = pod_metadata
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
@@ -94,7 +102,7 @@ class AsyncK8sHelper:
             "spec": spec,
         }
         logger.info(
-            f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'..."
+            f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'..."
         )
         await self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
@@ -151,6 +159,10 @@ class AsyncK8sHelper:
                                 raise SandboxTemplateNotFoundError(
                                     f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
                                 )
+                            elif cond.get("reason") == "WarmPoolNotFound":
+                                raise SandboxWarmPoolNotFoundError(
+                                    f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                                )
 
                         sandbox_status = status.get("sandbox", {})
                         # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
@@ -164,8 +176,8 @@ class AsyncK8sHelper:
     async def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
-        Returns the first pod IP from the sandbox status when ready, or None if
-        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        Returns the selected pod IP from the sandbox status when ready, or None if
+        no valid IP can be selected.
         """
         await self._ensure_initialized()
 
@@ -196,7 +208,7 @@ class AsyncK8sHelper:
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
                                 logger.info(f"Sandbox {name} is ready.")
                                 pod_ips = status.get("podIPs", [])
-                                return pod_ips[0] if pod_ips else None
+                                return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
                         logger.error(f"Sandbox {name} was deleted before becoming ready.")
                         raise SandboxNotFoundError(
@@ -220,7 +232,7 @@ class AsyncK8sHelper:
             logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
-                logger.error(f"Error terminating sandbox {name}: {e}")
+                logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
     async def get_sandbox(self, name: str, namespace: str):
@@ -240,17 +252,44 @@ class AsyncK8sHelper:
                 return None
             raise
 
-    async def list_sandbox_claims(self, namespace: str) -> list[str]:
-        """Lists all SandboxClaim custom resources in a namespace."""
+    async def get_sandbox_claim(self, name: str, namespace: str):
+        """Gets a SandboxClaim custom resource (or ``None`` if it doesn't exist)."""
         await self._ensure_initialized()
 
         try:
-            response = await self.custom_objects_api.list_namespaced_custom_object(
+            return await self.custom_objects_api.get_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME,
+                name=name,
+            )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    async def list_sandbox_claims(self, namespace: str, label_selector: str | None = None) -> list[str]:
+        """Lists all SandboxClaim custom resources in a namespace.
+
+        Args:
+            namespace: Kubernetes namespace to list claims in.
+            label_selector: Optional Kubernetes label selector string
+                (e.g. ``"app=myapp,env=prod"``). When set, only claims
+                matching the selector are returned.
+        """
+        await self._ensure_initialized()
+
+        try:
+            kwargs: dict = dict(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
             )
+            if label_selector is not None:
+                kwargs["label_selector"] = label_selector
+            response = await self.custom_objects_api.list_namespaced_custom_object(**kwargs)
             return [
                 item.get("metadata", {}).get("name")
                 for item in response.get("items", [])

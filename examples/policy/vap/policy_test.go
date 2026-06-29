@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 func TestSecureSandboxVAP(t *testing.T) {
@@ -55,7 +55,7 @@ func TestSecureSandboxVAP(t *testing.T) {
 
 	// 2. Create Client
 	scheme := runtime.NewScheme()
-	_ = sandboxv1alpha1.AddToScheme(scheme)
+	_ = sandboxv1beta1.AddToScheme(scheme)
 	_ = admissionregistrationv1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
@@ -326,10 +326,10 @@ func TestSecureSandboxVAP(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// DeepCopy the secure spec to start fresh every time
-			sandbox := &sandboxv1alpha1.Sandbox{
+			sandbox := &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
-				Spec: sandboxv1alpha1.SandboxSpec{
-					PodTemplate: sandboxv1alpha1.PodTemplate{
+				Spec: sandboxv1beta1.SandboxSpec{
+					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: *secureSpec.DeepCopy(),
 					},
 				},

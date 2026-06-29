@@ -12,10 +12,19 @@ spec:
       {{- include "agent-sandbox.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- $selectorLabels := include "agent-sandbox.selectorLabels" . | fromYaml }}
       labels:
-        {{- include "agent-sandbox.selectorLabels" . | nindent 8 }}
+        {{- toYaml (merge (dict) $selectorLabels .Values.podLabels) | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: agent-sandbox-controller
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: agent-sandbox-controller
         image: {{ include "agent-sandbox.image" . }}
@@ -29,6 +38,10 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        - name: webhook
+          containerPort: 9443
+          protocol: TCP
+
         livenessProbe:
           httpGet:
             path: /healthz
@@ -45,6 +58,14 @@ spec:
         resources:
           {{- toYaml . | nindent 10 }}
         {{- end }}
+        {{- with .Values.containerSecurityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/sandbox-config
+          readOnly: true
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -57,3 +78,9 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      volumes:
+      - name: config-volume
+        configMap:
+          name: agent-sandbox-config
+          optional: true
+

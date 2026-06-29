@@ -24,8 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -39,13 +39,13 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 
 	// Create a simple SandboxTemplate
-	template := &extensionsv1alpha1.SandboxTemplate{
+	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "obs-anno-template",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -59,16 +59,27 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "obs-anno-warmpool",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "obs-anno-template"},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	startTime := time.Now()
 
 	// Create a SandboxClaim
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "obs-anno-claim",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: "obs-anno-template"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "obs-anno-warmpool"},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
@@ -77,7 +88,7 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 	tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
 
 	// Retrieve the claim to check annotations
-	updatedClaim := &extensionsv1alpha1.SandboxClaim{}
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	err := tc.Get(t.Context(), types.NamespacedName{Name: claim.Name, Namespace: ns.Name}, updatedClaim)
 	require.NoError(t, err)
 

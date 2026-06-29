@@ -10,6 +10,22 @@ image:
 
 replicaCount: 1
 
+# podAnnotations are added to the controller pod template.
+# Useful for service-mesh sidecar injection toggles, Prometheus scrape
+# autodiscovery (e.g. Datadog `ad.datadoghq.com/...`), or any platform-
+# specific pod-level annotation.
+podAnnotations: {}
+  # ad.datadoghq.com/agent-sandbox-controller.check_names: '["openmetrics"]'
+  # ad.datadoghq.com/agent-sandbox-controller.init_configs: '[{}]'
+  # ad.datadoghq.com/agent-sandbox-controller.instances: |
+  #   [{"openmetrics_endpoint": "http://%%host%%:8080/metrics", "namespace": "agent_sandbox", "metrics": [".*"]}]
+
+# podLabels are added to the controller pod template, in addition to
+# the chart's selector labels. Useful for cost-allocation labels,
+# network policy selectors, or pod-level metadata.
+podLabels: {}
+  # team: platform
+
 controller:
   ##### Unset flags are omitted
   # clusterDomain: "cluster.local"
@@ -25,7 +41,7 @@ controller:
   # kubeApiBurst: 10
   # sandboxConcurrentWorkers: 1
   ##### The following workers are only active when controller.extensions=true.
-  # sandboxClaimConcurrentWorkers: 1
+  # sandboxClaimConcurrentWorkers: 50
   # sandboxWarmPoolConcurrentWorkers: 1
   # sandboxTemplateConcurrentWorkers: 1
   ##### extraArgs passes additional flags not listed above (e.g. zap logging flags).
@@ -44,3 +60,26 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Pod-level securityContext (spec.template.spec.securityContext). Default null — omitted unless set.
+# Example for Kyverno / restricted Pod Security:
+# podSecurityContext:
+#   runAsNonRoot: true
+#   seccompProfile:
+#     type: RuntimeDefault
+podSecurityContext: null
+
+# Container-level securityContext for the controller. Default null — omitted unless set.
+# Example:
+# containerSecurityContext:
+#   allowPrivilegeEscalation: false
+#   capabilities:
+#     drop:
+#       - ALL
+#   runAsNonRoot: true
+#   seccompProfile:
+#     type: RuntimeDefault
+containerSecurityContext: null
+
+# Name of the webhook service.
+webhookServiceName: agent-sandbox-webhook-service

@@ -1,0 +1,110 @@
+# Sandbox-router: a small reverse proxy that fans out incoming requests to the
+# correct per-user Sandbox pod based on three HTTP headers set by the caller
+# (or by the Go/Python SDK on their behalf):
+#
+#   X-Sandbox-ID         — the Sandbox object name (== pod name)
+#   X-Sandbox-Namespace  — the namespace the Sandbox lives in
+#   X-Sandbox-Port       — the container port on that pod to forward to (8080
+#                          for the FastAPI owner-agent in sandboxtemplate.yaml)
+#
+# Two Services point at the same router pods:
+#   * sandbox-router-svc       (ClusterIP)    — in-cluster callers; also what
+#                                              the per-Sandbox NetworkPolicy
+#                                              in sandboxtemplate.yaml allows
+#                                              ingress from.
+#   * sandbox-router-public    (LoadBalancer) — public Azure Load Balancer IP
+#                                              for the SDK / curl from outside
+#                                              the cluster.
+#
+# Build the router image yourself (see the README) and replace ${ROUTER_IMAGE}
+# below before applying.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  namespace: sandbox-agent-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: sandbox-router
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-public
+  namespace: sandbox-agent-demo
+spec:
+  type: LoadBalancer
+  selector:
+    app: sandbox-router
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router-deployment
+  namespace: sandbox-agent-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: sandbox-router
+      containers:
+      - name: router
+        image: ${ROUTER_IMAGE}
+        # imagePullPolicy: Never  # Uncomment when loading a local image into kind/minikube.
+        env:
+        - name: PROXY_TIMEOUT_SECONDS
+          value: "180"
+        # DEMO ONLY. The router fronts a public LoadBalancer below; in any
+        # real deployment, replace this with ROUTER_AUTH_TOKEN sourced from
+        # a Secret and have callers send `Authorization: Bearer <token>`.
+        # See clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml
+        # for the production-shaped manifest.
+        - name: ALLOW_UNAUTHENTICATED_ROUTER
+          value: "true"
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000

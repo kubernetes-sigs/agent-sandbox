@@ -23,8 +23,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -62,16 +62,25 @@ func TestSandboxClaimDeleteForeground(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "fg-delete-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	shutdownTime := metav1.NewTime(time.Now().Add(30 * time.Second)).Rfc3339Copy()
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "fg-delete-claim",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: template.Name},
-			Lifecycle: &extensionsv1alpha1.Lifecycle{
-				ShutdownPolicy: extensionsv1alpha1.ShutdownPolicyDeleteForeground,
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDeleteForeground,
 				ShutdownTime:   &shutdownTime,
 			},
 		},
@@ -111,7 +120,7 @@ func TestSandboxClaimDeleteForeground(t *testing.T) {
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), svc))
 	t.Log("Service fully deleted")
 
-	sandbox := &sandboxv1alpha1.Sandbox{}
+	sandbox := &sandboxv1beta1.Sandbox{}
 	sandbox.Name = claim.Name
 	sandbox.Namespace = ns.Name
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), sandbox))
@@ -136,16 +145,25 @@ func TestSandboxClaimTTLDeleteForegroundAfterFinished(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-fg-delete-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	ttlAfterFinished := int32(5)
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ttl-fg-delete-claim",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: template.Name},
-			Lifecycle: &extensionsv1alpha1.Lifecycle{
-				ShutdownPolicy:          extensionsv1alpha1.ShutdownPolicyDeleteForeground,
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDeleteForeground,
 				TTLSecondsAfterFinished: &ttlAfterFinished,
 			},
 		},
@@ -153,12 +171,12 @@ func TestSandboxClaimTTLDeleteForegroundAfterFinished(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
-	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded))
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded))
 	framework.MustUpdateObject(tc.ClusterClient, pod, func(obj *corev1.Pod) {
 		obj.Finalizers = append(obj.Finalizers, holdDeleteFinalizer)
 	})
 
-	sandbox := &sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
 
 	tc.MustWaitForObject(claim, predicates.HasDeletionTimestamp())
 	tc.MustWaitForObject(pod, predicates.HasDeletionTimestamp())
@@ -197,16 +215,25 @@ func TestSandboxClaimTTLAfterFinished(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-after-finished-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, testCtx.CreateWithCleanup(t.Context(), warmPool))
+
 	ttlAfterFinished := int32(2)
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ttl-after-finished-claim",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: template.Name},
-			Lifecycle: &extensionsv1alpha1.Lifecycle{
-				ShutdownPolicy:          extensionsv1alpha1.ShutdownPolicyDelete,
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
 				TTLSecondsAfterFinished: &ttlAfterFinished,
 			},
 		},
@@ -224,7 +251,7 @@ func TestSandboxClaimTTLAfterFinished(t *testing.T) {
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
-	sandbox := &sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
 
 	require.NoError(t, testCtx.WaitForObjectNotFound(t.Context(), claim))
 	require.NoError(t, testCtx.WaitForObjectNotFound(t.Context(), sandbox))
@@ -247,17 +274,26 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "earlier-of-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	shutdownTime := metav1.NewTime(time.Now().Add(30 * time.Second)).Rfc3339Copy()
 	ttlAfterFinished := int32(120)
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "earlier-of-claim",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: template.Name},
-			Lifecycle: &extensionsv1alpha1.Lifecycle{
-				ShutdownPolicy:          extensionsv1alpha1.ShutdownPolicyDelete,
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
 				ShutdownTime:            &shutdownTime,
 				TTLSecondsAfterFinished: &ttlAfterFinished,
 			},
@@ -265,9 +301,9 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
-	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded))
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded))
 	require.Never(t, func() bool {
-		current := &extensionsv1alpha1.SandboxClaim{}
+		current := &extensionsv1beta1.SandboxClaim{}
 		if err := tc.Get(t.Context(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, current); err != nil {
 			return true
 		}
@@ -276,7 +312,7 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
-	sandbox := &sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
 
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), claim))
 	require.False(t, time.Now().Before(shutdownTime.Time), "claim deleted before shutdownTime elapsed")
@@ -300,29 +336,38 @@ func TestSandboxClaimFinishedWithoutTTLIsRetained(t *testing.T) {
 		}},
 	})
 
-	claim := &extensionsv1alpha1.SandboxClaim{
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "finished-no-ttl-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "finished-no-ttl-claim",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: template.Name},
-			Lifecycle: &extensionsv1alpha1.Lifecycle{
-				ShutdownPolicy: extensionsv1alpha1.ShutdownPolicyDelete,
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
 			},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
-	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded))
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded))
 	require.Never(t, func() bool {
-		current := &extensionsv1alpha1.SandboxClaim{}
+		current := &extensionsv1beta1.SandboxClaim{}
 		if err := tc.Get(t.Context(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, current); err != nil {
 			return true
 		}
 		return current.DeletionTimestamp != nil
 	}, 5*time.Second, 250*time.Millisecond)
-	tc.MustExist(&sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}})
+	tc.MustExist(&sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}})
 }
 
 func TestSandboxClaimTTLZeroRetainPreservesFinishedConditionDuringCleanup(t *testing.T) {
@@ -340,35 +385,44 @@ func TestSandboxClaimTTLZeroRetainPreservesFinishedConditionDuringCleanup(t *tes
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-zero-retain-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	ttlAfterFinished := int32(0)
-	claim := &extensionsv1alpha1.SandboxClaim{
+	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ttl-zero-retain-claim",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1alpha1.SandboxClaimSpec{
-			TemplateRef: extensionsv1alpha1.SandboxTemplateRef{Name: template.Name},
-			Lifecycle: &extensionsv1alpha1.Lifecycle{
-				ShutdownPolicy:          extensionsv1alpha1.ShutdownPolicyRetain,
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyRetain,
 				TTLSecondsAfterFinished: &ttlAfterFinished,
 			},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
-	sandbox := &sandboxv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: claim.Name, Namespace: claim.Namespace}}
 	require.Eventually(t, func() bool {
 		return tc.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, sandbox) == nil
 	}, 60*time.Second, time.Second)
-	framework.MustUpdateObject(tc.ClusterClient, sandbox, func(obj *sandboxv1alpha1.Sandbox) {
+	framework.MustUpdateObject(tc.ClusterClient, sandbox, func(obj *sandboxv1beta1.Sandbox) {
 		obj.Finalizers = append(obj.Finalizers, holdDeleteFinalizer)
 	})
 
-	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionReady), extensionsv1alpha1.ClaimExpiredReason))
-	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded))
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionReady), extensionsv1beta1.ClaimExpiredReason))
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded))
 	tc.MustWaitForObject(sandbox, predicates.HasDeletionTimestamp())
 
-	framework.MustUpdateObject(tc.ClusterClient, sandbox, func(obj *sandboxv1alpha1.Sandbox) {
+	framework.MustUpdateObject(tc.ClusterClient, sandbox, func(obj *sandboxv1beta1.Sandbox) {
 		filtered := obj.Finalizers[:0]
 		for _, finalizer := range obj.Finalizers {
 			if finalizer != holdDeleteFinalizer {
@@ -384,21 +438,21 @@ func TestSandboxClaimTTLZeroRetainPreservesFinishedConditionDuringCleanup(t *tes
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), svc))
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), sandbox))
 
-	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionReady), extensionsv1alpha1.ClaimExpiredReason))
-	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded))
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionReady), extensionsv1beta1.ClaimExpiredReason))
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded))
 	tc.MustMatchPredicates(claim, predicates.NotDeleted())
 }
 
-func createTemplate(t *testing.T, tc *framework.TestContext, namespace, name string, podSpec corev1.PodSpec) *extensionsv1alpha1.SandboxTemplate {
+func createTemplate(t *testing.T, tc *framework.TestContext, namespace, name string, podSpec corev1.PodSpec) *extensionsv1beta1.SandboxTemplate {
 	t.Helper()
-	template := &extensionsv1alpha1.SandboxTemplate{
+	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
-			PodTemplate:             sandboxv1alpha1.PodTemplate{Spec: podSpec},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+			PodTemplate:             sandboxv1beta1.PodTemplate{Spec: podSpec},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))

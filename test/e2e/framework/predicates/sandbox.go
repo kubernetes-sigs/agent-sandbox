@@ -20,15 +20,15 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func asSandbox(obj client.Object) (*sandboxv1alpha1.Sandbox, error) {
+func asSandbox(obj client.Object) (*sandboxv1beta1.Sandbox, error) {
 	if obj == nil {
 		return nil, fmt.Errorf("sandbox object is nil")
 	}
-	sandbox, err := asTyped[*sandboxv1alpha1.Sandbox](obj)
+	sandbox, err := asTyped[*sandboxv1beta1.Sandbox](obj)
 	if err != nil {
 		return nil, err
 	}
@@ -36,14 +36,14 @@ func asSandbox(obj client.Object) (*sandboxv1alpha1.Sandbox, error) {
 }
 
 // SandboxHasStatus verifies that the Sandbox object has the specified status.
-func SandboxHasStatus(status sandboxv1alpha1.SandboxStatus) ObjectPredicate {
+func SandboxHasStatus(status sandboxv1beta1.SandboxStatus) ObjectPredicate {
 	return &sandboxHasStatusPredicate{
 		WantStatus: status,
 	}
 }
 
 type sandboxHasStatusPredicate struct {
-	WantStatus sandboxv1alpha1.SandboxStatus
+	WantStatus sandboxv1beta1.SandboxStatus
 }
 
 func (s *sandboxHasStatusPredicate) String() string {
@@ -57,7 +57,7 @@ func (s *sandboxHasStatusPredicate) Matches(obj client.Object) (bool, error) {
 	}
 	opts := []cmp.Option{
 		cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
-		cmpopts.IgnoreFields(sandboxv1alpha1.SandboxStatus{}, "PodIPs"),
+		cmpopts.IgnoreFields(sandboxv1beta1.SandboxStatus{}, "PodIPs", "NodeName"),
 	}
 	if diff := cmp.Diff(s.WantStatus, sandbox.Status, opts...); diff != "" {
 		return false, nil

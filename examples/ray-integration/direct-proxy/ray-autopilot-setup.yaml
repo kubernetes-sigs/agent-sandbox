@@ -1,0 +1,100 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: secure-rl-production-job
+  namespace: default
+spec:
+  # The entrypoint command that kicks off the Python training script
+  entrypoint: python /rl_production_loop.py
+  
+  # Dynamically installs the Sandbox SDK at runtime.
+  # This avoids the need to build a custom Ray Docker image just for one dependency.
+  runtimeEnvYAML: |
+    pip:
+      - k8s-agent-sandbox
+      
+  rayClusterSpec:
+    # 1. Ray Head Node
+    # This node is TRUSTED. It runs the Ray Global Control Store (GCS) and scheduler.
+    # It must run on standard K8s compute (not gVisor) for maximum gRPC performance.
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: 0.0.0.0
+      template:
+        spec:
+          containers:
+          - image: rayproject/ray:2.49.0-py310
+            name: ray-head
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            
+            # If CPU is too low (< 1.5), Redis and GCS will timeout during boot,
+            # causing 'Connection Refused' errors and failing the Liveness probes.
+            resources:
+              requests:
+                cpu: "2"      
+                memory: "4Gi" 
+              limits:
+                cpu: "2"
+                memory: "4Gi"
+            
+            # Explicit probes required to pass KubeRay validation.
+            # Delays are padded to give the 2 vCPUs enough time to initialize GCS.
+            readinessProbe:
+              httpGet:
+                path: /api/gcs_healthz
+                port: 8265
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 10
+            
+            livenessProbe:
+              httpGet:
+                path: /api/gcs_healthz
+                port: 8265
+              initialDelaySeconds: 15
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 10
+              
+            # Mounts the RL training script natively into the container 
+            # so the entrypoint can execute it without pulling from a git repo.
+            volumeMounts:
+            - mountPath: /rl_production_loop.py
+              name: code-volume
+              subPath: rl_production_loop.py
+          volumes:
+          - name: code-volume
+            configMap:
+              name: rl-code-config
+              
+    # ==============================================================================
+    # 2. Ray Worker Nodes
+    # They use the Python SDK to tunnel commands to isolated gVisor pods.
+    # ==============================================================================
+    workerGroupSpecs:
+    - groupName: sandboxed-workers
+      replicas: 3
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+          - image: rayproject/ray:2.49.0-py310
+            name: ray-worker
+            
+            # Ensure the combined CPU requests of the Head (2) + Worker (0.5) 
+            # fit comfortably within the "allocatable" limit of the K8s node pool,
+            # otherwise the worker will remain stuck in a 'Pending' state.
+            resources:
+              requests:
+                cpu: "500m"
+                memory: "2Gi"
+              limits:
+                cpu: "500m"
+                memory: "2Gi"

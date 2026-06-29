@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -29,7 +30,25 @@ PYTHON_TEST_SUITES = [
         "name": "k8s-agent-sandbox",
         "dir": os.path.join("clients", "python", "agentic-sandbox-client", "k8s_agent_sandbox"),
         "requirements": "requirements.txt",
-    }
+    },
+    {
+        "name": "dev-tools-shared",
+        "dir": os.path.join("dev", "tools", "shared"),
+        # No requirements file; headers.py relies only on the standard library,
+        # so the runner just installs pytest and runs the suite.
+        "requirements": "requirements.txt",
+    },
+    {
+        "name": "agent-sandbox-rl",
+        "dir": os.path.join("examples", "agent-sandbox-rl"),
+        # Editable installs (in order): the in-repo SDK first (so we don't depend
+        # on a PyPI build), then the example package with its test extra. The
+        # mocked suite needs neither datasets nor r2egym (both stubbed in tests).
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
+            (os.path.join("examples", "agent-sandbox-rl"), "[test]"),
+        ],
+    },
 ]
 
 
@@ -67,13 +86,27 @@ def run_python_tests(repo_root):
         venv_pip = os.path.join(venv_dir, "bin", "pip")
 
         print(f"\n=== Setting up Python venv for {suite['name']} tests ===")
+        if os.path.isdir(venv_dir):
+            # Safely verify the directory is indeed a virtual environment before removing
+            if os.path.exists(os.path.join(venv_dir, "pyvenv.cfg")):
+                shutil.rmtree(venv_dir)
+            else:
+                print(f"WARNING: Directory {venv_dir} exists but does not appear to be a venv (missing pyvenv.cfg). Skipping clean.")
         subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
 
         env = os.environ.copy()
-        env["PIP_EXTRA_INDEX_URL"] = os.environ.get("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+        if not os.environ.get("PIP_EXTRA_INDEX_URL"):
+            env.pop("PIP_EXTRA_INDEX_URL", None)
 
-        req_file = os.path.join(test_dir, suite["requirements"])
-        if os.path.isfile(req_file):
+        req_name = suite.get("requirements")
+        req_file = os.path.join(test_dir, req_name) if req_name else None
+        if suite.get("editable_installs"):
+            # install each (relative_dir, extras) editable, in order
+            for rel_dir, extras in suite["editable_installs"]:
+                subprocess.check_call(
+                    [venv_pip, "install", "--quiet", "-e", f".{extras}"],
+                    cwd=os.path.join(repo_root, rel_dir), env=env)
+        elif req_file and os.path.isfile(req_file):
             subprocess.check_call(
                 [venv_pip, "install", "--quiet", "-r", req_file], env=env)
         elif suite["name"] == "k8s-agent-sandbox":
@@ -81,6 +114,12 @@ def run_python_tests(repo_root):
             package_dir = os.path.dirname(test_dir)
             subprocess.check_call(
             [venv_pip, "install", "--quiet", "-e", ".[test]"], cwd=package_dir, env=env)
+
+            # Workaround: kubernetes 36.0.0 incorrectly bundles kubernetes_asyncio
+            # files in its wheel, which overwrite the real kubernetes_asyncio package.
+            # Force-reinstall kubernetes_asyncio after kubernetes to restore correct files.
+            subprocess.check_call(
+                [venv_pip, "install", "--quiet", "--force-reinstall", "kubernetes_asyncio"], env=env)
 
         subprocess.check_call(
             [venv_pip, "install", "--quiet", "pytest"], env=env)

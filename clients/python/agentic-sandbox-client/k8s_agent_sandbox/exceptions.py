@@ -27,8 +27,16 @@ class SandboxNotFoundError(SandboxError):
     """Raised when the sandbox or sandbox claim cannot be found or was deleted."""
 
 
+class SnapshotNotFoundError(SandboxError):
+    """Raised when the requested snapshot does not exist."""
+
+
 class SandboxTemplateNotFoundError(SandboxError):
     """Raised when the requested sandbox template does not exist."""
+
+
+class SandboxWarmPoolNotFoundError(SandboxError):
+    """Raised when the requested sandbox warm pool does not exist."""
 
 
 class SandboxPortForwardError(SandboxError):

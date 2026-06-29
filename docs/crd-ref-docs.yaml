@@ -1,0 +1,5 @@
+processor:
+  ignoreTypes:
+    - ".*List$"
+render:
+  projectName: "Agent Sandbox API"

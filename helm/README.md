@@ -51,6 +51,12 @@ helm upgrade agent-sandbox ./helm/ \
 > kubectl apply -f helm/crds/
 > ```
 
+### v1alpha1 → v1beta1 storage migration
+
+Upgrades to chart versions that move CRDs from `v1alpha1` to `v1beta1` require a manual storage migration using the `dev/tools/migrate.sh` script.
+
+See [`docs/api-migration-guide.md`](../docs/api-migration-guide.md) for full details, sequence of steps, and operational guidelines.
+
 ## Uninstallation
 
 ```bash
@@ -80,7 +86,7 @@ The following table lists the configurable parameters and their defaults.
 | `controller.leaderElect` | Enable leader election | `true` |
 | `controller.leaderElectionNamespace` | Namespace for the leader election resource (auto-detected if empty) | `""` |
 | `controller.clusterDomain` | Kubernetes cluster domain for service FQDN generation | `"cluster.local"` |
-| `controller.kubeApiQps` | QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
+| `controller.kubeApiQps` | Client-side QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |
 | `controller.sandboxConcurrentWorkers` | Max concurrent reconciles for the Sandbox controller | `1` |
 | `controller.sandboxClaimConcurrentWorkers` | Max concurrent reconciles for the SandboxClaim controller (extensions only) | `1` |
@@ -97,3 +103,8 @@ The following table lists the configurable parameters and their defaults.
 | `nodeSelector` | Node selector for the controller pod | `{}` |
 | `tolerations` | Tolerations for the controller pod | `[]` |
 | `affinity` | Affinity rules for the controller pod | `{}` |
+| `podSecurityContext` | Pod `securityContext`; only rendered when set (e.g. Kyverno / Pod Security) | `null` |
+| `containerSecurityContext` | Container `securityContext` for the controller; only rendered when set | `null` |
+| `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
+| `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
+| `webhookServiceName` | Name of the conversion webhook Service | `agent-sandbox-webhook-service` |

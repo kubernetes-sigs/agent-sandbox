@@ -23,7 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -42,18 +42,17 @@ func TestSandboxShutdownTime(t *testing.T) {
 	nameHash := NameHash(sandboxObj.Name)
 	// Assert Sandbox object status reconciles as expected
 	p := []predicates.ObjectPredicate{
-		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Pod is Ready; Service Exists",
-					ObservedGeneration: 1,
-					Reason:             "DependenciesReady",
-					Status:             "True",
 					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
+					Message:            "Pod is Ready; Service Exists",
 				},
 			},
 		}),
@@ -72,24 +71,23 @@ func TestSandboxShutdownTime(t *testing.T) {
 	// Set a shutdown time that ends shortly, truncated to second-level precision (RFC3339) to match
 	// the Kubernetes API's storage behavior.
 	shutdown := metav1.NewTime(time.Now().Add(10 * time.Second)).Rfc3339Copy()
-	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1alpha1.Sandbox) {
+	framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
 		obj.Spec.ShutdownTime = &shutdown
 	})
 
 	// Wait for sandbox status to reflect new state
 	p = []predicates.ObjectPredicate{
-		predicates.SandboxHasStatus(sandboxv1alpha1.SandboxStatus{
+		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			// Service/ServiceFQDN should be cleared from status when the Service is deleted
 			Service:     "",
 			ServiceFQDN: "",
-			Replicas:    0,
 			Conditions: []metav1.Condition{
 				{
-					Message:            "Sandbox has expired",
+					Type:               string(sandboxv1beta1.SandboxConditionReady),
+					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
-					Reason:             "SandboxExpired",
-					Status:             "False",
-					Type:               "Ready",
+					Reason:             sandboxv1beta1.SandboxReasonExpired,
+					Message:            "Sandbox has expired",
 				},
 			},
 		}),
@@ -110,14 +108,14 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 
 	shutdown := metav1.NewTime(time.Now().Add(8 * time.Second)).Rfc3339Copy()
-	policy := sandboxv1alpha1.ShutdownPolicyRetain
-	sandbox := &sandboxv1alpha1.Sandbox{
+	policy := sandboxv1beta1.ShutdownPolicyRetain
+	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "retain-finished-sandbox",
 			Namespace: ns.Name,
 		},
-		Spec: sandboxv1alpha1.SandboxSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: sandboxv1beta1.SandboxSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{{
@@ -127,7 +125,7 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 					}},
 				},
 			},
-			Lifecycle: sandboxv1alpha1.Lifecycle{
+			Lifecycle: sandboxv1beta1.Lifecycle{
 				ShutdownTime:   &shutdown,
 				ShutdownPolicy: &policy,
 			},
@@ -135,22 +133,22 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))
 
-	tc.MustWaitForObject(sandbox, predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded))
+	tc.MustWaitForObject(sandbox, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded))
 
 	require.Eventually(t, func() bool {
-		current := &sandboxv1alpha1.Sandbox{}
+		current := &sandboxv1beta1.Sandbox{}
 		if err := tc.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, current); err != nil {
 			return false
 		}
-		readyReasonMatches, err := predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionReady), sandboxv1alpha1.SandboxReasonExpired).Matches(current)
+		readyReasonMatches, err := predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionReady), sandboxv1beta1.SandboxReasonExpired).Matches(current)
 		if err != nil || !readyReasonMatches {
 			return false
 		}
-		finishedReasonMatches, err := predicates.ConditionReasonEquals(string(sandboxv1alpha1.SandboxConditionFinished), sandboxv1alpha1.SandboxReasonPodSucceeded).Matches(current)
+		finishedReasonMatches, err := predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionFinished), sandboxv1beta1.SandboxReasonPodSucceeded).Matches(current)
 		if err != nil || !finishedReasonMatches {
 			return false
 		}
-		return current.Status.Service == "" && current.Status.ServiceFQDN == "" && current.Status.Replicas == 0
+		return current.Status.Service == "" && current.Status.ServiceFQDN == ""
 	}, 60*time.Second, time.Second)
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace}}

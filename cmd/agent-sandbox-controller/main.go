@@ -22,24 +22,32 @@ import (
 	"net/http/pprof"
 	"os"
 	"runtime"
+	"strings"
 	"time"
+
+	"crypto/tls"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -65,8 +73,19 @@ func main() {
 	var sandboxClaimConcurrentWorkers int
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
+	var sandboxWarmPoolMaxBatchSize int
+	var enableWarmPoolEviction bool
 	var printVersion bool
+	var webhookPort int
+	var webhookCertDir string
+	var webhookServiceName string
+	var webhookNamespace string
+
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
+	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "The directory that contains the certificates.")
+	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
+	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -87,12 +106,14 @@ func main() {
 	flag.IntVar(&pprofMutexProfileFraction, "pprof-mutex-profile-fraction", 10,
 		"Mutex contention sampling rate for /debug/pprof/mutex when --enable-pprof-debug is set. "+
 			"<=0 disables; 1 samples all events; N>1 samples ~1/N events (e.g. 10 ~= 1/10, 100 ~= 1/100).")
-	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", -1.0, "QPS limit for kube API client (default is -1 no rate limit-unlimited)")
-	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "Burst limit for kube API client")
+	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", -1.0, "Client-side QPS limit for the Kubernetes API client (default: -1, no client-side rate limiting)")
+	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "The maximum burst for client-side throttling of the Kubernetes API client.")
 	flag.IntVar(&sandboxConcurrentWorkers, "sandbox-concurrent-workers", 1, "Max concurrent reconciles for the Sandbox controller")
-	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 1, "Max concurrent reconciles for the SandboxClaim controller")
+	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 50, "Max concurrent reconciles for the SandboxClaim controller")
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
+	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300.")
+	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -111,11 +132,17 @@ func main() {
 		"sandboxClaim", sandboxClaimConcurrentWorkers,
 		"sandboxWarmPool", sandboxWarmPoolConcurrentWorkers,
 		"sandboxTemplate", sandboxTemplateConcurrentWorkers,
+		"sandboxWarmPoolMaxBatchSize", sandboxWarmPoolMaxBatchSize,
 	)
 
 	// Validation checks for concurrency flags
 	if sandboxConcurrentWorkers <= 0 || sandboxClaimConcurrentWorkers <= 0 || sandboxWarmPoolConcurrentWorkers <= 0 {
 		setupLog.Error(nil, "concurrent workers must be greater than 0")
+		os.Exit(1)
+	}
+	// Validation checks for sandboxWarmPoolMaxBatchSize (maximum batch size for sandbox creation and deletion in SandboxWarmPool controller)
+	if sandboxWarmPoolMaxBatchSize <= 0 {
+		setupLog.Error(nil, "sandbox-warm-pool-max-batch-size must be greater than 0")
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -164,8 +191,10 @@ func main() {
 	http.DefaultServeMux = http.NewServeMux()
 
 	scheme := controllers.Scheme
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	if extensions {
 		utilruntime.Must(extensionsv1alpha1.AddToScheme(scheme))
+		utilruntime.Must(extensionsv1beta1.AddToScheme(scheme))
 	}
 
 	metricsOpts := metricsserver.Options{
@@ -209,6 +238,27 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
+	// Create a temporary client to patch the CRDs and access Secrets
+	tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create temporary client")
+		os.Exit(1)
+	}
+
+	// Generate or load self-signed TLS certificates for the webhook server
+	setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
+	caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
+	if err != nil {
+		setupLog.Error(err, "unable to prepare webhook certificates")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Patching CRDs with generated CA bundle")
+	if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
+		setupLog.Error(err, "failed to patch CRDs with CA bundle")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsOpts,
@@ -216,6 +266,15 @@ func main() {
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Port:    webhookPort,
+			CertDir: webhookCertDir,
+			TLSOpts: []func(*tls.Config){
+				func(cfg *tls.Config) {
+					cfg.ClientAuth = tls.NoClientCert
+				},
+			},
+		}),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -235,14 +294,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = ctrl.NewWebhookManagedBy(mgr, &sandboxv1beta1.Sandbox{}).
+		Complete(); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
+		os.Exit(1)
+	}
+
 	if extensions {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
+
+		var allowedDomains []string
+		configPath := "/etc/sandbox-config/allowed-label-domains"
+		if data, err := os.ReadFile(configPath); err == nil {
+			val := strings.TrimSpace(string(data))
+			if val != "" {
+				for _, d := range strings.FieldsFunc(val, func(c rune) bool {
+					return c == ',' || c == '\n' || c == '\r'
+				}) {
+					d = strings.ToLower(strings.TrimSpace(d))
+					if d != "" {
+						allowedDomains = append(allowedDomains, d)
+					}
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			setupLog.Error(err, "failed to read configuration file", "path", configPath)
+			os.Exit(1)
+		}
+
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
-			Client:           mgr.GetClient(),
-			Scheme:           mgr.GetScheme(),
-			WarmSandboxQueue: warmSandboxQueue,
-			Recorder:         mgr.GetEventRecorder("sandboxclaim-controller"),
-			Tracer:           instrumenter,
+			Client:              mgr.GetClient(),
+			Scheme:              mgr.GetScheme(),
+			WarmSandboxQueue:    warmSandboxQueue,
+			Recorder:            mgr.GetEventRecorder("sandboxclaim-controller"),
+			Tracer:              instrumenter,
+			AllowedLabelDomains: allowedDomains,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
@@ -259,10 +345,30 @@ func main() {
 		}
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
+			Client:                 mgr.GetClient(),
+			Scheme:                 mgr.GetScheme(),
+			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
+			EnableWarmPoolEviction: enableWarmPoolEviction,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
+			os.Exit(1)
+		}
+
+		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxClaim{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxClaim")
+			os.Exit(1)
+		}
+
+		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxTemplate{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxTemplate")
+			os.Exit(1)
+		}
+
+		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxWarmPool{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxWarmPool")
 			os.Exit(1)
 		}
 	}

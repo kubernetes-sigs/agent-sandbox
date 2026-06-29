@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,26 +31,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
-	templateDefault := &extensionsv1alpha1.SandboxTemplate{
+	templateDefault := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1alpha1.PodTemplate{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
 			},
 		},
 	}
 
-	templateWithNP := &extensionsv1alpha1.SandboxTemplate{
+	templateWithNP := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
 					{
 						From: []networkingv1.NetworkPolicyPeer{
@@ -68,11 +69,11 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 		},
 	}
 
-	templateOptOut := &extensionsv1alpha1.SandboxTemplate{
+	templateOptOut := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default"},
-		Spec: extensionsv1alpha1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
-			NetworkPolicy: &extensionsv1alpha1.NetworkPolicySpec{
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Egress: []networkingv1.NetworkPolicyEgressRule{{}}, // Should be ignored
 			},
 		},
@@ -92,7 +93,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 
 	testCases := []struct {
 		name                  string
-		templateToReconcile   *extensionsv1alpha1.SandboxTemplate
+		templateToReconcile   *extensionsv1beta1.SandboxTemplate
 		existingObjects       []client.Object
 		expectNetworkPolicy   bool
 		validateNetworkPolicy func(t *testing.T, np *networkingv1.NetworkPolicy)
@@ -106,11 +107,33 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if len(np.Spec.PolicyTypes) != 2 {
 					t.Errorf("Expected 2 PolicyTypes, got %d", len(np.Spec.PolicyTypes))
 				}
-				if len(np.Spec.Ingress) != 1 || np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "sandbox-router" {
-					t.Errorf("Expected Default Ingress rule to target sandbox-router")
+				if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 1 {
+					t.Fatalf("Expected Default Ingress rule to contain exactly 1 peer source, got %d", len(np.Spec.Ingress[0].From))
 				}
-				if len(np.Spec.Egress) != 1 || np.Spec.Egress[0].To[0].IPBlock.CIDR != "0.0.0.0/0" {
+				peer1 := np.Spec.Ingress[0].From[0]
+				if peer1.PodSelector == nil || peer1.NamespaceSelector == nil {
+					t.Fatalf("Expected both PodSelector and NamespaceSelector to be non-nil")
+				}
+				if peer1.PodSelector.MatchLabels["app"] != "sandbox-router" ||
+					peer1.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "agent-sandbox-system" {
+					t.Errorf("Expected first Ingress peer to target sandbox-router in agent-sandbox-system namespace")
+				}
+				if len(np.Spec.Egress) != 1 {
+					t.Fatalf("Expected 1 Default Egress rule, got %d", len(np.Spec.Egress))
+				}
+				if len(np.Spec.Egress[0].To) != 2 {
+					t.Fatalf("Expected 2 Egress peers (IPv4 and IPv6), got %d", len(np.Spec.Egress[0].To))
+				}
+				if np.Spec.Egress[0].To[0].IPBlock == nil || np.Spec.Egress[0].To[0].IPBlock.CIDR != "0.0.0.0/0" {
 					t.Fatalf("Expected Default Egress IPBlock 0.0.0.0/0")
+				}
+				ipv6Peer := np.Spec.Egress[0].To[1]
+				if ipv6Peer.IPBlock == nil || ipv6Peer.IPBlock.CIDR != "::/0" {
+					t.Fatalf("Expected Default Egress IPv6 IPBlock ::/0")
+				}
+				hasIPv6LinkLocalExcept := slices.Contains(ipv6Peer.IPBlock.Except, "fe80::/10")
+				if !hasIPv6LinkLocalExcept {
+					t.Errorf("Expected IPv6 Egress Except list to contain fe80::/10, got %v", ipv6Peer.IPBlock.Except)
 				}
 				expectedLabelKey := "agents.x-k8s.io/sandbox-template-ref-hash"
 				if _, ok := np.Spec.PodSelector.MatchLabels[expectedLabelKey]; !ok {
@@ -195,6 +218,28 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 
 			if tc.expectNetworkPolicy && tc.validateNetworkPolicy != nil {
 				tc.validateNetworkPolicy(t, &np)
+			}
+
+			var updatedTemplate extensionsv1beta1.SandboxTemplate
+			if err := client.Get(context.Background(), req.NamespacedName, &updatedTemplate); err != nil {
+				t.Fatalf("get sandbox template: %v", err)
+			}
+			expectedTemplateHash := SandboxTemplateRefHash(tc.templateToReconcile.Name)
+			if val := updatedTemplate.Labels[sandboxTemplateRefHash]; val != expectedTemplateHash {
+				t.Errorf("expected SandboxTemplate to have label %q=%q, got %q", sandboxTemplateRefHash, expectedTemplateHash, val)
+			}
+
+			resourceVersion := updatedTemplate.ResourceVersion
+			_, err = reconciler.Reconcile(context.Background(), req)
+			if err != nil {
+				t.Fatalf("second reconcile: (%v)", err)
+			}
+			var relabeledTemplate extensionsv1beta1.SandboxTemplate
+			if err := client.Get(context.Background(), req.NamespacedName, &relabeledTemplate); err != nil {
+				t.Fatalf("get sandbox template after second reconcile: %v", err)
+			}
+			if relabeledTemplate.ResourceVersion != resourceVersion {
+				t.Errorf("expected second reconcile to leave SandboxTemplate resourceVersion unchanged, got %q, want %q", relabeledTemplate.ResourceVersion, resourceVersion)
 			}
 		})
 	}

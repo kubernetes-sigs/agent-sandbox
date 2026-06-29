@@ -16,7 +16,7 @@ import logging
 import time
 from typing import List
 from kubernetes import client, config, watch
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
+from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -28,6 +28,7 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
 )
+from .utils import select_pod_ip
 
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
@@ -40,8 +41,15 @@ class K8sHelper:
         self.custom_objects_api = client.CustomObjectsApi()
         self.core_v1_api = client.CoreV1Api()
 
-    def create_sandbox_claim(self, name: str, template: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, warmpool: str | None = None):
-        """Creates a SandboxClaim custom resource."""
+    def create_sandbox_claim(self, name: str, warmpool: str, namespace: str, annotations: dict | None = None, labels: dict | None = None, lifecycle: dict | None = None, pod_metadata: dict | None = None):
+        """Creates a SandboxClaim custom resource.
+
+        Args:
+            pod_metadata: Optional ``{"labels": {...}, "annotations": {...}}``
+                dict emitted as ``spec.additionalPodMetadata`` so the labels and
+                annotations propagate onto the running Sandbox Pod (as opposed to
+                ``labels``, which only land on the SandboxClaim object).
+        """
         metadata = {
             "name": name,
             "annotations": annotations or {},
@@ -50,14 +58,14 @@ class K8sHelper:
             metadata["labels"] = labels
 
         spec = {
-            "sandboxTemplateRef": {
-                "name": template
+            "warmPoolRef": {
+                "name": warmpool
             }
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
-        if warmpool:
-            spec["warmpool"] = warmpool
+        if pod_metadata:
+            spec["additionalPodMetadata"] = pod_metadata
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
@@ -65,7 +73,7 @@ class K8sHelper:
             "metadata": metadata,
             "spec": spec,
         }
-        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using template '{template}'...")
+        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
         self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
@@ -118,6 +126,11 @@ class K8sHelper:
                             raise SandboxTemplateNotFoundError(
                                 f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
                             )
+                        elif cond.get('reason') == 'WarmPoolNotFound':
+                            w.stop()
+                            raise SandboxWarmPoolNotFoundError(
+                                f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                            )
 
                     sandbox_status = status.get('sandbox', {})
                     # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
@@ -131,8 +144,8 @@ class K8sHelper:
     def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
-        Returns the first pod IP from the sandbox status when ready, or None if
-        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        Returns the selected pod IP from the sandbox status when ready, or None if
+        no valid IP can be selected.
         """
         deadline = time.monotonic() + timeout
         logging.info(f"Watching for Sandbox {name} to become ready...")
@@ -161,7 +174,7 @@ class K8sHelper:
                             logging.info(f"Sandbox {name} is ready.")
                             w.stop()
                             pod_ips = status.get('podIPs', [])
-                            return pod_ips[0] if pod_ips else None
+                            return select_pod_ip(pod_ips)
                 elif event["type"] == "DELETED":
                     logging.error(f"Sandbox {name} was deleted before becoming ready.")
                     w.stop()
@@ -180,7 +193,7 @@ class K8sHelper:
             logging.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
-                logging.error(f"Error terminating sandbox {name}: {e}")
+                logging.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
     def get_sandbox(self, name: str, namespace: str):
@@ -198,15 +211,51 @@ class K8sHelper:
                 return None
             raise
 
-    def list_sandbox_claims(self, namespace: str) -> List[str]:
-        """Lists all SandboxClaim custom resources in a namespace."""
+    def patch_sandbox_claim(self, name: str, namespace: str, body: dict):
+        """Patches a SandboxClaim custom resource."""
+        return self.custom_objects_api.patch_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            name=name,
+            body=body
+        )
+
+    def get_sandbox_claim(self, name: str, namespace: str):
+        """Gets a SandboxClaim custom resource (or ``None`` if it doesn't exist)."""
         try:
-            response = self.custom_objects_api.list_namespaced_custom_object(
+            return self.custom_objects_api.get_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
-                plural=CLAIM_PLURAL_NAME
+                plural=CLAIM_PLURAL_NAME,
+                name=name
             )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def list_sandbox_claims(self, namespace: str, label_selector: str | None = None) -> List[str]:
+        """Lists all SandboxClaim custom resources in a namespace.
+
+        Args:
+            namespace: Kubernetes namespace to list claims in.
+            label_selector: Optional Kubernetes label selector string
+                (e.g. ``"app=myapp,env=prod"``). When set, only claims
+                matching the selector are returned.
+        """
+        try:
+            kwargs: dict = dict(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME,
+            )
+            if label_selector is not None:
+                kwargs["label_selector"] = label_selector
+            response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
             return [
                 item.get("metadata", {}).get("name") 
                 for item in response.get("items", []) 

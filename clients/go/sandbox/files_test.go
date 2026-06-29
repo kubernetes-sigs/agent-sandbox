@@ -24,6 +24,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,7 @@ import (
 // newReadyTestSandbox creates a Sandbox that's already "connected" to the given server URL.
 func newReadyTestSandbox(serverURL string) *Sandbox {
 	opts := Options{
-		TemplateName:      "test-template",
+		WarmPoolName:      "test-warmpool",
 		Namespace:         "default",
 		APIURL:            serverURL,
 		ServerPort:        8888,
@@ -69,7 +70,7 @@ func newReadyTestSandbox(serverURL string) *Sandbox {
 // newUnreadyTestSandbox returns a Sandbox that has not been opened.
 func newUnreadyTestSandbox() *Sandbox {
 	opts := Options{
-		TemplateName:      "test-template",
+		WarmPoolName:      "test-warmpool",
 		Namespace:         "default",
 		APIURL:            "http://localhost:19999",
 		ServerPort:        8888,
@@ -428,16 +429,20 @@ func TestRetry_ServerErrorThenSuccess(t *testing.T) {
 }
 
 func TestHTTPHeaders_AllSet(t *testing.T) {
+	var mu sync.Mutex
 	var headers http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		headers = r.Header.Clone()
+		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
 	}))
 	defer server.Close()
 
 	c := newReadyTestSandbox(server.URL)
+	c.connector.SetIdentity("my-claim")
+	c.connector.SetPodIP("10.244.0.42")
 	c.connector.mu.Lock()
-	c.connector.sandboxID = "my-claim"
 	c.connector.namespace = "my-ns"
 	c.connector.serverPort = 9999
 	c.connector.mu.Unlock()
@@ -447,14 +452,68 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 		t.Fatalf("Exists() error: %v", err)
 	}
 
-	if headers.Get(headerSandboxID) != "my-claim" {
-		t.Errorf("wrong %s: %s", headerSandboxID, headers.Get(headerSandboxID))
+	mu.Lock()
+	capturedHeaders := headers.Clone()
+	mu.Unlock()
+
+	if capturedHeaders.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, capturedHeaders.Get(headerSandboxID))
 	}
-	if headers.Get(headerSandboxNamespace) != "my-ns" {
-		t.Errorf("wrong %s: %s", headerSandboxNamespace, headers.Get(headerSandboxNamespace))
+	if capturedHeaders.Get(headerSandboxNamespace) != "my-ns" {
+		t.Errorf("wrong %s: %s", headerSandboxNamespace, capturedHeaders.Get(headerSandboxNamespace))
 	}
-	if headers.Get(headerSandboxPort) != "9999" {
-		t.Errorf("wrong %s: %s", headerSandboxPort, headers.Get(headerSandboxPort))
+	if capturedHeaders.Get(headerSandboxPort) != "9999" {
+		t.Errorf("wrong %s: %s", headerSandboxPort, capturedHeaders.Get(headerSandboxPort))
+	}
+	if capturedHeaders.Get(headerSandboxPodIP) != "10.244.0.42" {
+		t.Errorf("wrong %s: %s", headerSandboxPodIP, capturedHeaders.Get(headerSandboxPodIP))
+	}
+}
+
+func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
+	var mu sync.Mutex
+	var headers http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headers = r.Header.Clone()
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.connector.SetIdentity("my-claim")
+	c.connector.SetPodIP("")
+	c.connector.mu.Lock()
+	c.connector.namespace = "my-ns"
+	c.connector.serverPort = 9999
+	c.connector.mu.Unlock()
+
+	_, err := c.Exists(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("Exists() error: %v", err)
+	}
+
+	mu.Lock()
+	capturedHeaders := headers.Clone()
+	mu.Unlock()
+
+	if capturedHeaders.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, capturedHeaders.Get(headerSandboxID))
+	}
+	if _, ok := capturedHeaders[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
+		t.Errorf("expected header %s to be absent, but it was present", headerSandboxPodIP)
+	}
+	timeoutHeader := headers.Get(headerSandboxTimeout)
+	if timeoutHeader == "" {
+		t.Fatalf("expected %s to be set", headerSandboxTimeout)
+	}
+	seconds, err := strconv.ParseFloat(timeoutHeader, 64)
+	if err != nil {
+		t.Fatalf("failed to parse timeout header %q: %v", timeoutHeader, err)
+	}
+	if seconds <= 0 {
+		t.Fatalf("expected propagated timeout to be positive, got %f", seconds)
 	}
 }
 
@@ -524,6 +583,15 @@ func TestRetry_AllExhausted(t *testing.T) {
 	}
 	if !strings.Contains(errStr, "502") {
 		t.Errorf("expected error to mention status 502, got: %v", err)
+	}
+	if !errors.Is(err, ErrRetriesExhausted) {
+		t.Errorf("expected ErrRetriesExhausted in error chain, got: %v", err)
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Errorf("expected HTTPError in error chain, got: %v", err)
+	} else if httpErr.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502 in HTTPError, got %d", httpErr.StatusCode)
 	}
 }
 
@@ -673,6 +741,48 @@ func TestRetry_NonSeekableBody(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Errorf("expected 1 attempt with non-seekable body, got %d", got)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed *int32
+}
+
+func (t *trackingReadCloser) Close() error {
+	atomic.AddInt32(t.closed, 1)
+	return nil
+}
+
+func TestSendRequest_ClosesBodyOnRetryableError(t *testing.T) {
+	c := newReadyTestSandbox("http://example.com")
+	var closed int32
+	c.connector.httpClient.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Body:       &trackingReadCloser{Reader: strings.NewReader("error"), closed: &closed},
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	resp, err := c.connector.SendRequest(context.Background(), http.MethodGet, "exists/x", nil, "", 1)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	// Without closing retry bodies, HTTP connections leak and cannot be reused.
+	if atomic.LoadInt32(&closed) == 0 {
+		t.Fatal("expected response body to be closed")
 	}
 }
 
@@ -1386,6 +1496,46 @@ func TestWithMaxAttempts_InvalidUsesDefault(t *testing.T) {
 				t.Errorf("WithMaxAttempts(%d) should use default (%d attempts), got %d", n, maxAttempts, got)
 			}
 		})
+	}
+}
+
+func TestCancelOnClose_InvokesCancel(t *testing.T) {
+	cancelled := false
+	rc := &cancelOnClose{
+		ReadCloser: io.NopCloser(strings.NewReader("body")),
+		cancel:     func() { cancelled = true },
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	if !cancelled {
+		t.Error("cancelOnClose.Close() did not invoke cancel; request-context goroutines will not be released")
+	}
+}
+
+func TestRetry_LargeBodyOnRetryable(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write(make([]byte, maxDrainBytes*3)) // well over the 4 KB drain cap
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	exists, err := c.Exists(context.Background(), "test.txt")
+	if err != nil {
+		t.Fatalf("Exists() should succeed after retry past large error body: %v", err)
+	}
+	if !exists {
+		t.Error("expected exists=true after retry")
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("expected 2 attempts, got %d", got)
 	}
 }
 

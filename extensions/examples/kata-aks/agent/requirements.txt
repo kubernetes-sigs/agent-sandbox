@@ -1,0 +1,4 @@
+fastapi==0.115.4
+uvicorn==0.32.0
+openai==1.59.2
+httpx==0.27.2

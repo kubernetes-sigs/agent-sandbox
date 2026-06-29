@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 from typing import Callable, Awaitable
 
 import httpx
@@ -33,6 +34,22 @@ from .models import (
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 MAX_RETRIES = 5
 BACKOFF_FACTOR = 0.5
+
+
+def _router_timeout_header_value(timeout) -> str | None:
+    value = None
+    if isinstance(timeout, bool):
+        return None
+    if isinstance(timeout, (int, float)):
+        value = timeout
+    elif isinstance(timeout, httpx.Timeout):
+        value = timeout.read
+    else:
+        return None
+
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return str(value)
 
 
 class AsyncSandboxConnector:
@@ -67,7 +84,9 @@ class AsyncSandboxConnector:
         self._get_pod_ip = get_pod_ip
 
         self._base_url: str | None = None
+        self._pod_ip: str | None = None
         self._pod_ip_resolved = False
+        self._pod_ip_auth_failed = False
         self._cached_pod_ip_url: str | None = None
         if isinstance(connection_config, SandboxInClusterConnectionConfig):
             self._dns_url = (
@@ -95,7 +114,9 @@ class AsyncSandboxConnector:
                     return self._cached_pod_ip_url or self._dns_url
                 pod_ip = await self._get_pod_ip()
                 if pod_ip:
-                    self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                    self._pod_ip = pod_ip
+                    host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                    self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
                     self._pod_ip_resolved = True
                     return self._cached_pod_ip_url
             return self._dns_url
@@ -111,7 +132,8 @@ class AsyncSandboxConnector:
                 self.connection_config.gateway_namespace,
                 self.connection_config.gateway_ready_timeout,
             )
-            self._base_url = f"http://{ip_address}"
+            host = f"[{ip_address}]" if ":" in ip_address else ip_address
+            self._base_url = f"http://{host}"
         else:
             raise ValueError(
                 f"AsyncSandboxConnector does not support {type(self.connection_config).__name__}."
@@ -120,20 +142,75 @@ class AsyncSandboxConnector:
         return self._base_url
 
     async def send_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
+        """Sends an HTTP request asynchronously to the sandbox with standard parameters.
+
+        This method automatically resolves the gateway connection, appends the router/sandbox
+        identity headers, overrides redirect options to disable client-side automatic
+        redirection (for security/SSRF mitigation), and raises appropriate exceptions on errors.
+
+        Args:
+            method: The HTTP method (e.g., "GET", "POST").
+            endpoint: The API endpoint path.
+            **kwargs: Extra keyword arguments passed directly to the underlying
+                `httpx.AsyncClient.request` invocation. Note that 'follow_redirects'
+                is explicitly popped and overridden.
+
+        Returns:
+            The `httpx.Response` object representing the response from the sandbox.
+
+        Raises:
+            SandboxRequestError: If a connection/HTTP status error occurs, or if a redirect is
+                returned (status codes 301, 302, 303, 307, 308).
+
+        Note on Redirect Handling:
+            Automatic redirection (SSRF risk mitigation) is explicitly disabled in the
+            HTTP client. If a redirect status code recognized by httpx (301, 302,
+            303, 307, 308) is returned, a SandboxRequestError wrapping HTTPStatusError is
+            raised. Non-redirect 3xx status codes, such as 300 (Multiple Choices), 304
+            (Not Modified), 305 (Use Proxy), and 306 (Switch Proxy), do not trigger
+            automatic client redirection or raise redirect errors; they are returned
+            directly to the caller because httpx does not consider them redirects
+            and raise_for_status only raises for status codes 400 and above.
+        """
         base_url = await self._resolve_base_url()
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         headers = kwargs.pop("headers", {}).copy()
+        # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
+        # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
+        # ignored. We pop 'follow_redirects' here to prevent a TypeError due to duplicate keyword
+        # arguments when calling httpx.AsyncClient.request.
+        kwargs.pop("follow_redirects", None)
+
         if self._inject_router_headers:
             headers["X-Sandbox-ID"] = self.id
             headers["X-Sandbox-Namespace"] = self.namespace
             headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+            timeout_header = _router_timeout_header_value(kwargs.get("timeout"))
+            if timeout_header is not None:
+                headers["X-Sandbox-Timeout"] = timeout_header
+            if self._get_pod_ip and not self._pod_ip_auth_failed:
+                if not self._pod_ip_resolved:
+                    try:
+                        pod_ip = await self._get_pod_ip()
+                        if pod_ip:
+                            self._pod_ip = pod_ip
+                            self._pod_ip_resolved = True
+                    except Exception as e:
+                        status_code = getattr(getattr(e, "response", None), "status_code", None)
+                        if status_code in (401, 403):
+                            self._pod_ip_auth_failed = True
+                            logger.debug(f"K8s API auth failed ({status_code}). Permanently disabling direct pod IP routing for this client instance.")
+                        else:
+                            logger.debug(f"Transient failure resolving pod IP for direct routing: {e}")
+                if self._pod_ip:
+                    headers["X-Sandbox-Pod-IP"] = self._pod_ip
 
         last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
                 response = await self.client.request(
-                    method, url, headers=headers, **kwargs
+                    method, url, headers=headers, follow_redirects=False, **kwargs
                 )
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
                     delay = BACKOFF_FACTOR * (2 ** attempt)
@@ -144,6 +221,12 @@ class AsyncSandboxConnector:
                     last_response = response
                     await asyncio.sleep(delay)
                     continue
+                if response.is_redirect:
+                    raise httpx.HTTPStatusError(
+                        f"Redirection is not allowed (status code {response.status_code}).",
+                        request=response.request,
+                        response=response,
+                    )
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:
@@ -153,6 +236,7 @@ class AsyncSandboxConnector:
                     self._base_url = None
                 self._pod_ip_resolved = False
                 self._cached_pod_ip_url = None
+                self._pod_ip = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=e.response.status_code,
@@ -165,6 +249,7 @@ class AsyncSandboxConnector:
                     self._base_url = None
                 self._pod_ip_resolved = False
                 self._cached_pod_ip_url = None
+                self._pod_ip = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=None,
@@ -184,3 +269,4 @@ class AsyncSandboxConnector:
             self._base_url = None
         self._pod_ip_resolved = False
         self._cached_pod_ip_url = None
+        self._pod_ip = None

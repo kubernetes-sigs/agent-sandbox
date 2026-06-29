@@ -42,7 +42,7 @@ With Kata installed on your GKE nodes, you can now deploy an `Agent Sandbox` res
 The manifest below (`sandbox-kata-gke.yaml`) defines a `Sandbox` that requests the `kata-qemu` runtime and includes a `nodeSelector` to ensure it is scheduled onto a compatible Ubuntu node.
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: kata-gke-example

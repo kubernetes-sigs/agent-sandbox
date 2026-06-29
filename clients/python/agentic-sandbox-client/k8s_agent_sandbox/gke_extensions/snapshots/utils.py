@@ -14,6 +14,7 @@
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 from kubernetes.client import ApiException
 from kubernetes import watch
@@ -23,6 +24,7 @@ from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_VERSION,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
+    PODSNAPSHOT_NAME_ANNOTATION,
 )
 
 logger = logging.getLogger(__name__)
@@ -318,3 +320,50 @@ def wait_for_pod_ready(
                     logger.error(f"Error checking pod status: {e}")
         time.sleep(2)
     return False
+
+
+def wait_for_sandbox_propagation(
+    k8s_helper,
+    namespace: str,
+    sandbox_id: str,
+    snapshot_uid: str,
+    timeout: int = 30,
+) -> bool:
+    """Waits for the snapshot UID to propagate from SandboxClaim to Sandbox spec."""
+    import logging
+    logger = logging.getLogger(__name__)
+    import time
+    
+    logger.info(f"Waiting up to {timeout}s for snapshot UID '{snapshot_uid}' to propagate to Sandbox '{sandbox_id}'...")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            sandbox_obj = k8s_helper.get_sandbox(sandbox_id, namespace)
+            if sandbox_obj:
+                spec = sandbox_obj.get("spec", {}) or {}
+                pod_template = spec.get("podTemplate", {}) or {}
+                metadata = pod_template.get("metadata", {}) or {}
+                annotations = metadata.get("annotations", {}) or {}
+                
+                if annotations.get(PODSNAPSHOT_NAME_ANNOTATION) == snapshot_uid:
+                    logger.info("Snapshot UID propagated successfully.")
+                    return True
+        except Exception as e:
+            logger.error(f"Error checking sandbox propagation: {e}")
+        time.sleep(2)
+    return False
+
+def normalize_datetime(v):
+    """Normalizes a datetime object or ISO string to a timezone-aware UTC datetime."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError as e:
+            raise ValueError(f"Invalid ISO datetime string: {v}") from e
+    if isinstance(v, datetime):
+        if v.tzinfo is None or v.utcoffset() is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
+    raise TypeError(f"Expected datetime or ISO format string, got {type(v)}")

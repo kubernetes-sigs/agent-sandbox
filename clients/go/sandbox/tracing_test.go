@@ -32,10 +32,10 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	ktesting "k8s.io/client-go/testing"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	fakeextensions "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 func sandboxHTTPHandler() http.Handler {
@@ -72,7 +72,7 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *
 	// Simulate GenerateName: assign a name if only GenerateName is set.
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ca := action.(ktesting.CreateAction)
-		claim := ca.GetObject().(*extv1alpha1.SandboxClaim)
+		claim := ca.GetObject().(*extv1beta1.SandboxClaim)
 		if claim.Name == "" && claim.GenerateName != "" {
 			claim.Name = claim.GenerateName + "test12345"
 		}
@@ -82,24 +82,24 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *
 	// Default: claim status returns claim name as sandbox name.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ga := action.(ktesting.GetAction)
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
-			Status: extv1alpha1.SandboxClaimStatus{
-				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
 			},
 		}, nil
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		TracerProvider:      tp,
 		TraceServiceName:    "test-svc",
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
 		K8sHelper: &K8sHelper{
-			AgentsClient:     agentsCS.AgentsV1alpha1(),
-			ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+			AgentsClient:     agentsCS.AgentsV1beta1(),
+			ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 			Log:              logr.Discard(),
 		},
 	}
@@ -114,20 +114,20 @@ func newTracedTestClient(t *testing.T, tp *sdktrace.TracerProvider) (*Sandbox, *
 
 // setupTracedWatch wires a fake watcher that sends the sandbox once
 // the claim is created, and captures the created claim for inspection.
-func setupTracedWatch(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensions.Clientset) (*watch.FakeWatcher, **extv1alpha1.SandboxClaim) {
+func setupTracedWatch(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensions.Clientset) (*watch.FakeWatcher, **extv1beta1.SandboxClaim) {
 	fakeWatcher := watch.NewFake()
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(fakeWatcher, nil))
 
-	var captured *extv1alpha1.SandboxClaim
+	var captured *extv1beta1.SandboxClaim
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if ca, ok := action.(ktesting.CreateAction); ok {
-			if claim, ok := ca.GetObject().(*extv1alpha1.SandboxClaim); ok {
+			if claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim); ok {
 				if claim.Name == "" && claim.GenerateName != "" {
 					claim.Name = claim.GenerateName + "test12345"
 				}
 				captured = claim.DeepCopy()
 
-				sb := &sandboxv1alpha1.Sandbox{
+				sb := &sandboxv1beta1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      claim.Name,
 						Namespace: claim.Namespace,
@@ -135,9 +135,9 @@ func setupTracedWatch(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensio
 							PodNameAnnotation: claim.Name + "-pod",
 						},
 					},
-					Status: sandboxv1alpha1.SandboxStatus{
+					Status: sandboxv1beta1.SandboxStatus{
 						Conditions: []metav1.Condition{{
-							Type:   string(sandboxv1alpha1.SandboxConditionReady),
+							Type:   string(sandboxv1beta1.SandboxConditionReady),
 							Status: metav1.ConditionTrue,
 						}},
 					},
@@ -253,7 +253,7 @@ func TestTracingLifecycleAndOperations(t *testing.T) {
 	}
 
 	// Verify Run attributes
-	assertSpanAttr(t, spanByName["test-svc.run"], "sandbox.command", "echo hello")
+	assertSpanAttr(t, spanByName["test-svc.run"], "sandbox.command.executable", "echo")
 	assertSpanAttrInt(t, spanByName["test-svc.run"], "sandbox.exit_code", 0)
 
 	// Verify Write attributes
@@ -311,22 +311,22 @@ func TestTracingNoopWithoutProvider(t *testing.T) {
 	// Default: claim status returns claim name as sandbox name.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ga := action.(ktesting.GetAction)
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
-			Status: extv1alpha1.SandboxClaimStatus{
-				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
 			},
 		}, nil
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
 		K8sHelper: &K8sHelper{
-			AgentsClient:     agentsCS.AgentsV1alpha1(),
-			ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+			AgentsClient:     agentsCS.AgentsV1beta1(),
+			ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 			Log:              logr.Discard(),
 		},
 	}
@@ -369,24 +369,24 @@ func TestTracingErrorRecording(t *testing.T) {
 	// Default: claim status returns claim name as sandbox name.
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ga := action.(ktesting.GetAction)
-		return true, &extv1alpha1.SandboxClaim{
+		return true, &extv1beta1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
-			Status: extv1alpha1.SandboxClaimStatus{
-				SandboxStatus: extv1alpha1.SandboxStatus{Name: ga.GetName()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
 			},
 		}, nil
 	})
 
 	opts := Options{
-		TemplateName:        "test-template",
+		WarmPoolName:        "test-warmpool",
 		APIURL:              srv.URL,
 		TracerProvider:      tp,
 		TraceServiceName:    "test-svc",
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
 		K8sHelper: &K8sHelper{
-			AgentsClient:     agentsCS.AgentsV1alpha1(),
-			ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+			AgentsClient:     agentsCS.AgentsV1beta1(),
+			ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 			Log:              logr.Discard(),
 		},
 	}
@@ -427,6 +427,13 @@ func TestTracingErrorRecording(t *testing.T) {
 		}
 	}
 	t.Error("run span not found")
+}
+
+func TestTraceContextJSON_NoActiveSpan(t *testing.T) {
+	// Background context carries no span; carrier will be empty -> return "".
+	if got := traceContextJSON(context.Background()); got != "" {
+		t.Errorf("expected empty string for context without an active span, got %q", got)
+	}
 }
 
 // --- helpers ---
@@ -476,4 +483,40 @@ func assertSpanAttrBool(t *testing.T, span tracetest.SpanStub, key string, want 
 		}
 	}
 	t.Errorf("span %s: missing attribute %s", span.Name, key)
+}
+
+func TestCommandExecutable(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "simple command",
+			command: "echo hello",
+			want:    "echo",
+		},
+		{
+			name:    "command with path",
+			command: "/usr/bin/python3 -c 'print()'",
+			want:    "python3",
+		},
+		{
+			name:    "command with leading env vars",
+			command: "API_KEY=secret_token TOKEN=xyz ./run.sh --arg",
+			want:    "run.sh",
+		},
+		{
+			name:    "empty command",
+			command: "  ",
+			want:    "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := commandExecutable(tt.command); got != tt.want {
+				t.Errorf("commandExecutable(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
 }

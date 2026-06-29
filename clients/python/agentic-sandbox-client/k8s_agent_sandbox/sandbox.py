@@ -27,6 +27,7 @@ from .models import (
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
+from .utils import select_pod_ip
 
 class Sandbox:
     """
@@ -56,17 +57,12 @@ class Sandbox:
         # Sandbox Management downstream dependency
         self.k8s_helper = k8s_helper or K8sHelper()
 
-        # Establish Sandbox Connection
-        use_pod_ip = (
-            isinstance(self.connection_config, SandboxInClusterConnectionConfig)
-            and self.connection_config.use_pod_ip
-        )
         self.connector = SandboxConnector(
             sandbox_id=self.sandbox_id,
             namespace=self.namespace,
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
-            get_pod_ip=self.get_pod_ip if use_pod_ip else None,
+            get_pod_ip=self.get_pod_ip,
         )
 
         # Tracer initialization
@@ -116,15 +112,16 @@ class Sandbox:
         return None
 
     def get_pod_ip(self) -> str | None:
-        """Fetches the first pod IP from the Sandbox status.
+        """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
 
         Always queries the K8s API for the latest IP — the pod IP can change
-        after a pod restart (e.g. when spec.replicas is scaled to 0 and back).
-        Returns None if the controller does not populate podIPs.
+        after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed
+        via setting spec.operatingMode to Running).
+        Returns None if no valid IP can be selected.
         """
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         pod_ips = sandbox_object.get('status', {}).get('podIPs', [])
-        return pod_ips[0] if pod_ips else None
+        return select_pod_ip(pod_ips)
 
     def status(self) -> tuple[str, str]:
         """
@@ -192,11 +189,24 @@ class Sandbox:
         logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
     def terminate(self):
-        """Permanent deletion of all server side infrastructure and client side connection."""
+        """
+        Permanent deletion of all server side infrastructure and client side connection.
+
+        This method is idempotent. Calling ``terminate()`` repeatedly after a
+        successful deletion is a safe no-op. If the remote infrastructure has
+        already been removed, subsequent calls will handle the API 404 gracefully
+        rather than raising an error.
+        """
         # Close the client side connection and trace manager lifecycle
         self.close_connection()
-        
-        # Delete this Sandbox
+
+        if not self.claim_name:
+            # Already deleted (or never successfully created a claim).
+            return
+
         self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # Clear after successful delete so a retry does not 404.
+        self.claim_name = None
 
  

@@ -32,7 +32,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -55,7 +55,7 @@ func GetKubeconfig() string {
 
 func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(controllers.Scheme))
-	utilruntime.Must(extensionsv1alpha1.AddToScheme(controllers.Scheme))
+	utilruntime.Must(extensionsv1beta1.AddToScheme(controllers.Scheme))
 }
 
 func getRepoRoot() string {
@@ -79,6 +79,9 @@ type TestContext struct {
 	*ClusterClient
 	artifactsDir string
 	restConfig   *rest.Config
+
+	// benchmark is populated if this is a benchmark
+	benchmark *testing.B
 }
 
 // ArtifactsDir returns the directory where test artifacts should be written.
@@ -108,6 +111,11 @@ func NewTestContext(t T) *TestContext {
 		T:            wrappedT,
 		artifactsDir: artifactsDir,
 	}
+
+	if b, ok := t.(*testing.B); ok {
+		th.benchmark = b
+	}
+
 	kubeconfig := GetKubeconfig()
 	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},
@@ -116,6 +124,8 @@ func NewTestContext(t T) *TestContext {
 	if err != nil {
 		t.Fatal(err)
 	}
+	restConfig.QPS = 50
+	restConfig.Burst = 100
 	th.restConfig = restConfig
 
 	httpClient, err := rest.HTTPClientFor(restConfig)
@@ -236,5 +246,32 @@ func (th *TestContext) dumpControllerLogs() {
 		tailStream.Close()
 
 		th.Logf("=== Controller logs (last 42 lines) from %s (full logs: %s) ===\n%s", pod.Name, logFile, tailBuf.String())
+	}
+}
+
+// ReportMetric will report a benchmark result.
+// If running as a benchmark it will be reported through the benchmark framework.
+// If running as a unit-test it will be logged through the test.
+func (th *TestContext) ReportMetric(n float64, unit string) {
+	if th.benchmark != nil {
+		th.benchmark.ReportMetric(n, unit)
+	} else {
+		th.Logf("benchmark[%v]=%v", unit, n)
+	}
+}
+
+// StartTimer implements the same behavior as *testing.B.StartTimer, but for *framework.TestContext.
+// It is ignored if we are not running as a benchmark.
+func (th *TestContext) StartTimer() {
+	if th.benchmark != nil {
+		th.benchmark.StartTimer()
+	}
+}
+
+// StopTimer implements the same behavior as *testing.B.StopTimer, but for *framework.TestContext.
+// It is ignored if we are not running as a benchmark.
+func (th *TestContext) StopTimer() {
+	if th.benchmark != nil {
+		th.benchmark.StopTimer()
 	}
 }

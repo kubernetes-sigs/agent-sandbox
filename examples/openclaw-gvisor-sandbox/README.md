@@ -74,6 +74,14 @@ kubectl apply -f openclaw-claim.yaml
 kubectl apply -f kind-service.yaml          # or gke-service.yaml on GKE
 ```
 
+> **Note on `openclaw-config.yaml`** — the `allowedOrigins` list is pinned to
+> the access ports used below (`30789` for kind NodePort, `18789` for the GKE
+> IAP tunnel's local port). If you change either port, update `allowedOrigins`
+> to match — under `--bind=lan` OpenClaw refuses to start with an unknown
+> origin. For quick local-dev testing where you don't want to maintain the
+> list, swap `allowedOrigins` for `"dangerouslyAllowHostHeaderOriginFallback": true`
+> as a local-only escape hatch (not for anything exposed beyond your laptop).
+
 ## Accessing the UI
 
 ### On kind
@@ -130,6 +138,10 @@ gcloud compute firewall-rules create allow-iap-openclaw \
   --source-ranges=35.235.240.0/20 \
   --allow="tcp:${NODE_PORT}" \
   --network=default
+# If you ever change the NodePort (e.g., drop the pin in gke-service.yaml so GKE auto-allocates), update the rule to match the new port:
+#   gcloud compute firewall-rules update allow-iap-openclaw --allow="tcp:${NODE_PORT}"
+# Re-running the create above with a different port fails because the rule
+# name already exists.
 
 # Open the tunnel (leave running)
 gcloud compute start-iap-tunnel "$NODE" "$NODE_PORT" \
@@ -233,9 +245,7 @@ PVCs are named `<vctName>-<sandboxName>` and owned by the `Sandbox` CR. So:
 - **Delete the `Sandbox`** (or the `SandboxClaim` with `shutdownPolicy: Delete`)
   → PVC is garbage-collected, data is gone.
 
-Do not put `volumeClaimTemplates` on the `SandboxClaim`. Per
-`extensions/controllers/sandboxclaim_controller.go:1491`, a claim with VCTs
-bypasses the warm pool entirely and cold-starts a fresh sandbox.
+Do not put `volumeClaimTemplates` on the `SandboxClaim`. A claim containing its own VCTs will bypass the pre-warmed pool entirely and trigger a cold start of a fresh sandbox, defeating the purpose of the warm pool.
 
 ## Known limitations
 

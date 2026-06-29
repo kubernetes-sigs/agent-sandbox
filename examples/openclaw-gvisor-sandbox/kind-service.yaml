@@ -5,7 +5,7 @@ metadata:
 spec:
   type: NodePort
   selector:
-    sandbox: openclaw-template-sandbox
+    sandbox.users.io/openclaw-claim: openclaw-sandbox-claim
   ports:
     - name: gateway
       port: 18789

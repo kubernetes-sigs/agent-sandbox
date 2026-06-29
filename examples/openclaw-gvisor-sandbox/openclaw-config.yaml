@@ -7,7 +7,12 @@ data:
     {
       "gateway": {
         "controlUi": {
-          "dangerouslyAllowHostHeaderOriginFallback": true
+          "allowedOrigins": [
+              "http://localhost:30789",
+              "http://127.0.0.1:30789",
+              "http://localhost:18789",
+              "http://127.0.0.1:18789"
+            ]
         }
       }
     }

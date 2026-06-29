@@ -611,7 +611,7 @@ class TestK8sHelperWatchNoneEvents(unittest.TestCase):
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_sandbox_ready_returns_pod_ip(self, mock_watch_cls):
-        """wait_for_sandbox_ready returns the first pod IP when present."""
+        """wait_for_sandbox_ready returns the prioritized and normalized pod IP when present."""
         mock_watch = MagicMock()
         mock_watch_cls.return_value = mock_watch
         mock_watch.stream.return_value = [{
@@ -619,7 +619,7 @@ class TestK8sHelperWatchNoneEvents(unittest.TestCase):
             "object": {
                 "status": {
                     "conditions": [{"type": "Ready", "status": "True"}],
-                    "podIPs": ["10.244.0.5", "fd00::5"],
+                    "podIPs": ["::ffff:10.244.0.5", "fd00::5"],
                 },
             },
         }]

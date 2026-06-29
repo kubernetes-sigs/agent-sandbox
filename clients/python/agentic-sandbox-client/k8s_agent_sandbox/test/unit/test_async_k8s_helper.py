@@ -172,7 +172,7 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
                 "object": {
                     "status": {
                         "conditions": [{"type": "Ready", "status": "True"}],
-                        "podIPs": ["10.244.0.5", "fd00::5"],
+                        "podIPs": ["::ffff:10.244.0.5", "fd00::5"],
                     }
                 },
             }

@@ -73,6 +73,9 @@ var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 
 var ErrCrossNamespaceAdoption = errors.New("cross-namespace adoption forbidden")
 
+// ErrEnvVarsInjectionRejected is a sentinel error indicating environment variable injection was rejected.
+var ErrEnvVarsInjectionRejected = errors.New("environment variable injection rejected")
+
 // ErrVolumeClaimTemplatesDisallowed is a sentinel error indicating that volumeClaimTemplates are disallowed by the template.
 var ErrVolumeClaimTemplatesDisallowed = errors.New("volume claim templates are disallowed by the template")
 
@@ -85,6 +88,7 @@ var ErrVolumeClaimTemplatesInvalid = errors.New("invalid volume claim templates"
 var suppressErrors = []error{
 	ErrInvalidMetadata,
 	ErrSandboxNotOwned,
+	ErrEnvVarsInjectionRejected,
 	ErrVolumeClaimTemplatesDisallowed,
 	ErrVolumeClaimTemplatesOverrideForbidden,
 	ErrVolumeClaimTemplatesInvalid,
@@ -510,6 +514,16 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 		}
 		if errors.Is(err, ErrInvalidMetadata) {
 			reason = "InvalidMetadata"
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            err.Error(),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrEnvVarsInjectionRejected) {
+			reason = "EnvVarsInjectionRejected"
 			return metav1.Condition{
 				Type:               string(v1beta1.SandboxConditionReady),
 				Status:             metav1.ConditionFalse,
@@ -1071,8 +1085,11 @@ func (r *SandboxClaimReconciler) mergePodMetadata(templateMeta *v1beta1.PodMetad
 	return nil
 }
 
-// injectEnvs is a helper to inject/override a set of environment variables in a container.
 func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1beta1.EnvVar, policy extensionsv1beta1.EnvVarsInjectionPolicy, claimName string) error {
+	if policy == extensionsv1beta1.EnvVarsInjectionPolicyAllowed && len(container.EnvFrom) > 0 {
+		return fmt.Errorf("%w: container %q uses EnvFrom sources; Allowed policy cannot safely prevent overriding EnvFrom-provided variables", ErrEnvVarsInjectionRejected, container.Name)
+	}
+
 	for _, claimEnv := range envsToInject {
 		existingIdx := -1
 		for j, env := range container.Env {
@@ -1161,7 +1178,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Inject environment variables from the SandboxClaim
 	if len(claim.Spec.Env) > 0 {
 		if template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyAllowed && template.Spec.EnvVarsInjectionPolicy != extensionsv1beta1.EnvVarsInjectionPolicyOverrides {
-			err := fmt.Errorf("environment variable injection is not allowed by the template policy")
+			err := fmt.Errorf("%w: environment variable injection is not allowed by the template policy", ErrEnvVarsInjectionRejected)
 			logger.Error(err, "Environment variable injection rejected", "claimName", claim.Name)
 			return nil, err
 		}

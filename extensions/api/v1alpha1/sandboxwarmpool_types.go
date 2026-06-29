@@ -16,6 +16,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
@@ -89,6 +90,7 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:deprecatedversion:warning="extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool is deprecated; use extensions.agents.x-k8s.io/v1beta1 SandboxWarmPool instead"
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.
@@ -118,5 +120,8 @@ type SandboxWarmPoolList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxWarmPool{}, &SandboxWarmPoolList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxWarmPool{}, &SandboxWarmPoolList{})
+		return nil
+	})
 }

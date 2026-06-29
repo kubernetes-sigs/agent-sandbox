@@ -39,8 +39,8 @@ var (
 	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef used by the SandboxWarmPool (from sandboxWarmPool.Spec).
-	// - warmpool_name: the name of the SandboxWarmPool (from SandboxWarmPoolRef.Name).
+	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox.
+	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_startup_latency_ms",
@@ -54,8 +54,8 @@ var (
 	// ClaimControllerStartupLatency measures the time from controller first observed timestamp to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef used by the SandboxWarmPool (from sandboxWarmPool.Spec).
-	// - warmpool_name: the name of the SandboxWarmPool (SandboxWarmPoolRef.Name).
+	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox.
+	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
 	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_controller_startup_latency_ms",
@@ -86,7 +86,7 @@ var (
 	// - namespace: the namespace of the claim
 	// - sandbox_template: the SandboxTemplateRef
 	// - launch_type: "warm", "cold", "unknown"
-	// - warmpool_name: the name of the warm pool
+	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
 	// - pod_condition: "ready", "not_ready".
 	SandboxClaimCreationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{

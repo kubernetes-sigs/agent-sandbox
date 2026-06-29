@@ -46,7 +46,14 @@ func TestClaimLatencyRecording(t *testing.T) {
 			ClaimStartupLatency.WithLabelValues(tc.launchType, "test-tmpl", "test-pool").Observe(1000)
 
 			if testutil.CollectAndCount(ClaimStartupLatency) != 1 {
-				t.Errorf("Expected 1 observation")
+				t.Errorf("Expected 1 observation for ClaimStartupLatency")
+			}
+
+			ClaimControllerStartupLatency.Reset()
+			ClaimControllerStartupLatency.WithLabelValues(tc.launchType, "test-tmpl", "test-pool").Observe(1000)
+
+			if testutil.CollectAndCount(ClaimControllerStartupLatency) != 1 {
+				t.Errorf("Expected 1 observation for ClaimControllerStartupLatency")
 			}
 		})
 	}

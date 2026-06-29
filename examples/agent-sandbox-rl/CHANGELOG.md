@@ -81,8 +81,10 @@ Sandbox `v0.5.0rc1` (v1beta1).
   the benchmark CLI (`tests/run_full_swebench_benchmark.py`, plan-only by default;
   `--execute` runs it and reports **preload vs task** wall separately). Pure helpers
   unit-tested in `tests/test_capacity.py`.
-- **Docs**: `docs/gke.md` GKE tuning guide (Image Streaming, AR mirror, secondary
-  boot disk); README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
+- **Docs**: `docs/strategies.md` — consolidated strategies / sizing / tuning guide
+  (decision table, all-levers table, the four strategies, instant-claim sizing,
+  caching levers incl. pre-pull, Image Streaming, AR mirror, secondary boot disk);
+  README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
 ### Fixed (from PR #1049 review)
 - **Epoch teardown on failure** (`fleet.py`, `async_fleet.py`): a non-final

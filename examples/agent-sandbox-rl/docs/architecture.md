@@ -226,9 +226,10 @@ task region ~linearly; the SWE-Bench-Verified set is 500 images / 12 families
 Since image pull dominates wall-clock at scale, the `pipelined` strategy overlaps
 the next window's pull with the current window's execution, and `epochs`/`keep_warm`
 + `imagePullPolicy: IfNotPresent` amortize pulls across passes via the node layer
-cache. The GKE-side levers (in-region Artifact Registry mirror via the
-`image_rewrite` hook, Image Streaming, larger/secondary boot disk, disk-aware
-window sizing) are documented in [`gke.md`](gke.md).
+cache. Every strategy, sizing mode, and caching/infra lever (in-region Artifact
+Registry mirror via the `image_rewrite` hook, pre-pull DaemonSet, Image Streaming,
+larger/secondary boot disk, disk-aware window sizing) — with the workload each fits
+and the exact flag — is documented in [`strategies.md`](strategies.md).
 
 A later load-test sweep (`tests/loadtest.py`, recorded under `performance_reports/`)
 added the **instant-claim** findings: `warm_per_task` + `colocate_replicas` cut the

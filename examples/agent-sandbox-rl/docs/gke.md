@@ -6,7 +6,27 @@ At scale, wall-clock for SWE-bench-style fleets is dominated by **image pull**
 are node-pool / registry settings that live *outside* this package (it stays
 infra-agnostic), plus the small in-package knobs that target them.
 
-The levers, roughly in order of impact for repeated (RL) runs:
+## All levers at a glance
+
+Two independent axes plus a set of caching levers. Pick a **warm-pool strategy**
+(*when/how many* pools exist) and a **sizing mode** (*how deep* each pool is), then
+stack the caching levers that fit your cluster.
+
+| Lever | What it does | Knob / API | Best for |
+| :--- | :--- | :--- | :--- |
+| **Warm-pool strategy** | when pools exist & footprint | `run(strategy=…)`: `naive` / `sliding` / `pipelined` / `none` | `pipelined` for pull-bound eval; `naive`/`sliding` for RL |
+| **Concurrency-aware sizing** (default) | pool depth = image's share of the budget | `max_concurrent`, `max_warmpool_size` | eval (1:1), minimal footprint |
+| **Instant-claim (pre-warm)** | one warm replica **per task** | `FleetConfig.warm_per_task=True` | RL (G rollouts share an image) |
+| **Replica co-location** | pack a pool's replicas on one node → 1 pull/node | `TemplateSpec.colocate_replicas=True` | deep pools (RL), cache reuse |
+| **Cross-epoch reuse** | keep pools resident across passes | `run(epochs=N)` / `keep_warm=True` | repeated passes (RL epochs) |
+| **Node layer cache** | re-use already-pulled layers | `TemplateSpec.image_pull_policy=IfNotPresent` (default) | every repeated run |
+| **Pre-pull DaemonSet** | cache images on **every** node *before* the hot path | `fleet.prepull()` / `setup(prepull=True)` | spreading a fixed set across many nodes / autoscale |
+| **In-region mirror** | cut cross-region pull + Docker Hub rate limits | `make_rewriter(...)` + `load_tasks(image_rewrite=…)` | Docker Hub-hosted images |
+| **Image Streaming** | pods Ready before the full pull | node-pool `--enable-image-streaming` + `node_selector` | large images, task reads a fraction |
+| **Disk-aware window** | cap the auto window to node disk | `avg_image_gb` / `node_ephemeral_gb` / `cluster_nodes` | growing the window safely |
+| **Bigger / secondary boot disk** | more resident layers / images present at boot | node-pool setting + `node_selector` | fixed image sets, autoscale-warm |
+
+The rest of this guide details each, roughly in order of impact for repeated (RL) runs.
 
 ## 1. Amortize pulls across epochs (in-package)
 
@@ -31,7 +51,31 @@ Re-pulling every epoch is the biggest avoidable cost. Two mechanisms:
   capacity for `replicas × cpu_request` (e.g. 50 × 250m ≈ 13 vCPU → an
   `e2-standard-16`).
 
-## 2. In-region registry / pull-through cache
+## 2. Pre-pull the working set onto nodes (in-package)
+
+`epochs`/`keep_warm` warm the node cache *as a side effect of the first pass*;
+pre-pull warms it **up front and on every node**, before any claim. `fleet.prepull()`
+(or `setup(prepull=True)`) lays down a short-lived **DaemonSet** with one init
+container per image (each `IfNotPresent`, `sh -c exit 0`), so every selected node
+pulls + unpacks every image into its local containerd cache once; it waits until all
+nodes report ready, then `prepull_delete()` removes it.
+
+```python
+fleet.load_tasks(SweBenchSource(limit=500))
+fleet.plan()
+fleet.prepull()            # every node caches all 500 images; or setup(prepull=True)
+fleet.run(process_fn, strategy="sliding")   # warm pools now hit the node cache
+```
+
+- It honors `TemplateSpec.node_selector` / `image_pull_secret` and runs **per
+  cluster**, and (being a DaemonSet) **auto-covers newly-autoscaled nodes**.
+- It's the only mechanism that spreads ready images across **all** nodes ahead of
+  the hot path — unlike `colocate_replicas` (one node per pool) or `epochs` (only
+  the nodes a pass happened to schedule on). Best when the working set fits node
+  disk and the run is scheduling-spread or scales up mid-run.
+- Bounded by node disk — pair with the disk-aware window (§5) for large sets.
+
+## 3. In-region registry / pull-through cache
 
 Cross-region pulls from Docker Hub (and its rate limits) are slow. Mirror the
 images into a registry in your cluster's region and point the fleet at it:
@@ -53,7 +97,7 @@ images into a registry in your cluster's region and point the fleet at it:
   ```
   Grant the node service account `roles/artifactregistry.reader` on the repo.
 
-## 3. GKE Image Streaming (gcfs)
+## 4. GKE Image Streaming (gcfs)
 
 With images in Artifact Registry, [Image
 Streaming](https://cloud.google.com/kubernetes-engine/docs/how-to/image-streaming)
@@ -61,9 +105,9 @@ lets pods become **Ready before the full image is local** — containerd streams
 layer bytes on demand. For large images where a task touches a fraction of the
 bytes, this can turn the cold-pull tail (the worst-case `wait_pool_ready`) into
 seconds. It's a node-pool setting (`--enable-image-streaming`); target a
-streaming-enabled pool with `TemplateSpec.node_selector` (see §5).
+streaming-enabled pool with `TemplateSpec.node_selector` (see §6).
 
-## 4. Bigger / faster node disk (to grow the window)
+## 5. Bigger / faster node disk (to grow the window)
 
 More images resident per node ⇒ a larger `window_size` ⇒ fewer windows ⇒ less
 window-barrier overhead. Disk is the limit:
@@ -79,7 +123,7 @@ window-barrier overhead. Disk is the limit:
   ```
   The auto window for `sliding`/`pipelined` is then capped to fit usable disk.
 
-## 5. Targeting a node pool
+## 6. Targeting a node pool
 
 Image Streaming, secondary boot disk, and larger disks are all node-pool
 properties. Target the right pool per image via the existing template knobs — no
@@ -100,7 +144,9 @@ per problem (see [eval vs RL](../README.md#eval-vs-rl--recommended-recipes)).
 **Eval (1:1 SWE-bench sweep — many images, one task each).** Pull dominates, so the
 highest-leverage stack is: **images in Artifact Registry + Image Streaming**,
 **`pipelined`** to overlap whatever pull remains, and **`epochs`/`keep_warm` with
-`IfNotPresent`** so passes after the first are nearly pull-free. Grow `window_size`
+`IfNotPresent`** so passes after the first are nearly pull-free. If the set fits node
+disk and the run spreads across the pool, **`prepull()`** up front warms every node's
+cache before the first claim (and covers autoscaled nodes). Grow `window_size`
 (with `avg_image_gb`/`node_ephemeral_gb` as a guardrail) only once disk allows.
 `warm_per_task` doesn't apply (one task per image → one replica).
 

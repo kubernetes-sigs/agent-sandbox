@@ -337,7 +337,8 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
   task images on every node so warm pools skip the multi-GB pull. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report
   shows it as ~34 s of a 48 s run), so pre-pulling (or a persistent node-level
-  image cache) is the single biggest lever for repeated/RL runs.
+  image cache) is the single biggest lever for repeated/RL runs. See
+  [docs/gke.md §2](docs/gke.md#2-pre-pull-the-working-set-onto-nodes-in-package).
 - **Watch-based readiness**: `wait_for_pool_ready` watches the WarmPool and
   returns at the `readyReplicas` event (near-exact timing, no fixed poll grid),
   reconnecting and falling back to a short re-check on watch drops.
@@ -412,9 +413,11 @@ Three layers, mirroring the `k8s-agent-sandbox` SDK so traces/metrics interopera
 
 For **eval** (1:1 sweeps), wall-clock is dominated by **image pull**, not task work.
 The levers — `pipelined` (overlap pull with execution), `epochs`/`keep_warm` +
-`IfNotPresent` (amortize pulls across passes via the node layer cache), an in-region
-Artifact Registry mirror (the `image_rewrite` hook), GKE Image Streaming, and
-disk-aware window sizing — are covered in **[docs/gke.md](docs/gke.md)**.
+`IfNotPresent` (amortize pulls across passes via the node layer cache), **pre-pull**
+(`fleet.prepull()` — a DaemonSet that caches images on every node before the hot
+path), an in-region Artifact Registry mirror (the `image_rewrite` hook), GKE Image
+Streaming, and disk-aware window sizing — are covered in **[docs/gke.md](docs/gke.md)**,
+which opens with an [all-levers-at-a-glance](docs/gke.md#all-levers-at-a-glance) table.
 
 For **RL** (G rollouts per problem), the lever is instant claims —
 [`warm_per_task` + `colocate_replicas`](#eval-vs-rl--recommended-recipes) with

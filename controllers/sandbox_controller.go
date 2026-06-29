@@ -41,7 +41,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -120,7 +119,6 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
-	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
 	utilruntime.Must(sandboxv1beta1.AddToScheme(Scheme))
 }
 

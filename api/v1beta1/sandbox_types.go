@@ -151,6 +151,9 @@ const (
 // It deliberately excludes runtime-only fields (operatingMode, lifecycle).
 type SandboxBlueprint struct {
 	// podTemplate describes the pod that will be created in the sandbox.
+	// Note: When provisioned via a SandboxTemplate (such as by a SandboxClaim or SandboxWarmPool),
+	// if AutomountServiceAccountToken is not specified in the PodSpec, the controller defaults it
+	// to false to ensure a secure-by-default environment.
 	// +required
 	PodTemplate PodTemplate `json:"podTemplate"`
 

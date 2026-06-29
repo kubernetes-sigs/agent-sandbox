@@ -91,8 +91,6 @@ type SandboxTemplateSpec struct {
 	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
 	// Since moving fields out is breaking, if unsure whether a new field should be shared,
 	// define it in SandboxTemplateSpec (or SandboxSpec) first and promote it here later.
-	// If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false
-	// to ensure a secure-by-default environment.
 	sandboxv1beta1.SandboxBlueprint `json:",inline"`
 
 	// networkPolicy defines the network policy to be applied to the sandboxes

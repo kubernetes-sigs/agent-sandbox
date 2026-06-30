@@ -14,7 +14,9 @@
 
 import logging
 import math
+import os
 import socket
+import ssl
 import subprocess
 import time
 from typing import Callable
@@ -28,6 +30,7 @@ from .models import (
     SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    TLSConfig,
 )
 from .k8s_helper import K8sHelper
 from .metrics import sandbox_client_discovery_latency_ms
@@ -35,8 +38,56 @@ from .exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
 )
+from .utils import (
+    apply_tls_to_requests_session,
+    build_base_url,
+    build_ssl_context,
+)
 
 ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
+
+
+class _TLSAdapter(HTTPAdapter):
+    """HTTPAdapter that injects a custom SSL context and optional SNI override.
+
+    Used when ``TLSConfig.ca_cert`` is supplied (inline PEM materialized into an
+    SSLContext) or when ``server_name_override`` is set (e.g. LocalTunnel +
+    https where the cert's CN does not match 127.0.0.1).
+    """
+
+    def __init__(
+        self,
+        ssl_context: ssl.SSLContext | None = None,
+        server_name: str | None = None,
+        **kwargs,
+    ):
+        self._ssl_context = ssl_context
+        self._server_name = server_name
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        if self._ssl_context is not None:
+            kwargs["ssl_context"] = self._ssl_context
+        if self._server_name is not None:
+            kwargs["server_hostname"] = self._server_name
+            kwargs["assert_hostname"] = self._server_name
+        return super().init_poolmanager(*args, **kwargs)
+
+
+def _maybe_warn_plaintext_http(config: SandboxConnectionConfig) -> None:
+    """Log a notice when http:// is used for a strategy that should normally
+    be encrypted.
+
+    LocalTunnel is exempt because traffic is loopback-only. DirectConnection
+    is also exempt because the scheme comes from the user-supplied URL.
+    """
+    if isinstance(config, (SandboxGatewayConnectionConfig, SandboxInClusterConnectionConfig)):
+        if getattr(config, "scheme", "http") == "http":
+            logging.getLogger(__name__).warning(
+                "%s is using plaintext http:// scheme. Set scheme='https' and "
+                "configure tls=TLSConfig(...) to encrypt traffic.",
+                type(config).__name__,
+            )
 
 
 def _router_timeout_header_value(timeout) -> str | None:
@@ -114,8 +165,7 @@ class GatewayConnectionStrategy(ConnectionStrategy):
                 self.config.gateway_namespace,
                 self.config.gateway_ready_timeout
             )
-            host = f"[{ip_address}]" if ":" in ip_address else ip_address
-            self.base_url = f"http://{host}"
+            self.base_url = build_base_url(self.config.scheme, ip_address)
             return self.base_url
         except Exception:
             status = "failure"
@@ -190,7 +240,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                         f"Tunnel crashed: {stderr.decode(errors='replace')}")
 
                 if self._is_port_open(local_port):
-                    self.base_url = f"http://127.0.0.1:{local_port}"
+                    self.base_url = build_base_url(self.config.scheme, "127.0.0.1", local_port)
                     logging.info(f"Tunnel ready at {self.base_url}")
                     return self.base_url
                 
@@ -245,10 +295,9 @@ class InClusterConnectionStrategy(ConnectionStrategy):
         config: SandboxInClusterConnectionConfig,
         get_pod_ip: Callable[[], str | None] | None = None,
     ):
-        self._dns_url = (
-            f"http://{sandbox_id}.{namespace}"
-            f".svc.cluster.local:{config.server_port}"
-        )
+        self._scheme = config.scheme
+        host = f"{sandbox_id}.{namespace}.svc.cluster.local"
+        self._dns_url = build_base_url(self._scheme, host, config.server_port)
         self._get_pod_ip = get_pod_ip
         self._server_port = config.server_port
         self._resolved = False
@@ -260,8 +309,7 @@ class InClusterConnectionStrategy(ConnectionStrategy):
                 return self._cached_pod_ip_url or self._dns_url
             pod_ip = self._get_pod_ip()
             if pod_ip:
-                host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
-                self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
+                self._cached_pod_ip_url = build_base_url(self._scheme, pod_ip, self._server_port)
                 self._resolved = True
                 return self._cached_pod_ip_url
         return self._dns_url
@@ -300,7 +348,11 @@ class SandboxConnector:
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
-        
+
+        # Warn when plaintext http is used on a mode that supports TLS
+        # (Gateway, InCluster). LocalTunnel and DirectConnection are exempt.
+        _maybe_warn_plaintext_http(connection_config)
+
         # HTTP Session setup
         self.session = requests.Session()
         retries = Retry(
@@ -310,8 +362,37 @@ class SandboxConnector:
             allowed_methods=["GET", "POST", "PUT", "DELETE"]
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        
+
+        # TLS plumbing for the https:// adapter. If a PEM string was provided we
+        # build an SSLContext directly (avoids touching the disk); otherwise we
+        # fall back to requests' native verify= path. server_name_override is
+        # honored via the custom _TLSAdapter so connections to addresses that
+        # don't match the cert CN (e.g. LocalTunnel 127.0.0.1) can be validated.
+        self._tls_temp_ca_path: str | None = None
+        tls: TLSConfig | None = getattr(connection_config, "tls", None)
+        sni_override = tls.server_name_override if tls else None
+
+        ssl_ctx = build_ssl_context(tls)
+        if isinstance(ssl_ctx, ssl.SSLContext) or sni_override is not None:
+            self.session.mount(
+                "https://",
+                _TLSAdapter(
+                    ssl_context=ssl_ctx if isinstance(ssl_ctx, ssl.SSLContext) else None,
+                    server_name=sni_override,
+                    max_retries=retries,
+                ),
+            )
+            if ssl_ctx is False:
+                self.session.verify = False
+        else:
+            self.session.mount("https://", HTTPAdapter(max_retries=retries))
+            if ssl_ctx is False:
+                self.session.verify = False
+            else:
+                # Handles the file-path ca_cert case; PEM strings go through
+                # the SSLContext branch above.
+                self._tls_temp_ca_path = apply_tls_to_requests_session(self.session, tls)
+
 
     def _connection_strategy(self):
         if isinstance(self.connection_config, SandboxDirectConnectionConfig):
@@ -337,6 +418,12 @@ class SandboxConnector:
         self.strategy.close()
         if self.session:
             self.session.close()
+        if self._tls_temp_ca_path:
+            try:
+                os.unlink(self._tls_temp_ca_path)
+            except OSError:
+                pass
+            self._tls_temp_ca_path = None
 
     def send_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Sends an HTTP request to the sandbox with standard parameters.

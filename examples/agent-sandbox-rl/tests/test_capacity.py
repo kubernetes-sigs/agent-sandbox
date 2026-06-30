@@ -109,6 +109,8 @@ def test_pipelined_resident_disk_is_per_node_not_cluster_total():
   # the old (buggy) cluster-wide figure would be window*replicas*gb — far larger
   cluster_total = plan.window_size * plan.replicas_per_image * 10
   assert plan.resident_disk_per_node_gb < cluster_total
+  # peak warm pods = up to 2 windows (double-buffered), not one
+  assert plan.total_warm_pods == plan.window_size * plan.replicas_per_image * 2
 
 
 def test_plan_cpu_bound_falls_back_to_pipelined():

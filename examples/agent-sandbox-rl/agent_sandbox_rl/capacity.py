@@ -258,7 +258,9 @@ def plan_benchmark(cap: ClusterCapacity, n_images: int, tasks_per_image: int = 1
         rationale.append(
             f"Disk-bounded window = {window_size} image(s) resident; "
             f"task concurrency = {max_concurrent}.")
-        total_warm_pods = window_size * replicas              # peak, not all-at-once
+        # Peak = up to 2 windows resident (double-buffered: current + prefetch),
+        # matching the x2 per-node disk estimate above — not just one window.
+        total_warm_pods = window_size * replicas * 2
 
     if rl:
         rationale.append(

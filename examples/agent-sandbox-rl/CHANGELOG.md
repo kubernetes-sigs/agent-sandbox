@@ -87,6 +87,9 @@ Sandbox `v0.5.0rc1` (v1beta1).
   README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
 ### Fixed (from PR #1049 review)
+- **Pipelined peak-pod estimate** (`capacity.py`): `plan.total_warm_pods` for the
+  pipelined branch now reports `2 × window × replicas` (double-buffered: current +
+  prefetch window), matching the x2 per-node disk estimate, instead of one window.
 - **`_warm_entry` honors `wait=True` on reuse** (`fleet.py`): an already-warm image
   no longer skips the readiness wait when re-warmed with `wait=True` (a prior warm
   may have used `wait=False`), so the "optionally wait for readiness" contract holds.

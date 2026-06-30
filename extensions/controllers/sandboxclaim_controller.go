@@ -1318,7 +1318,8 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
-	// Apply per-claim workspace container resource overrides (fork extension)
+	// Apply claim workspace resource overrides before creating the Sandbox so
+	// per-claim sizing is persisted into the initial pod template.
 	if err := applyClaimWorkspaceResourcesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim); err != nil {
 		logger.Error(err, "Workspace resource override rejected", "claimName", claim.Name)
 		return nil, err

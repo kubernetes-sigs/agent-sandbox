@@ -45,7 +45,7 @@ import (
 )
 
 const (
-	sandboxTemplateRefHash          = "agents.x-k8s.io/sandbox-template-ref-hash"
+	sandboxTemplateRefHash          = sandboxv1beta1.SandboxTemplateRefHashLabel
 	warmPoolSandboxLabel            = sandboxv1beta1.SandboxWarmPoolLabel
 	sandboxCreateDeleteMaxBatchSize = 300
 	warmPoolEvictionAnnotation      = "cluster-autoscaler.kubernetes.io/safe-to-evict"

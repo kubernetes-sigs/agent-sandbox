@@ -870,14 +870,19 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// Assign system-owned labels after merging user input so they cannot be overridden.
 	podLabels[sandboxLabel] = nameHash
 
-	// Propagate the warm pool label directly from the Sandbox CR labels to the Pod,
-	// provided the Sandbox is actually owned by a Warm Pool.
-	// The warm pool label is required by the capacity buffer to identify the warm pool pods.
+	// Propagate extension-owned labels from the Sandbox CR to the Pod, provided the Sandbox is
+	// owned by an extensions controller (SandboxClaim or SandboxWarmPool).
 	if ref := metav1.GetControllerOf(sandbox); ref != nil {
 		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
-			if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
-				podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group {
+			// The warm pool label is required by the capacity buffer to identify warm pool pods.
+			if gvk.Kind == "SandboxWarmPool" {
+				if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
+					podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+				}
+			}
+			if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok {
+				podLabels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
 			}
 		}
 	}
@@ -1016,12 +1021,16 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			}
 		}
 	}
-	// Ensure the warm pool label is present if the sandbox is owned by a SandboxWarmPool.
+	// Reconcile extension-owned labels based on Sandbox ownership.
 	var expectedWarmPoolHash string
+	var expectedTemplateRefHash string
 	if ref := metav1.GetControllerOf(sandbox); ref != nil {
 		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
-			expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group {
+			if gvk.Kind == "SandboxWarmPool" {
+				expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+			}
+			expectedTemplateRefHash = sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]
 		}
 	}
 	if expectedWarmPoolHash != "" {
@@ -1030,9 +1039,19 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			updated = true
 		}
 	} else {
-		// If the Sandbox is no longer owned by a SandboxWarmPool, remove the warm pool label.
 		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
 			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
+			updated = true
+		}
+	}
+	if expectedTemplateRefHash != "" {
+		if pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] != expectedTemplateRefHash {
+			pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = expectedTemplateRefHash
+			updated = true
+		}
+	} else {
+		if _, exists := pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; exists {
+			delete(pod.Labels, sandboxv1beta1.SandboxTemplateRefHashLabel)
 			updated = true
 		}
 	}

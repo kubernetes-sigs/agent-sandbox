@@ -79,6 +79,8 @@ const (
 	SandboxAdoptableLabel = "agents.x-k8s.io/adoptable"
 	// SandboxWarmPoolLabel is the label used to track the warm pool that owns the Sandbox.
 	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
+	// SandboxTemplateRefHashLabel identifies which SandboxTemplate a Sandbox originated from.
+	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 type PodMetadata struct {

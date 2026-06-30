@@ -14,7 +14,7 @@
 
 import re
 from typing import Literal, Union
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
@@ -28,6 +28,12 @@ class FileEntry(BaseModel):
     size: int  # Size of the file in bytes.
     type: Literal["file", "directory"]  # Type of the entry (file or directory).
     mod_time: float # Last modification time of the file. (POSIX timestamp)
+
+class SandboxClaimEnvVar(BaseModel):
+    """Represents an environment variable entry in a SandboxClaim spec."""
+    name: str  # Name of the environment variable.
+    value: str  # Value of the environment variable.
+    container_name: str | None = Field(default=None, serialization_alias="containerName")
 
 class SandboxDirectConnectionConfig(BaseModel):
     """Configuration for connecting directly to a Sandbox URL."""
@@ -77,4 +83,3 @@ class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
     enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.
     trace_service_name: str = "sandbox-client"  # Service name used for traces.
-    

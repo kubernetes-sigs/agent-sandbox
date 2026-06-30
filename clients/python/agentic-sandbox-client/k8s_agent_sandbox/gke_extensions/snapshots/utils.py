@@ -12,19 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Callable
 import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
-from kubernetes.client import ApiException
+
 from kubernetes import watch
+from kubernetes.client import ApiException
 from pydantic import BaseModel
+
 from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
+    PODSNAPSHOT_NAME_ANNOTATION,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
-    PODSNAPSHOT_NAME_ANNOTATION,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,8 +62,12 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
             and condition.get("reason") == "Complete"
         ):
             snapshot_created = status.get("snapshotCreated") or {}
-            snapshot_uid = snapshot_created.get("name") or ""
-            snapshot_timestamp = condition.get("lastTransitionTime") or ""
+            snapshot_uid = snapshot_created.get("name")
+            snapshot_timestamp = condition.get("lastTransitionTime")
+            if not snapshot_uid or not snapshot_timestamp:
+                raise RuntimeError(
+                    "Snapshot completed without required metadata."
+                )
             return SnapshotResult(
                 snapshot_uid=snapshot_uid,
                 snapshot_timestamp=snapshot_timestamp,
@@ -274,12 +281,14 @@ def wait_for_snapshot_deletion(
 def wait_for_pod_termination(
     k8s_helper: Any,
     namespace: str,
-    pod_name: str ,
-    pod_uid: str ,
+    pod_name: str,
+    pod_uid: str,
     timeout: int = 180,
 ) -> bool:
     """Waits until the specified pod is terminated."""
-    logger.info(f"Waiting up to {timeout}s for pod '{pod_name}' (UID: {pod_uid}) to terminate...")
+    logger.info(
+        f"Waiting up to {timeout}s for pod '{pod_name}' (UID: {pod_uid}) to terminate..."
+    )
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
@@ -326,15 +335,18 @@ def wait_for_sandbox_propagation(
     k8s_helper,
     namespace: str,
     sandbox_id: str,
-    snapshot_uid: str,
+    snapshot_uid: str | None,
     timeout: int = 30,
 ) -> bool:
     """Waits for the snapshot UID to propagate from SandboxClaim to Sandbox spec."""
     import logging
+
     logger = logging.getLogger(__name__)
     import time
-    
-    logger.info(f"Waiting up to {timeout}s for snapshot UID '{snapshot_uid}' to propagate to Sandbox '{sandbox_id}'...")
+
+    logger.info(
+        f"Waiting up to {timeout}s for snapshot UID '{snapshot_uid}' to propagate to Sandbox '{sandbox_id}'..."
+    )
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
@@ -352,6 +364,7 @@ def wait_for_sandbox_propagation(
             logger.error(f"Error checking sandbox propagation: {e}")
         time.sleep(2)
     return False
+
 
 def normalize_datetime(v):
     """Normalizes a datetime object or ISO string to a timezone-aware UTC datetime."""

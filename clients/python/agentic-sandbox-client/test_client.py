@@ -18,15 +18,13 @@ import logging
 import sys
 import subprocess
 from unittest.mock import MagicMock
-from pydantic import ValidationError
 from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
-    ExecutionResult,
-    FileEntry
+    ExecutionResult
 )
 from k8s_agent_sandbox.sandbox import Sandbox
 

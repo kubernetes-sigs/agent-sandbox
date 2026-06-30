@@ -16,7 +16,8 @@ from typing import Any
 import logging
 import uuid
 import time
-from typing import Callable, Literal
+from typing import Literal
+from collections.abc import Callable
 from datetime import datetime, timezone
 from kubernetes.client import ApiException
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator

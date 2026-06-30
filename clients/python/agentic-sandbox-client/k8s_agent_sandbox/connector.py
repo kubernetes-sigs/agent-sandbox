@@ -18,7 +18,7 @@ import math
 import socket
 import subprocess
 import time
-from typing import Callable
+from collections.abc import Callable
 import requests
 from abc import ABC, abstractmethod
 from requests.adapters import HTTPAdapter

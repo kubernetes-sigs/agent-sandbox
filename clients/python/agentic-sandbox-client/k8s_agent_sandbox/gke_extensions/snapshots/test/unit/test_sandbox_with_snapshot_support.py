@@ -23,7 +23,6 @@ from k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support im
     SUCCESS_CODE,
     ERROR_CODE,
     INTERNAL_ERROR_CODE,
-    SuspendResponse,
     RestorationResponse,
 )
 from k8s_agent_sandbox.exceptions import SnapshotNotFoundError

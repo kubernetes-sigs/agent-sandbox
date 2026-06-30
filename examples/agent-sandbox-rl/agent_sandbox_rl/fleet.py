@@ -28,7 +28,8 @@ import logging
 import math
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
+from collections.abc import Callable
 
 from kubernetes import client
 

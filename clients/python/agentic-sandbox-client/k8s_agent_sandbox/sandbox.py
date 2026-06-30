@@ -12,15 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import atexit
 import logging
-import requests
-from .trace_manager import create_tracer_manager, trace_span, trace
+from .trace_manager import create_tracer_manager
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
     SandboxConnectionConfig,
-    SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
 )

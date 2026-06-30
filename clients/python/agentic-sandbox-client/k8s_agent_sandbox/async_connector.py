@@ -15,7 +15,8 @@
 import asyncio
 import logging
 import math
-from typing import Any, Callable, Awaitable
+from collections.abc import Callable
+from typing import Any, Awaitable
 
 import httpx
 

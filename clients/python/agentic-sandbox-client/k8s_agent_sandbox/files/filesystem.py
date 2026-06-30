@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import os
 import posixpath
 import urllib.parse
 from typing import Any, List

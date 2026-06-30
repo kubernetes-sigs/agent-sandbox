@@ -271,7 +271,7 @@ func TestSandboxCollector(t *testing.T) {
 						Name:      "sandbox-client",
 						Namespace: "default",
 						Labels: map[string]string{
-							sandboxv1beta1.SandboxCreatedByLabel: "go-client",
+							sandboxv1beta1.CreatedByLabel: "go-client",
 						},
 					},
 					Status: sandboxv1beta1.SandboxStatus{
@@ -297,7 +297,7 @@ func TestSandboxCollector(t *testing.T) {
 						Name:      "sandbox-python-client",
 						Namespace: "default",
 						Labels: map[string]string{
-							sandboxv1beta1.SandboxCreatedByLabel: "python-client",
+							sandboxv1beta1.CreatedByLabel: "python-client",
 						},
 					},
 					Status: sandboxv1beta1.SandboxStatus{
@@ -323,7 +323,7 @@ func TestSandboxCollector(t *testing.T) {
 						Name:      "sandbox-untrusted",
 						Namespace: "default",
 						Labels: map[string]string{
-							sandboxv1beta1.SandboxCreatedByLabel: "hacker-client",
+							sandboxv1beta1.CreatedByLabel: "hacker-client",
 						},
 					},
 					Status: sandboxv1beta1.SandboxStatus{

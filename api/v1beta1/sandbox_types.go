@@ -60,8 +60,8 @@ const (
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
 	// SandboxLaunchTypeLabel is the label used to track whether the Sandbox was cold-created or originated from a warm pool.
 	SandboxLaunchTypeLabel = "agents.x-k8s.io/launch-type"
-	// SandboxCreatedByLabel is the label used to track which component created the resource (e.g. client, controller, etc.).
-	SandboxCreatedByLabel = "agents.x-k8s.io/created-by"
+	// CreatedByLabel is the label used to track which component created the resource (e.g. client, controller, etc.).
+	CreatedByLabel = "agents.x-k8s.io/created-by"
 	// SandboxLaunchTypeCold indicates the Sandbox was cold-created.
 	SandboxLaunchTypeCold = "cold"
 	// SandboxLaunchTypeWarm indicates the Sandbox was pre-provisioned by or adopted from a SandboxWarmPool.

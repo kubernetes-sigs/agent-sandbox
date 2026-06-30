@@ -102,7 +102,12 @@ class SandboxFleet:
   def __init__(self, config: FleetConfig | None = None,
                registry: ClusterRegistry | None = None):
     self.config = config or FleetConfig()
-    self.registry = registry or self._default_registry(self.config)
+    # Honor an explicitly-passed registry even when empty — `ClusterRegistry`
+    # defines `__len__`, so `registry or …` would treat `ClusterRegistry([])` as
+    # falsy and build a default ambient Cluster (which loads kube-config). Only
+    # fall back when no registry was given at all.
+    self.registry = (registry if registry is not None
+                     else self._default_registry(self.config))
     self.placement = get_placement(self.config.placement)
     self.tasks: list[Task] = []
     self.plan_: FleetPlan | None = None

@@ -87,6 +87,12 @@ Sandbox `v0.5.0rc1` (v1beta1).
   README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
 ### Fixed (from PR #1049 review)
+- **Explicit empty registry honored** (`fleet.py`): `SandboxFleet(..., registry=ClusterRegistry([]))`
+  no longer falls back to a default ambient `Cluster` (which loads kube-config and
+  failed CI where none exists). `ClusterRegistry` defines `__len__`, so the old
+  `registry or default` treated an empty registry as falsy — now `is not None`.
+  This was the failing `presubmit-agent-sandbox-unit-test` (two `test_registry_rewrite`
+  tests passed locally only because a kube-config was present).
 - **Pipelined peak-pod estimate** (`capacity.py`): `plan.total_warm_pods` for the
   pipelined branch now reports `2 × window × replicas` (double-buffered: current +
   prefetch window), matching the x2 per-node disk estimate, instead of one window.

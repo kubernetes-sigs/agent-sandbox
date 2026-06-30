@@ -87,6 +87,19 @@ def test_warm_entry_reserves_only_delta_on_scale_up(make_cluster):
   assert c.active_replicas == 4
 
 
+def test_explicit_empty_registry_is_honored_no_kubeconfig(monkeypatch):
+  # An explicit (even empty) registry must NOT be replaced by a default ambient
+  # Cluster — ClusterRegistry defines __len__, so `registry or default` would
+  # treat ClusterRegistry([]) as falsy and load kube-config (fails in CI).
+  import agent_sandbox_rl.fleet as fleet_mod
+
+  def _boom(*a, **k):
+    raise AssertionError("must not build a default Cluster / load kube-config")
+  monkeypatch.setattr(fleet_mod, "Cluster", _boom)   # the name _default_registry uses
+  f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([]))
+  assert len(f.registry) == 0           # honored as-is, no fallback
+
+
 def test_warm_entry_waits_on_reuse(make_cluster):
   # Re-warming an already-warm image with wait=True must still wait for readiness
   # (a prior warm may have used wait=False), not silently skip the check.

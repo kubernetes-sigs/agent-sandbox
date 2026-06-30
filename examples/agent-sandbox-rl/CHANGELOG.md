@@ -87,6 +87,14 @@ Sandbox `v0.5.0rc1` (v1beta1).
   README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
 ### Fixed (from PR #1049 review)
+- **`_warm_entry` honors `wait=True` on reuse** (`fleet.py`): an already-warm image
+  no longer skips the readiness wait when re-warmed with `wait=True` (a prior warm
+  may have used `wait=False`), so the "optionally wait for readiness" contract holds.
+- **`plan_benchmark` validates numeric args** (`capacity.py`): raises `ValueError`
+  for `cpu_request_milli < 1` (was `ZeroDivisionError`), `max_pool < 1`,
+  `avg_image_gb <= 0`, and `disk_headroom` outside `[0, 1)`.
+- **`_disk_spec` docstring corrected** (`fleet.py`): documents that `usable` is
+  `None` (disk cap disabled) unless *both* disk hints are set.
 - **Epoch teardown on failure** (`fleet.py`, `async_fleet.py`): a non-final
   `epochs>1` pass that raised left warm pools/claims resident (only the last epoch
   carried `teardown=True`). Both fleets now tear down on a mid-run epoch error when
@@ -199,7 +207,7 @@ Sandbox `v0.5.0rc1` (v1beta1).
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).
 - **Docs**: README, `docs/architecture.md`, this changelog.
-- **Tests**: 216 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
+- **Tests**: 218 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
   pool readiness + fail-fast on terminal errors, cluster, sources, placement,
   fleet incl. 2-cluster routing + acquire rollback + idempotent release,
   strategies/parallel, preflight, prepull, async, swebench incl. `keep_row`,

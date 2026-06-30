@@ -135,6 +135,20 @@ def test_plan_rejects_bad_counts():
     capacity.plan_benchmark(_cap(), n_images=10, tasks_per_image=0)
 
 
+def test_plan_rejects_bad_numeric_args():
+  # division/headroom inputs must be validated, not silently div-by-zero or go negative
+  with pytest.raises(ValueError):
+    capacity.plan_benchmark(_cap(), n_images=10, cpu_request_milli=0)
+  with pytest.raises(ValueError):
+    capacity.plan_benchmark(_cap(), n_images=10, max_pool=0)
+  with pytest.raises(ValueError):
+    capacity.plan_benchmark(_cap(), n_images=10, avg_image_gb=0)
+  with pytest.raises(ValueError):
+    capacity.plan_benchmark(_cap(), n_images=10, disk_headroom=1.0)
+  with pytest.raises(ValueError):
+    capacity.plan_benchmark(_cap(), n_images=10, disk_headroom=-0.1)
+
+
 def test_plan_guards_zero_nodes():
   # plan_benchmark is independently callable; a 0-node snapshot must not div-by-zero
   cap = capacity.ClusterCapacity(pool="empty", nodes=0, machine_types=[],

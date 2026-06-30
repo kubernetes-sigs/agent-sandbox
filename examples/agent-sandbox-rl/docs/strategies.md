@@ -60,7 +60,7 @@ fleet.run(rollout_fn, strategy="naive", keep_warm=True)       # reuse across ste
 | **Pre-pull DaemonSet** | cache images on **every** node *before* the hot path | `fleet.prepull()` / `setup(prepull=True)` | spread a fixed set across nodes / autoscale |
 | **In-region mirror** | cut cross-region pull + Docker Hub rate limits | `make_rewriter(...)` + `load_tasks(image_rewrite=…)` | Docker Hub-hosted images |
 | **Image Streaming** | pods Ready before the full pull | node-pool `--enable-image-streaming` + `node_selector` | large images, task reads a fraction |
-| **Disk-aware window** | cap the auto window to node disk | `avg_image_gb` / `node_ephemeral_gb` / `cluster_nodes` | growing the window safely |
+| **Disk-aware window** | cap the auto window to node disk | `avg_image_gb` / `node_ephemeral_gb` / `disk_headroom` / `cluster_nodes` | growing the window safely |
 | **Bigger / secondary boot disk** | more resident layers / images present at boot | node-pool setting + `node_selector` | fixed image sets, autoscale-warm |
 
 ---

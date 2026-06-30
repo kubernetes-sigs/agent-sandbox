@@ -176,6 +176,14 @@ def plan_benchmark(cap: ClusterCapacity, n_images: int, tasks_per_image: int = 1
     """
     if n_images < 1 or tasks_per_image < 1:
         raise ValueError("n_images and tasks_per_image must be >= 1")
+    if cpu_request_milli < 1:
+        raise ValueError("cpu_request_milli must be >= 1")
+    if max_pool < 1:
+        raise ValueError("max_pool must be >= 1")
+    if avg_image_gb <= 0:
+        raise ValueError("avg_image_gb must be > 0")
+    if not 0.0 <= disk_headroom < 1.0:
+        raise ValueError("disk_headroom must be in [0, 1)")
     n_tasks = n_images * tasks_per_image
     rl = tasks_per_image > 1                      # RL rollout shape -> instant-claim levers
     warm_per_task = rl

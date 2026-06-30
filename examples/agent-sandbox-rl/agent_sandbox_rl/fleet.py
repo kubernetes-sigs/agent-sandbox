@@ -170,13 +170,15 @@ class SandboxFleet:
     return counts
 
   def _disk_spec(self) -> "tuple[float | None, float | None]":
-    """``(avg_image_gb, usable_disk_gb)`` for disk-aware window sizing, or
-    ``(None, None)`` when not configured. ``usable`` is per-node ephemeral storage
-    minus headroom (conservative: a window's images may co-locate on one node)."""
+    """``(avg_image_gb, usable_disk_gb)`` for disk-aware window sizing. ``usable`` is
+    ``None`` (disk cap disabled) unless **both** ``avg_image_gb`` and
+    ``node_ephemeral_gb`` are set; ``avg`` is returned as-configured for reference.
+    ``usable`` is per-node ephemeral storage minus headroom (conservative: a window's
+    images may co-locate on one node)."""
     avg = self.config.avg_image_gb
     node_gb = self.config.node_ephemeral_gb
     if avg is None or node_gb is None:
-      return (avg, None)
+      return (avg, None)                      # usable=None -> recommend_window_* skips the disk cap
     return (avg, node_gb * (1.0 - self.config.disk_headroom))
 
   def recommended_window(self, *, pipelined: bool = False) -> int:
@@ -313,12 +315,23 @@ class SandboxFleet:
     *same* image from two threads at once (the reuse check + record aren't atomic
     across the released lock); the callers never do that — one entry per image."""
     reps = replicas_override if replicas_override is not None else e.replicas
-    with self._lock:
-      already = self._warmed.get(e.image, 0)
-      if already >= reps:
-        return                              # already warm (cross-epoch / keep_warm reuse)
     c = self.registry.get(e.cluster)
     fam = repo_family(e.image)
+
+    def _await_ready():
+      with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):
+        if not c.resources.wait_for_pool_ready(
+            e.pool, reps, timeout=self.config.ready_timeout):
+          raise FleetError(
+              f"warm pool '{e.pool}' on cluster '{e.cluster}' did not become "
+              f"ready within {self.config.ready_timeout}s")
+
+    with self._lock:
+      already = self._warmed.get(e.image, 0)
+    if already >= reps:                       # already warm (cross-epoch / keep_warm reuse)
+      if wait:                                # still honor the readiness contract on reuse
+        _await_ready()
+      return
     with self._obs.phase("create_warmpool", cluster=e.cluster, family=fam):
       c.resources.ensure_template(
           e.image, e.template, c.template_spec(self.config.template))
@@ -331,12 +344,7 @@ class SandboxFleet:
       self._warmed[e.image] = reps
     self._obs.warm_add(e.cluster, delta)
     if wait:
-      with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):
-        if not c.resources.wait_for_pool_ready(
-            e.pool, reps, timeout=self.config.ready_timeout):
-          raise FleetError(
-              f"warm pool '{e.pool}' on cluster '{e.cluster}' did not become "
-              f"ready within {self.config.ready_timeout}s")
+      _await_ready()
 
   def _warm_entries(self, entries, wait: bool,
                     replicas_override: int | None = None) -> None:

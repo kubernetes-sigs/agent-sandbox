@@ -87,6 +87,20 @@ def test_warm_entry_reserves_only_delta_on_scale_up(make_cluster):
   assert c.active_replicas == 4
 
 
+def test_warm_entry_waits_on_reuse(make_cluster):
+  # Re-warming an already-warm image with wait=True must still wait for readiness
+  # (a prior warm may have used wait=False), not silently skip the check.
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1"])
+  f.warm_image("i1", wait=False)                 # warm without waiting
+  assert c.resources.wait_for_pool_ready.call_count == 0
+  f.warm_image("i1", wait=True)                  # reuse — must wait now
+  assert c.resources.wait_for_pool_ready.call_count == 1
+  # no re-create / no extra reservation on reuse
+  assert c.resources.create_warmpool.call_count == 1
+
+
 def test_warm_images_dedupes_input(make_cluster):
   # Duplicates in the public helper must not warm the same image twice (unsafe).
   c = make_cluster("solo")

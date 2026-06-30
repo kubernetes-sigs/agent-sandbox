@@ -87,6 +87,10 @@ Sandbox `v0.5.0rc1` (v1beta1).
   README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
 
 ### Fixed (from PR #1049 review)
+- **Async `close()` blocks + cancels by default** (`async_fleet.py`): explicit
+  `close()` / `__aexit__` now `shutdown(wait=True, cancel_futures=True)` so no
+  non-daemon worker thread outlives the close; `__del__` keeps `wait=False` to
+  avoid hanging during GC/finalization.
 - **Explicit empty registry honored** (`fleet.py`): `SandboxFleet(..., registry=ClusterRegistry([]))`
   no longer falls back to a default ambient `Cluster` (which loads kube-config and
   failed CI where none exists). `ClusterRegistry` defines `__len__`, so the old
@@ -216,7 +220,7 @@ Sandbox `v0.5.0rc1` (v1beta1).
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).
 - **Docs**: README, `docs/architecture.md`, this changelog.
-- **Tests**: 218 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
+- **Tests**: 220 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
   pool readiness + fail-fast on terminal errors, cluster, sources, placement,
   fleet incl. 2-cluster routing + acquire rollback + idempotent release,
   strategies/parallel, preflight, prepull, async, swebench incl. `keep_row`,

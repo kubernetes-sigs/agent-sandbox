@@ -64,6 +64,29 @@ def test_async_thread_pool_scales_with_concurrency(make_cluster):
     f.close()
 
 
+def test_close_blocks_and_cancels_by_default(make_cluster):
+  # Explicit close() must block (wait=True) and cancel queued work so no non-daemon
+  # worker thread outlives it; __del__'s close(wait=False) must stay non-blocking.
+  from agent_sandbox_rl import ClusterRegistry
+  f = _fleet(ClusterRegistry([make_cluster("solo")]), max_concurrent=4)
+  ex = f._thread_pool()
+  calls = []
+  orig = ex.shutdown
+  ex.shutdown = lambda *a, **k: (calls.append(k), orig(*a, **k))[1]
+
+  f.close()                                    # explicit path
+  assert calls[-1] == {"wait": True, "cancel_futures": True}
+  assert f._executor is None                   # reset -> fleet stays reusable
+
+  ex2 = f._thread_pool()                        # rebuilt on next use
+  assert ex2 is not ex
+  calls2 = []
+  o2 = ex2.shutdown
+  ex2.shutdown = lambda *a, **k: (calls2.append(k), o2(*a, **k))[1]
+  f.close(wait=False)                           # __del__-style path
+  assert calls2[-1] == {"wait": False, "cancel_futures": True}
+
+
 async def test_async_naive_sync_processfn(two_cluster_registry):
   f = _fleet(two_cluster_registry, placement="round-robin")
   f.load_tasks(["imgA", "imgB", "imgA"])

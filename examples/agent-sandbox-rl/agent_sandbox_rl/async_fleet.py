@@ -81,19 +81,26 @@ class AsyncSandboxFleet:
     return await loop.run_in_executor(
         self._thread_pool(), functools.partial(fn, *args, **kwargs))
 
-  def close(self) -> None:
+  def close(self, *, wait: bool = True) -> None:
     """Shut down the dedicated thread pool (idempotent). Prefer ``async with`` /
     ``close()``; the fleet is reusable, so the pool persists across ``run()`` calls
-    until then."""
+    until then.
+
+    ``wait=True`` (default, the explicit-close path) blocks until outstanding work
+    finishes and cancels queued-but-unstarted work, so no non-daemon worker thread
+    outlives the close. ``__del__`` passes ``wait=False`` to avoid hanging during
+    GC/interpreter finalization.
+    """
     if self._executor is not None:
-      self._executor.shutdown(wait=False)
+      self._executor.shutdown(wait=wait, cancel_futures=True)
       self._executor = None
 
   def __del__(self):
     # Backstop for the no-context-manager path (`fleet.run()` then discard): don't
-    # leak the pool's threads if close()/__aexit__ was never called.
+    # leak the pool's threads if close()/__aexit__ was never called. Non-blocking
+    # so finalization can't hang on in-flight work.
     try:
-      self.close()
+      self.close(wait=False)
     except Exception:  # pragma: no cover - best-effort at finalization
       pass
 

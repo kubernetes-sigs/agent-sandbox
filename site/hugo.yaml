@@ -1,5 +1,5 @@
 baseURL: 'https://agent-sandbox.sigs.k8s.io/'
-locale: 'en-us'
+locale: 'en-US'
 title: 'Agent Sandbox'
 
 enableRobotsTXT: true
@@ -10,7 +10,10 @@ security:
     - '^text/markdown$'
   node:
     permissions:
-      allowRead: ["*"]
+      allowRead:
+         - .
+         - assets
+         - node_modules
 
 ## Docsy
 enableGitInfo: true

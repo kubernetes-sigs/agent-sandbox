@@ -48,6 +48,7 @@ The router can be configured using the following environment variables:
 
 | Variable | Description | Default |
 |---|---|---|
+| `MAX_KEEPALIVE_CONNECTIONS` | Maximum keep-alive connections in the httpx connection pool. Set to `0` to disable pooling — useful when sandbox pods restart frequently, as it forces DNS re-resolution on every request. | `20` |
 | `PROXY_TIMEOUT_SECONDS` | Timeout in seconds for proxied requests to sandbox pods. Increase this for long-running operations (e.g., code execution, model inference). | `180` (3 minutes) |
 
 ## Deployment

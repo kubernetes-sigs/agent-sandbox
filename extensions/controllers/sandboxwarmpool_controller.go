@@ -149,7 +149,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	activeSandboxes = healthySandboxes
 
-	desiredReplicas := warmPool.Spec.Replicas
+	desiredReplicas := int32(1)
+	if warmPool.Spec.Replicas != nil {
+		desiredReplicas = *warmPool.Spec.Replicas
+	}
 	currentReplicas := int32(len(activeSandboxes))
 
 	logger.Info("Pool status",
@@ -449,24 +452,15 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		return nil
 	}
 
-	patch := &extensionsv1beta1.SandboxWarmPool{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: extensionsv1beta1.GroupVersion.String(),
-			Kind:       "SandboxWarmPool",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      warmPool.Name,
-			Namespace: warmPool.Namespace,
-		},
-		Status: warmPool.Status,
+	oldWarmPool := warmPool.DeepCopy()
+	oldWarmPool.Status = *oldStatus
+	patch := client.MergeFrom(oldWarmPool)
+
+	if err := r.Status().Patch(ctx, warmPool, patch); err != nil {
+		return fmt.Errorf("failed to update SandboxWarmPool status: %w", err)
 	}
 
-	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil { //nolint:staticcheck // SA1019: client.Apply requires generated apply configurations
-		logger.Error(err, "Failed to apply SandboxWarmPool status via SSA")
-		return err
-	}
-
-	logger.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
+	logger.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas, "readyReplicas", warmPool.Status.ReadyReplicas)
 	return nil
 }
 

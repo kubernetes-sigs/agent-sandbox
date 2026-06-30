@@ -16,6 +16,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
@@ -208,5 +209,8 @@ type SandboxClaimList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxClaim{}, &SandboxClaimList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxClaim{}, &SandboxClaimList{})
+		return nil
+	})
 }

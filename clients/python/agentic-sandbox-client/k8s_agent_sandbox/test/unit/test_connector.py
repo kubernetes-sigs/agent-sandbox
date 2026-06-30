@@ -94,6 +94,34 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
         strategy.close()  # invalidates cache
         self.assertEqual(strategy.connect(), "http://10.0.0.2:8888")  # fresh resolve
 
+    def test_connect_brackets_ipv6_pod_ip(self):
+        """IPv6 pod IPs must be enclosed in brackets in URLs (RFC 3986)."""
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        strategy = InClusterConnectionStrategy(
+            "my-sandbox", "dev", config, get_pod_ip=lambda: "2001:db8::1"
+        )
+        self.assertEqual(strategy.connect(), "http://[2001:db8::1]:8888")
+
+
+class TestGatewayConnectionStrategy(unittest.TestCase):
+    """Unit tests for GatewayConnectionStrategy."""
+
+    def test_connect_brackets_ipv6(self):
+        """Gateway IPv6 addresses must be bracketed in the base URL."""
+        config = SandboxGatewayConnectionConfig(gateway_name="gw", gateway_namespace="default")
+        mock_helper = MagicMock()
+        mock_helper.wait_for_gateway_ip.return_value = "2001:db8::1"
+        strategy = GatewayConnectionStrategy(config, k8s_helper=mock_helper)
+        self.assertEqual(strategy.connect(), "http://[2001:db8::1]")
+
+    def test_connect_does_not_bracket_ipv4(self):
+        """Gateway IPv4 addresses must NOT be bracketed."""
+        config = SandboxGatewayConnectionConfig(gateway_name="gw", gateway_namespace="default")
+        mock_helper = MagicMock()
+        mock_helper.wait_for_gateway_ip.return_value = "34.56.78.90"
+        strategy = GatewayConnectionStrategy(config, k8s_helper=mock_helper)
+        self.assertEqual(strategy.connect(), "http://34.56.78.90")
+
 
 class TestExistingStrategiesDefaultHeaderInjection(unittest.TestCase):
     """Regression: existing strategies must still inject router headers by default."""

@@ -44,6 +44,12 @@
 {{- if .Values.controller.sandboxTemplateConcurrentWorkers }}
 - --sandbox-template-concurrent-workers={{ .Values.controller.sandboxTemplateConcurrentWorkers }}
 {{- end }}
+{{- if .Values.webhookServiceName }}
+- --webhook-service-name={{ .Values.webhookServiceName }}
+{{- end }}
+{{- if (include "agent-sandbox.namespace" .) }}
+- --webhook-namespace={{ include "agent-sandbox.namespace" . }}
+{{- end }}
 {{- range .Values.controller.extraArgs }}
 - {{ . | quote }}
 {{- end }}

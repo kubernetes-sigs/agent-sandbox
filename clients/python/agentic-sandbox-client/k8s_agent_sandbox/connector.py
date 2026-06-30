@@ -114,7 +114,8 @@ class GatewayConnectionStrategy(ConnectionStrategy):
                 self.config.gateway_namespace,
                 self.config.gateway_ready_timeout
             )
-            self.base_url = f"http://{ip_address}"
+            host = f"[{ip_address}]" if ":" in ip_address else ip_address
+            self.base_url = f"http://{host}"
             return self.base_url
         except Exception:
             status = "failure"
@@ -259,7 +260,8 @@ class InClusterConnectionStrategy(ConnectionStrategy):
                 return self._cached_pod_ip_url or self._dns_url
             pod_ip = self._get_pod_ip()
             if pod_ip:
-                self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
                 self._resolved = True
                 return self._cached_pod_ip_url
         return self._dns_url

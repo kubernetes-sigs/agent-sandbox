@@ -203,7 +203,7 @@ func runParallelSandboxClaimsTest(t *testing.T, tc *framework.TestContext, poolS
 	poolObj := &extensionsv1beta1.SandboxWarmPool{}
 	poolObj.Name = "warmpool"
 	poolObj.Namespace = ns.Name
-	poolObj.Spec.Replicas = poolSize
+	poolObj.Spec.Replicas = &poolSize
 	poolObj.Spec.TemplateRef.Name = template.Name
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), poolObj))
 

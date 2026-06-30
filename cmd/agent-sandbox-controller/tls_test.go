@@ -90,9 +90,9 @@ func TestGenerateWebhookCerts(t *testing.T) {
 		defer os.RemoveAll(tempDir)
 
 		// Pre-populate Secret with dummy data
-		existingCA := []byte("existing-ca-pem")
-		existingCert := []byte("existing-cert-pem")
-		existingKey := []byte("existing-key-pem")
+		existingCA := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----")
+		existingCert := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----")
+		existingKey := []byte("-----BEGIN EC PRIVATE KEY-----\nMIIB\n-----END EC PRIVATE KEY-----")
 
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -123,6 +123,32 @@ func TestGenerateWebhookCerts(t *testing.T) {
 		keyBytes, err := os.ReadFile(keyPath)
 		require.NoError(t, err)
 		assert.Equal(t, existingKey, keyBytes)
+	})
+
+	t.Run("returns error when existing Secret has invalid certificate data", func(t *testing.T) {
+		tempDir, err := os.MkdirTemp("", "webhook-certs-test-*")
+		require.NoError(t, err)
+		defer os.RemoveAll(tempDir)
+
+		// Pre-populate Secret with invalid PEM data
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: namespace,
+			},
+			Data: map[string][]byte{
+				"ca.crt":  []byte("invalid-ca-pem"),
+				"tls.crt": []byte("invalid-cert-pem"),
+				"tls.key": []byte("invalid-key-pem"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+
+		caPEM, err := generateWebhookCerts(context.Background(), fakeClient, tempDir, serviceName, namespace, clusterDomain)
+		require.Error(t, err)
+		assert.Nil(t, caPEM)
+		assert.Contains(t, err.Error(), "has invalid certificate data")
 	})
 }
 

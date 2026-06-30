@@ -187,7 +187,7 @@ async def proxy_request(request: Request, full_path: str):
             ip = ipaddress.ip_address(pod_ip)
             if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
                 raise HTTPException(status_code=400, detail="Invalid target IP address.")
-            target_host = str(ip)
+            target_host = f"[{ip}]" if isinstance(ip, ipaddress.IPv6Address) else str(ip)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid target IP address format.")
     else:

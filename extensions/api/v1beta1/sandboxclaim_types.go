@@ -158,6 +158,7 @@ type SandboxClaimSpec struct {
 
 	// workspaceResources overrides resource requests/limits for the container named "workspace" at claim time.
 	// Unset fields keep the values from the SandboxTemplate; set fields force request=limit for that resource.
+	// Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
 	// +optional
 	WorkspaceResources *WorkspaceResources `json:"workspaceResources,omitempty"`
 }

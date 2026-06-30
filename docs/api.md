@@ -928,7 +928,7 @@ _Appears in:_
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 | `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.<br />Specifying this field forces a cold start because warm pool pods will not have these volumes. |  | Optional: \{\} <br /> |
-| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requests/limits for the container named "workspace" at claim time.<br />Unset fields keep the values from the SandboxTemplate; set fields force request=limit for that resource. |  | Optional: \{\} <br /> |
+| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requests/limits for the container named "workspace" at claim time.<br />Unset fields keep the values from the SandboxTemplate; set fields force request=limit for that resource.<br />Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus

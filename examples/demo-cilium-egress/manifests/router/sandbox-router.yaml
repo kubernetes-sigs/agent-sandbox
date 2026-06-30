@@ -1,0 +1,89 @@
+# agent-sandbox sandbox-router (HTTP ingress proxy to sandbox pods).
+# Adapted from clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml
+# and pinned to the demo namespace. __ROUTER_IMAGE__ is substituted by
+# scripts/optional-gateway-routing.sh after building + pushing the image
+# (along with __ALLOW_UNAUTHENTICATED_ROUTER__).
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  namespace: sandbox-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: sandbox-router
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router-deployment
+  namespace: sandbox-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: sandbox-router
+      containers:
+        - name: router
+          image: __ROUTER_IMAGE__
+          env:
+            - name: PROXY_TIMEOUT_SECONDS
+              value: "180"
+            # Secure by default: the router requires a Bearer token read from the
+            # sandbox-router-auth Secret that scripts/optional-gateway-routing.sh
+            # mints. optional:true so the explicit unauthenticated path below can
+            # also run (when no Secret is created).
+            - name: ROUTER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-router-auth
+                  key: auth-token
+                  optional: true
+            # ⚠️ DANGER (demo only): set to "true" ONLY when you deliberately opt
+            # into the unauthenticated path (ALLOW_UNAUTHENTICATED_ROUTER=true when
+            # running optional-gateway-routing.sh). Combined with the public L7
+            # Gateway in gateway.yaml this exposes /execute to the internet with NO
+            # auth = unauthenticated remote code execution. Throwaway clusters only.
+            - name: ALLOW_UNAUTHENTICATED_ROUTER
+              value: "__ALLOW_UNAUTHENTICATED_ROUTER__"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000

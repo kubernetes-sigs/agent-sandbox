@@ -129,8 +129,8 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	fc := builder.Build()
 
 	testQueue := queue.NewSimpleSandboxQueue()
-	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
-	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
+	testQueue.Add(queue.GetNamespacedWarmPoolName("default", "pool"), queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
+	testQueue.Add(queue.GetNamespacedWarmPoolName("default", "pool"), queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
 
 	reconciler := &SandboxClaimReconciler{
 		Client: fc, Scheme: scheme,

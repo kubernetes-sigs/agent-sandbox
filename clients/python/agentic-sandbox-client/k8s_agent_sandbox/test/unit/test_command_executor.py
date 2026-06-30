@@ -17,7 +17,6 @@ from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.commands.command_executor import CommandExecutor, _extract_executable
 from k8s_agent_sandbox.commands.async_command_executor import AsyncCommandExecutor
-from k8s_agent_sandbox.models import ExecutionResult
 
 
 class TestCommandExecutor(unittest.TestCase):

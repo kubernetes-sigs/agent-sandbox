@@ -14,17 +14,20 @@
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
-from kubernetes.client import ApiException
+
 from kubernetes import watch
+from kubernetes.client import ApiException
 from pydantic import BaseModel
+
 from k8s_agent_sandbox.constants import (
     PODSNAPSHOT_API_GROUP,
     PODSNAPSHOT_API_VERSION,
+    PODSNAPSHOT_NAME_ANNOTATION,
     PODSNAPSHOT_PLURAL,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
-    PODSNAPSHOT_NAME_ANNOTATION,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,8 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
             snapshot_created = status.get("snapshotCreated") or {}
             snapshot_uid = snapshot_created.get("name")
             snapshot_timestamp = condition.get("lastTransitionTime")
+            if not snapshot_uid or not snapshot_timestamp:
+                raise RuntimeError("Snapshot completed without required metadata.")
             return SnapshotResult(
                 snapshot_uid=snapshot_uid,
                 snapshot_timestamp=snapshot_timestamp,
@@ -81,7 +86,7 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
 
 
 def wait_for_snapshot_to_be_completed(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     trigger_name: str,
     podsnapshot_timeout: int,
@@ -145,7 +150,7 @@ def wait_for_snapshot_to_be_completed(
 
 
 def check_pod_restored_from_snapshot(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     pod_name: str,
     snapshot_uid: str,
@@ -213,7 +218,7 @@ def check_pod_restored_from_snapshot(
 
 
 def wait_for_snapshot_deletion(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     snapshot_uid: str,
     timeout: int = 180,
@@ -272,14 +277,16 @@ def wait_for_snapshot_deletion(
 
 
 def wait_for_pod_termination(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     pod_name: str,
     pod_uid: str,
     timeout: int = 180,
 ) -> bool:
     """Waits until the specified pod is terminated."""
-    logger.info(f"Waiting up to {timeout}s for pod '{pod_name}' (UID: {pod_uid}) to terminate...")
+    logger.info(
+        f"Waiting up to {timeout}s for pod '{pod_name}' (UID: {pod_uid}) to terminate..."
+    )
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
@@ -297,9 +304,9 @@ def wait_for_pod_termination(
 
 
 def wait_for_pod_ready(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
-    get_pod_name_func,
+    get_pod_name_func: Callable[[], str | None],
     timeout: int = 180,
 ) -> bool:
     """Waits until a newly created pod is ready."""
@@ -326,15 +333,18 @@ def wait_for_sandbox_propagation(
     k8s_helper,
     namespace: str,
     sandbox_id: str,
-    snapshot_uid: str,
+    snapshot_uid: str | None,
     timeout: int = 30,
 ) -> bool:
     """Waits for the snapshot UID to propagate from SandboxClaim to Sandbox spec."""
     import logging
+
     logger = logging.getLogger(__name__)
     import time
-    
-    logger.info(f"Waiting up to {timeout}s for snapshot UID '{snapshot_uid}' to propagate to Sandbox '{sandbox_id}'...")
+
+    logger.info(
+        f"Waiting up to {timeout}s for snapshot UID '{snapshot_uid}' to propagate to Sandbox '{sandbox_id}'..."
+    )
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
@@ -344,14 +354,21 @@ def wait_for_sandbox_propagation(
                 pod_template = spec.get("podTemplate", {}) or {}
                 metadata = pod_template.get("metadata", {}) or {}
                 annotations = metadata.get("annotations", {}) or {}
-                
-                if annotations.get(PODSNAPSHOT_NAME_ANNOTATION) == snapshot_uid:
-                    logger.info("Snapshot UID propagated successfully.")
+
+                propagated_uid = annotations.get(PODSNAPSHOT_NAME_ANNOTATION)
+                if propagated_uid == snapshot_uid:
+                    if snapshot_uid is None:
+                        logger.info(
+                            "Restore annotation cleanup propagated successfully."
+                        )
+                    else:
+                        logger.info("Snapshot UID propagated successfully.")
                     return True
         except Exception as e:
             logger.error(f"Error checking sandbox propagation: {e}")
         time.sleep(2)
     return False
+
 
 def normalize_datetime(v):
     """Normalizes a datetime object or ISO string to a timezone-aware UTC datetime."""

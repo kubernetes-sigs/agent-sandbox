@@ -32,7 +32,8 @@ import asyncio
 import inspect
 import logging
 import time
-from typing import Awaitable, Callable
+from typing import Awaitable
+from collections.abc import Callable
 
 from .observability import repo_family
 

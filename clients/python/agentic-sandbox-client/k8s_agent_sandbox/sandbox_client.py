@@ -58,7 +58,7 @@ class SandboxClient(Generic[T]):
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = False,
-    ):
+    ) -> None:
         """
         Initializes the SandboxClient.
 
@@ -255,7 +255,7 @@ class SandboxClient(Generic[T]):
         """
         return self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
 
-    def delete_sandbox(self, claim_name: str, namespace: str = "default"):
+    def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources.
         
         Example:
@@ -275,7 +275,7 @@ class SandboxClient(Generic[T]):
         except Exception as e:
             logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
             
-    def delete_all(self):
+    def delete_all(self) -> None:
         """
         Cleanup all tracked sandboxes managed by this client.
         
@@ -295,7 +295,7 @@ class SandboxClient(Generic[T]):
                 )
 
     @trace_span("create_claim")
-    def _create_claim(self, claim_name: str, warmpool_name: str, namespace: str, labels: dict[str, str] | None = None, lifecycle: dict | None = None, pod_metadata: dict | None = None):
+    def _create_claim(self, claim_name: str, warmpool_name: str, namespace: str, labels: dict[str, str] | None = None, lifecycle: dict | None = None, pod_metadata: dict | None = None)-> None:
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
         if span.is_recording():
@@ -313,12 +313,13 @@ class SandboxClient(Generic[T]):
         self.k8s_helper.create_sandbox_claim(claim_name, warmpool_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle, pod_metadata=pod_metadata)
 
     @trace_span("wait_for_sandbox_ready")
-    def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
-        """Waits for the Sandbox custom resource to have a 'Ready' status."""
+    def _wait_for_sandbox_ready(
+        self, sandbox_id: str, namespace: str, timeout: int
+    ) -> None:
         self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @trace_span("delete_claim")
-    def _delete_claim(self, claim_name: str, namespace: str):
+    def _delete_claim(self, claim_name: str, namespace: str) -> None:
         """Deletes the SandboxClaim custom resource from the Kubernetes cluster."""
         self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
 

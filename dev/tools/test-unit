@@ -124,6 +124,16 @@ def run_python_tests(repo_root):
         subprocess.check_call(
             [venv_pip, "install", "--quiet", "pytest"], env=env)
 
+        if suite["name"] == "k8s-agent-sandbox":
+            print(f"\n=== Running mypy type checks: {suite['name']} ===")
+            package_dir = os.path.dirname(test_dir)
+            mypy_result = subprocess.run([
+                venv_python, "-m", "mypy",
+                "k8s_agent_sandbox",
+            ], cwd=package_dir)
+            if mypy_result.returncode != 0:
+                returncode = mypy_result.returncode
+
         print(f"\n=== Running Python unit tests: {suite['name']} ===")
         junit_file = os.path.join(
             repo_root, "bin", f"python-{suite['name']}-junit.xml")

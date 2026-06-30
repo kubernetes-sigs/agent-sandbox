@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
 import logging
 import uuid
 import time
-from typing import Callable, Literal
+from typing import Literal
+from collections.abc import Callable
 from datetime import datetime, timezone
 from kubernetes.client import ApiException
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
@@ -96,15 +98,15 @@ class SnapshotEngine:
     def __init__(
         self,
         namespace: str,
-        k8s_helper,
+        k8s_helper: Any,
         get_pod_name_func: Callable[[], str],
         get_sandbox_name_hash_func: Callable[[], str | None],
-    ):
+    ) -> None:
         self.namespace = namespace
         self.k8s_helper = k8s_helper
         self.get_pod_name_func = get_pod_name_func
         self.get_sandbox_name_hash_func = get_sandbox_name_hash_func
-        self.created_manual_triggers = []
+        self.created_manual_triggers: list[str] = []
 
     def create(
         self, trigger_name: str, podsnapshot_timeout: int = 180
@@ -219,7 +221,7 @@ class SnapshotEngine:
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-    def delete_manual_triggers(self, max_retries: int = 3):
+    def delete_manual_triggers(self, max_retries: int = 3) -> None:
         """Cleans up the manual trigger related resources created by this Sandbox."""
         remaining_triggers = list(self.created_manual_triggers)
 
@@ -361,7 +363,7 @@ class SnapshotEngine:
                 try:
                     valid_snapshots.append(
                         SnapshotDetail(
-                            snapshot_uid=metadata.get("name"),
+                            snapshot_uid=metadata.get("name") or "",
                             source_pod=metadata.get("annotations", {}).get(
                                 PODSNAPSHOT_POD_NAME_ANNOTATION, "Unknown"
                             ),

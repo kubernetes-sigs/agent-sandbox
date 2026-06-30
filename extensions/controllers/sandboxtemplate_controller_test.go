@@ -19,10 +19,12 @@ package controllers
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -265,6 +267,118 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			}
 			if relabeledTemplate.ResourceVersion != resourceVersion {
 				t.Errorf("expected second reconcile to leave SandboxTemplate resourceVersion unchanged, got %q, want %q", relabeledTemplate.ResourceVersion, resourceVersion)
+			}
+		})
+	}
+}
+
+// TestSandboxTemplateReconcileNetworkPolicyOwnershipConflict is the regression test for the
+// privilege-escalation fix: a SandboxTemplate must never delete or modify a NetworkPolicy it
+// does not control. It covers both the unmanaged-delete path and the managed-update path with
+// an existing NetworkPolicy that has either no controller owner or a mismatched one. Without the
+// IsControlledBy guard, each case would let the template hijack/destroy a foreign NetworkPolicy;
+// these cases fail (no error, object mutated) against the unpatched controller.
+func TestSandboxTemplateReconcileNetworkPolicyOwnershipConflict(t *testing.T) {
+	otherIsController := true
+	foreignOwner := []metav1.OwnerReference{
+		{
+			APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+			Kind:       "SandboxTemplate",
+			Name:       "some-other-template",
+			Controller: &otherIsController,
+			UID:        "uid-some-other-template",
+		},
+	}
+
+	unmanagedTemplate := func() *extensionsv1beta1.SandboxTemplate {
+		return &extensionsv1beta1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default", UID: "uid-optout"},
+			Spec: extensionsv1beta1.SandboxTemplateSpec{
+				NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+			},
+		}
+	}
+	managedTemplate := func() *extensionsv1beta1.SandboxTemplate {
+		return &extensionsv1beta1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default", UID: "uid-custom"},
+			Spec: extensionsv1beta1.SandboxTemplateSpec{
+				NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
+					Egress: []networkingv1.NetworkPolicyEgressRule{
+						{To: []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "metrics"}}}}},
+					},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name      string
+		template  *extensionsv1beta1.SandboxTemplate
+		ownerRefs []metav1.OwnerReference
+	}{
+		{name: "Unmanaged refuses to delete NetworkPolicy with no controller owner", template: unmanagedTemplate(), ownerRefs: nil},
+		{name: "Unmanaged refuses to delete NetworkPolicy owned by a different template", template: unmanagedTemplate(), ownerRefs: foreignOwner},
+		{name: "Managed refuses to update NetworkPolicy with no controller owner", template: managedTemplate(), ownerRefs: nil},
+		{name: "Managed refuses to update NetworkPolicy owned by a different template", template: managedTemplate(), ownerRefs: foreignOwner},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			// A foreign NetworkPolicy carrying a distinctive spec so any mutation is detectable.
+			foreignNP := &networkingv1.NetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            tc.template.Name + "-network-policy",
+					Namespace:       "default",
+					OwnerReferences: tc.ownerRefs,
+				},
+				Spec: networkingv1.NetworkPolicySpec{
+					PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"owned-by": "someone-else"}},
+				},
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tc.template, foreignNP).Build()
+
+			recorder := events.NewFakeRecorder(10)
+			reconciler := &SandboxTemplateReconciler{
+				Client:   cl,
+				Scheme:   scheme,
+				Recorder: recorder,
+				Tracer:   asmetrics.NewNoOp(),
+			}
+
+			npKey := types.NamespacedName{Name: foreignNP.Name, Namespace: "default"}
+
+			// Capture the pre-reconcile state of the foreign NetworkPolicy.
+			var before networkingv1.NetworkPolicy
+			if err := cl.Get(context.Background(), npKey, &before); err != nil {
+				t.Fatalf("get foreign NetworkPolicy before reconcile: %v", err)
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: tc.template.Name, Namespace: "default"}}
+			if _, err := reconciler.Reconcile(context.Background(), req); err == nil {
+				t.Fatalf("expected reconcile to return an error on ownership conflict, got nil")
+			}
+
+			// The foreign NetworkPolicy must still exist and be byte-for-byte unchanged.
+			var after networkingv1.NetworkPolicy
+			if err := cl.Get(context.Background(), npKey, &after); err != nil {
+				t.Fatalf("expected foreign NetworkPolicy to still exist after conflict, got err: %v", err)
+			}
+			if after.ResourceVersion != before.ResourceVersion {
+				t.Errorf("foreign NetworkPolicy was modified: resourceVersion %q -> %q", before.ResourceVersion, after.ResourceVersion)
+			}
+			if !equality.Semantic.DeepEqual(after.Spec, before.Spec) {
+				t.Errorf("foreign NetworkPolicy spec was mutated: %+v", after.Spec)
+			}
+
+			// A Warning event should have been recorded so the conflict is observable on the object.
+			select {
+			case ev := <-recorder.Events:
+				if !strings.Contains(ev, corev1.EventTypeWarning) || !strings.Contains(ev, "NetworkPolicyOwnershipConflict") {
+					t.Errorf("expected a Warning NetworkPolicyOwnershipConflict event, got %q", ev)
+				}
+			default:
+				t.Errorf("expected a Warning event to be recorded for the ownership conflict")
 			}
 		})
 	}

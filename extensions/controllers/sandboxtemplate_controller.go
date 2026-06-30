@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
@@ -87,16 +88,18 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
 		if err == nil {
 			if !metav1.IsControlledBy(existingNP, template) {
-				return ctrl.Result{}, fmt.Errorf("NetworkPolicy %s is not controlled by SandboxTemplate %s", npName, template.Name)
+				r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile",
+					"Refusing to delete NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s", npNamespace, npName, template.Name)
+				return ctrl.Result{}, fmt.Errorf("NetworkPolicy %s/%s is not controlled by SandboxTemplate %s", npNamespace, npName, template.Name)
 			}
 			if err := r.Delete(ctx, existingNP); err != nil && !k8errors.IsNotFound(err) {
 				logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
-				return ctrl.Result{}, err
+				return ctrl.Result{}, fmt.Errorf("failed to delete unmanaged NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 			}
 			logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
 		} else if !k8errors.IsNotFound(err) {
 			logger.Error(err, "Failed to get unmanaged NetworkPolicy")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -127,7 +130,9 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if err == nil {
 		if !metav1.IsControlledBy(existingNP, template) {
-			return ctrl.Result{}, fmt.Errorf("NetworkPolicy %s is not controlled by SandboxTemplate %s", npName, template.Name)
+			r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile",
+				"Refusing to update NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s", npNamespace, npName, template.Name)
+			return ctrl.Result{}, fmt.Errorf("NetworkPolicy %s/%s is not controlled by SandboxTemplate %s", npNamespace, npName, template.Name)
 		}
 
 		// Policy exists: Semantic DeepEqual check for drift
@@ -138,14 +143,14 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		existingNP.Spec = desiredSpec
 		if err := r.Update(ctx, existingNP); err != nil {
 			logger.Error(err, "Failed to update NetworkPolicy", "name", npName)
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to update NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 		}
 		logger.Info("Successfully updated shared NetworkPolicy", "name", npName)
 		return ctrl.Result{}, nil
 	}
 
 	if !k8errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 	}
 
 	// 6. Create New Policy
@@ -160,7 +165,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if err := r.Create(ctx, np); err != nil {
 		logger.Error(err, "Failed to create NetworkPolicy", "name", npName)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to create NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 	}
 
 	logger.Info("Successfully created shared NetworkPolicy", "name", npName)

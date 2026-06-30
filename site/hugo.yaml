@@ -10,10 +10,7 @@ security:
     - '^text/markdown$'
   node:
     permissions:
-      allowRead:
-         - .
-         - assets
-         - node_modules
+      allowRead: ["*"]
 
 ## Docsy
 enableGitInfo: true

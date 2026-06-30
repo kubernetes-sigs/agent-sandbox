@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -65,9 +65,7 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
             snapshot_uid = snapshot_created.get("name")
             snapshot_timestamp = condition.get("lastTransitionTime")
             if not snapshot_uid or not snapshot_timestamp:
-                raise RuntimeError(
-                    "Snapshot completed without required metadata."
-                )
+                raise RuntimeError("Snapshot completed without required metadata.")
             return SnapshotResult(
                 snapshot_uid=snapshot_uid,
                 snapshot_timestamp=snapshot_timestamp,
@@ -356,9 +354,15 @@ def wait_for_sandbox_propagation(
                 pod_template = spec.get("podTemplate", {}) or {}
                 metadata = pod_template.get("metadata", {}) or {}
                 annotations = metadata.get("annotations", {}) or {}
-                
-                if annotations.get(PODSNAPSHOT_NAME_ANNOTATION) == snapshot_uid:
-                    logger.info("Snapshot UID propagated successfully.")
+
+                propagated_uid = annotations.get(PODSNAPSHOT_NAME_ANNOTATION)
+                if propagated_uid == snapshot_uid:
+                    if snapshot_uid is None:
+                        logger.info(
+                            "Restore annotation cleanup propagated successfully."
+                        )
+                    else:
+                        logger.info("Snapshot UID propagated successfully.")
                     return True
         except Exception as e:
             logger.error(f"Error checking sandbox propagation: {e}")

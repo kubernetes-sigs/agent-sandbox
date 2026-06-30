@@ -299,6 +299,11 @@ func (in *SandboxTemplateSpec) DeepCopyInto(out *SandboxTemplateSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.PersistentVolumeClaimRetentionPolicy != nil {
+		in, out := &in.PersistentVolumeClaimRetentionPolicy, &out.PersistentVolumeClaimRetentionPolicy
+		*out = new(apiv1beta1.PersistentVolumeClaimRetentionPolicy)
+		**out = **in
+	}
 	if in.NetworkPolicy != nil {
 		in, out := &in.NetworkPolicy, &out.NetworkPolicy
 		*out = new(NetworkPolicySpec)

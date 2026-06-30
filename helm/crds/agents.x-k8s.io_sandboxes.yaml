@@ -33,6 +33,15 @@ spec:
                 - Running
                 - Suspended
                 type: string
+              persistentVolumeClaimRetentionPolicy:
+                properties:
+                  whenDeleted:
+                    default: Delete
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                type: object
               podTemplate:
                 properties:
                   metadata:

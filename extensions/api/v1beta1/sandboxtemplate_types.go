@@ -103,6 +103,12 @@ type SandboxTemplateSpec struct {
 	// +listType=atomic
 	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
+	// persistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created
+	// from volumeClaimTemplates.
+	// Defaults to Delete for backward compatibility.
+	// +optional
+	PersistentVolumeClaimRetentionPolicy *sandboxv1beta1.PersistentVolumeClaimRetentionPolicy `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
+
 	// networkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template. A single shared NetworkPolicy is created per Template.
 	// Behavior is dictated by the NetworkPolicyManagement field:

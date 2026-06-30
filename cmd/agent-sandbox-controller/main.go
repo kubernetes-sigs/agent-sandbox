@@ -283,6 +283,7 @@ func main() {
 
 	// Register the custom Sandbox metric collector globally.
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
+	asmetrics.RegisterWarmPoolCollector(mgr.GetClient(), mgr.GetLogger().WithName("warmpool-collector"))
 
 	if err = (&controllers.SandboxReconciler{
 		Client:        mgr.GetClient(),

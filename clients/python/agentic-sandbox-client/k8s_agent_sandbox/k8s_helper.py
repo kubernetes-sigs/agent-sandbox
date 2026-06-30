@@ -17,7 +17,6 @@ import time
 from datetime import datetime, UTC
 from typing import List
 from kubernetes import client, config, watch
-<<<<<<< HEAD
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
@@ -97,7 +96,10 @@ class K8sHelper:
             spec["additionalPodMetadata"] = pod_metadata
         env_spec = construct_sandbox_claim_env_spec(env)
         if env_spec:
-            spec["env"] = env_spec
+            spec["env"] = [
+                env_var.model_dump(by_alias=True, exclude_none=True)
+                for env_var in env_spec
+            ]
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",

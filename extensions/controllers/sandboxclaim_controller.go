@@ -766,7 +766,9 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 		// Sandbox status before requeueing so a stale queue key does not erase
 		// placement information used by pickSmart.
 		if len(adopted.Status.PodIPs) == 0 {
-			adoptedKey.NodeName = adopted.Status.NodeName
+			if adopted.Status.NodeName != "" {
+				adoptedKey.NodeName = adopted.Status.NodeName
+			}
 			skipped = append(skipped, adoptedKey)
 			continue
 		}

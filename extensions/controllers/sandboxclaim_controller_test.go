@@ -2473,7 +2473,7 @@ func TestGetCandidateRequeuesUnnetworkedWarmPoolSandboxes(t *testing.T) {
 	ctx := context.Background()
 	warmPoolUID := types.UID("warmpool-uid-123")
 	poolName := "test-pool"
-	key := queue.SandboxKey{Namespace: "default", Name: "rotating-sb"}
+	key := queue.SandboxKey{Namespace: "default", Name: "rotating-sb", NodeName: "node-a"}
 	rotatingSandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      key.Name,
@@ -2490,7 +2490,7 @@ func TestGetCandidateRequeuesUnnetworkedWarmPoolSandboxes(t *testing.T) {
 				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
-		Status: sandboxv1beta1.SandboxStatus{NodeName: "node-a", PodIPs: nil},
+		Status: sandboxv1beta1.SandboxStatus{PodIPs: nil},
 	}
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: key.Namespace, UID: types.UID("claim-uid")},
@@ -2512,7 +2512,7 @@ func TestGetCandidateRequeuesUnnetworkedWarmPoolSandboxes(t *testing.T) {
 
 	requeued, ok := warmSandboxQueue.Get(namespacedWarmPoolName)
 	require.True(t, ok, "unnetworked candidate should be returned to the queue")
-	require.Equal(t, queue.SandboxKey{Namespace: key.Namespace, Name: key.Name, NodeName: rotatingSandbox.Status.NodeName}, requeued)
+	require.Equal(t, key, requeued)
 }
 
 func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {

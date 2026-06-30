@@ -199,6 +199,21 @@ spec:
                 required:
                 - name
                 type: object
+              workspaceResources:
+                properties:
+                  cpuMillicores:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  diskGiB:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  memoryMiB:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
             required:
             - warmPoolRef
             type: object

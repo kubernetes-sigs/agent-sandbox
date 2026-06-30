@@ -906,6 +906,7 @@ _Appears in:_
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 | `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.<br />Specifying this field forces a cold start because warm pool pods will not have these volumes. |  | Optional: \{\} <br /> |
+| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requests/limits for the container named "workspace" at claim time.<br />Unset fields keep the values from the SandboxTemplate; set fields force request=limit for that resource.<br />Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -1143,5 +1144,25 @@ _Appears in:_
 | `Disallowed` | VolumeClaimTemplatesPolicyDisallowed prevents a SandboxClaim from specifying any volume claim templates.<br /> |
 | `Allowed` | VolumeClaimTemplatesPolicyAllowed allows a SandboxClaim to inject new volume claim templates, but not override existing ones.<br /> |
 | `Overrides` | VolumeClaimTemplatesPolicyOverrides allows a SandboxClaim to inject new and override existing volume claim templates.<br /> |
+
+
+#### WorkspaceResources
+
+
+
+WorkspaceResources defines per-claim resource overrides for the container named "workspace".
+Fields left unset keep the values from the SandboxTemplate; fields that are set
+force the workspace container request and limit to the same value.
+
+
+
+_Appears in:_
+- [SandboxClaimSpec](#sandboxclaimspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `cpuMillicores` _integer_ | cpuMillicores is the desired CPU request/limit for the workspace container.<br />Zero leaves the CPU resources from the SandboxTemplate unchanged. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `memoryMiB` _integer_ | memoryMiB is the desired memory request/limit for the workspace container, in mebibytes (1 MiB = 1024*1024 B).<br />Zero leaves the memory resources from the SandboxTemplate unchanged. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `diskGiB` _integer_ | diskGiB is the desired ephemeral-storage request/limit for the workspace container, in gibibytes (1 GiB = 1024*1024*1024 B).<br />Zero leaves the ephemeral-storage resources from the SandboxTemplate unchanged. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 

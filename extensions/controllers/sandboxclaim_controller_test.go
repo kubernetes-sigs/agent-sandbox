@@ -2777,7 +2777,10 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 		Build()
 
 	warmQueue := queue.NewSimpleSandboxQueue()
-	warmQueue.Add(sandboxcontrollers.NameHash("test-template"), queue.SandboxKey{Namespace: "default", Name: "warm-sb"})
+	warmQueue.Add(
+		queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name),
+		queue.SandboxKey{Namespace: warmSandbox.Namespace, Name: warmSandbox.Name, NodeName: warmSandbox.Status.NodeName},
+	)
 
 	reconciler := &SandboxClaimReconciler{
 		Client:           fakeClient,
@@ -2873,6 +2876,40 @@ func TestApplyWorkspaceResourceOverridesEmptyOverridesIsNoOp(t *testing.T) {
 				t.Fatalf("expected resources unchanged when override has no positive fields\n  got:    %#v\n  wanted: %#v", container.Resources, tc.current)
 			}
 		})
+	}
+}
+
+func TestApplyWorkspaceResourceOverridesPartialOverrideKeepsTemplateValues(t *testing.T) {
+	current := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("500m"),
+			corev1.ResourceMemory:           resource.MustParse("1Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("5Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("1000m"),
+			corev1.ResourceMemory:           resource.MustParse("2Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+		},
+	}
+	container := &corev1.Container{Name: workspaceContainerName, Resources: *current.DeepCopy()}
+
+	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResources{MemoryMiB: 4096})
+
+	expected := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("500m"),
+			corev1.ResourceMemory:           resource.MustParse("4096Mi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("5Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("1000m"),
+			corev1.ResourceMemory:           resource.MustParse("4096Mi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+		},
+	}
+	if !reflect.DeepEqual(container.Resources, expected) {
+		t.Fatalf("expected partial override to preserve omitted resources\n  got:    %#v\n  wanted: %#v", container.Resources, expected)
 	}
 }
 

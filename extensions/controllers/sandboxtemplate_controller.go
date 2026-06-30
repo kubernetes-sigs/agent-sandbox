@@ -94,11 +94,16 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				return ctrl.Result{}, nil
 			}
 			// Delete can race with an external deletion; treat NotFound as success to avoid noisy requeues.
-			if err := r.Delete(ctx, existingNP); err != nil && !k8errors.IsNotFound(err) {
-				logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
-				return ctrl.Result{}, fmt.Errorf("failed to delete unmanaged NetworkPolicy %s/%s: %w", npNamespace, npName, err)
+			if err := r.Delete(ctx, existingNP); err != nil {
+				if !k8errors.IsNotFound(err) {
+					logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
+					return ctrl.Result{}, fmt.Errorf("failed to delete unmanaged NetworkPolicy %s/%s: %w", npNamespace, npName, err)
+				}
+				// Removed out-of-band between Get and Delete; desired state already achieved.
+				logger.Info("Unmanaged NetworkPolicy already deleted", "name", existingNP.Name)
+			} else {
+				logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
 			}
-			logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
 		} else if !k8errors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 		}

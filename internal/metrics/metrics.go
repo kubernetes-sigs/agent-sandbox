@@ -28,6 +28,13 @@ const (
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
 
+	// Sandbox status values for the agent_sandbox_warmpool_size metric.
+	// Derived from Sandbox.Status.Conditions, not Pod state.
+	SandboxStatusReady     = "ready"
+	SandboxStatusPending   = "pending"
+	SandboxStatusSucceeded = "succeeded"
+	SandboxStatusFailed    = "failed"
+
 	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
 	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
@@ -108,6 +115,19 @@ var (
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
 		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by"},
+		nil,
+	)
+
+	// AgentSandboxWarmPoolSizeDesc describes the agent_sandbox_warmpool_size metric.
+	// Labels:
+	// - namespace: the namespace of the warm pool
+	// - warmpool_name: the name of the warm pool
+	// - sandbox_template: the SandboxTemplateRef
+	// - sandbox_status: "ready" | "pending" | "succeeded" | "failed".
+	AgentSandboxWarmPoolSizeDesc = prometheus.NewDesc(
+		"agent_sandbox_warmpool_size",
+		"Number of sandboxes currently in each warm pool, labeled by sandbox status.",
+		[]string{"namespace", "warmpool_name", "sandbox_template", "sandbox_status"},
 		nil,
 	)
 

@@ -142,7 +142,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			Name: "test-claim", Namespace: "default",
 			Annotations: map[string]string{sandboxv1beta1.SandboxTemplateRefAnnotation: "test-template"},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
 			}},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
@@ -169,7 +169,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "automount-template", Namespace: "default"},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
 			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{AutomountServiceAccountToken: new(true), Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+				Spec: corev1.PodSpec{AutomountServiceAccountToken: ptr.To(true), Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
 			},
 		},
 	}
@@ -603,7 +603,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 						Name:      "test-claim-network-policy", // Matches the claim name
 						Namespace: "default",
 						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
 						}},
 					},
 				},
@@ -629,7 +629,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 						Name:      "test-claim-network-policy",
 						Namespace: "default",
 						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
 						}},
 					},
 				},
@@ -909,7 +909,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 							Kind:       "SandboxWarmPool",
 							Name:       "test-warmpool-env-override",
 							UID:        "wp-env-override-uid",
-							Controller: new(true),
+							Controller: ptr.To(true),
 						}},
 					},
 				},
@@ -1233,7 +1233,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				Name:      claimName,
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{
-					{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: new(true)},
+					{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: ptr.To(true)},
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{PodTemplate: sandboxv1beta1.PodTemplate{}},
@@ -1928,7 +1928,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       "test-pool",
 						UID:        warmPoolUID,
-						Controller: new(true),
+						Controller: ptr.To(true),
 					},
 				},
 			},
@@ -1977,7 +1977,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Kind:       "ReplicaSet",
 						Name:       "other-controller",
 						UID:        "other-uid-456",
-						Controller: new(true),
+						Controller: ptr.To(true),
 					},
 				},
 			},
@@ -2472,7 +2472,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 			Name: "adopted-sb", Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim",
-				Name: "test-claim", UID: "claim-uid", Controller: new(true),
+				Name: "test-claim", UID: "claim-uid", Controller: ptr.To(true),
 			}},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
@@ -2747,7 +2747,7 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 					Kind:       "SandboxWarmPool",
 					Name:       "test-pool",
 					UID:        "pool-uid",
-					Controller: new(true),
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -3111,7 +3111,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 						Kind:       "SandboxWarmPool",
 						Name:       "test-warmpool",
 						UID:        "pool-uid",
-						Controller: new(true),
+						Controller: ptr.To(true),
 					},
 				},
 			},

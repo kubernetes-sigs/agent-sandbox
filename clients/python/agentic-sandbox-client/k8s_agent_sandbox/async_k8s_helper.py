@@ -335,7 +335,7 @@ class AsyncK8sHelper:
                             
                             if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
                                 logger.warning(
-                                    "Gateway address rejected by validation: %r",
+                                    "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
                                     ip_address,
                                 )
                                 continue

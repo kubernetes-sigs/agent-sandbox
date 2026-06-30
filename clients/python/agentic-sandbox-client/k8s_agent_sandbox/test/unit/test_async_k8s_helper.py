@@ -366,7 +366,7 @@ class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
             ip = await self.helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
             self.assertEqual(ip, "192.168.1.2")
 
-    async def test_wait_for_gateway_ip_rejects_ipv6(self):
+    async def test_wait_for_gateway_ip_accepts_ipv6(self):
         async def _async_gen(*args, **kwargs):
             yield {
                 "type": "MODIFIED",
@@ -374,15 +374,6 @@ class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
                     "metadata": {"name": "test-gateway"},
                     "status": {
                         "addresses": [{"value": "2001:db8::1"}]
-                    }
-                }
-            }
-            yield {
-                "type": "MODIFIED",
-                "object": {
-                    "metadata": {"name": "test-gateway"},
-                    "status": {
-                        "addresses": [{"value": "192.168.1.1"}]
                     }
                 }
             }
@@ -394,7 +385,7 @@ class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
             MockWatch.return_value = mock_watch
 
             ip = await self.helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
-            self.assertEqual(ip, "192.168.1.1")
+            self.assertEqual(ip, "2001:db8::1")
 
     async def test_wait_for_gateway_ip_disguised_ip_decimal(self):
         async def _async_gen(*args, **kwargs):

@@ -103,11 +103,8 @@ def is_valid_ip(s: str) -> bool:
         return False
     import ipaddress
     try:
-        # Downstream callers construct URLs with `http://{ip_address}`,
-        # which only works for IPv4 literals without additional
-        # normalization. Reject IPv6 here to keep the returned value
-        # compatible with existing URL construction.
-        return isinstance(ipaddress.ip_address(s), ipaddress.IPv4Address)
+        ipaddress.ip_address(s)
+        return True
     except ValueError:
         return False
 

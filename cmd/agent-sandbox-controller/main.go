@@ -80,12 +80,14 @@ func main() {
 	var webhookCertDir string
 	var webhookServiceName string
 	var webhookNamespace string
+	var manageWebhookCerts bool
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
 	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "The directory that contains the certificates.")
 	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
 	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
+	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Enable the controller to automatically generate certificates and patch CRDs. Set to false if certificates and webhooks are managed externally (e.g., in GKE).")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -238,25 +240,29 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
-	// Create a temporary client to patch the CRDs and access Secrets
-	tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
-	if err != nil {
-		setupLog.Error(err, "unable to create temporary client")
-		os.Exit(1)
-	}
+	if manageWebhookCerts {
+		// Create a temporary client to patch the CRDs and access Secrets
+		tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "unable to create temporary client")
+			os.Exit(1)
+		}
 
-	// Generate or load self-signed TLS certificates for the webhook server
-	setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
-	caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
-	if err != nil {
-		setupLog.Error(err, "unable to prepare webhook certificates")
-		os.Exit(1)
-	}
+		// Generate or load self-signed TLS certificates for the webhook server
+		setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
+		caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
+		if err != nil {
+			setupLog.Error(err, "unable to prepare webhook certificates")
+			os.Exit(1)
+		}
 
-	setupLog.Info("Patching CRDs with generated CA bundle")
-	if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
-		setupLog.Error(err, "failed to patch CRDs with CA bundle")
-		os.Exit(1)
+		setupLog.Info("Patching CRDs with generated CA bundle")
+		if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
+			setupLog.Error(err, "failed to patch CRDs with CA bundle")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("Webhook certificate management and CRD patching is disabled")
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{

@@ -1,0 +1,87 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: late-bind-template
+  namespace: default
+spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    egress:
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  podTemplate:
+    metadata:
+      annotations:
+        # Minimum version 1.36.0-gke.3302001 required for this annotation
+        # 'workspace-volume' must match the volume name below
+        dev.gvisor.empty-dir.workspace-volume.force-shared: "true"
+    spec:
+      runtimeClassName: gvisor
+      automountServiceAccountToken: false
+      nodeSelector: {sandbox.gke.io/runtime: gvisor}
+      tolerations:
+      - {key: "sandbox.gke.io/runtime", value: "gvisor", effect: "NoSchedule"}
+      securityContext: 
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: agent
+        image: registry.k8s.io/agent-sandbox/python-runtime-sandbox:v0.1.0
+        resources: {limits: {cpu: "500m", memory: "1Gi"}, requests: {cpu: "250m", memory: "512Mi"}}
+        securityContext:
+          capabilities:
+            drop: ["ALL"] # Required
+          allowPrivilegeEscalation: false
+        volumeMounts: 
+        - name: workspace-volume
+          mountPath: /workspace
+          mountPropagation: HostToContainer 
+        env:
+        - name: POD_UID
+          valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+        - name: NODE_IP
+          valueFrom: {fieldRef: {fieldPath: status.hostIP}}
+        - name: VOLUME_NAME
+          value: "workspace-volume" # Must be the name of the agent pod's emptyDir volume. 
+        - name: MOUNT_PATH
+          value: "/workspace"   # Must be the mount path of the agent pod's emptyDir volume.
+        - name: SUB_DIR
+          value: "user_data"
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "Waiting for local late-bind signal in emptyDir root..."
+          # Check for signal in the parent directory to avoid NFS caching
+          while [ ! -f /$MOUNT_PATH/.ready ]; do sleep 0.1; done
+          
+          echo "Data bound! Resilience verified."
+          # Agent still works inside the subfolder where the NFS is mounted
+          cd $MOUNT_PATH/$SUB_DIR
+          
+          # --- DEMO ONLY: Persistence Verification ---
+          # This section proves that your data is preserved across session resumes.
+          # It prints the history of previous pods that accessed this same storage.
+          [ -f state.txt ] && cat state.txt || echo "New Session Initialized."
+          
+          # Records a 'heartbeat' from the current pod to prove write access is active.
+          echo "Heartbeat from $(hostname) at $(date)" >> state.txt
+          
+          # --- CUSTOM AGENT LOGIC STARTS HERE ---
+          # Replace the following 'sleep' with your actual agent application or 
+          # execution entry point.
+          echo "Starting custom agent application..."
+          sleep infinity
+      volumes: 
+        # Standard emptyDir is now used for late-binding storage.
+      - name: workspace-volume
+        emptyDir: {}
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: late-bind-warmpool
+  namespace: default
+spec:
+  replicas: 2
+  sandboxTemplateRef: {name: late-bind-template}

@@ -178,3 +178,58 @@ func TestSimpleSandboxQueue_GetWithStrategy(t *testing.T) {
 		t.Errorf("Expected queue to be empty, but got an item")
 	}
 }
+
+func TestGetNamespacedWarmPoolName(t *testing.T) {
+	namespace := "my-ns"
+	wp := "my-wp"
+	expected := "my-ns/my-wp"
+	got := GetNamespacedWarmPoolName(namespace, wp)
+	if got != expected {
+		t.Errorf("Expected %q, got %q", expected, got)
+	}
+}
+
+func TestSimpleSandboxQueue_NoLegacyFallback(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	namespace := "my-ns"
+	wpName := "my-wp"
+	namespacedName := GetNamespacedWarmPoolName(namespace, wpName)
+
+	key1 := SandboxKey{Namespace: namespace, Name: "sb-1"}
+
+	// Store queue with namespace-aware warm pool name
+	q.Add(namespacedName, key1)
+
+	// Verify that namespace-agnostic warm pool name does NOT work to Get
+	_, ok := q.Get(wpName)
+	if ok {
+		t.Errorf("Expected Get with namespace-agnostic name to fail")
+	}
+
+	// Verify that namespace-agnostic warm pool name does NOT work to GetWithStrategy
+	_, ok = q.GetWithStrategy(wpName, func(items []SandboxKey) (SandboxKey, bool) {
+		return items[0], true
+	})
+	if ok {
+		t.Errorf("Expected GetWithStrategy with namespace-agnostic name to fail")
+	}
+
+	// Verify that namespace-agnostic warm pool name does NOT work to RemoveItem
+	q.RemoveItem(wpName, key1)
+	// We use GetWithStrategy without popping, or check queue length by standard Get.
+	// Since Get pops, let's check that Get(namespacedName) still succeeds and returns key1.
+	got, ok := q.Get(namespacedName)
+	if !ok || got != key1 {
+		t.Errorf("Expected item to still be in queue after RemoveItem with namespace-agnostic name")
+	}
+
+	// Re-add item since Get popped it
+	q.Add(namespacedName, key1)
+
+	// Verify that namespace-agnostic warm pool name does NOT work to RemoveQueue
+	q.RemoveQueue(wpName)
+	_, ok = q.Get(namespacedName)
+	if !ok {
+		t.Errorf("Expected queue to still exist after RemoveQueue with namespace-agnostic name")
+	}
+}

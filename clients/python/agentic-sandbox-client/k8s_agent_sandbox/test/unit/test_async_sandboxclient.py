@@ -31,6 +31,7 @@ from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
+    SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
 )
@@ -355,6 +356,38 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("connection_config is required", str(ctx.exception))
 
+    async def test_get_pod_ip(self):
+        """Tests that get_pod_ip returns the pod IP when present."""
+        mock_k8s_helper = AsyncMock()
+        mock_k8s_helper.get_sandbox = AsyncMock(return_value={
+            "status": {
+                "podIPs": ["10.244.0.42"]
+            }
+        })
+        sandbox = AsyncSandbox(
+            claim_name="test",
+            sandbox_id="test-id",
+            connection_config=MagicMock(),
+            k8s_helper=mock_k8s_helper,
+        )
+        self.assertEqual(await sandbox.get_pod_ip(), "10.244.0.42")
+
+    async def test_get_pod_ip_prioritization_and_normalization(self):
+        """Tests that get_pod_ip uses select_pod_ip to prioritize and normalize IPs."""
+        mock_k8s_helper = AsyncMock()
+        mock_k8s_helper.get_sandbox = AsyncMock(return_value={
+            "status": {
+                "podIPs": ["::ffff:10.244.0.42", "2001:db8::1"]
+            }
+        })
+        sandbox = AsyncSandbox(
+            claim_name="test",
+            sandbox_id="test-id",
+            connection_config=MagicMock(),
+            k8s_helper=mock_k8s_helper,
+        )
+        self.assertEqual(await sandbox.get_pod_ip(), "10.244.0.42")
+
 
 class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
@@ -422,6 +455,53 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         )
         url = await connector._resolve_base_url()
         self.assertEqual(url, "http://10.244.0.5:8888")
+
+    async def test_in_cluster_resolves_ipv6_pod_ip(self):
+        """IPv6 pod IPs must be bracketed in the base URL (RFC 3986)."""
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+            get_pod_ip=AsyncMock(return_value="2001:db8::1"),
+        )
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://[2001:db8::1]:8888")
+
+    async def test_gateway_resolves_ipv6(self):
+        """Gateway IPv6 addresses must be bracketed in the base URL."""
+        config = SandboxGatewayConnectionConfig(
+            gateway_name="test-gw",
+            gateway_namespace="default",
+        )
+        mock_k8s = MagicMock()
+        mock_k8s.wait_for_gateway_ip = AsyncMock(return_value="2001:db8::1")
+        connector = AsyncSandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=mock_k8s,
+        )
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://[2001:db8::1]")
+
+    async def test_gateway_does_not_bracket_ipv4(self):
+        """Gateway IPv4 addresses must NOT be bracketed."""
+        config = SandboxGatewayConnectionConfig(
+            gateway_name="test-gw",
+            gateway_namespace="default",
+        )
+        mock_k8s = MagicMock()
+        mock_k8s.wait_for_gateway_ip = AsyncMock(return_value="34.56.78.90")
+        connector = AsyncSandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=mock_k8s,
+        )
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://34.56.78.90")
 
     async def test_in_cluster_does_not_inject_router_headers(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)

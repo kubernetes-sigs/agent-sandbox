@@ -19,6 +19,9 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -83,6 +86,9 @@ spec:
   - additionalPrinterColumns:
     - jsonPath: .status.readyReplicas
       name: Ready
+      type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age

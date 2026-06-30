@@ -2215,7 +2215,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					if cCopy.Labels == nil {
 						cCopy.Labels = make(map[string]string)
 					}
-					cCopy.Labels[sandboxv1beta1.SandboxCreatedByLabel] = "go-client"
+					cCopy.Labels[sandboxv1beta1.CreatedByLabel] = "go-client"
 					return cCopy
 				}(),
 				func() client.Object {
@@ -2223,17 +2223,41 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					if sb.Labels == nil {
 						sb.Labels = make(map[string]string)
 					}
-					sb.Labels[sandboxv1beta1.SandboxCreatedByLabel] = "controller"
+					sb.Labels[sandboxv1beta1.CreatedByLabel] = "controller"
 					return sb
 				}(),
 			},
 			expectSandboxAdoption:  true,
 			expectedAdoptedSandbox: "pool-sb-1",
 			expectedLabels: map[string]string{
-				sandboxv1beta1.SandboxCreatedByLabel: "go-client",
+				sandboxv1beta1.CreatedByLabel: "go-client",
 			},
 			expectedPodLabels: map[string]string{
-				sandboxv1beta1.SandboxCreatedByLabel: "go-client",
+				sandboxv1beta1.CreatedByLabel: "go-client",
+			},
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "removes created-by label during adoption when claim lacks it",
+			existingObjects: []client.Object{
+				template,
+				claim.DeepCopy(),
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					if sb.Labels == nil {
+						sb.Labels = make(map[string]string)
+					}
+					sb.Labels[sandboxv1beta1.CreatedByLabel] = "controller"
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedLabels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "",
+			},
+			expectedPodLabels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "",
 			},
 			expectNewSandboxCreated: false,
 		},
@@ -2761,6 +2785,18 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		if val != 1 {
 			t.Errorf("expected metric count 1, got %v", val)
 		}
+
+		// Verify created Sandbox labels are absent
+		sb := &sandboxv1beta1.Sandbox{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: "default"}, sb); err != nil {
+			t.Fatalf("failed to get created sandbox: %v", err)
+		}
+		if val, exists := sb.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox created-by label to be absent, got %q", val)
+		}
+		if val, exists := sb.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox pod template created-by label to be absent, got %q", val)
+		}
 	})
 
 	t.Run("Warm Start", func(t *testing.T) {
@@ -2773,8 +2809,9 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				Name:      "warm-sb",
 				Namespace: "default",
 				Labels: map[string]string{
-					warmPoolSandboxLabel:   poolNameHash,
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					warmPoolSandboxLabel:          poolNameHash,
+					sandboxTemplateRefHash:        sandboxcontrollers.NameHash("test-template"),
+					sandboxv1beta1.CreatedByLabel: "controller",
 				},
 				Annotations: map[string]string{
 					sandboxv1beta1.SandboxTemplateRefAnnotation: "test-template",
@@ -2827,6 +2864,18 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeWarm, "test-warmpool", "ready", "unknown"))
 		if val != 1 {
 			t.Errorf("expected metric count 1, got %v", val)
+		}
+
+		// Verify adopted Sandbox labels are removed (since claim lacks it)
+		sb := &sandboxv1beta1.Sandbox{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: "warm-sb", Namespace: "default"}, sb); err != nil {
+			t.Fatalf("failed to get adopted sandbox: %v", err)
+		}
+		if val, exists := sb.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox created-by label to be absent, got %q", val)
+		}
+		if val, exists := sb.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox pod template created-by label to be absent, got %q", val)
 		}
 	})
 }

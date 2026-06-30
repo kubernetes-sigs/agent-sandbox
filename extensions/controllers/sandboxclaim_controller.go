@@ -177,9 +177,9 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Start Tracing Span
 	var initialAttrs map[string]string
 	if claim.Labels != nil {
-		if val, ok := claim.Labels[v1beta1.SandboxCreatedByLabel]; ok {
+		if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok {
 			initialAttrs = map[string]string{
-				v1beta1.SandboxCreatedByLabel: val,
+				v1beta1.CreatedByLabel: val,
 			}
 		}
 	}
@@ -389,8 +389,12 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			templateHash := SandboxTemplateRefHash(template.Name)
 			mergedMeta.Labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
 			mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
-			if val, ok := claim.Labels[v1beta1.SandboxCreatedByLabel]; ok {
-				mergedMeta.Labels[v1beta1.SandboxCreatedByLabel] = val
+			// Sync the created-by label to the Pod template. If the claim does not have it,
+			// we remove it to ensure consistency with cold starts and prevent stale label values.
+			if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok {
+				mergedMeta.Labels[v1beta1.CreatedByLabel] = val
+			} else {
+				delete(mergedMeta.Labels, v1beta1.CreatedByLabel)
 			}
 
 			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
@@ -405,12 +409,19 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 				sandbox.Labels[sandboxTemplateRefHash] = templateHash
 				needsUpdate = true
 			}
-			if val, ok := claim.Labels[v1beta1.SandboxCreatedByLabel]; ok && sandbox.Labels[v1beta1.SandboxCreatedByLabel] != val {
-				if sandbox.Labels == nil {
-					sandbox.Labels = make(map[string]string)
+			if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok {
+				if sandbox.Labels[v1beta1.CreatedByLabel] != val {
+					if sandbox.Labels == nil {
+						sandbox.Labels = make(map[string]string)
+					}
+					sandbox.Labels[v1beta1.CreatedByLabel] = val
+					needsUpdate = true
 				}
-				sandbox.Labels[v1beta1.SandboxCreatedByLabel] = val
-				needsUpdate = true
+			} else {
+				if _, exists := sandbox.Labels[v1beta1.CreatedByLabel]; exists {
+					delete(sandbox.Labels, v1beta1.CreatedByLabel)
+					needsUpdate = true
+				}
 			}
 
 			if needsUpdate {
@@ -667,8 +678,12 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 		labels = make(map[string]string)
 	}
 	labels[extensionsv1beta1.SandboxIDLabel] = string(claim.UID)
-	if val, ok := claim.Labels[v1beta1.SandboxCreatedByLabel]; ok {
-		labels[v1beta1.SandboxCreatedByLabel] = val
+	// Propagate created-by label from the claim if present. If absent, explicitly
+	// delete it to synchronize removal or prevent stale propagation from warm sandboxes.
+	if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok {
+		labels[v1beta1.CreatedByLabel] = val
+	} else {
+		delete(labels, v1beta1.CreatedByLabel)
 	}
 	return labels
 }
@@ -863,7 +878,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			templateName := r.resolveTemplateName(adopted)
 			createdBy := "unknown"
-			if val, ok := claim.Labels[v1beta1.SandboxCreatedByLabel]; ok {
+			if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok {
 				createdBy = val
 			}
 			asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition, createdBy)
@@ -953,8 +968,12 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		if templateHash != "" {
 			mergedMeta.Labels[sandboxTemplateRefHash] = templateHash
 		}
-		if val, ok := claim.Labels[v1beta1.SandboxCreatedByLabel]; ok {
-			mergedMeta.Labels[v1beta1.SandboxCreatedByLabel] = val
+		// Propagate created-by label to the Pod template during adoption. If absent,
+		// explicitly delete it to ensure it is not kept from the pre-warmed sandbox.
+		if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok {
+			mergedMeta.Labels[v1beta1.CreatedByLabel] = val
+		} else {
+			delete(mergedMeta.Labels, v1beta1.CreatedByLabel)
 		}
 
 		if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
@@ -1295,6 +1314,10 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxProvisioned", "Provisioning", "Created Sandbox %q", sandbox.Name)
 	}
 
+	createdBy := "unknown"
+	if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok {
+		createdBy = val
+	}
 	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, claim.Spec.WarmPoolRef.Name, "not_ready", createdBy)
 
 	return sandbox, nil

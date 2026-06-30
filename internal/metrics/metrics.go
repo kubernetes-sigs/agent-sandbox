@@ -88,7 +88,7 @@ var (
 	// - launch_type: "warm", "cold", "unknown"
 	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
 	// - pod_condition: "ready", "not_ready".
-	// - created_by: the component that created the claim (e.g. "go-client", "python-client", "unknown").
+	// - created_by: the component that created the claim (e.g. "go-client", "python-client", "controller", "unknown").
 	SandboxClaimCreationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "agent_sandbox_claim_creation_total",
@@ -105,7 +105,7 @@ var (
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: sandboxTemplateRef.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
-	// - created_by: the component that created the sandbox (e.g. "client", "unknown").
+	// - created_by: the component that created the sandbox (e.g. "go-client", "python-client", "controller", "unknown").
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",

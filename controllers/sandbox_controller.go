@@ -166,8 +166,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		"sandbox.name":      sandbox.Name,
 		"sandbox.namespace": sandbox.Namespace,
 	}
-	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxCreatedByLabel]; ok {
-		initialAttrs[sandboxv1beta1.SandboxCreatedByLabel] = val
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
+		initialAttrs[sandboxv1beta1.CreatedByLabel] = val
 	}
 	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
 	defer end()
@@ -869,9 +869,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 	}
 
-	// Propagate the created-by label directly from the Sandbox CR labels to the Pod if present.
-	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxCreatedByLabel]; ok {
-		podLabels[sandboxv1beta1.SandboxCreatedByLabel] = val
+	// Propagate the created-by label from the Sandbox CR labels to the Pod if present,
+	// normalizing it to a known allow-list to prevent invalid values or high cardinality.
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok && val != "" {
+		podLabels[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
 	}
 
 	annotations := map[string]string{}
@@ -1024,15 +1025,19 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	}
 
 	// Ensure the created-by label is present on the Pod if it is present on the Sandbox.
-	expectedCreatedBy := sandbox.Labels[sandboxv1beta1.SandboxCreatedByLabel]
+	// We normalize it to a known allow-list to prevent invalid values or high cardinality on the Pod.
+	var expectedCreatedBy string
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok && val != "" {
+		expectedCreatedBy = asmetrics.NormalizeCreatedBy(val)
+	}
 	if expectedCreatedBy != "" {
-		if pod.Labels[sandboxv1beta1.SandboxCreatedByLabel] != expectedCreatedBy {
-			pod.Labels[sandboxv1beta1.SandboxCreatedByLabel] = expectedCreatedBy
+		if pod.Labels[sandboxv1beta1.CreatedByLabel] != expectedCreatedBy {
+			pod.Labels[sandboxv1beta1.CreatedByLabel] = expectedCreatedBy
 			updated = true
 		}
 	} else {
-		if _, exists := pod.Labels[sandboxv1beta1.SandboxCreatedByLabel]; exists {
-			delete(pod.Labels, sandboxv1beta1.SandboxCreatedByLabel)
+		if _, exists := pod.Labels[sandboxv1beta1.CreatedByLabel]; exists {
+			delete(pod.Labels, sandboxv1beta1.CreatedByLabel)
 			updated = true
 		}
 	}

@@ -2099,6 +2099,76 @@ func TestReconcilePod(t *testing.T) {
 			expectErr:              true,
 			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name"},
 		},
+		{
+			name:        "propagates and normalizes created-by label value go-client",
+			initialObjs: []runtime.Object{},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "go-client",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						sandboxv1beta1.CreatedByLabel:       "go-client",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name:        "normalizes invalid created-by label to unknown",
+			initialObjs: []runtime.Object{},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "invalid-user-value-which-is-too-long-or-custom",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						sandboxv1beta1.CreatedByLabel:       "unknown",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
 	}
 
 	for _, tc := range testCases {

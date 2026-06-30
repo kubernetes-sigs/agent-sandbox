@@ -148,7 +148,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		createdByStr := "unknown"
-		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxCreatedByLabel]; ok {
+		if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
 			createdByStr = NormalizeCreatedBy(val)
 		}
 

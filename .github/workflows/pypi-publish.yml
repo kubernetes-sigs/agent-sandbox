@@ -20,7 +20,7 @@ jobs:
         working-directory: clients/python/agentic-sandbox-client
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0 # Important: Fetches all history and tags for setuptools-scm
 
@@ -48,7 +48,7 @@ jobs:
         working-directory: clients/python/agentic-sandbox-client
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0 # Fetch full history and tags for setuptools-scm during build
 
@@ -86,9 +86,9 @@ jobs:
       id-token: write # IMPORTANT: mandatory for trusted publishing
       contents: read
 
-    # Run if it is a push event AND NOT a release candidate
+    # Run if it is a push event
     if: >-
-      (github.event_name == 'push' && !contains(github.ref, 'rc'))
+      (github.event_name == 'push')
 
     steps:
       - name: Download all the dists

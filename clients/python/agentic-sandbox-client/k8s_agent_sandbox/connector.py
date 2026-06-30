@@ -14,6 +14,7 @@
 
 from typing import Any
 import logging
+import math
 import socket
 import subprocess
 import time
@@ -38,6 +39,25 @@ from .exceptions import (
 )
 
 ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
+
+
+def _router_timeout_header_value(timeout) -> str | None:
+    value = None
+    if isinstance(timeout, bool):
+        return None
+    if isinstance(timeout, (int, float)):
+        value = timeout
+    elif isinstance(timeout, tuple):
+        if len(timeout) == 0:
+            return None
+        value = timeout[-1]
+    else:
+        return None
+
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return str(value)
+
 
 class ConnectionStrategy(ABC):
     """Abstract base class for connection strategies."""
@@ -98,7 +118,8 @@ class GatewayConnectionStrategy(ConnectionStrategy):
                 self.config.gateway_namespace,
                 self.config.gateway_ready_timeout
             )
-            self.base_url = f"http://{ip_address}"
+            host = f"[{ip_address}]" if ":" in ip_address else ip_address
+            self.base_url = f"http://{host}"
             return self.base_url
         except Exception:
             status = "failure"
@@ -164,7 +185,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     "kubectl", "port-forward",
                     ROUTER_SERVICE_NAME,
                     f"{local_port}:8080",
-                    "-n", self.namespace
+                    "-n", self.config.router_namespace
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
@@ -248,7 +269,8 @@ class InClusterConnectionStrategy(ConnectionStrategy):
                 return self._cached_pod_ip_url or self._dns_url
             pod_ip = self._get_pod_ip()
             if pod_ip:
-                self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
                 self._resolved = True
                 return self._cached_pod_ip_url
         return self._dns_url
@@ -325,9 +347,39 @@ class SandboxConnector:
         if self.session:
             self.session.close()
 
-    def send_request(
-        self, method: str, endpoint: str, **kwargs: Any
-    ) -> requests.Response:
+    def send_request(self, method: str, endpoint: str, **kwargs : Any) -> requests.Response:
+        """Sends an HTTP request to the sandbox with standard parameters.
+
+        This method automatically resolves the gateway or tunnel connection,
+        appends the router/sandbox identity headers, overrides redirect options to
+        disable client-side automatic redirection (for security/SSRF mitigation),
+        and raises appropriate exceptions on errors.
+
+        Args:
+            method: The HTTP method (e.g., "GET", "POST").
+            endpoint: The API endpoint path.
+            **kwargs: Extra keyword arguments passed directly to the underlying
+                `requests.Session.request` invocation. Note that 'allow_redirects'
+                is explicitly popped and overridden.
+
+        Returns:
+            The `requests.Response` object representing the response from the sandbox.
+
+        Raises:
+            SandboxRequestError: If a connection error occurs, or if a redirect is
+                returned (status codes 301, 302, 303, 307, 308).
+            SandboxPortForwardError: If the local port-forward tunnel crashes.
+
+        Note on Redirect Handling:
+            Automatic redirection (SSRF risk mitigation) is explicitly disabled in the
+            HTTP client. If a redirect status code recognized by requests (301, 302,
+            303, 307, 308) is returned, a SandboxRequestError wrapping HTTPError is
+            raised. Non-redirect 3xx status codes, such as 300 (Multiple Choices), 304
+            (Not Modified), 305 (Use Proxy), and 306 (Switch Proxy), do not trigger
+            automatic client redirection or raise redirect errors; they are returned
+            directly to the caller because requests does not consider them redirects
+            and raise_for_status only raises for status codes 400 and above.
+        """
         try:
             # Establish connection (re-establishes if closed/dead)
             base_url = self.connect()
@@ -343,6 +395,9 @@ class SandboxConnector:
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
                 headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+                timeout_header = _router_timeout_header_value(kwargs.get("timeout"))
+                if timeout_header is not None:
+                    headers["X-Sandbox-Timeout"] = timeout_header
                 if self._get_pod_ip and not self._pod_ip_auth_failed:
                     if not self._pod_ip_resolved:
                         try:
@@ -361,8 +416,19 @@ class SandboxConnector:
                         headers["X-Sandbox-Pod-IP"] = self._pod_ip
             kwargs["headers"] = headers
 
-            # Send the request
-            response = self.session.request(method, url, **kwargs)
+            # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
+            # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
+            # ignored. We pop 'allow_redirects' here to prevent a TypeError due to duplicate keyword
+            # arguments when calling requests.Session.request.
+            kwargs.pop("allow_redirects", None)
+
+            # Send the request with redirections blocked
+            response = self.session.request(method, url, allow_redirects=False, **kwargs)
+            if response.is_redirect:
+                raise requests.exceptions.HTTPError(
+                    f"Redirection is not allowed (status code {response.status_code}).",
+                    response=response,
+                )
             response.raise_for_status()
             return response
         except SandboxPortForwardError:

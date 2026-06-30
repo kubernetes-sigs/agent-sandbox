@@ -11,7 +11,7 @@ disableKinds:
 
 menu:
   main:
-    - name: "Github"
+    - name: "GitHub"
       weight: 99
       pre: "<i class='fab fa-github pe-2'></i>"
       url: "https://github.com/kubernetes-sigs/agent-sandbox"
@@ -153,7 +153,7 @@ module:
   - disableWatch: true
     source: ../docs
     target: assets/additional/docs
-    includeFiles: ["testing.md", "api.md"]
+    includeFiles: ["testing.md", "api.md", "api-migration-guide.md"]
 
   imports:
     - path: github.com/google/docsy

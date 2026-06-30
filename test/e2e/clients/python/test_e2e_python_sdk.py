@@ -18,7 +18,10 @@ from test.e2e.clients.python.framework.context import TestContext
 import pytest
 import yaml
 from k8s_agent_sandbox import SandboxClient
-from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig
+from k8s_agent_sandbox.models import (
+    SandboxGatewayConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+)
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
 TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
@@ -68,6 +71,8 @@ def deploy_router(tc, temp_namespace):
 
     with open(ROUTER_YAML_PATH, "r") as f:
         manifest = f.read().replace("${ROUTER_IMAGE}", router_image)
+        # Enable unauthenticated mode for local E2E test execution
+        manifest = manifest.replace('value: "false"', 'value: "true"')
 
     print(f"Applying router manifest to namespace: {temp_namespace}")
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
@@ -109,6 +114,24 @@ def sandbox_warmpool(tc, temp_namespace, sandbox_template):
 
     tc.wait_for_warmpool_ready("python-sdk-warmpool", namespace=temp_namespace)
     print("Warmpool is ready.")
+    return "python-sdk-warmpool"
+
+
+@pytest.fixture(scope="function")
+def sandbox_coldpool(tc, temp_namespace, sandbox_template):
+    """Deploys a zero-replica sandbox warmpool for cold start tests"""
+    manifest = f"""apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: python-sdk-coldpool
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: {sandbox_template}
+"""
+    tc.apply_manifest_text(manifest, namespace=temp_namespace)
+    print("Coldpool manifest applied.")
+    return "python-sdk-coldpool"
 
 
 def run_sdk_tests(sandbox):
@@ -132,14 +155,14 @@ def run_sdk_tests(sandbox):
     assert read_content == file_content, f"File content mismatch: {read_content}"
 
 
-def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_router):
+def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_router, sandbox_coldpool):
     """Tests the Python SDK in Sandbox Router (Developer/Tunnel) mode without warmpool."""
-    client = SandboxClient()
+    config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
+    client = SandboxClient(connection_config=config)
     try:
         sandbox = client.create_sandbox(
-            template=sandbox_template,
+            warmpool=sandbox_coldpool,
             namespace=temp_namespace,
-            warmpool="none",
         )
         print("\n--- Running SDK tests without warmpool ---")
         run_sdk_tests(sandbox)
@@ -155,10 +178,11 @@ def test_python_sdk_router_mode_warmpool(
     tc, temp_namespace, sandbox_template, deploy_router, sandbox_warmpool
 ):
     """Tests the Python SDK in Sandbox Router mode with warmpool."""
-    client = SandboxClient()
+    config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
+    client = SandboxClient(connection_config=config)
     try:
         sandbox = client.create_sandbox(
-            template=sandbox_template,
+            warmpool=sandbox_warmpool,
             namespace=temp_namespace,
         )
         print("\n--- Running SDK tests with warmpool ---")
@@ -172,7 +196,7 @@ def test_python_sdk_router_mode_warmpool(
 
 
 def test_python_sdk_gateway_mode(
-    tc, temp_namespace, sandbox_template, deploy_router, deploy_gateway
+    tc, temp_namespace, sandbox_template, deploy_router, deploy_gateway, sandbox_coldpool
 ):
     """Tests the Python SDK in Production mode (with Gateway and Router) without warmpool."""
     config = SandboxGatewayConnectionConfig(
@@ -182,9 +206,8 @@ def test_python_sdk_gateway_mode(
     client = SandboxClient(connection_config=config)
     try:
         sandbox = client.create_sandbox(
-            template=sandbox_template,
+            warmpool=sandbox_coldpool,
             namespace=temp_namespace,
-            warmpool="none",
         )
         print("\n--- Running SDK tests without warmpool ---")
         run_sdk_tests(sandbox)
@@ -212,7 +235,7 @@ def test_python_sdk_gateway_mode_warmpool(
     client = SandboxClient(connection_config=config)
     try:
         sandbox = client.create_sandbox(
-            template=sandbox_template,
+            warmpool=sandbox_warmpool,
             namespace=temp_namespace,
         )
         print("\n--- Running SDK tests with warmpool ---")

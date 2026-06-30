@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import sys
+import subprocess
+
+# Add repository root to path
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from dev.ci.shared.runner import TestRunner
+
+class MigrationTestRunner(TestRunner):
+    def __init__(self):
+        super().__init__("migration-test", "Runs upgrade and rollback migration E2E tests in a clean kind cluster")
+        # Ensure that by default we skip the initial deploy so we start with a clean kind cluster.
+        self.parser.set_defaults(skip_initial_deploy=True)
+
+    def setup_cluster(self, args):
+        return super().setup_cluster(args, extra_push_images_args=["--controller-only"])
+
+    def run_tests(self, args):
+        # Configure kubeconfig env var for test commands inside the runner
+        kubeconfig = os.path.join(self.repo_root, "bin/KUBECONFIG")
+        os.environ["KUBECONFIG"] = kubeconfig
+
+        image_tag = os.environ["IMAGE_TAG"]
+
+        # 1. Run E2E Upgrade/Rollback via kubectl method
+        print("\n=======================================================")
+        print("Starting E2E storage migration tests via kubectl method")
+        print("=======================================================")
+        cmd = [
+            "python3",
+            os.path.join(self.repo_root, "dev/tools/test-migration.py"),
+            "--image-prefix", args.image_prefix,
+            "--image-tag", image_tag,
+            "--method", "kubectl",
+            "--test-rollback"
+        ]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print("kubectl migration E2E test failed!")
+            return result
+
+        # 2. Run E2E Upgrade/Rollback via helm method
+        print("\n====================================================")
+        print("Starting E2E storage migration tests via helm method")
+        print("====================================================")
+        cmd = [
+            "python3",
+            os.path.join(self.repo_root, "dev/tools/test-migration.py"),
+            "--image-prefix", args.image_prefix,
+            "--image-tag", image_tag,
+            "--method", "helm",
+            "--test-rollback"
+        ]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print("helm migration E2E test failed!")
+            return result
+
+        print("\nAll storage migration E2E tests completed successfully!")
+        return result
+
+if __name__ == "__main__":
+    runner = MigrationTestRunner()
+    runner.main()

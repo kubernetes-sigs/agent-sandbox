@@ -1,0 +1,94 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: secure-rl-production-job
+  namespace: default
+spec:
+  entrypoint: python /rl_production_loop.py
+  
+  # Dynamically installs the Agent Sandbox SDK on all Ray nodes at runtime.
+  # This avoids the need to build a custom Ray Docker image just for one dependency.
+  runtimeEnvYAML: |
+    pip:
+      - k8s-agent-sandbox
+      
+  rayClusterSpec:
+    # 1. Ray Head Node
+    # Runs the Ray Global Control Store (GCS) and scheduler. 
+    # Must run on standard K8s compute (not gVisor) for max performance.
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: 0.0.0.0
+      template:
+        spec:
+          containers:
+          - image: rayproject/ray:2.49.0-py310
+            name: ray-head
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            
+            # Needs at least 2 vCPUs so Redis and GCS boot quickly. 
+            # If set too low, KubeRay liveness probes will fail with 'Connection Refused'.
+            resources:
+              requests:
+                cpu: "2"
+                memory: "4Gi"
+              limits:
+                cpu: "2"
+                memory: "4Gi"
+            
+            # Explicit probes required to pass KubeRay validation.
+            readinessProbe:
+              httpGet:
+                path: /api/gcs_healthz
+                port: 8265
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 10
+            
+            livenessProbe:
+              httpGet:
+                path: /api/gcs_healthz
+                port: 8265
+              initialDelaySeconds: 15
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 10
+              
+            volumeMounts:
+            - mountPath: /rl_production_loop.py
+              name: code-volume
+              subPath: rl_production_loop.py
+          volumes:
+          - name: code-volume
+            configMap:
+              name: rl-code-config
+              
+    # 2. Ray Worker Nodes
+    # They run the Python SDK that 
+    # natively routes execution payloads to the isolated gVisor Sandboxes.
+    workerGroupSpecs:
+    - groupName: sandboxed-workers
+      replicas: 3
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+          - image: rayproject/ray:2.49.0-py310
+            name: ray-worker
+            
+            # This fits perfectly inside the ~3.8 vCPUs of a single 
+            # e2-standard-4 node, preventing the worker from getting stuck in 'Pending'.
+            resources:
+              requests:
+                cpu: "1"
+                memory: "4Gi"
+              limits:
+                cpu: "1"
+                memory: "4Gi"

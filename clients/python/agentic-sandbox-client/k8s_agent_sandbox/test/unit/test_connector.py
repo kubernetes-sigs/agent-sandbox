@@ -94,6 +94,34 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
         strategy.close()  # invalidates cache
         self.assertEqual(strategy.connect(), "http://10.0.0.2:8888")  # fresh resolve
 
+    def test_connect_brackets_ipv6_pod_ip(self):
+        """IPv6 pod IPs must be enclosed in brackets in URLs (RFC 3986)."""
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        strategy = InClusterConnectionStrategy(
+            "my-sandbox", "dev", config, get_pod_ip=lambda: "2001:db8::1"
+        )
+        self.assertEqual(strategy.connect(), "http://[2001:db8::1]:8888")
+
+
+class TestGatewayConnectionStrategy(unittest.TestCase):
+    """Unit tests for GatewayConnectionStrategy."""
+
+    def test_connect_brackets_ipv6(self):
+        """Gateway IPv6 addresses must be bracketed in the base URL."""
+        config = SandboxGatewayConnectionConfig(gateway_name="gw", gateway_namespace="default")
+        mock_helper = MagicMock()
+        mock_helper.wait_for_gateway_ip.return_value = "2001:db8::1"
+        strategy = GatewayConnectionStrategy(config, k8s_helper=mock_helper)
+        self.assertEqual(strategy.connect(), "http://[2001:db8::1]")
+
+    def test_connect_does_not_bracket_ipv4(self):
+        """Gateway IPv4 addresses must NOT be bracketed."""
+        config = SandboxGatewayConnectionConfig(gateway_name="gw", gateway_namespace="default")
+        mock_helper = MagicMock()
+        mock_helper.wait_for_gateway_ip.return_value = "34.56.78.90"
+        strategy = GatewayConnectionStrategy(config, k8s_helper=mock_helper)
+        self.assertEqual(strategy.connect(), "http://34.56.78.90")
+
 
 class TestExistingStrategiesDefaultHeaderInjection(unittest.TestCase):
     """Regression: existing strategies must still inject router headers by default."""
@@ -161,6 +189,8 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
 
     def _mock_ok_response(self):
         mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 200
+        mock_resp.is_redirect = False
         mock_resp.raise_for_status.return_value = None
         return mock_resp
 
@@ -192,6 +222,66 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         self.assertIn("X-Sandbox-Namespace", sent_headers)
         self.assertIn("X-Sandbox-Port", sent_headers)
 
+    def test_timeout_header_is_sent_for_router_requests(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=123)
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123")
+
+    def test_timeout_tuple_uses_last_value_for_router_requests(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=(3, 123))
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123")
+
+    def test_timeout_tuple_without_read_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=(5, None))
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
+    def test_unsupported_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=object())
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
+    def test_timeout_header_is_not_sent_for_in_cluster_requests(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        strategy = InClusterConnectionStrategy("my-sb", "my-ns", config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", timeout=123)
+
+        _, call_kwargs = mock_session.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
     def test_in_cluster_url_is_pod_dns(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         strategy = InClusterConnectionStrategy("my-sb", "my-ns", config)
@@ -204,6 +294,68 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         url = call_args[1]
         self.assertEqual(url, "http://my-sb.my-ns.svc.cluster.local:8888/execute")
 
+    def test_allow_redirects_is_false(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute")
+
+        call_args, call_kwargs = mock_session.request.call_args
+        self.assertFalse(call_kwargs.get("allow_redirects", True))
+
+    def test_allow_redirects_in_kwargs_popped(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_session.request.return_value = self._mock_ok_response()
+
+        connector.send_request("GET", "/execute", allow_redirects=True)
+
+        call_args, call_kwargs = mock_session.request.call_args
+        self.assertFalse(call_kwargs.get("allow_redirects", True))
+
+    def test_redirect_raises_error(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 302
+        mock_resp.is_redirect = True
+        mock_resp.raise_for_status.return_value = None
+        mock_session.request.return_value = mock_resp
+
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        with self.assertRaises(SandboxRequestError):
+            connector.send_request("GET", "/execute")
+
+    def test_304_does_not_raise_redirect_error(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 304
+        mock_resp.is_redirect = False
+        mock_resp.raise_for_status.return_value = None
+        mock_session.request.return_value = mock_resp
+
+        connector.send_request("GET", "/execute")
+
+    def test_300_does_not_raise_redirect_error(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 300
+        mock_resp.is_redirect = False
+        mock_resp.raise_for_status.return_value = None
+        mock_session.request.return_value = mock_resp
+
+        connector.send_request("GET", "/execute")
 
 if __name__ == "__main__":
     unittest.main()

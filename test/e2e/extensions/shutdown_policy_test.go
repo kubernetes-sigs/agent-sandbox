@@ -62,6 +62,15 @@ func TestSandboxClaimDeleteForeground(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "fg-delete-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	shutdownTime := metav1.NewTime(time.Now().Add(30 * time.Second)).Rfc3339Copy()
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -69,7 +78,7 @@ func TestSandboxClaimDeleteForeground(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDeleteForeground,
 				ShutdownTime:   &shutdownTime,
@@ -136,6 +145,15 @@ func TestSandboxClaimTTLDeleteForegroundAfterFinished(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-fg-delete-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	ttlAfterFinished := int32(5)
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -143,7 +161,7 @@ func TestSandboxClaimTTLDeleteForegroundAfterFinished(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDeleteForeground,
 				TTLSecondsAfterFinished: &ttlAfterFinished,
@@ -197,6 +215,15 @@ func TestSandboxClaimTTLAfterFinished(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-after-finished-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, testCtx.CreateWithCleanup(t.Context(), warmPool))
+
 	ttlAfterFinished := int32(2)
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -204,7 +231,7 @@ func TestSandboxClaimTTLAfterFinished(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
 				TTLSecondsAfterFinished: &ttlAfterFinished,
@@ -247,6 +274,15 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "earlier-of-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	shutdownTime := metav1.NewTime(time.Now().Add(30 * time.Second)).Rfc3339Copy()
 	ttlAfterFinished := int32(120)
 	claim := &extensionsv1beta1.SandboxClaim{
@@ -255,7 +291,7 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
 				ShutdownTime:            &shutdownTime,
@@ -300,13 +336,22 @@ func TestSandboxClaimFinishedWithoutTTLIsRetained(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "finished-no-ttl-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "finished-no-ttl-claim",
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
 			},
@@ -340,6 +385,15 @@ func TestSandboxClaimTTLZeroRetainPreservesFinishedConditionDuringCleanup(t *tes
 		}},
 	})
 
+	replicas := int32(0)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-zero-retain-warmpool", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
 	ttlAfterFinished := int32(0)
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -347,7 +401,7 @@ func TestSandboxClaimTTLZeroRetainPreservesFinishedConditionDuringCleanup(t *tes
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
 			Lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyRetain,
 				TTLSecondsAfterFinished: &ttlAfterFinished,

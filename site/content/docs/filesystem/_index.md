@@ -15,13 +15,13 @@ All file operations are also available as async methods via `AsyncSandboxClient`
 - A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed: `pip install k8s-agent-sandbox`.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. A `SandboxTemplate` defines the pod spec (image, resources, probes, optional `runtimeClassName` for gVisor/Kata) used when a sandbox is created. It must exist in the target namespace before `create_sandbox(template=...)` will succeed — otherwise the call returns a `NotFound` error.
+- A `SandboxWarmPool` named `python-sandbox-pool` (backed by a `SandboxTemplate`) applied to your cluster. The `SandboxTemplate` defines the pod spec (image, resources, probes, optional `runtimeClassName` for gVisor/Kata) used when a sandbox is created, and the `SandboxWarmPool` pre-warms instances of it. Both must exist in the target namespace before `create_sandbox(warmpool=...)` will succeed — otherwise the call returns a `NotFound` error.
 
-Apply this minimal template once per namespace:
+Apply this minimal template and warm pool once per namespace:
 
 ```bash
 kubectl apply -n default -f - <<'EOF'
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: python-sandbox-template
@@ -37,6 +37,15 @@ spec:
           httpGet: { path: "/", port: 8888 }
           periodSeconds: 1
       restartPolicy: OnFailure
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: python-sandbox-pool
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: python-sandbox-template
 EOF
 ```
 
@@ -48,7 +57,7 @@ The full template (with isolation runtime options) lives at [`clients/python/age
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
 ```
 
 ## Write a file

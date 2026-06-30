@@ -1,0 +1,22 @@
+name: Feature Request
+description: Propose a new feature or enhancement for agent-sandbox
+labels: ["kind/feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to propose a new feature or enhancement!
+  - type: textarea
+    id: feature
+    attributes:
+      label: What would you like to be added?
+      description: A clear and concise description of the feature or enhancement you would like to see implemented.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is this needed?
+      description: Describe the underlying problem, use case, or motivation for adding this feature.
+    validations:
+      required: true

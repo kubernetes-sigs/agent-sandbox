@@ -17,6 +17,7 @@ package v1beta1
 import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
@@ -53,6 +54,20 @@ const (
 
 	// EnvVarsInjectionPolicyDisallowed prevents a SandboxClaim from injecting any environment variables.
 	EnvVarsInjectionPolicyDisallowed EnvVarsInjectionPolicy = "Disallowed"
+)
+
+// VolumeClaimTemplatesPolicy defines whether a SandboxClaim is allowed to inject or override volume claim templates.
+type VolumeClaimTemplatesPolicy string
+
+const (
+	// VolumeClaimTemplatesPolicyDisallowed prevents a SandboxClaim from specifying any volume claim templates.
+	VolumeClaimTemplatesPolicyDisallowed VolumeClaimTemplatesPolicy = "Disallowed"
+
+	// VolumeClaimTemplatesPolicyAllowed allows a SandboxClaim to inject new volume claim templates, but not override existing ones.
+	VolumeClaimTemplatesPolicyAllowed VolumeClaimTemplatesPolicy = "Allowed"
+
+	// VolumeClaimTemplatesPolicyOverrides allows a SandboxClaim to inject new and override existing volume claim templates.
+	VolumeClaimTemplatesPolicyOverrides VolumeClaimTemplatesPolicy = "Overrides"
 )
 
 // NetworkPolicySpec defines the desired state of the NetworkPolicy.
@@ -127,13 +142,19 @@ type SandboxTemplateSpec struct {
 	// +optional
 	EnvVarsInjectionPolicy EnvVarsInjectionPolicy `json:"envVarsInjectionPolicy,omitempty"`
 
+	// volumeClaimTemplatesPolicy allows a SandboxClaim to inject or override volume claim templates defined in the template.
+	// If set to Disallowed, the SandboxClaim will be rejected if it specifies any volume claim templates.
+	// +kubebuilder:validation:Enum=Disallowed;Allowed;Overrides
+	// +kubebuilder:default=Disallowed
+	// +optional
+	VolumeClaimTemplatesPolicy VolumeClaimTemplatesPolicy `json:"volumeClaimTemplatesPolicy,omitempty"`
+
 	// service controls whether the controller should automatically create a
 	// headless Service for Sandboxes created from this template.
 	// When unset, the controller preserves existing Services for backward
 	// compatibility but does not create new ones. Set to true to enable or false
 	// to explicitly disable and remove the Service.
-	//nolint:kubeapilinter
-	//nolint:nobools // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
 }
@@ -141,6 +162,8 @@ type SandboxTemplateSpec struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
+// +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // SandboxTemplate is the Schema for the sandbox template API.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
@@ -163,5 +186,8 @@ type SandboxTemplateList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxTemplate{}, &SandboxTemplateList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxTemplate{}, &SandboxTemplateList{})
+		return nil
+	})
 }

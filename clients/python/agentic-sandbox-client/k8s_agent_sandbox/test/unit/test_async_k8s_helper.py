@@ -38,17 +38,17 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             "shutdownPolicy": "Delete",
         }
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", lifecycle=lifecycle
+            "test-claim", "test-warmpool", "test-namespace", lifecycle=lifecycle
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
         body = call_kwargs["body"]
         self.assertEqual(body["spec"]["lifecycle"], lifecycle)
-        self.assertEqual(body["spec"]["sandboxTemplateRef"]["name"], "test-template")
+        self.assertEqual(body["spec"]["warmPoolRef"]["name"], "test-warmpool")
 
     async def test_no_lifecycle_omits_key(self):
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace"
+            "test-claim", "test-warmpool", "test-namespace"
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
@@ -61,7 +61,7 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             "shutdownPolicy": "Delete",
         }
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace",
+            "test-claim", "test-warmpool", "test-namespace",
             annotations={"key": "val"},
             labels={"agent": "test"},
             lifecycle=lifecycle,
@@ -73,30 +73,26 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["metadata"]["labels"], {"agent": "test"})
         self.assertEqual(body["metadata"]["annotations"], {"key": "val"})
 
-    async def test_create_claim_with_warmpool_none(self):
+    async def test_pod_metadata_included_in_manifest(self):
+        pod_metadata = {"labels": {"client-id": "tenant-a"}}
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", warmpool="none"
+            "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
         body = call_kwargs["body"]
-        self.assertEqual(body["spec"]["warmpool"], "none")
+        self.assertEqual(
+            body["spec"]["additionalPodMetadata"]["labels"]["client-id"], "tenant-a"
+        )
 
-    async def test_create_claim_with_specific_warmpool(self):
+    async def test_no_pod_metadata_omits_key(self):
         await self.helper.create_sandbox_claim(
-            "test-claim", "test-template", "test-namespace", warmpool="custom-pool"
+            "test-claim", "test-warmpool", "test-namespace"
         )
 
         call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
         body = call_kwargs["body"]
-        self.assertEqual(body["spec"]["warmpool"], "custom-pool")
-
-    async def test_create_claim_warmpool_omitted(self):
-        await self.helper.create_sandbox_claim("test-claim", "test-template", "test-namespace")
-
-        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
-        body = call_kwargs["body"]
-        self.assertNotIn("warmpool", body["spec"])
+        self.assertNotIn("additionalPodMetadata", body["spec"])
 
 
 class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
@@ -176,7 +172,7 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
                 "object": {
                     "status": {
                         "conditions": [{"type": "Ready", "status": "True"}],
-                        "podIPs": ["10.244.0.5", "fd00::5"],
+                        "podIPs": ["::ffff:10.244.0.5", "fd00::5"],
                     }
                 },
             }
@@ -211,6 +207,31 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
             result = await self.helper.wait_for_sandbox_ready("my-sandbox", "default", timeout=10)
 
         self.assertIsNone(result)
+
+class TestAsyncK8sHelperDeleteSandboxClaim(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self):
+        self.helper = AsyncK8sHelper()
+        self.helper._initialized = True
+        self.helper.custom_objects_api = MagicMock()
+        self.helper.core_v1_api = MagicMock()
+
+    async def test_delete_404_is_ignored(self):
+        from kubernetes_asyncio import client as async_client
+        exc = async_client.ApiException(status=404)
+        self.helper.custom_objects_api.delete_namespaced_custom_object = AsyncMock(side_effect=exc)
+
+        await self.helper.delete_sandbox_claim("missing-claim", "default")
+
+    async def test_delete_non_404_reraises(self):
+        from kubernetes_asyncio import client as async_client
+        exc = async_client.ApiException(status=403)
+        self.helper.custom_objects_api.delete_namespaced_custom_object = AsyncMock(side_effect=exc)
+
+        with self.assertRaises(async_client.ApiException) as ctx:
+            await self.helper.delete_sandbox_claim("claim", "default")
+        self.assertEqual(ctx.exception.status, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,7 @@ type connector struct {
 	namespace  string
 	serverPort int
 	baseURL    string
+	podIP      string
 	lastError  error
 
 	requestTimeout    time.Duration
@@ -111,6 +112,9 @@ func newConnector(cfg connectorConfig) *connector {
 		ownsTransport:     cfg.HTTPTransport == nil,
 		httpClient: &http.Client{
 			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		log:     cfg.Log,
 		tracer:  cfg.Tracer,
@@ -123,6 +127,21 @@ func (c *connector) SetIdentity(sandboxName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sandboxID = sandboxName
+}
+
+// SetPodIP sets the sandbox pod's IP address to be sent as X-Sandbox-Pod-IP.
+// The input is sanitized and validated to prevent net/http header injection errors.
+func (c *connector) SetPodIP(ip string) {
+	validIP := selectPodIP([]string{ip})
+	shouldLog := (validIP == "" && strings.TrimSpace(ip) != "")
+
+	c.mu.Lock()
+	c.podIP = validIP
+	c.mu.Unlock()
+
+	if shouldLog {
+		c.log.V(1).Info("skipping invalid pod IP address", "ip", ip)
+	}
 }
 
 // Connect delegates to the strategy to discover and set the base URL.
@@ -153,6 +172,7 @@ func (c *connector) Close() error {
 	c.baseURL = ""
 	c.lastError = nil
 	c.sandboxID = ""
+	c.podIP = ""
 	c.mu.Unlock()
 	err := c.strategy.Close()
 	if c.ownsTransport {
@@ -198,6 +218,12 @@ func (cc *cancelOnClose) Close() error {
 
 // SendRequest sends an HTTP request to the sandbox router with required
 // headers and retry logic for transient failures.
+//
+// Note on Redirect Handling:
+// Automatic HTTP redirection is disabled in the underlying HTTP client to mitigate
+// client-side SSRF vulnerabilities. If the sandbox returns a redirect status code
+// (e.g., 301, 302, 303, 307, 308), the response is returned directly to the caller
+// with its body unclosed and a nil error (instead of being followed automatically).
 func (c *connector) SendRequest(ctx context.Context, method, endpoint string, body io.Reader, contentType string, maxRetries int) (*http.Response, error) {
 	limit := maxRetries
 	if limit <= 0 {
@@ -236,6 +262,7 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		sandboxID := c.sandboxID
 		namespace := c.namespace
 		port := c.serverPort
+		podIP := c.podIP
 		c.mu.Unlock()
 
 		var bodyReader io.Reader
@@ -265,7 +292,20 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 		req.Header.Set(headerSandboxID, sandboxID)
 		req.Header.Set(headerSandboxNamespace, namespace)
 		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining > 0 {
+				timeout := remaining
+				if c.perAttemptTimeout > 0 && c.perAttemptTimeout < timeout {
+					timeout = c.perAttemptTimeout
+				}
+				req.Header.Set(headerSandboxTimeout, strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64))
+			}
+		}
 		req.Header.Set(headerRequestID, reqID)
+		if podIP != "" {
+			req.Header.Set(headerSandboxPodIP, podIP)
+		}
 		if contentType != "" {
 			req.Header.Set("Content-Type", contentType)
 		}

@@ -1,15 +1,28 @@
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
   # This will be the name of your sandbox pod and its associated resources.
   name: my-secure-sandbox
-  # This MUST be in the same namespace as the SandboxTemplate.
+  # This MUST be in the same namespace as the SandboxWarmPool.
   namespace: default
 spec:
-  # It points to the template.
-  sandboxTemplateRef:
-    # This name must exactly match the 'metadata.name' of your SandboxTemplate.
-    name: secure-datascience-template
+  # It points to the warm pool.
+  warmPoolRef:
+    # This name must exactly match the 'metadata.name' of your SandboxWarmPool.
+    name: sandboxwarmpool-example
+  # Defines additional or override PVCs for the sandbox.
+  # volumeClaimTemplatesPolicy field in the SandboxTemplate determines if
+  # these PVCs are allowed and how they are merged.
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        storageClassName: "dynamic-rwo"
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 6Gi
   lifecycle:
     # Policy can be "Delete" (clean up everything) or "Retain" (stop resources but keep objects).
     # Default is "Retain".

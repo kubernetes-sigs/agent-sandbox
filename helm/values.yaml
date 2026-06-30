@@ -41,7 +41,7 @@ controller:
   # kubeApiBurst: 10
   # sandboxConcurrentWorkers: 1
   ##### The following workers are only active when controller.extensions=true.
-  # sandboxClaimConcurrentWorkers: 1
+  # sandboxClaimConcurrentWorkers: 50
   # sandboxWarmPoolConcurrentWorkers: 1
   # sandboxTemplateConcurrentWorkers: 1
   ##### extraArgs passes additional flags not listed above (e.g. zap logging flags).
@@ -60,3 +60,26 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Pod-level securityContext (spec.template.spec.securityContext). Default null — omitted unless set.
+# Example for Kyverno / restricted Pod Security:
+# podSecurityContext:
+#   runAsNonRoot: true
+#   seccompProfile:
+#     type: RuntimeDefault
+podSecurityContext: null
+
+# Container-level securityContext for the controller. Default null — omitted unless set.
+# Example:
+# containerSecurityContext:
+#   allowPrivilegeEscalation: false
+#   capabilities:
+#     drop:
+#       - ALL
+#   runAsNonRoot: true
+#   seccompProfile:
+#     type: RuntimeDefault
+containerSecurityContext: null
+
+# Name of the webhook service.
+webhookServiceName: agent-sandbox-webhook-service

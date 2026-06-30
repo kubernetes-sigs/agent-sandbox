@@ -48,8 +48,7 @@ Before running this test, ensure the following prerequisites are met:
           - --enable-tracing
           - --zap-log-level=debug
           - --zap-encoder=json
-          - --kube-api-qps=1000
-          - --kube-api-burst=1000
+          - --kube-api-qps=-1
           - --sandbox-concurrent-workers=1000
           - --sandbox-claim-concurrent-workers=1000
           - --sandbox-warm-pool-concurrent-workers=1000
@@ -106,7 +105,7 @@ The primary test parameters can be modified by editing the variables at the top 
 - **`QPS`**: The maximum creation rate (Queries Per Second) for SandboxClaim objects.
 - **`TOTAL_BURSTS`**: The total number of burst cycles to run.
 - **`WARMPOOL_SIZE`**: The target number of pre-warmed sandboxes to maintain.
-- **`RUNTIME_CLASS`**: The RuntimeClassName for the SandboxTemplate such as `gvisor`.
+- **`RUNTIME_CLASS`**: The RuntimeClassName for the underlying SandboxTemplate linked to the pool, such as `gvisor`.
 
 The total number of claims created by the test will be `BURST_SIZE * TOTAL_BURSTS`.
 

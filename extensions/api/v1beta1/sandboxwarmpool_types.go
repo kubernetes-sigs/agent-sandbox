@@ -16,6 +16,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
@@ -28,13 +29,21 @@ const (
 	TemplateRefField = ".spec.sandboxTemplateRef.name"
 )
 
+// SandboxTemplateRef references a SandboxTemplate.
+type SandboxTemplateRef struct {
+	// name of the SandboxTemplate
+	// +required
+	Name string `json:"name"`
+}
+
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpec struct {
 	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
-	// +required
+	// +optional
+	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
-	Replicas int32 `json:"replicas"`
+	Replicas *int32 `json:"replicas,omitempty"`
 
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
@@ -89,7 +98,10 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyReplicas"
+// +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".spec.replicas"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.
 type SandboxWarmPool struct {
 	metav1.TypeMeta `json:",inline"`
@@ -116,5 +128,8 @@ type SandboxWarmPoolList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxWarmPool{}, &SandboxWarmPoolList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxWarmPool{}, &SandboxWarmPoolList{})
+		return nil
+	})
 }

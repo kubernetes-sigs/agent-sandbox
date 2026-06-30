@@ -149,7 +149,7 @@ data:
         "\n",
         "\n",
         "os.environ[\"GOOGLE_API_KEY\"] = \"\"\n",
-        "AGENT_SANDBOX_API_URL = \"http://python-sandbox-service:8888/execute\"\n",
+        "AGENT_SANDBOX_API_URL = \"http://python-sandbox-service:8888/execute-python\"\n",
         "\n",
         "\n",
         "@tool\n",
@@ -187,10 +187,9 @@ data:
         "    print(f\"--- Executing code ---\\n{code}\\n----------------------\")\n",
         "\n",
         "    try:\n",
-        "        encoded_code = base64.b64encode(code.encode('utf-8')).decode('utf-8')\n",
         "        response = requests.post(\n",
         "            AGENT_SANDBOX_API_URL,\n",
-        "            json={\"command\": f'python -c \"import base64; exec(base64.b64decode(\\'{encoded_code}\\'))\"'}, # Ensure your API accepts 'command' or 'code'\n",
+        "            json={\"code\": code},\n",
         "            timeout=60\n",
         "        )\n",
         "        response.raise_for_status()\n",
@@ -276,7 +275,7 @@ data:
     kagglehub
     pandas
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: jupyterlab-sandbox

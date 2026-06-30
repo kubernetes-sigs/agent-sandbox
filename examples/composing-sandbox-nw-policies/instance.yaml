@@ -1,4 +1,4 @@
-apiVersion: custom.agents.x-k8s.io/v1alpha1
+apiVersion: custom.agents.x-k8s.io/v1beta1
 kind: AgenticSandbox
 metadata:
   name: demo

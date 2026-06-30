@@ -657,8 +657,7 @@ class TestMaxKeepaliveConnections:
             assert sandbox_router.max_keepalive_connections == 50
 
     def test_default_when_env_var_unset(self):
-        env = {k: v for k, v in os.environ.items() if k != "MAX_KEEPALIVE_CONNECTIONS"}
-        with patch.dict(os.environ, env, clear=True):
+        with patch.dict(os.environ, {"ALLOW_UNAUTHENTICATED_ROUTER": "true"}, clear=True):
             importlib.reload(sandbox_router)
             assert sandbox_router.max_keepalive_connections == 20
 

@@ -2,12 +2,13 @@
 	{{ $name := trim (.Get "name") " " }}
 	{{ $include := trim (.Get "include") " "}}
 	{{ $codelang := .Get "codelang" }}
+	{{ $options := .Get "options" | default "" }}
 	{{ if not (.Parent.Scratch.Get "tabs") }}
 	{{ .Parent.Scratch.Set "tabs" slice }}
 	{{ end }}
 	{{ with .Inner }}
 	{{ if $codelang }}
-	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "content" (highlight . $codelang "") ) }}
+	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "content" (highlight . $codelang $options) ) }}
 	{{ else }}
 	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "content" . ) }}
 	{{ end }}

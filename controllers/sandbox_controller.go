@@ -167,7 +167,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		"sandbox.namespace": sandbox.Namespace,
 	}
 	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
-		initialAttrs[sandboxv1beta1.CreatedByLabel] = val
+		initialAttrs[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
 	}
 	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
 	defer end()

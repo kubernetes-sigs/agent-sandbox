@@ -3470,3 +3470,69 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	require.Len(t, got.Status.Conditions, 1,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
 }
+
+type mockTracer struct {
+	asmetrics.Instrumenter
+	capturedAttrs map[string]string
+}
+
+func (m *mockTracer) StartSpan(ctx context.Context, obj metav1.Object, spanName string, attrs map[string]string) (context.Context, func()) {
+	if len(attrs) > 0 {
+		m.capturedAttrs = attrs
+	}
+	return ctx, func() {}
+}
+
+func (m *mockTracer) GetTraceContext(ctx context.Context) string {
+	return ""
+}
+
+func (m *mockTracer) IsRecording(ctx context.Context) bool {
+	return true
+}
+
+func (m *mockTracer) AddEvent(ctx context.Context, name string, attrs map[string]string) {}
+
+func TestReconcile_TracingNormalization(t *testing.T) {
+	sbName := "tracing-test-sandbox"
+	sbNs := "default"
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbName,
+			Namespace: sbNs,
+			UID:       "uid-1",
+			Labels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "invalid-value",
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "nginx"}},
+				},
+			},
+		},
+	}
+
+	fc := newFakeClient(sandbox)
+	mt := &mockTracer{}
+	r := &SandboxReconciler{
+		Client:        fc,
+		Scheme:        Scheme,
+		Tracer:        mt,
+		ClusterDomain: "cluster.local",
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sbName, Namespace: sbNs}}
+
+	var sb sandboxv1beta1.Sandbox
+	require.NoError(t, fc.Get(ctx, req.NamespacedName, &sb))
+
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	require.NotNil(t, mt.capturedAttrs)
+	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
+}
+

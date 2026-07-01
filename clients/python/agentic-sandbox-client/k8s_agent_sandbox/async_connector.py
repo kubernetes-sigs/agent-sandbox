@@ -15,7 +15,6 @@
 import asyncio
 import logging
 import math
-import ssl
 from typing import Callable, Awaitable
 
 import httpx
@@ -234,6 +233,8 @@ class AsyncSandboxConnector:
         # layer via the per-request sni_hostname extension. Honors any caller-
         # supplied extensions but does not silently overwrite them.
         if self._sni_override is not None:
+            if not any(k.lower() == "host" for k in headers):
+                headers["Host"] = self._sni_override
             extensions = kwargs.pop("extensions", None) or {}
             extensions.setdefault("sni_hostname", self._sni_override)
             kwargs["extensions"] = extensions

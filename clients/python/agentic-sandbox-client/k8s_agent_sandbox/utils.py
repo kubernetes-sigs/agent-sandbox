@@ -171,13 +171,14 @@ def _looks_like_pem(s: str) -> bool:
 
 
 def build_ssl_context(tls: "TLSConfig | None") -> Union[bool, ssl.SSLContext]:
-    """Build a value suitable for httpx ``verify=`` / requests ``Session.verify``.
+    """Build a value suitable for httpx ``verify=`` or an HTTPS adapter/transport.
 
     Returns:
         - ``True`` when no TLS config is provided (use system default CAs).
-        - ``False`` when ``insecure_skip_verify`` is set.
-        - An ``ssl.SSLContext`` when a custom CA is provided. The CA may be
-          either a file path or inline PEM content; the form is auto-detected.
+        - ``False`` when ``insecure_skip_verify`` is set (disabled verification).
+        - An ``ssl.SSLContext`` intended for passing into an HTTPS adapter/transport
+          when a custom CA is provided. The CA may be either a file path or
+          inline PEM content; the form is auto-detected.
 
     Raises ``ValueError`` on malformed CA content.
     """

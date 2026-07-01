@@ -363,22 +363,23 @@ class SandboxConnector:
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
-        # TLS plumbing for the https:// adapter. If a PEM string was provided we
-        # build an SSLContext directly (avoids touching the disk); otherwise we
-        # fall back to requests' native verify= path. server_name_override is
-        # honored via the custom _TLSAdapter so connections to addresses that
-        # don't match the cert CN (e.g. LocalTunnel 127.0.0.1) can be validated.
+        # TLS plumbing for the https:// adapter. If a custom CA is provided
+        # (either inline PEM or file path), we build an SSLContext directly;
+        # otherwise we fall back to requests' native verify= path.
+        # server_name_override is honored via the custom _TLSAdapter so
+        # connections to addresses that don't match the cert CN (e.g.
+        # LocalTunnel 127.0.0.1) can be validated.
         self._tls_temp_ca_path: str | None = None
         tls: TLSConfig | None = getattr(connection_config, "tls", None)
-        sni_override = tls.server_name_override if tls else None
+        self._sni_override = tls.server_name_override if tls else None
 
         ssl_ctx = build_ssl_context(tls)
-        if isinstance(ssl_ctx, ssl.SSLContext) or sni_override is not None:
+        if isinstance(ssl_ctx, ssl.SSLContext) or self._sni_override is not None:
             self.session.mount(
                 "https://",
                 _TLSAdapter(
                     ssl_context=ssl_ctx if isinstance(ssl_ctx, ssl.SSLContext) else None,
-                    server_name=sni_override,
+                    server_name=self._sni_override,
                     max_retries=retries,
                 ),
             )
@@ -389,8 +390,7 @@ class SandboxConnector:
             if ssl_ctx is False:
                 self.session.verify = False
             else:
-                # Handles the file-path ca_cert case; PEM strings go through
-                # the SSLContext branch above.
+                # Fallback path when no custom CA or SNI override is provided.
                 self._tls_temp_ca_path = apply_tls_to_requests_session(self.session, tls)
 
 
@@ -469,6 +469,10 @@ class SandboxConnector:
             url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
             headers = kwargs.get("headers", {}).copy()
+            if self._sni_override is not None and not any(
+                k.lower() == "host" for k in headers
+            ):
+                headers["Host"] = self._sni_override
             if self.strategy.should_inject_router_headers():
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace

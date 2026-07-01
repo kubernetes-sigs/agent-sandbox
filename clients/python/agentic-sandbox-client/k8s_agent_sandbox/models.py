@@ -19,7 +19,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 class TLSConfig(BaseModel):
     """Optional TLS settings for HTTPS connections."""
-    # PEM-encoded CA bundle content OR an absolute file path. The SDK detects
+    # PEM-encoded CA bundle content OR a file path. The SDK detects
     # which form was passed by looking for a "-----BEGIN" header.
     ca_cert: Optional[str] = None
     # Disable certificate verification. Intended for development and self-signed

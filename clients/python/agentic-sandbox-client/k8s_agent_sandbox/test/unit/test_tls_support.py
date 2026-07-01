@@ -207,7 +207,7 @@ class TestBuildSSLContext(unittest.TestCase):
         # branch is taken (vs file-path branch) for a "-----BEGIN" header.
         # ssl.load_verify_locations will reject malformed PEM with SSLError,
         # which the helper wraps as ValueError. That alone proves PEM mode.
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "PEM is invalid"):
             build_ssl_context(TLSConfig(ca_cert=SELF_SIGNED_PEM))
 
 

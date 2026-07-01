@@ -362,6 +362,8 @@ _Appears in:_
 
 
 SandboxSpec defines the desired state of Sandbox.
+volumeClaimTemplates is immutable after creation; SandboxTemplate's copy of the
+same field is not affected by this restriction and stays editable.
 
 
 

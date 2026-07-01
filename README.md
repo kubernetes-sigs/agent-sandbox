@@ -100,6 +100,22 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```
 
+### GitOps / kustomize (Config Sync, Argo CD)
+
+`manifest.yaml` and `extensions.yaml` are designed for sequential `kubectl apply -f`,
+so they both declare the `agent-sandbox-controller` Deployment (the extensions copy
+adds `--extensions`). `kubectl apply` tolerates this (last write wins), but kustomize
+and GitOps engines reject the duplicate resource id.
+
+For those consumers, each release also publishes a single, collision-free `install.yaml`
+(core + extensions, controller declared once with extensions enabled):
+
+```sh
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/install.yaml
+```
+
+You can also render it directly from source with `kubectl kustomize k8s/`.
+
 ### Go SDK
 
 To interact with the agent-sandbox programmatically from Go, use the Go SDK:

@@ -98,8 +98,23 @@ def main():
     if not os.path.exists("release_assets"):
         os.makedirs("release_assets")
 
-    all_yaml_files = glob.glob("k8s/**/*.yaml", recursive=True)
+    # kustomization.yaml files describe how to assemble the manifests (see the
+    # all-in-one install.yaml below); they are not themselves resources, so they
+    # must not be concatenated into the flat manifest/extensions assets.
+    all_yaml_files = [
+        f
+        for f in glob.glob("k8s/**/*.yaml", recursive=True)
+        if os.path.basename(f) != "kustomization.yaml"
+    ]
     image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}"
+
+    def replace_image(text):
+        """Replace the ko:// image placeholder with the published controller image."""
+        return re.sub(
+            r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
+            image_url,
+            text,
+        )
 
     # --- Generate manifest.yaml ---
     print("INFO: Preparing core manifest.yaml")
@@ -115,11 +130,7 @@ def main():
     with open("release_assets/manifest.yaml", "r") as file:
         filedata = file.read()
 
-    filedata = re.sub(
-        r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
-        image_url,
-        filedata,
-    )
+    filedata = replace_image(filedata)
 
     with open("release_assets/manifest.yaml", "w") as file:
         file.write(filedata)
@@ -139,22 +150,36 @@ def main():
     with open("release_assets/extensions.yaml", "r") as file:
         filedata = file.read()
 
-    filedata = re.sub(
-        r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
-        image_url,
-        filedata,
-    )
+    filedata = replace_image(filedata)
 
     with open("release_assets/extensions.yaml", "w") as file:
         file.write(filedata)
     print("INFO: Successfully created release_assets/extensions.yaml")
 
+    # --- Generate install.yaml (all-in-one, kustomize/GitOps friendly) ---
+    # manifest.yaml + extensions.yaml both declare the controller Deployment and
+    # are meant for sequential `kubectl apply -f` (last-write-wins). That duplicate
+    # resource id is rejected by kustomize/Config Sync/Argo CD, so we also publish a
+    # single collision-free asset rendered from k8s/kustomization.yaml.
+    print("INFO: Preparing all-in-one install.yaml")
+    result = subprocess.run(
+        ["kubectl", "kustomize", "k8s"], check=True, capture_output=True, text=True
+    )
+    print(f"INFO: Replacing image placeholder in install.yaml with: {image_url}")
+    with open("release_assets/install.yaml", "w") as file:
+        file.write(replace_image(result.stdout))
+    print("INFO: Successfully created release_assets/install.yaml")
+
+    # --- Publish Draft Release ---
     if args.publish:
         print(f"INFO: Publishing draft release {tag} to GitHub...")
         manifest_path = "release_assets/manifest.yaml"
         extensions_path = "release_assets/extensions.yaml"
+        install_path = "release_assets/install.yaml"
 
-        if not os.path.exists(manifest_path) or not os.path.exists(extensions_path):
+        if not all(
+            os.path.exists(p) for p in (manifest_path, extensions_path, install_path)
+        ):
             print("❌ Release assets missing. Cannot publish.")
             sys.exit(1)
 
@@ -173,6 +198,7 @@ def main():
                 "gh", "release", "upload", tag,
                 manifest_path,
                 extensions_path,
+                install_path,
                 "--clobber",
                 "--repo", "kubernetes-sigs/agent-sandbox",
             ])
@@ -200,6 +226,7 @@ def main():
                 "gh", "release", "create", tag,
                 manifest_path,
                 extensions_path,
+                install_path,
             ]
 
             if notes_file:

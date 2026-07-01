@@ -171,6 +171,7 @@ func NormalizeCreatedBy(createdBy string) string {
 }
 
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.
+// The createdBy value is automatically normalized.
 func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition, createdBy string) {
 	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition, NormalizeCreatedBy(createdBy)).Inc()
 }

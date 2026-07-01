@@ -228,7 +228,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if claim.Labels != nil {
 		if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok && val != "" {
 			initialAttrs = map[string]string{
-				v1beta1.CreatedByLabel: val,
+				v1beta1.CreatedByLabel: asmetrics.NormalizeCreatedBy(val),
 			}
 		}
 	}
@@ -971,11 +971,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				podCondition = "ready"
 			}
 			templateName := r.resolveTemplateName(adopted)
-			createdBy := "unknown"
-			if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok && val != "" {
-				createdBy = val
-			}
-			asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition, createdBy)
+			asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition, claim.Labels[v1beta1.CreatedByLabel])
 
 			return true, nil
 		}()
@@ -1415,11 +1411,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxProvisioned", "Provisioning", "Created Sandbox %q", sandbox.Name)
 	}
 
-	createdBy := "unknown"
-	if val, ok := claim.Labels[v1beta1.CreatedByLabel]; ok && val != "" {
-		createdBy = val
-	}
-	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, claim.Spec.WarmPoolRef.Name, "not_ready", createdBy)
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, template.Name, asmetrics.LaunchTypeCold, claim.Spec.WarmPoolRef.Name, "not_ready", claim.Labels[v1beta1.CreatedByLabel])
 
 	return sandbox, nil
 }

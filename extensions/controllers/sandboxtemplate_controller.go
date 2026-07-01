@@ -87,10 +87,14 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		existingNP := &networkingv1.NetworkPolicy{}
 		err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
 		if err == nil {
+			// Unmanaged mode means the user has opted out of NP management for
+			// this template. If the NP is not ours we intentionally do nothing:
+			// silently skipping honors the opt-out (contrast with Managed below).
 			if !metav1.IsControlledBy(existingNP, template) {
-				logger.Info("Skipping deletion of NetworkPolicy not owned by template", "name", npName)
-				r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile",
-					"Skipping deletion of NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s", npNamespace, npName, template.Name)
+				msg := fmt.Sprintf("skipping deletion of NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s",
+					npNamespace, npName, template.Name)
+				logger.Info(msg)
+				r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile", "%s", msg)
 				return ctrl.Result{}, nil
 			}
 			// Delete can race with an external deletion; treat NotFound as success to avoid noisy requeues.
@@ -135,10 +139,14 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
 
 	if err == nil {
+		// Managed mode means we are the source of truth for this NP name. A
+		// collision with an unowned NP is a hard failure (contrast with the
+		// Unmanaged skip above), otherwise we would silently drift.
 		if !metav1.IsControlledBy(existingNP, template) {
-			r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile",
-				"Refusing to update NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s", npNamespace, npName, template.Name)
-			return ctrl.Result{}, fmt.Errorf("refusing to update NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s", npNamespace, npName, template.Name)
+			msg := fmt.Sprintf("refusing to update NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s",
+				npNamespace, npName, template.Name)
+			r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile", "%s", msg)
+			return ctrl.Result{}, fmt.Errorf("%s", msg)
 		}
 		// Policy exists: Semantic DeepEqual check for drift
 		if equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {

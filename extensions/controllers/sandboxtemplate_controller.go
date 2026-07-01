@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
@@ -86,17 +87,29 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		existingNP := &networkingv1.NetworkPolicy{}
 		err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
 		if err == nil {
+			// Unmanaged mode means the user has opted out of NP management for
+			// this template. If the NP is not ours we intentionally do nothing:
+			// silently skipping honors the opt-out (contrast with Managed below).
 			if !metav1.IsControlledBy(existingNP, template) {
-				logger.Info("Skipping deletion of NetworkPolicy not owned by template", "name", npName)
+				msg := fmt.Sprintf("skipping deletion of NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s",
+					npNamespace, npName, template.Name)
+				logger.Info(msg)
+				r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile", "%s", msg)
 				return ctrl.Result{}, nil
 			}
+			// Delete can race with an external deletion; treat NotFound as success to avoid noisy requeues.
 			if err := r.Delete(ctx, existingNP); err != nil {
-				logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
-				return ctrl.Result{}, err
+				if !k8errors.IsNotFound(err) {
+					logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
+					return ctrl.Result{}, fmt.Errorf("failed to delete unmanaged NetworkPolicy %s/%s: %w", npNamespace, npName, err)
+				}
+				// Removed out-of-band between Get and Delete; desired state already achieved.
+				logger.Info("Unmanaged NetworkPolicy already deleted", "name", existingNP.Name)
+			} else {
+				logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
 			}
-			logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
 		} else if !k8errors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -126,8 +139,14 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
 
 	if err == nil {
+		// Managed mode means we are the source of truth for this NP name. A
+		// collision with an unowned NP is a hard failure (contrast with the
+		// Unmanaged skip above), otherwise we would silently drift.
 		if !metav1.IsControlledBy(existingNP, template) {
-			return ctrl.Result{}, fmt.Errorf("refusing to update NetworkPolicy %q as it is not controlled by SandboxTemplate %q", npName, template.Name)
+			msg := fmt.Sprintf("refusing to update NetworkPolicy %s/%s: it is not controlled by SandboxTemplate %s",
+				npNamespace, npName, template.Name)
+			r.Recorder.Eventf(template, nil, corev1.EventTypeWarning, "NetworkPolicyOwnershipConflict", "Reconcile", "%s", msg)
+			return ctrl.Result{}, fmt.Errorf("%s", msg)
 		}
 		// Policy exists: Semantic DeepEqual check for drift
 		if equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {
@@ -137,14 +156,14 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		existingNP.Spec = desiredSpec
 		if err := r.Update(ctx, existingNP); err != nil {
 			logger.Error(err, "Failed to update NetworkPolicy", "name", npName)
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to update NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 		}
 		logger.Info("Successfully updated shared NetworkPolicy", "name", npName)
 		return ctrl.Result{}, nil
 	}
 
 	if !k8errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 	}
 
 	// 6. Create New Policy
@@ -159,7 +178,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if err := r.Create(ctx, np); err != nil {
 		logger.Error(err, "Failed to create NetworkPolicy", "name", npName)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to create NetworkPolicy %s/%s: %w", npNamespace, npName, err)
 	}
 
 	logger.Info("Successfully created shared NetworkPolicy", "name", npName)

@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -293,10 +294,11 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 		}
 
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, unownedNP).Build()
+		recorder := events.NewFakeRecorder(10)
 		reconciler := &SandboxTemplateReconciler{
 			Client:   client,
 			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
+			Recorder: recorder,
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -304,6 +306,7 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 			NamespacedName: types.NamespacedName{Name: "victim", Namespace: "default"},
 		}
 
+		// Unmanaged mode skips (does not error) when the NetworkPolicy is unowned.
 		_, err := reconciler.Reconcile(context.Background(), req)
 		if err != nil {
 			t.Fatalf("reconcile: (%v)", err)
@@ -319,6 +322,9 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 				t.Fatalf("failed to get network policy: %v", err)
 			}
 		}
+
+		// A Warning event should record the skipped deletion so the conflict is observable.
+		assertOwnershipConflictEvent(t, recorder)
 	})
 
 	t.Run("Does not update unowned NetworkPolicy", func(t *testing.T) {
@@ -341,10 +347,11 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 		}
 
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, unownedNP).Build()
+		recorder := events.NewFakeRecorder(10)
 		reconciler := &SandboxTemplateReconciler{
 			Client:   client,
 			Scheme:   scheme,
-			Recorder: events.NewFakeRecorder(10),
+			Recorder: recorder,
 			Tracer:   asmetrics.NewNoOp(),
 		}
 
@@ -352,10 +359,13 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 			NamespacedName: types.NamespacedName{Name: "victim", Namespace: "default"},
 		}
 
+		// Managed mode must refuse (return an error) rather than overwrite an unowned NetworkPolicy.
 		_, err := reconciler.Reconcile(context.Background(), req)
-		// We expect an error here once fixed, but currently it might succeed and overwrite
-		if err != nil {
-			t.Logf("Reconcile returned error (expected after fix): %v", err)
+		if err == nil {
+			t.Fatalf("expected reconcile to return an error for an unowned NetworkPolicy in Managed mode, got nil")
+		}
+		if !strings.Contains(err.Error(), "not controlled by SandboxTemplate") {
+			t.Errorf("unexpected error message: %v", err)
 		}
 
 		// Check if unownedNP was updated
@@ -368,5 +378,22 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 		if _, ok := np.Spec.PodSelector.MatchLabels["keep"]; !ok {
 			t.Errorf("VULNERABILITY: Unowned NetworkPolicy was updated/overwritten!")
 		}
+
+		// A Warning event should record the refusal so the conflict is observable.
+		assertOwnershipConflictEvent(t, recorder)
 	})
+}
+
+// assertOwnershipConflictEvent fails the test unless a Warning NetworkPolicyOwnershipConflict
+// event was recorded by the reconciler.
+func assertOwnershipConflictEvent(t *testing.T, recorder *events.FakeRecorder) {
+	t.Helper()
+	select {
+	case ev := <-recorder.Events:
+		if !strings.Contains(ev, corev1.EventTypeWarning) || !strings.Contains(ev, "NetworkPolicyOwnershipConflict") {
+			t.Errorf("expected a Warning NetworkPolicyOwnershipConflict event, got %q", ev)
+		}
+	default:
+		t.Errorf("expected a Warning event to be recorded for the ownership conflict")
+	}
 }

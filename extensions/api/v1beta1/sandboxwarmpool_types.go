@@ -102,6 +102,9 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
 // +kubebuilder:conversion:strategy=Webhook
+// +kubebuilder:printcolumn:name="Current",type="integer",JSONPath=".status.replicas",priority=1
+// +kubebuilder:printcolumn:name="Template",type="string",JSONPath=".spec.sandboxTemplateRef.name",priority=1
+// +kubebuilder:printcolumn:name="Selector",type="string",JSONPath=".status.selector",priority=1
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.
 type SandboxWarmPool struct {
 	metav1.TypeMeta `json:",inline"`

@@ -15,7 +15,30 @@ spec:
     singular: sandbox
   scope: Namespaced
   versions:
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.service
+      name: Service
+      priority: 1
+      type: string
+    - jsonPath: .status.nodeName
+      name: Node
+      priority: 1
+      type: string
+    - jsonPath: .spec.shutdownTime
+      name: Shutdown
+      priority: 1
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         properties:

@@ -29,7 +29,9 @@ from .models import (
     SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    TLSConfig,
 )
+from .utils import build_base_url, build_ssl_context
 
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 MAX_RETRIES = 5
@@ -89,20 +91,40 @@ class AsyncSandboxConnector:
         self._pod_ip_auth_failed = False
         self._cached_pod_ip_url: str | None = None
         if isinstance(connection_config, SandboxInClusterConnectionConfig):
-            self._dns_url = (
-                f"http://{sandbox_id}.{namespace}"
-                f".svc.cluster.local:{connection_config.server_port}"
+            host = f"{sandbox_id}.{namespace}.svc.cluster.local"
+            self._dns_url = build_base_url(
+                connection_config.scheme, host, connection_config.server_port
             )
             self._server_port = connection_config.server_port
+            self._scheme = connection_config.scheme
         else:
             self._dns_url = None
             self._server_port = None
+            self._scheme = None
 
         self._inject_router_headers = not isinstance(
             connection_config, SandboxInClusterConnectionConfig
         )
 
-        transport = httpx.AsyncHTTPTransport(retries=3)
+        # Warn when plaintext http is used on a mode that supports TLS
+        # (Gateway, InCluster). LocalTunnel and DirectConnection are exempt.
+        if isinstance(
+            connection_config,
+            (SandboxGatewayConnectionConfig, SandboxInClusterConnectionConfig),
+        ) and connection_config.scheme == "http":
+            logger.warning(
+                "%s is using plaintext http:// scheme. Set scheme='https' and "
+                "configure tls=TLSConfig(...) to encrypt traffic.",
+                type(connection_config).__name__,
+            )
+
+        # Build httpx verify= value from TLSConfig. PEM strings, file paths,
+        # and insecure_skip_verify are all handled by build_ssl_context.
+        tls: TLSConfig | None = getattr(connection_config, "tls", None)
+        verify = build_ssl_context(tls)
+        self._sni_override = tls.server_name_override if tls else None
+
+        transport = httpx.AsyncHTTPTransport(retries=3, verify=verify)
         self.client = httpx.AsyncClient(
             transport=transport, timeout=httpx.Timeout(60.0)
         )
@@ -115,8 +137,9 @@ class AsyncSandboxConnector:
                 pod_ip = await self._get_pod_ip()
                 if pod_ip:
                     self._pod_ip = pod_ip
-                    host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
-                    self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
+                    self._cached_pod_ip_url = build_base_url(
+                        self._scheme, pod_ip, self._server_port
+                    )
                     self._pod_ip_resolved = True
                     return self._cached_pod_ip_url
             return self._dns_url
@@ -132,8 +155,7 @@ class AsyncSandboxConnector:
                 self.connection_config.gateway_namespace,
                 self.connection_config.gateway_ready_timeout,
             )
-            host = f"[{ip_address}]" if ":" in ip_address else ip_address
-            self._base_url = f"http://{host}"
+            self._base_url = build_base_url(self.connection_config.scheme, ip_address)
         else:
             raise ValueError(
                 f"AsyncSandboxConnector does not support {type(self.connection_config).__name__}."
@@ -205,6 +227,17 @@ class AsyncSandboxConnector:
                             logger.debug(f"Transient failure resolving pod IP for direct routing: {e}")
                 if self._pod_ip:
                     headers["X-Sandbox-Pod-IP"] = self._pod_ip
+
+        # When server_name_override is set (e.g. LocalTunnel + https where the
+        # certificate's CN does not match 127.0.0.1), forward it to the TLS
+        # layer via the per-request sni_hostname extension. Honors any caller-
+        # supplied extensions but does not silently overwrite them.
+        if self._sni_override is not None:
+            if not any(k.lower() == "host" for k in headers):
+                headers["Host"] = self._sni_override
+            extensions = kwargs.pop("extensions", None) or {}
+            extensions.setdefault("sni_hostname", self._sni_override)
+            kwargs["extensions"] = extensions
 
         last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):

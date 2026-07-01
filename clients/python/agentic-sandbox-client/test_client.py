@@ -324,7 +324,7 @@ def test_claim_annotation(client: SandboxClient, warmpool_name: str, namespace: 
             assert dt.tzname() == 'UTC', "Timestamp should be in UTC"
             print(f"Parsed datetime: {dt}")
         except ValueError as e:
-            raise AssertionError(f"Failed to parse timestamp '{timestamp_str}': {e}")
+            raise AssertionError(f"Failed to parse timestamp '{timestamp_str}': {e}") from e
 
         print("--- SandboxClaim Annotation Test Passed! ---")
 

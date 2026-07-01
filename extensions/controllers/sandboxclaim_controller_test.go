@@ -5035,22 +5035,22 @@ type mockTracer struct {
 	capturedAttrs map[string]string
 }
 
-func (m *mockTracer) StartSpan(ctx context.Context, obj metav1.Object, spanName string, attrs map[string]string) (context.Context, func()) {
+func (m *mockTracer) StartSpan(ctx context.Context, _ metav1.Object, _ string, attrs map[string]string) (context.Context, func()) {
 	if len(attrs) > 0 {
 		m.capturedAttrs = attrs
 	}
 	return ctx, func() {}
 }
 
-func (m *mockTracer) GetTraceContext(ctx context.Context) string {
+func (m *mockTracer) GetTraceContext(_ context.Context) string {
 	return ""
 }
 
-func (m *mockTracer) IsRecording(ctx context.Context) bool {
+func (m *mockTracer) IsRecording(_ context.Context) bool {
 	return true
 }
 
-func (m *mockTracer) AddEvent(ctx context.Context, name string, attrs map[string]string) {}
+func (m *mockTracer) AddEvent(_ context.Context, _ string, _ map[string]string) {}
 
 func TestReconcile_TracingNormalization(t *testing.T) {
 	claimName := "tracing-test-claim"
@@ -5091,4 +5091,3 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
 }
-

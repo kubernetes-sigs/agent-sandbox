@@ -87,6 +87,9 @@ var errAdoptionTriggeredRetry = errors.New("triggered adoption completion, retry
 const adoptionCacheLagRequeueDelay = 50 * time.Millisecond
 
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
+var exemptedMetadataKeys = []string{
+	"cluster-autoscaler.kubernetes.io/safe-to-evict",
+}
 
 var ErrCrossNamespaceAdoption = errors.New("cross-namespace adoption forbidden")
 
@@ -1160,7 +1163,7 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(claimMeta *v1beta
 			}
 		} else {
 			// For annotations, we use the blocklist
-			if isRestrictedDomain(domain) {
+			if isRestrictedDomain(domain) && !slices.Contains(exemptedMetadataKeys, key) {
 				return fmt.Errorf("restricted system domain: %q is not allowed in AdditionalPodMetadata", key)
 			}
 		}

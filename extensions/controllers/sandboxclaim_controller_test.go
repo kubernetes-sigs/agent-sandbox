@@ -792,6 +792,28 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
+			name: "claim with safe-to-evict annotation is accepted",
+			claimToReconcile: &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-safe-to-evict", Namespace: "default", UID: "uid-safe-to-evict"},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
+						Annotations: map[string]string{"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"},
+					},
+				},
+			},
+			existingObjects: []client.Object{template, warmPool},
+			expectSandbox:   true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady", Message: "Sandbox is not ready",
+			},
+			validateSandbox: func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, _ *extensionsv1beta1.SandboxTemplate) {
+				if val, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"]; !ok || val != "false" {
+					t.Errorf("expected cluster-autoscaler.kubernetes.io/safe-to-evict to be propagated, got %q", val)
+				}
+			},
+		},
+		{
 			name: "claim with spoofed router app label is rejected",
 			claimToReconcile: &extensionsv1beta1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{Name: "claim-spoofed-app-label", Namespace: "default", UID: "uid-spoofed-app-label"},
